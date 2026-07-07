@@ -1,0 +1,12 @@
+# gitleaks configuration for OpenWave.
+# Extends the default ruleset; add allowlist entries for verified false positives.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist"
+paths = [
+  '''Cargo\.lock''',
+  '''(.*?)(jpe?g|png|gif|svg|ico|webp)$''',
+]
