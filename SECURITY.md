@@ -4,11 +4,9 @@
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, report them privately via one of:
-
-- GitHub's [private vulnerability reporting](https://github.com/brightwave-inc/openwave/security/advisories/new)
-  (**Security** tab → **Report a vulnerability**), or
-- email **security@brightwave.io**.
+Instead, report them privately through GitHub's
+[private vulnerability reporting](https://github.com/brightwave-inc/openwave/security/advisories/new)
+(**Security** tab → **Report a vulnerability**).
 
 Please include enough detail to reproduce: affected component/version, steps,
 and impact. We'll acknowledge your report, keep you updated on progress, and
