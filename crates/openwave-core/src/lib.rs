@@ -11,9 +11,14 @@
 pub mod error;
 pub mod id;
 pub mod model;
+pub mod provider;
 pub mod tool;
 
 pub use error::{AgentError, Result};
 pub use id::{CallId, MessageId, SessionId, StepId, TurnId};
 pub use model::{Message, Role, Session};
+pub use provider::{
+    ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
+    Usage,
+};
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
