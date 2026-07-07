@@ -1,0 +1,27 @@
+# Rust build artifacts
+/target/
+**/target/
+**/*.rs.bk
+
+# Environment & secrets — never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.keystore
+secrets.toml
+credentials.json
+
+# Node / frontend (desktop UI, added later)
+node_modules/
+dist/
+.vite/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

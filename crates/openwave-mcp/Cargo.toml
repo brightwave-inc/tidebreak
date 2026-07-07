@@ -1,0 +1,13 @@
+[package]
+name = "openwave-mcp"
+description = "OpenWave MCP: the Model Context Protocol server face and client for mounting external tool servers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

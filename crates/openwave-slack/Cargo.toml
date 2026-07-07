@@ -1,0 +1,13 @@
+[package]
+name = "openwave-slack"
+description = "OpenWave Slack: the Socket Mode adapter that runs the agent from a Slack workspace."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
