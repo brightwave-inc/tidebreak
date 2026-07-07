@@ -1,0 +1,88 @@
+<p align="center">
+  <img src="assets/openwave-logo.png" alt="OpenWave" width="380">
+</p>
+
+<h1 align="center">OpenWave</h1>
+
+<p align="center">
+  <strong>An open, local-first cowork runtime.</strong><br>
+  A Rust-native agent that works over your files and tools — on your machine, with your own model keys.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0">
+  <img src="https://img.shields.io/badge/status-pre--alpha-orange.svg" alt="Status: pre-alpha">
+  <img src="https://img.shields.io/badge/built%20with-Rust-dea584.svg?logo=rust&logoColor=white" alt="Built with Rust">
+</p>
+
+---
+
+## Where this comes from
+
+OpenWave is the open core of the [Brightwave](https://brightwave.io) platform.
+
+Brightwave spent years building an agentic system for demanding, real-world
+knowledge work — a runtime that plans and executes multi-step tasks, calls tools
+through a strict schema-first contract, runs skills in a sandbox, connects to
+your sources, and grounds its answers in citations. **We're taking the core
+pieces of that platform — the agent loop, the tool and skill model, connectors,
+and retrieval — and opening them up** under Apache-2.0, rebuilt lean in Rust as a
+local-first application you run yourself.
+
+The idea is simple: the engine that does the work shouldn't be a cloud service
+that holds your data and meters your tokens. It should be something you own —
+local by default, model-agnostic, and open.
+
+## Why
+
+Most agentic tools are cloud services that hold your data and meter your usage.
+OpenWave is the opposite: a slim desktop app (plus a headless mode) that runs the
+agent loop **on your machine**, keeps your data local, and lets you bring your
+own model — hosted or fully offline. It speaks [MCP](https://modelcontextprotocol.io),
+so it works with the agents and tools you already use.
+
+## Principles
+
+- **Local-first & private.** Your files, keys, and history stay on your machine.
+- **Bring your own model.** Anthropic, OpenAI, Google, or anything
+  OpenAI-compatible (vLLM, LM Studio, Ollama, OpenRouter). We never meter tokens.
+- **Slim by default.** Small install; no bundled model weights or language
+  runtimes — fetched on first use, cached locally.
+- **Works with any agent.** An MCP server _and_ a client — OpenWave both exposes
+  tools and consumes them.
+- **Open core.** The runtime is Apache-2.0 and complete on its own.
+
+## Status
+
+Pre-alpha, built in the open. The workspace scaffold is in place; the walking
+skeleton (chat + local file tools + streaming) is next. Expect rapid change and
+rough edges — and see [CONTRIBUTING](CONTRIBUTING.md) if you'd like to help.
+
+## Building
+
+```sh
+cargo build --workspace
+```
+
+Requires the Rust toolchain declared in [`rust-toolchain.toml`](rust-toolchain.toml).
+
+## Layout
+
+This is a single Cargo workspace. Libraries never depend on clients — the
+dependency graph only flows downward toward `openwave-core`.
+
+| Crate | What it is |
+| --- | --- |
+| [`openwave-core`](crates/openwave-core) | agent loop, tools, providers, storage traits |
+| [`openwave-connectors`](crates/openwave-connectors) | OAuth + source connectors |
+| [`openwave-retrieval`](crates/openwave-retrieval) | embeddings, vector search, citations |
+| [`openwave-mcp`](crates/openwave-mcp) | MCP server & client |
+| [`openwave-desktop`](crates/openwave-desktop) | desktop app (Tauri) |
+| [`openwave-cli`](crates/openwave-cli) | headless daemon + CLI |
+| [`openwave-slack`](crates/openwave-slack) | Slack adapter |
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Contributions are
+accepted under the terms in
+[CONTRIBUTING](CONTRIBUTING.md#contributor-license-agreement).
