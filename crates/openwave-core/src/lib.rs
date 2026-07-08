@@ -18,6 +18,7 @@ pub mod event;
 pub mod id;
 pub mod model;
 pub mod provider;
+pub mod storage;
 pub mod tool;
 
 pub use error::{AgentError, AgentErrorInfo, Result};
@@ -28,4 +29,5 @@ pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
     Usage,
 };
+pub use storage::{BlobStore, SecretProvider, Store};
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
