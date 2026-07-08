@@ -24,6 +24,8 @@ pub mod model;
 pub mod provider;
 pub mod storage;
 pub mod tool;
+#[cfg(feature = "tools")]
+pub mod tools;
 
 #[cfg(feature = "sqlite")]
 pub use db::DbStore;
@@ -39,3 +41,5 @@ pub use provider::{
 };
 pub use storage::{BlobStore, SecretProvider, Store};
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
+#[cfg(feature = "tools")]
+pub use tools::{ListDir, ReadFile, WriteFile};

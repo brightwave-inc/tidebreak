@@ -11,12 +11,14 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["sqlite", "keychain"]
+default = ["sqlite", "keychain", "tools"]
 # The default SeaORM-backed Store with the SQLite driver. Turn off
 # (`default-features = false`) to depend on just the trait contracts.
 sqlite = ["dep:sea-orm", "dep:sea-orm-migration"]
 # The OS-keychain-backed SecretProvider.
 keychain = ["dep:keyring", "dep:tokio"]
+# The built-in filesystem tools (read_file / list_dir / write_file).
+tools = ["dep:tokio"]
 
 [dependencies]
 async-trait = { workspace = true }
