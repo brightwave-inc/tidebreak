@@ -1,12 +1,17 @@
-//! OpenWave core — the agent loop, tool registry, provider adapters, and the
-//! `Store` / `BlobStore` / `SecretProvider` / `Auth` traits every client sits
-//! on.
+//! OpenWave core — the open-core seam every client sits on.
 //!
-//! This crate is the open-core seam: it must never depend on a specific client.
+//! Holds the agent loop, tool registry, the `AgentEvent` stream, and the trait
+//! contracts (`Tool`, `ModelProvider`, `Store`, `BlobStore`, `SecretProvider`)
+//! plus their default local impls. Concrete model-provider adapters live in
+//! `openwave-router`, not here.
 //!
-//! Landing incrementally with the M0 walking skeleton. This slice defines the
-//! foundational types — identifiers, the error type, and the persisted
-//! conversation model.
+//! This crate must never depend on a specific client, and is independently
+//! publishable on crates.io.
+//!
+//! Built incrementally with the M0 walking skeleton. Present so far: [`id`]
+//! (typed identifiers), [`error`], [`model`] (the persisted session/message
+//! model), [`tool`] (the tool contract), and [`provider`] (the model-provider
+//! contract).
 
 pub mod error;
 pub mod id;
