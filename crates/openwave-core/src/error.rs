@@ -27,6 +27,10 @@ pub enum AgentError {
     #[error("secret error: {0}")]
     Secret(String),
 
+    /// A failure from a model provider (network, HTTP status, malformed stream).
+    #[error("provider error: {0}")]
+    Provider(String),
+
     /// A catch-all for contexts that do not yet warrant their own variant.
     #[error("{0}")]
     Message(String),
@@ -56,6 +60,7 @@ impl AgentError {
             Self::Config(_) => "config",
             Self::Store(_) => "store",
             Self::Secret(_) => "secret",
+            Self::Provider(_) => "provider",
             Self::Message(_) => "message",
             Self::Serde(_) => "serde",
         }
