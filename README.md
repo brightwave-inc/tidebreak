@@ -69,17 +69,21 @@ Requires the Rust toolchain declared in [`rust-toolchain.toml`](rust-toolchain.t
 ## Layout
 
 This is a single Cargo workspace. Libraries never depend on clients — the
-dependency graph only flows downward toward `openwave-core`.
+dependency graph only flows downward toward `openwave-core`. For a fuller
+walkthrough of each crate, see [`docs/crates.md`](docs/crates.md).
 
 | Crate | What it is |
 | --- | --- |
-| [`openwave-core`](crates/openwave-core) | agent loop, tools, providers, storage traits |
+| [`openwave-core`](crates/openwave-core) | agent loop, tools, event stream, storage traits |
 | [`openwave-connectors`](crates/openwave-connectors) | OAuth + source connectors |
 | [`openwave-retrieval`](crates/openwave-retrieval) | embeddings, vector search, citations |
 | [`openwave-mcp`](crates/openwave-mcp) | MCP server & client |
 | [`openwave-desktop`](crates/openwave-desktop) | desktop app (Tauri) |
 | [`openwave-cli`](crates/openwave-cli) | headless daemon + CLI |
 | [`openwave-slack`](crates/openwave-slack) | Slack adapter |
+
+_Model-provider adapters and routing/failover live in a planned `openwave-router`
+crate — see [`docs/crates.md`](docs/crates.md)._
 
 ## License
 
