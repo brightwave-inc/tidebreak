@@ -126,6 +126,16 @@ pub struct Usage {
     pub cache_creation_input_tokens: u32,
 }
 
+impl std::ops::AddAssign for Usage {
+    /// Accumulate token counts (e.g. across the model calls of a multi-step turn).
+    fn add_assign(&mut self, rhs: Self) {
+        self.input_tokens += rhs.input_tokens;
+        self.output_tokens += rhs.output_tokens;
+        self.cache_read_input_tokens += rhs.cache_read_input_tokens;
+        self.cache_creation_input_tokens += rhs.cache_creation_input_tokens;
+    }
+}
+
 /// Why a completion stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
