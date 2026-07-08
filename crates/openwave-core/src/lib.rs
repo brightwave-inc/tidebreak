@@ -14,12 +14,14 @@
 //! contract).
 
 pub mod error;
+pub mod event;
 pub mod id;
 pub mod model;
 pub mod provider;
 pub mod tool;
 
-pub use error::{AgentError, Result};
+pub use error::{AgentError, AgentErrorInfo, Result};
+pub use event::AgentEvent;
 pub use id::{CallId, MessageId, SessionId, StepId, TurnId};
 pub use model::{Message, Role, Session};
 pub use provider::{

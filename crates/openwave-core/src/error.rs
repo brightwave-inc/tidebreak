@@ -5,6 +5,7 @@
 //! `#[non_exhaustive]` so growing it is never a breaking change for downstream
 //! matches.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Shorthand for results across the core crate.
@@ -36,5 +37,64 @@ impl AgentError {
     /// Build an [`AgentError::Config`] from anything string-like.
     pub fn config(message: impl Into<String>) -> Self {
         Self::Config(message.into())
+    }
+
+    /// A short, stable machine-readable category for this error.
+    ///
+    /// Used to tag the serializable [`AgentErrorInfo`] that rides the event
+    /// stream, so clients can branch on the kind without parsing the message.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Config(_) => "config",
+            Self::Message(_) => "message",
+            Self::Serde(_) => "serde",
+        }
+    }
+
+    /// Convert into the serializable form carried by `AgentEvent::TurnFailed`.
+    pub fn to_info(&self) -> AgentErrorInfo {
+        AgentErrorInfo {
+            kind: self.kind().to_string(),
+            message: self.to_string(),
+        }
+    }
+}
+
+/// The wire-facing representation of an error.
+///
+/// [`AgentError`] itself is not `Serialize` (it wraps non-serializable source
+/// errors like [`serde_json::Error`]), but the `AgentEvent` stream that clients
+/// consume must serialize. `AgentErrorInfo` is that serializable projection: a
+/// stable `kind` plus a human-readable `message`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentErrorInfo {
+    /// Machine-readable category (see [`AgentError::kind`]).
+    pub kind: String,
+    /// Human-readable description.
+    pub message: String,
+}
+
+impl From<&AgentError> for AgentErrorInfo {
+    fn from(err: &AgentError) -> Self {
+        err.to_info()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn info_carries_kind_and_message() {
+        let info = AgentError::config("bad path").to_info();
+        assert_eq!(info.kind, "config");
+        assert_eq!(info.message, "configuration error: bad path");
+    }
+
+    #[test]
+    fn info_is_serializable_and_roundtrips() {
+        let info: AgentErrorInfo = (&AgentError::msg("boom")).into();
+        let json = serde_json::to_string(&info).unwrap();
+        assert_eq!(serde_json::from_str::<AgentErrorInfo>(&json).unwrap(), info);
     }
 }
