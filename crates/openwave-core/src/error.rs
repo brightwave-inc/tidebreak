@@ -23,6 +23,10 @@ pub enum AgentError {
     #[error("store error: {0}")]
     Store(String),
 
+    /// A failure reaching the secret store (keychain / KMS).
+    #[error("secret error: {0}")]
+    Secret(String),
+
     /// A catch-all for contexts that do not yet warrant their own variant.
     #[error("{0}")]
     Message(String),
@@ -51,6 +55,7 @@ impl AgentError {
         match self {
             Self::Config(_) => "config",
             Self::Store(_) => "store",
+            Self::Secret(_) => "secret",
             Self::Message(_) => "message",
             Self::Serde(_) => "serde",
         }

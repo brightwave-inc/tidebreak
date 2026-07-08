@@ -18,6 +18,8 @@ pub mod db;
 pub mod error;
 pub mod event;
 pub mod id;
+#[cfg(feature = "keychain")]
+pub mod keychain;
 pub mod model;
 pub mod provider;
 pub mod storage;
@@ -28,6 +30,8 @@ pub use db::DbStore;
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::AgentEvent;
 pub use id::{CallId, MessageId, SessionId, StepId, TurnId};
+#[cfg(feature = "keychain")]
+pub use keychain::KeychainSecretProvider;
 pub use model::{Message, Role, Session};
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
