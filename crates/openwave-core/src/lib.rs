@@ -13,6 +13,8 @@
 //! model), [`tool`] (the tool contract), and [`provider`] (the model-provider
 //! contract).
 
+#[cfg(feature = "sqlite")]
+pub mod db;
 pub mod error;
 pub mod event;
 pub mod id;
@@ -21,6 +23,8 @@ pub mod provider;
 pub mod storage;
 pub mod tool;
 
+#[cfg(feature = "sqlite")]
+pub use db::DbStore;
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::AgentEvent;
 pub use id::{CallId, MessageId, SessionId, StepId, TurnId};

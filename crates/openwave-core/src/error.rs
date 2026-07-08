@@ -19,6 +19,10 @@ pub enum AgentError {
     #[error("configuration error: {0}")]
     Config(String),
 
+    /// A persistence failure from the `Store` / `BlobStore`.
+    #[error("store error: {0}")]
+    Store(String),
+
     /// A catch-all for contexts that do not yet warrant their own variant.
     #[error("{0}")]
     Message(String),
@@ -46,6 +50,7 @@ impl AgentError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Config(_) => "config",
+            Self::Store(_) => "store",
             Self::Message(_) => "message",
             Self::Serde(_) => "serde",
         }

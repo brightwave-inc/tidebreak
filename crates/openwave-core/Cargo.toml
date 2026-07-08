@@ -10,6 +10,12 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["sqlite"]
+# The default SeaORM-backed Store with the SQLite driver. Turn off
+# (`default-features = false`) to depend on just the trait contracts without an ORM.
+sqlite = ["dep:sea-orm", "dep:sea-orm-migration"]
+
 [dependencies]
 async-trait = { workspace = true }
 futures = { workspace = true }
@@ -18,3 +24,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+sea-orm = { workspace = true, optional = true }
+sea-orm-migration = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"
