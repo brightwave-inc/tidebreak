@@ -11,10 +11,12 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["sqlite"]
+default = ["sqlite", "keychain"]
 # The default SeaORM-backed Store with the SQLite driver. Turn off
-# (`default-features = false`) to depend on just the trait contracts without an ORM.
+# (`default-features = false`) to depend on just the trait contracts.
 sqlite = ["dep:sea-orm", "dep:sea-orm-migration"]
+# The OS-keychain-backed SecretProvider.
+keychain = ["dep:keyring", "dep:tokio"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -26,6 +28,18 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 sea-orm = { workspace = true, optional = true }
 sea-orm-migration = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+# Keychain backends are per-OS: Security framework (macOS), Credential Manager
+# (Windows), and the Secret Service on Linux. The Linux backend uses
+# async-secret-service (pure-Rust zbus + rustcrypto) — no system libdbus/pkg-config
+# at build time; the blocking `keyring` calls already run under `spawn_blocking`.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"], optional = true }
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"], optional = true }
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["async-secret-service", "crypto-rust", "tokio"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
