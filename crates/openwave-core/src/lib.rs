@@ -14,6 +14,7 @@
 //! contract).
 
 pub mod agent;
+pub mod config;
 #[cfg(feature = "sqlite")]
 pub mod db;
 pub mod error;
@@ -29,6 +30,7 @@ pub mod tool;
 pub mod tools;
 
 pub use agent::{Agent, AgentConfig, ToolRegistry};
+pub use config::{Config, Profile};
 #[cfg(feature = "sqlite")]
 pub use db::DbStore;
 pub use error::{AgentError, AgentErrorInfo, Result};
