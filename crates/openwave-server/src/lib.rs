@@ -76,6 +76,7 @@ pub fn app(state: AppState) -> Router {
             axum::routing::put(routes::put_api_key).delete(routes::delete_api_key),
         )
         .route("/chats/{id}/messages", post(routes::post_message))
+        .route("/chats/{id}/cancel", post(routes::post_cancel))
         .route(
             "/chats/{id}/approvals/{call_id}",
             post(routes::post_approval),
@@ -417,6 +418,23 @@ mod tests {
             .status()
     }
 
+    /// POST `/chats/{id}/cancel`, returning the response status.
+    async fn cancel_turn(router: &Router, bearer: &str, chat: ChatId) -> StatusCode {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/chats/{chat}/cancel"))
+                    .header(header::AUTHORIZATION, bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
     /// Poll the journal until the turn terminates (or time out), returning its
     /// events in sequence order.
     async fn wait_for_turn(store: &Arc<dyn Store>, chat: ChatId) -> Vec<SequencedEvent> {
@@ -425,7 +443,9 @@ mod tests {
             if events.iter().any(|e| {
                 matches!(
                     e.event,
-                    AgentEvent::TurnCompleted { .. } | AgentEvent::TurnFailed { .. }
+                    AgentEvent::TurnCompleted { .. }
+                        | AgentEvent::TurnFailed { .. }
+                        | AgentEvent::TurnCancelled { .. }
                 )
             }) {
                 return events;
@@ -433,6 +453,55 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("turn did not finish within the timeout");
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_a_running_turn() {
+        // A turn that blocks in the provider (a stand-in for a long model call),
+        // so it stays running until we cancel it.
+        let gate = Arc::new(Notify::new());
+        let (router, token, store, _dir) =
+            test_app_with(Arc::new(GatedProvider { gate: gate.clone() })).await;
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "go").await,
+            StatusCode::ACCEPTED
+        );
+
+        // The slot is claimed synchronously before the turn is spawned, so a
+        // cancel arriving right after the 202 still finds the running turn.
+        assert_eq!(
+            cancel_turn(&router, &bearer, chat.id).await,
+            StatusCode::ACCEPTED
+        );
+
+        // The turn preempts the blocked provider call and ends as cancelled —
+        // note we never release `gate`, so only the cancel can end it.
+        let events = wait_for_turn(&store, chat.id).await;
+        assert!(matches!(
+            events.last().map(|e| &e.event),
+            Some(AgentEvent::TurnCancelled { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_without_a_running_turn_is_a_conflict_and_unknown_chat_is_404() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        // Known chat, nothing running → 409.
+        assert_eq!(
+            cancel_turn(&router, &bearer, chat.id).await,
+            StatusCode::CONFLICT
+        );
+        // Unknown chat → 404.
+        assert_eq!(
+            cancel_turn(&router, &bearer, ChatId::new()).await,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

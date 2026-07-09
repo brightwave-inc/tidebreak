@@ -1,9 +1,11 @@
 //! Shared application state handed to every request handler.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use openwave_core::{AgentConfig, ChatId, Config, SecretProvider, Store, ToolRegistry};
+use openwave_core::{
+    AgentConfig, CancelToken, ChatId, Config, SecretProvider, Store, ToolRegistry,
+};
 use uuid::Uuid;
 
 use crate::approvals::ApprovalBroker;
@@ -65,14 +67,15 @@ impl AppState {
     }
 }
 
-/// Admits one running turn per chat.
+/// Admits one running turn per chat, and holds each running turn's
+/// [`CancelToken`] so a cancel request can find and trip it.
 ///
 /// The agent's per-chat sequence numbering assumes a single writer; this guard
 /// upholds that at the API edge — a turn holds its chat's slot until it finishes,
 /// and a concurrent request for the same chat is refused (never queued behind it).
 #[derive(Default)]
 pub struct TurnGuard {
-    active: Mutex<HashSet<ChatId>>,
+    active: Mutex<HashMap<ChatId, CancelToken>>,
 }
 
 impl TurnGuard {
@@ -80,13 +83,29 @@ impl TurnGuard {
     /// The returned [`ActiveTurn`] releases the slot when dropped — including on
     /// panic — so a failed turn never wedges the chat.
     pub fn try_acquire(self: &Arc<Self>, chat_id: ChatId) -> Option<ActiveTurn> {
-        if self.active.lock().unwrap().insert(chat_id) {
-            Some(ActiveTurn {
-                guard: Arc::clone(self),
-                chat_id,
-            })
-        } else {
-            None
+        let mut active = self.active.lock().unwrap();
+        if active.contains_key(&chat_id) {
+            return None;
+        }
+        let cancel = CancelToken::new();
+        active.insert(chat_id, cancel.clone());
+        Some(ActiveTurn {
+            guard: Arc::clone(self),
+            chat_id,
+            cancel,
+        })
+    }
+
+    /// Trip the cancel token of the turn running for `chat_id`, if any. Returns
+    /// whether a turn was found to cancel. Idempotent — a second cancel while the
+    /// turn winds down just re-trips the already-tripped token.
+    pub fn cancel(&self, chat_id: ChatId) -> bool {
+        match self.active.lock().unwrap().get(&chat_id) {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
         }
     }
 }
@@ -95,6 +114,15 @@ impl TurnGuard {
 pub struct ActiveTurn {
     guard: Arc<TurnGuard>,
     chat_id: ChatId,
+    cancel: CancelToken,
+}
+
+impl ActiveTurn {
+    /// The cancel token for this turn — handed to the agent so a `POST .../cancel`
+    /// routed through [`TurnGuard::cancel`] stops it.
+    pub fn cancel_token(&self) -> CancelToken {
+        self.cancel.clone()
+    }
 }
 
 impl Drop for ActiveTurn {
@@ -125,5 +153,25 @@ mod tests {
             guard.try_acquire(chat).is_some(),
             "the slot frees once the turn is dropped"
         );
+    }
+
+    #[test]
+    fn cancel_trips_the_running_turns_token() {
+        let guard = Arc::new(TurnGuard::default());
+        let chat = ChatId::new();
+
+        // No turn running yet: nothing to cancel.
+        assert!(!guard.cancel(chat));
+
+        let held = guard.try_acquire(chat).expect("acquire");
+        let token = held.cancel_token();
+        assert!(!token.is_cancelled());
+
+        assert!(guard.cancel(chat), "a running turn is found and cancelled");
+        assert!(token.is_cancelled(), "the turn's own token is tripped");
+
+        // Once the slot frees, there's again nothing to cancel.
+        drop(held);
+        assert!(!guard.cancel(chat));
     }
 }

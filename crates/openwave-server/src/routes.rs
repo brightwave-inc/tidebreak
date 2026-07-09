@@ -447,7 +447,9 @@ pub async fn post_message(
         state.store.clone(),
         agent_config,
     )
-    .with_approvals(state.approvals.clone());
+    .with_approvals(state.approvals.clone())
+    // Watch the slot's token so `POST /chats/{id}/cancel` can stop this turn.
+    .with_cancel(active.cancel_token());
     let store = state.store.clone();
     let events = state.events.clone();
     tokio::spawn(async move {
@@ -457,6 +459,30 @@ pub async fn post_message(
     });
 
     Ok(StatusCode::ACCEPTED)
+}
+
+/// `POST /chats/{id}/cancel` — stop the turn currently running for a chat.
+///
+/// `202 Accepted` once the running turn has been signalled to stop; it winds down
+/// asynchronously and emits `TurnCancelled` as its terminal event (watch the
+/// event stream for it). `404` if the chat doesn't exist, `409` if no turn is
+/// currently running for it. Idempotent while a turn is winding down — a repeat
+/// cancel simply re-trips the already-tripped token.
+pub async fn post_cancel(
+    State(state): State<AppState>,
+    Path(id): Path<ChatId>,
+) -> Result<StatusCode, ServerError> {
+    // Distinguish "unknown chat" (404) from "known chat, nothing running" (409).
+    if state.store.get_chat(id).await?.is_none() {
+        return Err(ServerError::not_found(format!("chat {id} not found")));
+    }
+    if state.active_turns.cancel(id) {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ServerError::conflict(format!(
+            "chat {id} has no turn in progress"
+        )))
+    }
 }
 
 /// Body of `POST /chats/{id}/approvals/{call_id}`.
