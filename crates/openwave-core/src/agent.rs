@@ -388,9 +388,14 @@ impl Agent {
             // can still be stopped. On cancel we close the approval card
             // (`ApprovalDecided { approved: false }`) and return an error result;
             // the loop's post-tool check then ends the turn as cancelled.
+            //
+            // `future::select` polls the left arm first, so when both are ready
+            // (approve lands in the same tick as cancel) the decision would win
+            // and a Sensitive tool would still run. Prefer cancel whenever the
+            // token is already tripped — same bias as the post-stream check.
             let decision = match future::select(pending, self.cancel.cancelled()).await {
-                Either::Left((decision, _)) => decision,
-                Either::Right(((), _)) => {
+                Either::Left((decision, _)) if !self.cancel.is_cancelled() => decision,
+                Either::Left(_) | Either::Right(((), _)) => {
                     let _ = events.unbounded_send(AgentEvent::ApprovalDecided {
                         call_id: call.call_id,
                         approved: false,
@@ -883,6 +888,20 @@ mod tests {
         }
     }
 
+    /// Trips cancel, then resolves Approve immediately — both arms of the
+    /// approval `select` are ready in the same poll. Without a cancel-preferring
+    /// check, `select` would take Approve and the Sensitive tool would run.
+    struct CancelThenApproveGate {
+        cancel: CancelToken,
+    }
+
+    impl ApprovalGate for CancelThenApproveGate {
+        fn arm(&self, _request: ApprovalRequest) -> crate::approval::ApprovalFuture<'_> {
+            self.cancel.cancel();
+            Box::pin(async { ApprovalDecision::Approve })
+        }
+    }
+
     async fn cancel_test_chat() -> (Arc<dyn Store>, Chat, tempfile::TempDir) {
         let workspace = tempfile::tempdir().unwrap();
         let db = tempfile::tempdir().unwrap();
@@ -1032,6 +1051,51 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ApprovalDecided {
+                approved: false,
+                ..
+            }
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCancelled { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_wins_when_approval_and_cancel_are_both_ready() {
+        let (store, chat, _workspace) = cancel_test_chat().await;
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let cancel = CancelToken::new();
+        let agent = Agent::new(
+            Arc::new(BoomProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(BoomTool { ran: ran.clone() }))),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_approvals(Arc::new(CancelThenApproveGate {
+            cancel: cancel.clone(),
+        }))
+        .with_cancel(cancel);
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "cancel must preempt an approve that is ready in the same poll"
+        );
         assert!(events.iter().any(|e| matches!(
             e,
             AgentEvent::ApprovalDecided {
