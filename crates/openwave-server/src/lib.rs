@@ -52,8 +52,12 @@ pub fn app(state: AppState) -> Router {
             post(routes::create_project).get(routes::list_projects),
         )
         .route("/projects/{id}", get(routes::get_project))
+        .route("/models", get(routes::list_models))
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
-        .route("/chats/{id}", get(routes::get_chat))
+        .route(
+            "/chats/{id}",
+            get(routes::get_chat).patch(routes::patch_chat),
+        )
         .route(
             "/settings/api-key",
             axum::routing::put(routes::put_api_key).delete(routes::delete_api_key),
@@ -605,6 +609,180 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let info: AgentErrorInfo = json_body(response).await;
         assert_eq!(info.kind, "bad_request");
+    }
+
+    #[tokio::test]
+    async fn models_catalog_is_served() {
+        let (router, token, _store, _dir) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/models")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let catalog: serde_json::Value = json_body(response).await;
+        let models = catalog["models"].as_array().unwrap();
+        assert!(!models.is_empty());
+        assert!(models.iter().any(|m| m["provider"] == "anthropic"));
+    }
+
+    #[tokio::test]
+    async fn chat_created_with_a_model() {
+        let (router, token, _store, _dir) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chats")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"workspace_dir": "/tmp/ws", "model": "claude-x"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let chat: Chat = json_body(response).await;
+        assert_eq!(chat.model.as_deref(), Some("claude-x"));
+    }
+
+    #[tokio::test]
+    async fn chat_created_with_empty_model_is_rejected() {
+        let (router, token, _store, _dir) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chats")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"workspace_dir": "/tmp/ws", "model": ""}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, "bad_request");
+    }
+
+    /// PATCH a chat's model with a raw JSON body, returning the response.
+    async fn patch_chat(
+        router: &Router,
+        bearer: &str,
+        chat: ChatId,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/chats/{chat}"))
+                    .header(header::AUTHORIZATION, bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn patch_chat_sets_and_clears_the_model() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+        assert_eq!(chat.model, None);
+
+        let set = patch_chat(
+            &router,
+            &bearer,
+            chat.id,
+            serde_json::json!({"model": "m1"}),
+        )
+        .await;
+        assert_eq!(set.status(), StatusCode::OK);
+        assert_eq!(json_body::<Chat>(set).await.model.as_deref(), Some("m1"));
+
+        let cleared = patch_chat(
+            &router,
+            &bearer,
+            chat.id,
+            serde_json::json!({"model": null}),
+        )
+        .await;
+        assert_eq!(cleared.status(), StatusCode::OK);
+        assert_eq!(json_body::<Chat>(cleared).await.model, None);
+    }
+
+    #[tokio::test]
+    async fn patch_chat_rejects_empty_model_and_unknown_chat() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        let empty = patch_chat(&router, &bearer, chat.id, serde_json::json!({"model": ""})).await;
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+        let missing = patch_chat(
+            &router,
+            &bearer,
+            ChatId::new(),
+            serde_json::json!({"model": "m"}),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chat_model_takes_precedence_over_the_default() {
+        let recorder = RecordingProvider::default();
+        let (router, token, store, _dir) = test_app_with(Arc::new(recorder.clone())).await;
+        let bearer = format!("Bearer {token}");
+
+        // A global default is set, but the chat picks its own model — the chat wins.
+        let set_default = put_settings(
+            &router,
+            &bearer,
+            serde_json::json!({"model": "default-model"}),
+        )
+        .await;
+        assert_eq!(set_default.status(), StatusCode::OK);
+        let chat = make_chat(&router, &bearer).await;
+        let patched = patch_chat(
+            &router,
+            &bearer,
+            chat.id,
+            serde_json::json!({"model": "chat-model"}),
+        )
+        .await;
+        assert_eq!(patched.status(), StatusCode::OK);
+
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "hi").await,
+            StatusCode::ACCEPTED
+        );
+        wait_for_turn(&store, chat.id).await;
+        assert!(
+            recorder
+                .models
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "chat-model"),
+            "the chat's own model should win over the global default"
+        );
     }
 
     #[tokio::test]

@@ -478,6 +478,7 @@ mod tests {
             id: ChatId::new(),
             project_id: None,
             title: None,
+            model: None,
             workspace_dir: workspace.path().to_path_buf(),
             created_at: Utc::now(),
         };
@@ -551,6 +552,7 @@ mod tests {
             id: ChatId::new(),
             project_id: None,
             title: None,
+            model: None,
             workspace_dir: workspace.path().to_path_buf(),
             created_at: Utc::now(),
         };
@@ -609,6 +611,7 @@ mod tests {
             id: ChatId::new(),
             project_id: None,
             title: None,
+            model: None,
             workspace_dir: workspace.path().to_path_buf(),
             created_at: Utc::now(),
         };

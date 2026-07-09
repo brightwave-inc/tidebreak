@@ -95,12 +95,26 @@ impl Store for DbStore {
             id: Set(chat.id.0),
             project_id: Set(chat.project_id.map(|p| p.0)),
             title: Set(chat.title.clone()),
+            model: Set(chat.model.clone()),
             workspace_dir: Set(chat.workspace_dir.to_string_lossy().into_owned()),
             created_at: Set(chat.created_at),
         }
         .insert(&self.conn)
         .await
         .map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
+        entities::chat::Entity::update_many()
+            .col_expr(
+                entities::chat::Column::Model,
+                sea_orm::sea_query::Expr::value(model),
+            )
+            .filter(entities::chat::Column::Id.eq(id.0))
+            .exec(&self.conn)
+            .await
+            .map_err(store_err)?;
         Ok(())
     }
 
@@ -235,6 +249,7 @@ fn chat_from_model(model: entities::chat::Model) -> Chat {
         id: ChatId(model.id),
         project_id: model.project_id.map(ProjectId),
         title: model.title,
+        model: model.model,
         workspace_dir: PathBuf::from(model.workspace_dir),
         created_at: model.created_at,
     }
@@ -304,6 +319,7 @@ mod entities {
             pub id: Uuid,
             pub project_id: Option<Uuid>,
             pub title: Option<String>,
+            pub model: Option<String>,
             pub workspace_dir: String,
             pub created_at: DateTimeUtc,
         }
@@ -393,6 +409,7 @@ mod migration {
                 Box::new(Init),
                 Box::new(AddEventJournal),
                 Box::new(AddProjects),
+                Box::new(AddChatModel),
             ]
         }
     }
@@ -594,6 +611,42 @@ mod migration {
         }
     }
 
+    /// Adds the optional per-chat `model` override.
+    struct AddChatModel;
+
+    impl MigrationName for AddChatModel {
+        fn name(&self) -> &str {
+            "m0004_chat_model"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for AddChatModel {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Chat::Table)
+                        .add_column(ColumnDef::new(Chat::Model).text())
+                        .to_owned(),
+                )
+                .await?;
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Chat::Table)
+                        .drop_column(Chat::Model)
+                        .to_owned(),
+                )
+                .await?;
+            Ok(())
+        }
+    }
+
     #[derive(DeriveIden)]
     enum Project {
         Table,
@@ -609,6 +662,7 @@ mod migration {
         Id,
         ProjectId,
         Title,
+        Model,
         WorkspaceDir,
         CreatedAt,
     }
@@ -658,6 +712,7 @@ mod tests {
             id: ChatId::new(),
             project_id: None,
             title: Some("hello".into()),
+            model: None,
             workspace_dir: PathBuf::from("/tmp/ws"),
             created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
         }
@@ -716,6 +771,32 @@ mod tests {
         };
         assert_eq!(listed_link(in_project.id), Some(project.id));
         assert_eq!(listed_link(loose.id), None);
+    }
+
+    #[tokio::test]
+    async fn set_chat_model_updates_then_clears() {
+        let (_dir, store) = temp_store().await;
+        let chat = sample_chat();
+        store.create_chat(&chat).await.unwrap();
+        assert_eq!(store.get_chat(chat.id).await.unwrap().unwrap().model, None);
+
+        store
+            .set_chat_model(chat.id, Some("claude-x".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_chat(chat.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("claude-x")
+        );
+
+        store.set_chat_model(chat.id, None).await.unwrap();
+        assert_eq!(store.get_chat(chat.id).await.unwrap().unwrap().model, None);
     }
 
     #[tokio::test]

@@ -155,6 +155,44 @@ pub async fn delete_api_key(State(state): State<AppState>) -> Result<StatusCode,
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// A selectable model in the catalog.
+#[derive(Debug, Serialize)]
+pub struct ModelInfo {
+    /// The identifier passed to the provider and stored as `chat.model`.
+    pub id: &'static str,
+    /// The provider that serves the model.
+    pub provider: &'static str,
+}
+
+/// Response for `GET /models`.
+#[derive(Debug, Serialize)]
+pub struct ModelCatalog {
+    /// The models a client can select from.
+    pub models: Vec<ModelInfo>,
+}
+
+/// `GET /models` — the catalog a chat's model selector chooses from.
+///
+/// A curated static list for now (Anthropic only, matching the single provider
+/// wired today). When multiple providers are configurable this becomes
+/// provider-driven — the enabled, credentialed providers' models.
+pub async fn list_models() -> Json<ModelCatalog> {
+    const ANTHROPIC_MODELS: &[&str] = &[
+        "claude-opus-4-8",
+        "claude-sonnet-5",
+        "claude-haiku-4-5-20251001",
+    ];
+    Json(ModelCatalog {
+        models: ANTHROPIC_MODELS
+            .iter()
+            .map(|id| ModelInfo {
+                id,
+                provider: "anthropic",
+            })
+            .collect(),
+    })
+}
+
 /// Body of `POST /projects`.
 #[derive(Debug, Deserialize)]
 pub struct CreateProject {
@@ -217,6 +255,9 @@ pub struct CreateChat {
     /// Optional project to file this chat under; omitted for a loose chat.
     #[serde(default)]
     pub project_id: Option<ProjectId>,
+    /// Optional model for this chat; omitted to use the configured default.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// `POST /chats` — create a chat and return it (`201 Created`).
@@ -243,15 +284,51 @@ pub async fn create_chat(
             )));
         }
     }
+    if body.model.as_deref().is_some_and(str::is_empty) {
+        return Err(ServerError::bad_request("model must not be empty"));
+    }
     let chat = Chat {
         id: ChatId::new(),
         project_id: body.project_id,
         title: body.title,
+        model: body.model,
         workspace_dir: body.workspace_dir,
         created_at: Utc::now(),
     };
     state.store.create_chat(&chat).await?;
     Ok((StatusCode::CREATED, Json(chat)))
+}
+
+/// Body of `PATCH /chats/{id}`. A double option (like `PUT /settings`): absent
+/// leaves the model unchanged, `null` clears it (fall back to the default), and a
+/// value sets it.
+#[derive(Debug, Deserialize)]
+pub struct ChatUpdate {
+    #[serde(default, deserialize_with = "double_option")]
+    pub model: Option<Option<String>>,
+}
+
+/// `PATCH /chats/{id}` — update a chat's model selection; returns the chat. This
+/// is what a chat UI's model selector writes to.
+pub async fn patch_chat(
+    State(state): State<AppState>,
+    Path(id): Path<ChatId>,
+    Json(body): Json<ChatUpdate>,
+) -> Result<Json<Chat>, ServerError> {
+    let mut chat = state
+        .store
+        .get_chat(id)
+        .await?
+        .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
+
+    if let Some(model) = body.model {
+        if model.as_deref().is_some_and(str::is_empty) {
+            return Err(ServerError::bad_request("model must not be empty"));
+        }
+        state.store.set_chat_model(id, model.clone()).await?;
+        chat.model = model;
+    }
+    Ok(Json(chat))
 }
 
 /// `GET /chats` — list chats, most-recently-created first.
@@ -301,10 +378,16 @@ pub async fn post_message(
         ServerError::conflict(format!("chat {id} already has a turn in progress"))
     })?;
 
-    // The model is reconfigurable at runtime via PUT /settings; a stored value
-    // overrides the boot default for this turn.
+    // Model resolution order: the chat's own selection wins, then the global
+    // default setting (PUT /settings), then the boot default in agent_config.
+    // Short-circuit: only read the setting when the chat has no model of its own,
+    // so a chat with a model doesn't pay (or fail on) the settings lookup.
     let mut agent_config = state.agent_config.clone();
-    if let Some(model) = read_model(&*state.store).await? {
+    let model = match chat.model.clone() {
+        Some(model) => Some(model),
+        None => read_model(&*state.store).await?,
+    };
+    if let Some(model) = model {
         agent_config.model = model;
     }
     // Resolve the provider from the currently-configured key, so a key set via
