@@ -35,6 +35,14 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
+      - name: Install Tauri Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt
         run: cargo fmt --all --check

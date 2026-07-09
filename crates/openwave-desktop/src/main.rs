@@ -1,7 +1,9 @@
 //! OpenWave desktop — the Tauri application shell.
 //!
-//! Scaffolding only. The app lands with the M0 walking skeleton.
+//! Boots the in-process HTTP/WebSocket surface and hosts the chat UI webview.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    println!("openwave-desktop: not yet implemented");
+    openwave_desktop_lib::run();
 }

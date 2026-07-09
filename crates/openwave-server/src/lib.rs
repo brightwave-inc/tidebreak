@@ -26,9 +26,11 @@ mod state;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use axum::http::{header, Method};
 use axum::routing::{get, post};
 use axum::Router;
 use tokio::net::TcpListener;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use openwave_core::{
     AgentConfig, AgentError, Config, DbStore, KeychainSecretProvider, ListDir, Profile, ReadFile,
@@ -85,7 +87,25 @@ pub fn app(state: AppState) -> Router {
         ))
         .with_state(state);
 
-    Router::new().route("/healthz", get(healthz)).merge(api)
+    // Loopback-only + bearer token is the real gate. CORS mirrors the request
+    // Origin so the Tauri webview (and a browser on `vite` during UI work) can
+    // call the API from a different localhost port.
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::mirror_request())
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT]);
+
+    Router::new()
+        .route("/healthz", get(healthz))
+        .merge(api)
+        .layer(cors)
 }
 
 /// Liveness probe — no auth, no state.
@@ -1777,6 +1797,35 @@ mod tests {
             .unwrap();
         assert_eq!(authed.status(), reqwest::StatusCode::OK);
         assert_eq!(authed.json::<Vec<Chat>>().await.unwrap(), vec![]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cors_preflight_allows_localhost_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = bind(Config::desktop(dir.path())).await.unwrap();
+        let addr = server.local_addr();
+        tokio::spawn(async move {
+            let _ = server.serve().await;
+        });
+
+        let client = reqwest::Client::new();
+        let preflight = client
+            .request(reqwest::Method::OPTIONS, format!("http://{addr}/chats"))
+            .header(reqwest::header::ORIGIN, "http://localhost:1420")
+            .header(reqwest::header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .header(
+                reqwest::header::ACCESS_CONTROL_REQUEST_HEADERS,
+                "authorization",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), reqwest::StatusCode::OK);
+        let allow_origin = preflight
+            .headers()
+            .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(allow_origin, Some("http://localhost:1420"));
     }
 
     // --- WebSocket event stream ---

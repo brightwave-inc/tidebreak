@@ -78,9 +78,25 @@ you'd like to help.
 
 ```sh
 cargo build --workspace
+cargo test --workspace
 ```
 
 Requires the Rust toolchain declared in [`rust-toolchain.toml`](rust-toolchain.toml).
+
+### Desktop app (Tauri)
+
+The desktop shell lives in [`crates/openwave-desktop`](crates/openwave-desktop).
+It boots the same local API as `openwave serve` inside the process and hosts a
+React UI in a webview. See that crate's README for prerequisites and the two
+local-test paths (`cargo tauri dev`, or browser UI against `openwave serve`).
+
+Headless API without the UI:
+
+```sh
+ANTHROPIC_API_KEY=sk-... cargo run -p openwave-cli -- serve
+# then: curl -s http://127.0.0.1:PORT/healthz
+#       curl -H "Authorization: Bearer TOKEN" http://127.0.0.1:PORT/chats
+```
 
 ## Layout
 

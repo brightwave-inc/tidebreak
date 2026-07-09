@@ -14,10 +14,13 @@
 secrets.toml
 credentials.json
 
-# Node / frontend (desktop UI, added later)
+# Node / frontend (desktop UI)
 node_modules/
 dist/
 .vite/
+
+# Tauri codegen (regenerated on build)
+crates/openwave-desktop/gen/
 
 # OS / editor cruft
 .DS_Store
