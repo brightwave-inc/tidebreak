@@ -2006,4 +2006,69 @@ mod tests {
         // No Authorization header: the handshake must fail (auth runs before upgrade).
         assert!(connect_async(request).await.is_err());
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ws_subprotocol_auth_succeeds() {
+        use crate::auth::{WS_HANDSHAKE_SUBPROTOCOL, WS_TOKEN_SUBPROTOCOL_PREFIX};
+
+        let (addr, token, store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
+        let client = reqwest::Client::new();
+        let chat = make_chat_http(&client, addr, &token).await;
+        send_message_http(&client, addr, &token, chat.id).await;
+        wait_for_turn(&store, chat.id).await;
+
+        // Authenticate with Sec-WebSocket-Protocol only — no Authorization header.
+        let mut request = format!("ws://{addr}/chats/{}/events?after=0", chat.id)
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            format!("{WS_HANDSHAKE_SUBPROTOCOL}, {WS_TOKEN_SUBPROTOCOL_PREFIX}{token}")
+                .parse()
+                .unwrap(),
+        );
+        let (mut socket, response) = connect_async(request).await.unwrap();
+        // Server must select the handshake subprotocol.
+        let selected = response
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(selected, Some(WS_HANDSHAKE_SUBPROTOCOL));
+
+        let mut saw_completed = false;
+        let read = async {
+            while let Some(frame) = socket.next().await {
+                let WsMessage::Text(text) = frame.unwrap() else {
+                    continue;
+                };
+                let event: SequencedEvent = serde_json::from_str(text.as_str()).unwrap();
+                if matches!(event.event, AgentEvent::TurnCompleted { .. }) {
+                    saw_completed = true;
+                    break;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .expect("turn did not complete over subprotocol-authed socket");
+        assert!(saw_completed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ws_subprotocol_wrong_token_is_rejected() {
+        use crate::auth::{WS_HANDSHAKE_SUBPROTOCOL, WS_TOKEN_SUBPROTOCOL_PREFIX};
+
+        let (addr, _token, _store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
+        let chat = ChatId::new();
+        let mut request = format!("ws://{addr}/chats/{chat}/events")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            format!("{WS_HANDSHAKE_SUBPROTOCOL}, {WS_TOKEN_SUBPROTOCOL_PREFIX}not-the-token")
+                .parse()
+                .unwrap(),
+        );
+        assert!(connect_async(request).await.is_err());
+    }
 }
