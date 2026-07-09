@@ -527,9 +527,10 @@ pub struct EventsQuery {
 /// was already replayed, means nothing is missed or duplicated across the handoff.
 /// `404` if the chat doesn't exist.
 ///
-/// Auth is checked by the bearer middleware. Browser clients that authenticated
-/// via `Sec-WebSocket-Protocol` must offer `openwave-v1` so this handler can
-/// select it in the upgrade response (browsers require a matching selection).
+/// Auth is checked by the bearer middleware. Browser clients authenticate via
+/// `Sec-WebSocket-Protocol` (`openwave-token.<token>`). When the client offered
+/// `openwave-v1`, this handler selects it in the upgrade response so the
+/// browser accepts the handshake (RFC 6455).
 pub async fn chat_events(
     State(state): State<AppState>,
     Path(id): Path<ChatId>,
