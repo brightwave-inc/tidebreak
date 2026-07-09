@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use crate::document::{Chunk, ScoredChunk};
 use crate::embed::Embedding;
 use crate::error::{Result, RetrievalError};
+use crate::id::DocumentId;
 
 /// A chunk together with its embedding, ready to store.
 #[derive(Debug, Clone)]
@@ -43,6 +44,14 @@ pub trait VectorStore: Send + Sync {
     /// Fewer than `k` come back when the store holds fewer records. `k == 0`
     /// yields an empty result.
     async fn query(&self, query: &Embedding, k: usize) -> Result<Vec<ScoredChunk>>;
+
+    /// Remove every chunk belonging to `document_id`, returning how many were
+    /// removed. Removing a document that isn't present is a no-op (`Ok(0)`).
+    ///
+    /// This is what lets re-ingesting *changed* content be a true replacement:
+    /// prune the document's old chunks, then upsert the new ones, so a shrunk or
+    /// rewritten document leaves no stale chunks behind to be surfaced by search.
+    async fn delete_by_document(&self, document_id: DocumentId) -> Result<usize>;
 
     /// The number of records currently stored.
     async fn len(&self) -> Result<usize>;
@@ -133,6 +142,16 @@ impl VectorStore for InMemoryVectorStore {
         });
         scored.truncate(k);
         Ok(scored)
+    }
+
+    async fn delete_by_document(&self, document_id: DocumentId) -> Result<usize> {
+        let mut store = self
+            .records
+            .write()
+            .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
+        let before = store.len();
+        store.retain(|r| r.chunk.document_id != document_id);
+        Ok(before - store.len())
     }
 
     async fn len(&self) -> Result<usize> {
@@ -230,5 +249,31 @@ mod tests {
         // The second upsert's vector won.
         let hits = store.query(&Embedding(vec![0.0, 1.0]), 1).await.unwrap();
         assert!((hits[0].score - 1.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn delete_by_document_removes_only_that_document() {
+        let store = InMemoryVectorStore::new(2);
+        let a = DocumentId::new();
+        let b = DocumentId::new();
+        store
+            .upsert(vec![
+                record(a, 0, "a0", vec![1.0, 0.0]),
+                record(a, 1, "a1", vec![0.0, 1.0]),
+                record(b, 0, "b0", vec![1.0, 1.0]),
+            ])
+            .await
+            .unwrap();
+
+        let removed = store.delete_by_document(a).await.unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.len().await.unwrap(), 1);
+        // Document b's chunk is untouched.
+        let hits = store.query(&Embedding(vec![1.0, 1.0]), 5).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.document_id, b);
+
+        // Deleting an absent document is a no-op.
+        assert_eq!(store.delete_by_document(a).await.unwrap(), 0);
     }
 }
