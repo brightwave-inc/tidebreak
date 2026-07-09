@@ -17,6 +17,7 @@ mod error;
 mod extract;
 mod hub;
 mod provider;
+mod providers;
 mod resolver;
 mod routes;
 mod state;
@@ -53,6 +54,15 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/projects/{id}", get(routes::get_project))
         .route("/models", get(routes::list_models))
+        .route("/providers", get(routes::list_providers))
+        .route(
+            "/providers/{kind}",
+            axum::routing::put(routes::put_provider),
+        )
+        .route(
+            "/providers/{kind}/credential",
+            axum::routing::delete(routes::delete_provider_credential),
+        )
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route(
             "/chats/{id}",
@@ -114,7 +124,10 @@ const DEFAULT_MODEL: &str = "claude-opus-4-8";
 pub async fn bind(config: Config) -> Result<Server> {
     let store = connect_store(&config).await?;
     let secrets: Arc<dyn SecretProvider> = Arc::new(KeychainSecretProvider::new());
-    let resolver = Arc::new(KeyedResolver::new(secrets.clone()));
+    // Pre-providers installs may only have an env/legacy key — enable Anthropic
+    // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade.
+    providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
+    let resolver = Arc::new(KeyedResolver::new(store.clone(), secrets.clone()));
     let (tools, agent_config) = agent_deps();
     let state = AppState::new(config, store, resolver, secrets, tools, agent_config);
     let token = state.token.clone();
@@ -987,15 +1000,221 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolver_builds_a_real_provider_when_a_key_is_set() {
-        // A stored key takes precedence over the env fallback, so this is
-        // deterministic regardless of the ambient environment.
-        let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
-        secrets
-            .set_secret(resolver::ANTHROPIC_API_KEY, "sk-test")
+    async fn providers_list_and_put_roundtrip() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+
+        let list = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/providers")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let resolver = resolver::KeyedResolver::new(secrets.clone());
+        assert_eq!(list.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(list).await;
+        let providers = body["providers"].as_array().unwrap();
+        assert!(providers.iter().any(|p| p["kind"] == "anthropic"));
+        assert!(providers.iter().any(|p| p["kind"] == "openai"));
+        assert!(providers.iter().any(|p| p["kind"] == "openai_compatible"));
+
+        let put = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/providers/openai")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "enabled": true,
+                            "credential": {"type": "api_key", "key": "sk-openai"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+        let info: serde_json::Value = json_body(put).await;
+        assert_eq!(info["kind"], "openai");
+        assert_eq!(info["enabled"], true);
+        assert_eq!(info["has_credential"], true);
+        assert!(info.get("credential").is_none());
+
+        // Credential never appears on the list either.
+        let list = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/providers")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value = json_body(list).await;
+        let openai = body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["kind"] == "openai")
+            .unwrap();
+        assert_eq!(openai["has_credential"], true);
+        assert!(openai.get("credential").is_none());
+
+        let delete = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/providers/openai/credential")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+        let list = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/providers")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value = json_body(list).await;
+        let openai = body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["kind"] == "openai")
+            .unwrap();
+        assert_eq!(openai["has_credential"], false);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_requires_base_url_when_enabled() {
+        let (router, token, _store, _dir) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/providers/openai_compatible")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({"enabled": true}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_kind_is_404() {
+        let (router, token, _store, _dir) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/providers/not-a-provider")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({"enabled": true}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn models_catalog_includes_enabled_credentialed_providers() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+
+        let put = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/providers/openai")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "enabled": true,
+                            "credential": {"type": "api_key", "key": "sk-openai"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/models")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let catalog: serde_json::Value = json_body(response).await;
+        let models = catalog["models"].as_array().unwrap();
+        assert!(models.iter().any(|m| m["provider"] == "openai"));
+    }
+
+    #[tokio::test]
+    async fn resolver_builds_a_real_provider_when_a_key_is_set() {
+        // Typed credential blob + enabled config — the primary write path.
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}/test.db?mode=rwc",
+                dir.path().display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+        providers::write_credential(
+            &*secrets,
+            providers::ProviderKind::Anthropic,
+            &providers::ProviderCredential::api_key("sk-test"),
+        )
+        .await
+        .unwrap();
+        providers::write_config(
+            &*store,
+            providers::ProviderKind::Anthropic,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let resolver = resolver::KeyedResolver::new(store.clone(), secrets.clone());
         let resolved = resolver.resolve().await;
         assert_eq!(resolved.id().0, "anthropic");
 
@@ -1004,12 +1223,28 @@ mod tests {
         assert!(Arc::ptr_eq(&resolved, &again));
 
         // Changing the key rebuilds it.
-        secrets
-            .set_secret(resolver::ANTHROPIC_API_KEY, "sk-different")
-            .await
-            .unwrap();
+        providers::write_credential(
+            &*secrets,
+            providers::ProviderKind::Anthropic,
+            &providers::ProviderCredential::api_key("sk-different"),
+        )
+        .await
+        .unwrap();
         let rebuilt = resolver.resolve().await;
         assert!(!Arc::ptr_eq(&resolved, &rebuilt));
+
+        // Disabling Anthropic fails closed even with a key present.
+        providers::write_config(
+            &*store,
+            providers::ProviderKind::Anthropic,
+            &providers::ProviderConfig {
+                enabled: false,
+                base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolver.resolve().await.id().0, "unconfigured");
     }
 
     #[tokio::test(flavor = "multi_thread")]
