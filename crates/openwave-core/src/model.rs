@@ -53,6 +53,8 @@ pub struct Chat {
     pub project_id: Option<ProjectId>,
     /// Human-facing title; `None` until one is set or derived.
     pub title: Option<String>,
+    /// The model this chat runs against, or `None` to use the configured default.
+    pub model: Option<String>,
     /// Absolute path to this chat's workspace directory.
     pub workspace_dir: PathBuf,
     /// When the chat was created.

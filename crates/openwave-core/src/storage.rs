@@ -53,6 +53,10 @@ pub trait Store: Send + Sync {
     /// List chats, most-recently-created first.
     async fn list_chats(&self) -> Result<Vec<Chat>>;
 
+    /// Set (or clear, with `None`) a chat's model override. A no-op if the chat
+    /// doesn't exist.
+    async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()>;
+
     /// Append a message to its chat.
     async fn append_message(&self, message: &Message) -> Result<()>;
 
@@ -148,6 +152,12 @@ mod tests {
         async fn list_chats(&self) -> Result<Vec<Chat>> {
             Ok(self.chats.lock().unwrap().values().cloned().collect())
         }
+        async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
+            if let Some(chat) = self.chats.lock().unwrap().get_mut(&id) {
+                chat.model = model;
+            }
+            Ok(())
+        }
         async fn append_message(&self, _message: &Message) -> Result<()> {
             Ok(())
         }
@@ -195,6 +205,7 @@ mod tests {
             id: ChatId::new(),
             project_id: None,
             title: None,
+            model: None,
             workspace_dir: "/tmp/ws".into(),
             created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
         };
