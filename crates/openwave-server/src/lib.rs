@@ -37,8 +37,8 @@ use openwave_core::{
     Result, SecretProvider, Store, ToolRegistry, WriteFile,
 };
 use openwave_retrieval::{
-    Embedder, HashEmbedder, InMemoryVectorStore, PlainTextParser, Retriever, SearchTool,
-    TextChunker, VectorStore,
+    Embedder, HashEmbedder, InMemoryVectorStore, OpenAiEmbedder, PlainTextParser, Retriever,
+    SearchTool, TextChunker, VectorStore,
 };
 
 use resolver::KeyedResolver;
@@ -161,7 +161,8 @@ pub async fn bind(config: Config) -> Result<Server> {
     // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade.
     providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
     let resolver = Arc::new(KeyedResolver::new(store.clone(), secrets.clone()));
-    let (retrieval, tools, agent_config) = agent_deps();
+    let embedder = resolve_embedder(&*secrets).await;
+    let (retrieval, tools, agent_config) = agent_deps(embedder);
     let state = AppState::new(
         config,
         store,
@@ -195,8 +196,8 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// providers; see [`resolver`]), so configuring a provider at runtime takes effect
 /// without a restart. The model *name* comes from `OPENWAVE_MODEL` (or the built-in
 /// default) and can be overridden at runtime via `PUT /settings` or per-chat.
-fn agent_deps() -> (Arc<Retriever>, Arc<ToolRegistry>, AgentConfig) {
-    let (retrieval, search) = build_retrieval();
+fn agent_deps(embedder: Arc<dyn Embedder>) -> (Arc<Retriever>, Arc<ToolRegistry>, AgentConfig) {
+    let (retrieval, search) = build_retrieval(embedder);
     let tools = Arc::new(
         ToolRegistry::new()
             .with(Box::new(ReadFile))
@@ -212,15 +213,38 @@ fn agent_deps() -> (Arc<Retriever>, Arc<ToolRegistry>, AgentConfig) {
     (retrieval, tools, agent_config)
 }
 
-/// Build the retrieval pipeline and the `search` tool that shares its index.
+/// The embeddings model used when an OpenAI credential is configured. Its native
+/// output width is [`EMBED_DIMS`]; kept fixed here (a configurable embeddings model
+/// is a later slice) so the declared dimensionality always matches the model.
+const EMBED_MODEL: &str = "text-embedding-3-small";
+/// Native output dimensionality of [`EMBED_MODEL`].
+const EMBED_DIMS: usize = 1536;
+
+/// Choose the embedder for this launch.
+///
+/// If an OpenAI API key is configured (stored credential or `OPENAI_API_KEY`), use
+/// real semantic embeddings via [`OpenAiEmbedder`] — documents are embedded through
+/// OpenAI's API, consistent with the bring-your-own-key egress model. Otherwise
+/// fall back to the offline, lexical [`HashEmbedder`], so search works with no
+/// credentials (just less well). Chosen once at startup: the in-memory index is
+/// per-launch and dimension-bound to the embedder, so switching requires a restart.
+async fn resolve_embedder(secrets: &dyn SecretProvider) -> Arc<dyn Embedder> {
+    match providers::resolve_api_key(secrets, providers::ProviderKind::Openai).await {
+        Some(key) => Arc::new(OpenAiEmbedder::new(key, EMBED_MODEL, EMBED_DIMS)),
+        None => Arc::new(HashEmbedder::default()),
+    }
+}
+
+/// Build the retrieval pipeline and the `search` tool that shares its index, over
+/// the given `embedder`.
 ///
 /// The [`Retriever`] (used to ingest and to serve `POST /search`) and the returned
 /// [`SearchTool`] (registered for the agent) hold the **same** embedder and vector
 /// store, so a document ingested through the API is immediately visible to the
-/// agent's search. The store is in-memory today — durable/hybrid backends and real
-/// embedding providers are later slices — so an index does not survive a restart.
-fn build_retrieval() -> (Arc<Retriever>, Box<SearchTool>) {
-    let embedder: Arc<dyn Embedder> = Arc::new(HashEmbedder::default());
+/// agent's search. The store is sized to the embedder's dimensionality. It's
+/// in-memory today — durable/hybrid backends are a later slice — so an index does
+/// not survive a restart.
+fn build_retrieval(embedder: Arc<dyn Embedder>) -> (Arc<Retriever>, Box<SearchTool>) {
     let store: Arc<dyn VectorStore> = Arc::new(InMemoryVectorStore::new(embedder.dimensions()));
     let retrieval = Arc::new(Retriever::new(
         Box::new(PlainTextParser::new()),
@@ -471,7 +495,7 @@ mod tests {
             .await
             .unwrap(),
         );
-        let (retrieval, _search) = build_retrieval();
+        let (retrieval, _search) = build_retrieval(Arc::new(HashEmbedder::default()));
         let state = AppState::new(
             Config::desktop(dir.path()),
             store.clone(),
@@ -948,7 +972,7 @@ mod tests {
 
     #[test]
     fn agent_deps_registers_the_search_tool_alongside_the_file_tools() {
-        let (_retrieval, tools, _config) = agent_deps();
+        let (_retrieval, tools, _config) = agent_deps(Arc::new(HashEmbedder::default()));
         let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
         assert!(
             names.iter().any(|n| n == "search"),
@@ -958,6 +982,24 @@ mod tests {
             names.iter().any(|n| n == "read_file"),
             "file tools still present"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_embedder_uses_openai_when_a_key_is_configured() {
+        // A stored OpenAI credential (which takes precedence over any env var, so
+        // this is deterministic) selects the real 1536-dim embedder over the
+        // offline HashEmbedder default. No network call — construction only.
+        let secrets = MemSecrets::default();
+        providers::write_credential(
+            &secrets,
+            providers::ProviderKind::Openai,
+            &providers::ProviderCredential::api_key("sk-openai-test"),
+        )
+        .await
+        .unwrap();
+        let embedder = resolve_embedder(&secrets).await;
+        assert_eq!(embedder.dimensions(), EMBED_DIMS);
+        assert_ne!(EMBED_DIMS, HashEmbedder::default().dimensions());
     }
 
     #[tokio::test]
@@ -2089,7 +2131,7 @@ mod tests {
             Arc::new(FixedResolver(Arc::new(FakeProvider))),
             Arc::new(MemSecrets::default()),
             Arc::new(ToolRegistry::new()),
-            build_retrieval().0,
+            build_retrieval(Arc::new(HashEmbedder::default())).0,
             AgentConfig {
                 model: "fake".into(),
                 ..AgentConfig::default()
@@ -2244,7 +2286,7 @@ mod tests {
             }))),
             Arc::new(MemSecrets::default()),
             tools,
-            build_retrieval().0,
+            build_retrieval(Arc::new(HashEmbedder::default())).0,
             AgentConfig {
                 model: "fake".into(),
                 ..AgentConfig::default()
