@@ -252,6 +252,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relative_workspace_dir_is_rejected() {
+        let (router, token, _dir) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chats")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"workspace_dir": "relative/dir"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, "bad_request");
+    }
+
+    #[tokio::test]
     async fn unknown_chat_is_404() {
         let (router, token, _dir) = test_app().await;
         let response = router
