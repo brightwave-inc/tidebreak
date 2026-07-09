@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { ServerInfo } from "./api";
 
 /**
@@ -10,17 +10,17 @@ import type { ServerInfo } from "./api";
  *   React app can be exercised against `openwave serve`.
  */
 export async function resolveServerInfo(): Promise<ServerInfo> {
+  if (isTauri()) {
+    return await invoke<ServerInfo>("server_info");
+  }
+
   const fromEnv = envServerInfo();
   if (fromEnv) return fromEnv;
 
-  try {
-    return await invoke<ServerInfo>("server_info");
-  } catch (err) {
-    const hint =
-      "Set VITE_OPENWAVE_URL and VITE_OPENWAVE_TOKEN (from `openwave serve`) " +
-      "to run the UI in a browser, or launch via `cargo tauri dev`.";
-    throw new Error(`${String(err)}\n\n${hint}`);
-  }
+  throw new Error(
+    "Set VITE_OPENWAVE_URL and VITE_OPENWAVE_TOKEN (from `openwave serve`) " +
+      "to run the UI in a browser, or launch via `cargo tauri dev`.",
+  );
 }
 
 function envServerInfo(): ServerInfo | null {

@@ -79,8 +79,10 @@ export class ApiClient {
       }
       throw new Error(`${response.status}: ${detail}`);
     }
-    if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    if (response.status === 204 || response.status === 202) return undefined as T;
+    const text = await response.text();
+    if (!text) return undefined as T;
+    return JSON.parse(text) as T;
   }
 
   listProviders(): Promise<{ providers: ProviderInfo[] }> {

@@ -202,6 +202,7 @@ export default function App() {
     const content = draft.trim();
     setDraft("");
     setMessages((prev) => [...prev, { id: nextId(), role: "user", text: content }]);
+    setBusy(true);
     try {
       await client.postMessage(chat.id, content);
     } catch (err) {
