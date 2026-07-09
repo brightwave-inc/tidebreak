@@ -11,8 +11,8 @@
 //! - [`BlobStore`] — bytes (documents, images, exports), served locally or from
 //!   object storage.
 //!
-//! Only the entities that exist today are modeled here. Persistence for tool
-//! calls, connections, documents, and skills is added alongside the slices that
+//! Only the entities that exist today are modeled here. Persistence for
+//! connections, documents, and skills is added alongside the slices that
 //! introduce those record types.
 
 use async_trait::async_trait;
@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::error::Result;
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, ProjectId};
-use crate::model::{Chat, Message, Project};
+use crate::model::{Chat, Message, Project, ToolCallRecord};
 
 /// Durable metadata and conversation state.
 ///
@@ -62,6 +62,12 @@ pub trait Store: Send + Sync {
 
     /// List a chat's messages in creation order.
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>>;
+
+    /// Upsert a tool call (insert on first sight, update result on completion).
+    async fn upsert_tool_call(&self, call: &ToolCallRecord) -> Result<()>;
+
+    /// List a chat's tool calls in creation order.
+    async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>>;
 
     /// Read a setting (profile, model prefs, approval policy), or `None`.
     async fn get_setting(&self, key: &str) -> Result<Option<Value>>;
@@ -125,6 +131,7 @@ mod tests {
         chats: Mutex<HashMap<ChatId, Chat>>,
         settings: Mutex<HashMap<String, Value>>,
         events: Mutex<Vec<(ChatId, SequencedEvent)>>,
+        tool_calls: Mutex<HashMap<crate::id::CallId, ToolCallRecord>>,
     }
 
     #[async_trait]
@@ -163,6 +170,30 @@ mod tests {
         }
         async fn list_messages(&self, _chat_id: ChatId) -> Result<Vec<Message>> {
             Ok(vec![])
+        }
+        async fn upsert_tool_call(&self, call: &ToolCallRecord) -> Result<()> {
+            let mut calls = self.tool_calls.lock().unwrap();
+            if let Some(existing) = calls.get_mut(&call.id) {
+                existing.arguments = call.arguments.clone();
+                existing.result = call.result.clone();
+                existing.is_error = call.is_error;
+                existing.completed_at = call.completed_at;
+            } else {
+                calls.insert(call.id, call.clone());
+            }
+            Ok(())
+        }
+        async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
+            let mut calls: Vec<_> = self
+                .tool_calls
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|call| call.chat_id == chat_id)
+                .cloned()
+                .collect();
+            calls.sort_by_key(|call| call.created_at);
+            Ok(calls)
         }
         async fn get_setting(&self, key: &str) -> Result<Option<Value>> {
             Ok(self.settings.lock().unwrap().get(key).cloned())

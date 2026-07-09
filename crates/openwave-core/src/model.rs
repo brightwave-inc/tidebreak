@@ -80,3 +80,33 @@ pub struct Message {
     /// When it was created.
     pub created_at: DateTime<Utc>,
 }
+
+/// A persisted tool invocation — name, arguments, and (once finished) result.
+///
+/// Distinct from [`Message`]: the model transcript rebuilds `ToolUse` /
+/// `ToolResult` blocks from these rows so cross-turn context keeps structured
+/// tool activity, not just free text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    /// Stable id (same as the live [`crate::id::CallId`] on the event stream).
+    pub id: crate::id::CallId,
+    /// Chat this call belongs to.
+    pub chat_id: ChatId,
+    /// Turn that produced the call.
+    pub turn_id: TurnId,
+    /// Provider-facing tool-use id (Anthropic `tool_use.id`, OpenAI `tool_call_id`).
+    pub provider_id: String,
+    /// Tool name.
+    pub name: String,
+    /// Parsed JSON arguments.
+    pub arguments: serde_json::Value,
+    /// Result text fed back to the model, once completed.
+    pub result: Option<String>,
+    /// Whether the tool reported a failure.
+    #[serde(default)]
+    pub is_error: bool,
+    /// When the call was recorded (args known).
+    pub created_at: DateTime<Utc>,
+    /// When the result was written, if completed.
+    pub completed_at: Option<DateTime<Utc>>,
+}

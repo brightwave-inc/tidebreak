@@ -385,6 +385,15 @@ mod tests {
         async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>> {
             self.inner.list_messages(chat_id).await
         }
+        async fn upsert_tool_call(&self, call: &openwave_core::ToolCallRecord) -> Result<()> {
+            self.inner.upsert_tool_call(call).await
+        }
+        async fn list_tool_calls(
+            &self,
+            chat_id: ChatId,
+        ) -> Result<Vec<openwave_core::ToolCallRecord>> {
+            self.inner.list_tool_calls(chat_id).await
+        }
         async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>> {
             self.inner.get_setting(key).await
         }
