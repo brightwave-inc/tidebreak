@@ -98,6 +98,13 @@ pub enum AgentEvent {
         /// Token accounting up to the point of cancellation.
         usage: Usage,
     },
+    /// A mid-turn steer message was injected into the running turn. The turn
+    /// continues (unlike `TurnCancelled`); the content is also persisted as a
+    /// user message.
+    UserSteered {
+        /// The steered user text.
+        content: String,
+    },
 }
 
 /// An [`AgentEvent`] paired with its per-chat sequence number, as stored in

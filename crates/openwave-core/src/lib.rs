@@ -26,6 +26,7 @@ pub mod id;
 pub mod keychain;
 pub mod model;
 pub mod provider;
+pub mod steer;
 pub mod storage;
 pub mod tool;
 #[cfg(feature = "tools")]
@@ -49,6 +50,7 @@ pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
     Usage,
 };
+pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{BlobStore, SecretProvider, Store};
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 #[cfg(feature = "tools")]

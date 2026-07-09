@@ -33,6 +33,7 @@ use crate::model::{Chat, Message, Role};
 use crate::provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, StopReason, Usage,
 };
+use crate::steer::SteerInbox;
 use crate::storage::Store;
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 
@@ -124,6 +125,7 @@ pub struct Agent {
     config: AgentConfig,
     approvals: Arc<dyn ApprovalGate>,
     cancel: CancelToken,
+    steer: SteerInbox,
 }
 
 /// A tool call accumulated from the provider stream.
@@ -152,6 +154,7 @@ impl Agent {
             config,
             approvals: Arc::new(RefuseGate),
             cancel: CancelToken::new(),
+            steer: SteerInbox::new(),
         }
     }
 
@@ -167,6 +170,14 @@ impl Agent {
     #[must_use]
     pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// Drain mid-turn steer messages from `steer`. Without this the turn ignores
+    /// any steer pushes (the default inbox stays empty).
+    #[must_use]
+    pub fn with_steer(mut self, steer: SteerInbox) -> Self {
+        self.steer = steer;
         self
     }
 
@@ -214,6 +225,9 @@ impl Agent {
             if self.cancel.is_cancelled() {
                 return self.finish_cancelled(events, total_usage);
             }
+            // Boundary steer: inject any queued messages before the next model call.
+            self.apply_steers(chat, turn_id, &mut transcript, events)
+                .await?;
 
             let request = ChatRequest {
                 model: self.config.model.clone(),
@@ -230,14 +244,25 @@ impl Agent {
             let mut by_index: HashMap<u32, usize> = HashMap::new();
             let mut stop_reason = StopReason::EndTurn;
 
-            // Race each stream item against cancellation so a long or hung model
-            // call is preempted promptly. On cancel we discard this step's
-            // partial output — nothing from it has been persisted yet.
-            let cancelled = loop {
-                let event = match future::select(stream.next(), self.cancel.cancelled()).await {
+            // Race each stream item against cancel and interrupt-steer so a long
+            // model call is preempted promptly. Cancel ends the turn; interrupt
+            // discards this step's partial output and continues after injecting.
+            enum StreamEnd {
+                Done,
+                Cancelled,
+                Steered,
+            }
+            let stream_end = loop {
+                let event = match future::select(
+                    stream.next(),
+                    future::select(self.cancel.cancelled(), self.steer.interrupted()),
+                )
+                .await
+                {
                     Either::Left((Some(event), _)) => event,
-                    Either::Left((None, _)) => break false,
-                    Either::Right(((), _)) => break true,
+                    Either::Left((None, _)) => break StreamEnd::Done,
+                    Either::Right((Either::Left(((), _)), _)) => break StreamEnd::Cancelled,
+                    Either::Right((Either::Right(((), _)), _)) => break StreamEnd::Steered,
                 };
                 match event {
                     ProviderEvent::TextDelta { text: delta } => {
@@ -276,8 +301,17 @@ impl Agent {
                     ProviderEvent::Stop { reason } => stop_reason = reason,
                 }
             };
-            if cancelled {
+            // Prefer cancel when both cancel and interrupt are ready (cancel is
+            // the left arm of the nested select). Also catch a cancel that raced
+            // the final stream event.
+            if matches!(stream_end, StreamEnd::Cancelled) || self.cancel.is_cancelled() {
                 return self.finish_cancelled(events, total_usage);
+            }
+            if matches!(stream_end, StreamEnd::Steered) {
+                // Discard this step's partial output — nothing from it was persisted.
+                self.apply_steers(chat, turn_id, &mut transcript, events)
+                    .await?;
+                continue;
             }
 
             // Record the assistant message (text + any tool-use blocks).
@@ -302,6 +336,14 @@ impl Agent {
             }
 
             if calls.is_empty() {
+                // A steer that arrived as the stream finished should continue the
+                // turn rather than report completion.
+                if self
+                    .apply_steers(chat, turn_id, &mut transcript, events)
+                    .await?
+                {
+                    continue;
+                }
                 let _ = events.unbounded_send(AgentEvent::TurnCompleted {
                     usage: total_usage,
                     stop_reason,
@@ -342,6 +384,9 @@ impl Agent {
                 role: Role::User,
                 content: results,
             });
+            // Boundary steer after tools — injected before the next model step.
+            self.apply_steers(chat, turn_id, &mut transcript, events)
+                .await?;
         }
 
         Err(AgentError::msg("max steps per turn exceeded"))
@@ -352,6 +397,35 @@ impl Agent {
     fn finish_cancelled(&self, events: &UnboundedSender<AgentEvent>, usage: Usage) -> Result<()> {
         let _ = events.unbounded_send(AgentEvent::TurnCancelled { usage });
         Ok(())
+    }
+
+    /// Drain the steer inbox into the transcript. Returns whether any messages
+    /// were injected. Emits [`AgentEvent::UserSteered`] per message.
+    async fn apply_steers(
+        &self,
+        chat: &Chat,
+        turn_id: TurnId,
+        transcript: &mut Vec<ChatMessage>,
+        events: &UnboundedSender<AgentEvent>,
+    ) -> Result<bool> {
+        let msgs = self.steer.drain();
+        if msgs.is_empty() {
+            return Ok(false);
+        }
+        for msg in msgs {
+            self.persist(chat.id, turn_id, Role::User, &msg.content)
+                .await?;
+            transcript.push(ChatMessage {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: msg.content.clone(),
+                }],
+            });
+            let _ = events.unbounded_send(AgentEvent::UserSteered {
+                content: msg.content,
+            });
+        }
+        Ok(true)
     }
 
     /// Resolve approval and execute one tool call, returning its output. Tool and
@@ -1112,6 +1186,137 @@ mod tests {
             events.last(),
             Some(AgentEvent::TurnCancelled { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn interrupt_steer_preempts_mid_stream_and_continues() {
+        let (store, chat, _workspace) = cancel_test_chat().await;
+
+        // First call stalls after "partial"; after steer, second call finishes.
+        struct StallThenFinish {
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl ModelProvider for StallThenFinish {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("stall-then-finish")
+            }
+            async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let head = stream::iter(vec![ProviderEvent::TextDelta {
+                        text: "partial".into(),
+                    }]);
+                    return Ok(head.chain(stream::pending()).boxed());
+                }
+                Ok(stream::iter(vec![
+                    ProviderEvent::TextDelta {
+                        text: "after steer".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ])
+                .boxed())
+            }
+        }
+
+        let steer = SteerInbox::new();
+        let agent = Agent::new(
+            Arc::new(StallThenFinish {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new()),
+            store.clone(),
+            AgentConfig {
+                model: "stall".into(),
+                ..Default::default()
+            },
+        )
+        .with_steer(steer.clone());
+
+        let chat_id = chat.id;
+        let (tx, mut rx) = unbounded();
+        let handle = tokio::spawn(async move {
+            let _ = agent.run_turn(&chat, "go", &tx).await;
+        });
+
+        let mut steered = false;
+        let mut completed = false;
+        while let Some(event) = rx.next().await {
+            match event {
+                AgentEvent::TextDelta { text } if text == "partial" => {
+                    steer.push("please change course", true);
+                }
+                AgentEvent::UserSteered { content } => {
+                    assert_eq!(content, "please change course");
+                    steered = true;
+                }
+                AgentEvent::TurnCompleted { .. } => completed = true,
+                AgentEvent::TurnCancelled { .. } => {
+                    panic!("steer must continue the turn, not cancel it")
+                }
+                _ => {}
+            }
+        }
+        handle.await.unwrap();
+
+        assert!(steered, "steer event emitted");
+        assert!(completed, "turn completes after steer");
+        let roles: Vec<_> = store
+            .list_messages(chat_id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|m| (m.role, m.content.clone()))
+            .collect();
+        // Initial user + steered user + final assistant (partial discarded).
+        assert!(roles.iter().any(|(r, c)| *r == Role::User && c == "go"));
+        assert!(roles
+            .iter()
+            .any(|(r, c)| *r == Role::User && c == "please change course"));
+        assert!(roles
+            .iter()
+            .any(|(r, c)| *r == Role::Assistant && c == "after steer"));
+        assert!(!roles.iter().any(|(_, c)| c == "partial"));
+    }
+
+    #[tokio::test]
+    async fn cancel_wins_over_steer_when_both_ready() {
+        let (store, chat, _workspace) = cancel_test_chat().await;
+
+        let cancel = CancelToken::new();
+        let steer = SteerInbox::new();
+        // Trip both before the turn starts racing the stream.
+        cancel.cancel();
+        steer.push("ignored", true);
+
+        let agent = Agent::new(
+            Arc::new(StallProvider),
+            Arc::new(ToolRegistry::new()),
+            store,
+            AgentConfig {
+                model: "stall".into(),
+                ..Default::default()
+            },
+        )
+        .with_cancel(cancel)
+        .with_steer(steer);
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCancelled { .. })
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::UserSteered { .. })),
+            "cancel must win; steer is not applied"
+        );
     }
 
     #[tokio::test]

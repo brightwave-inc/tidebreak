@@ -169,8 +169,25 @@ export default function App() {
       return;
     }
 
+    if (event.type === "user_steered") {
+      setMessages((prev) => [
+        ...prev,
+        { id: nextId(), role: "user", text: event.content },
+      ]);
+      return;
+    }
+
     if (event.type === "turn_completed") {
       setBusy(false);
+      return;
+    }
+
+    if (event.type === "turn_cancelled") {
+      setBusy(false);
+      setMessages((prev) => [
+        ...prev,
+        { id: nextId(), role: "system", text: "turn cancelled" },
+      ]);
       return;
     }
 

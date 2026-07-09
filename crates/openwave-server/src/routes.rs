@@ -449,7 +449,9 @@ pub async fn post_message(
     )
     .with_approvals(state.approvals.clone())
     // Watch the slot's token so `POST /chats/{id}/cancel` can stop this turn.
-    .with_cancel(active.cancel_token());
+    .with_cancel(active.cancel_token())
+    // Drain the slot's inbox so `POST /chats/{id}/steer` can inject mid-turn.
+    .with_steer(active.steer_inbox());
     let store = state.store.clone();
     let events = state.events.clone();
     tokio::spawn(async move {
@@ -459,6 +461,43 @@ pub async fn post_message(
     });
 
     Ok(StatusCode::ACCEPTED)
+}
+
+/// Body of `POST /chats/{id}/steer`.
+#[derive(Debug, Deserialize)]
+pub struct SteerBody {
+    /// User text to inject into the running turn.
+    pub content: String,
+    /// When true, preempt the provider stream immediately; otherwise the message
+    /// waits for the next step boundary.
+    #[serde(default)]
+    pub interrupt: bool,
+}
+
+/// `POST /chats/{id}/steer` — inject a message into the turn currently running.
+///
+/// `202 Accepted` once the message is queued (and interrupt signalled, if
+/// requested). The turn continues after injecting — watch the event stream for
+/// `UserSteered`. `404` if the chat doesn't exist, `409` if no turn is running,
+/// `400` if `content` is empty.
+pub async fn post_steer(
+    State(state): State<AppState>,
+    Path(id): Path<ChatId>,
+    Json(body): Json<SteerBody>,
+) -> Result<StatusCode, ServerError> {
+    if body.content.trim().is_empty() {
+        return Err(ServerError::bad_request("steer content must not be empty"));
+    }
+    if state.store.get_chat(id).await?.is_none() {
+        return Err(ServerError::not_found(format!("chat {id} not found")));
+    }
+    if state.active_turns.steer(id, body.content, body.interrupt) {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ServerError::conflict(format!(
+            "chat {id} has no turn in progress"
+        )))
+    }
 }
 
 /// `POST /chats/{id}/cancel` — stop the turn currently running for a chat.

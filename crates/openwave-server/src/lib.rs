@@ -77,6 +77,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/chats/{id}/messages", post(routes::post_message))
         .route("/chats/{id}/cancel", post(routes::post_cancel))
+        .route("/chats/{id}/steer", post(routes::post_steer))
         .route(
             "/chats/{id}/approvals/{call_id}",
             post(routes::post_approval),
@@ -217,6 +218,7 @@ async fn connect_store(config: &Config) -> Result<Arc<dyn Store>> {
 mod tests {
     use super::*;
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -501,6 +503,117 @@ mod tests {
         assert_eq!(
             cancel_turn(&router, &bearer, ChatId::new()).await,
             StatusCode::NOT_FOUND
+        );
+    }
+
+    /// POST `/chats/{id}/steer`, returning the response status.
+    async fn steer_turn(
+        router: &Router,
+        bearer: &str,
+        chat: ChatId,
+        content: &str,
+        interrupt: bool,
+    ) -> StatusCode {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/chats/{chat}/steer"))
+                    .header(header::AUTHORIZATION, bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"content": content, "interrupt": interrupt}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn steer_without_a_running_turn_is_a_conflict_and_unknown_chat_is_404() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        assert_eq!(
+            steer_turn(&router, &bearer, chat.id, "hi", false).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            steer_turn(&router, &bearer, ChatId::new(), "hi", false).await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            steer_turn(&router, &bearer, chat.id, "  ", false).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_steer_preempts_a_running_turn_and_continues() {
+        // Stall after the first delta so steer can interrupt; then finish.
+        struct StallThenFinish {
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl ModelProvider for StallThenFinish {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("stall-then-finish")
+            }
+            async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let head = stream::iter(vec![ProviderEvent::TextDelta {
+                        text: "partial".into(),
+                    }]);
+                    return Ok(head.chain(stream::pending()).boxed());
+                }
+                Ok(stream::iter(vec![
+                    ProviderEvent::TextDelta {
+                        text: "after steer".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ])
+                .boxed())
+            }
+        }
+
+        let (router, token, store, _dir) = test_app_with(Arc::new(StallThenFinish {
+            calls: AtomicUsize::new(0),
+        }))
+        .await;
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "go").await,
+            StatusCode::ACCEPTED
+        );
+        // Give the turn a moment to enter the stalled stream.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(
+            steer_turn(&router, &bearer, chat.id, "change course", true).await,
+            StatusCode::ACCEPTED
+        );
+
+        let events = wait_for_turn(&store, chat.id).await;
+        assert!(events.iter().any(|e| matches!(
+            &e.event,
+            AgentEvent::UserSteered { content } if content == "change course"
+        )));
+        assert!(matches!(
+            events.last().map(|e| &e.event),
+            Some(AgentEvent::TurnCompleted { .. })
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.event, AgentEvent::TurnCancelled { .. })),
+            "steer continues the turn"
         );
     }
 
