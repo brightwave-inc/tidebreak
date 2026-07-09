@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use openwave_core::{
     AgentConfig, CancelToken, ChatId, Config, SecretProvider, SteerInbox, Store, ToolRegistry,
 };
+use openwave_retrieval::Retriever;
 use uuid::Uuid;
 
 use crate::approvals::ApprovalBroker;
@@ -29,6 +30,10 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretProvider>,
     /// The tools available to the agent.
     pub tools: Arc<ToolRegistry>,
+    /// The retrieval pipeline: ingest documents and search the shared index that
+    /// backs the agent's `search` tool. Its vector store is the same one the
+    /// registered `SearchTool` queries, so an ingest is immediately searchable.
+    pub retrieval: Arc<Retriever>,
     /// Per-turn agent tuning (model, limits, …).
     pub agent_config: AgentConfig,
     /// The secret every request must present as `Authorization: Bearer <token>`.
@@ -44,12 +49,14 @@ pub struct AppState {
 
 impl AppState {
     /// Assemble state, minting a fresh random bearer token for this launch.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
         secrets: Arc<dyn SecretProvider>,
         tools: Arc<ToolRegistry>,
+        retrieval: Arc<Retriever>,
         agent_config: AgentConfig,
     ) -> Self {
         Self {
@@ -58,6 +65,7 @@ impl AppState {
             resolver,
             secrets,
             tools,
+            retrieval,
             agent_config,
             token: Uuid::new_v4().to_string().into(),
             active_turns: Arc::new(TurnGuard::default()),
