@@ -11,11 +11,15 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["tool"]
-# The agent-facing `search` Tool. Pulls in `openwave-core` for the `Tool` trait;
-# turn it off (`default-features = false`) to use the retrieval pipeline as a
-# standalone library with no dependency on the core crate.
+# On by default (like openwave-router's adapters) so both are built and tested in
+# CI. Depend with `default-features = false` for the lean, offline pipeline: just
+# the seams plus HashEmbedder/InMemoryVectorStore, no openwave-core and no reqwest.
+default = ["tool", "embed-openai"]
+# The agent-facing `search` Tool. Pulls in `openwave-core` for the `Tool` trait.
 tool = ["dep:openwave-core"]
+# A real OpenAI-compatible embedding provider (network, via reqwest). The offline
+# HashEmbedder is always available regardless.
+embed-openai = ["dep:reqwest"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -28,6 +32,8 @@ uuid = { workspace = true, features = ["v5"] }
 # Only the trait contracts (Tool/ToolSpec/…), not the SQLite/keychain/file-tool
 # machinery — hence default-features = false.
 openwave-core = { path = "../openwave-core", default-features = false, optional = true }
+# HTTP client for the OpenAI-compatible embedder (embed-openai feature only).
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -52,16 +52,21 @@
 //! shared index. Turn the feature off to use the pipeline as a standalone library
 //! with no dependency on the core crate.
 //!
-//! Not yet wired: real embedding providers and reranking, persistent/hybrid vector
-//! backends, rich-format parsing, and the server ingest API + `AppState` wiring
-//! that hands the agent a live index. Each lands as its own slice behind these
-//! seams.
+//! For real semantic embeddings, the `embed-openai` feature adds [`OpenAiEmbedder`],
+//! an [`Embedder`] backed by the OpenAI-compatible `/embeddings` endpoint — a
+//! drop-in for [`HashEmbedder`] behind the same seam.
+//!
+//! Not yet wired: embedding reranking, persistent/hybrid vector backends,
+//! rich-format parsing, per-chat/project index scoping, and choosing the embedder
+//! from server configuration. Each lands as its own slice behind these seams.
 
 mod chunk;
 mod document;
 mod embed;
 mod error;
 mod id;
+#[cfg(feature = "embed-openai")]
+mod openai_embed;
 mod parse;
 mod retriever;
 #[cfg(feature = "tool")]
@@ -73,6 +78,8 @@ pub use document::{ByteSpan, Chunk, Citation, Document, DocumentSource, ScoredCh
 pub use embed::{Embedder, Embedding, HashEmbedder};
 pub use error::{Result, RetrievalError};
 pub use id::{ChunkId, DocumentId};
+#[cfg(feature = "embed-openai")]
+pub use openai_embed::OpenAiEmbedder;
 pub use parse::{DocumentParser, ParsedDocument, PlainTextParser};
 pub use retriever::{IngestOutcome, Retriever};
 #[cfg(feature = "tool")]
