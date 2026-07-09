@@ -59,8 +59,27 @@ macro_rules! id_type {
 
 id_type!(
     /// Identifies an ingested source document.
+    ///
+    /// Usually minted fresh with [`DocumentId::new`], but [`DocumentId::derive`]
+    /// produces a stable id from a source URI so re-ingesting the same location
+    /// targets the same document (idempotent upserts) rather than a new one.
     DocumentId
 );
+
+impl DocumentId {
+    /// Namespace UUID for URI-derived document ids. A fixed, arbitrary value,
+    /// distinct from [`ChunkId`]'s namespace so the two derivations never alias.
+    const NAMESPACE: Uuid = Uuid::from_u128(0x1d0c_7a44_9e21_4b83_bc55_6677_8899_aabb);
+
+    /// Derive a stable id from a source URI.
+    ///
+    /// The same `uri` always yields the same id, so re-ingesting a file replaces
+    /// its chunks in place instead of duplicating them.
+    #[must_use]
+    pub fn derive(uri: &str) -> Self {
+        Self(Uuid::new_v5(&Self::NAMESPACE, uri.as_bytes()))
+    }
+}
 id_type!(
     /// Identifies one chunk of a document.
     ///
@@ -109,6 +128,18 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, format!("\"{id}\""));
         assert_eq!(serde_json::from_str::<DocumentId>(&json).unwrap(), id);
+    }
+
+    #[test]
+    fn derived_document_ids_are_stable_per_uri() {
+        assert_eq!(
+            DocumentId::derive("file:///a.txt"),
+            DocumentId::derive("file:///a.txt")
+        );
+        assert_ne!(
+            DocumentId::derive("file:///a.txt"),
+            DocumentId::derive("file:///b.txt")
+        );
     }
 
     #[test]

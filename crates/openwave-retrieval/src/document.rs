@@ -88,8 +88,22 @@ impl Document {
         media_type: impl Into<String>,
         text: impl Into<String>,
     ) -> Self {
+        Self::with_id(DocumentId::new(), source, media_type, text)
+    }
+
+    /// Assemble a document with a caller-supplied id.
+    ///
+    /// Used by ingestion to give URI-sourced documents a stable, derived id so
+    /// re-ingestion is idempotent (see [`DocumentId::derive`]).
+    #[must_use]
+    pub fn with_id(
+        id: DocumentId,
+        source: DocumentSource,
+        media_type: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
         Self {
-            id: DocumentId::new(),
+            id,
             source,
             media_type: media_type.into(),
             text: text.into(),

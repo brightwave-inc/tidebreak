@@ -11,6 +11,7 @@ use crate::chunk::Chunker;
 use crate::document::{Citation, Document, DocumentSource};
 use crate::embed::Embedder;
 use crate::error::{Result, RetrievalError};
+use crate::id::DocumentId;
 use crate::parse::DocumentParser;
 use crate::vector::{VectorRecord, VectorStore};
 
@@ -57,9 +58,14 @@ impl Retriever {
 
     /// Ingest one document: parse its bytes, chunk, embed, and upsert.
     ///
-    /// Idempotent for a given document id: derived chunk ids mean re-ingesting the
-    /// same text replaces rather than duplicates. A document that chunks to
-    /// nothing (empty or whitespace-only) stores nothing and reports zero chunks.
+    /// Idempotent for [`DocumentSource::Uri`] sources: the document id is derived
+    /// from the URI, so re-ingesting the *same* bytes from the same URI reuses the
+    /// document id, re-derives identical chunk ids, and upserts in place rather
+    /// than duplicating. (Re-ingesting *changed* content at the same URI upserts
+    /// the new chunks but does not yet delete chunks the old version left behind —
+    /// stale-chunk cleanup is a later slice.) [`DocumentSource::Inline`] sources
+    /// get a fresh id every call. A document that chunks to nothing (empty or
+    /// whitespace-only) stores nothing and reports zero chunks.
     pub async fn ingest(
         &self,
         source: DocumentSource,
@@ -67,7 +73,13 @@ impl Retriever {
         raw: &[u8],
     ) -> Result<IngestOutcome> {
         let parsed = self.parser.parse(raw, media_type)?;
-        let document = Document::new(source, media_type, parsed.text);
+        // Stable id per URI so re-ingesting a file is idempotent; inline content
+        // has no external identity, so it gets a fresh id each time.
+        let id = match &source {
+            DocumentSource::Uri { uri } => DocumentId::derive(uri),
+            _ => DocumentId::new(),
+        };
+        let document = Document::with_id(id, source, media_type, parsed.text);
 
         let chunks = self.chunker.chunk(&document);
         if chunks.is_empty() {
@@ -198,6 +210,48 @@ The Great Barrier Reef is the world's largest coral reef system.";
         let after_first = r.store().len().await.unwrap();
         r.store().upsert(records).await.unwrap();
         assert_eq!(r.store().len().await.unwrap(), after_first);
+    }
+
+    #[tokio::test]
+    async fn re_ingesting_same_uri_is_idempotent_end_to_end() {
+        let r = retriever();
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        let uri = || DocumentSource::uri("file:///notes.txt");
+
+        let first = r
+            .ingest(uri(), "text/plain", text.as_bytes())
+            .await
+            .unwrap();
+        assert!(first.chunks > 0);
+        let after_first = r.store().len().await.unwrap();
+
+        // Same URI + same bytes => same document id => same chunk ids => the
+        // pipeline replaces in place rather than duplicating.
+        let second = r
+            .ingest(uri(), "text/plain", text.as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(second.document.id, first.document.id);
+        assert_eq!(r.store().len().await.unwrap(), after_first);
+
+        // And a single search returns each chunk once, not doubled.
+        let hits = r.search("three four five", 10).await.unwrap();
+        let unique: std::collections::HashSet<_> = hits.iter().map(|h| h.chunk_id).collect();
+        assert_eq!(unique.len(), hits.len());
+    }
+
+    #[tokio::test]
+    async fn inline_documents_get_a_fresh_id_each_ingest() {
+        let r = retriever();
+        let a = r
+            .ingest(DocumentSource::Inline, "text/plain", b"same inline bytes")
+            .await
+            .unwrap();
+        let b = r
+            .ingest(DocumentSource::Inline, "text/plain", b"same inline bytes")
+            .await
+            .unwrap();
+        assert_ne!(a.document.id, b.document.id);
     }
 
     #[tokio::test]
