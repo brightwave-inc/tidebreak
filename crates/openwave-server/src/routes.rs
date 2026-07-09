@@ -33,6 +33,16 @@ pub async fn create_chat(
     State(state): State<AppState>,
     Json(body): Json<CreateChat>,
 ) -> Result<impl IntoResponse, ServerError> {
+    // The workspace path must be absolute: a relative one is resolved against
+    // the server process's CWD only later (when a tool canonicalizes it), so the
+    // same chat would map to different directories across restarts or launch
+    // dirs. Reject it here rather than persist an ambiguous path.
+    if !body.workspace_dir.is_absolute() {
+        return Err(ServerError::bad_request(format!(
+            "workspace_dir must be an absolute path, got {:?}",
+            body.workspace_dir
+        )));
+    }
     let chat = Chat {
         id: ChatId::new(),
         title: body.title,
