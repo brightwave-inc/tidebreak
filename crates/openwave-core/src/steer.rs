@@ -36,6 +36,9 @@ pub struct SteerInbox {
 struct Inner {
     queue: Mutex<VecDeque<SteerMessage>>,
     interrupt: AtomicBool,
+    /// Set when the turn is about to emit `TurnCompleted`, so a concurrent
+    /// [`SteerInbox::push`] cannot land a message that will never be drained.
+    sealed: AtomicBool,
     waker: AtomicWaker,
 }
 
@@ -48,20 +51,24 @@ impl SteerInbox {
 
     /// Enqueue a steer message. When `interrupt` is true, also trip the interrupt
     /// flag so a turn racing the provider stream can preempt promptly.
-    pub fn push(&self, content: impl Into<String>, interrupt: bool) {
+    ///
+    /// Returns `false` when the inbox has been sealed for turn completion (the
+    /// message is not queued).
+    pub fn push(&self, content: impl Into<String>, interrupt: bool) -> bool {
         let content = content.into();
         if content.is_empty() {
-            return;
+            return true;
         }
-        self.inner
-            .queue
-            .lock()
-            .unwrap()
-            .push_back(SteerMessage { content });
+        let mut queue = self.inner.queue.lock().unwrap();
+        if self.inner.sealed.load(Ordering::Acquire) {
+            return false;
+        }
+        queue.push_back(SteerMessage { content });
         if interrupt {
             self.inner.interrupt.store(true, Ordering::Release);
             self.inner.waker.wake();
         }
+        true
     }
 
     /// Drain every queued message (order preserved). Clears the interrupt flag.
@@ -82,6 +89,21 @@ impl SteerInbox {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner.queue.lock().unwrap().is_empty() && !self.interrupt_requested()
+    }
+
+    /// If the inbox is quiet, seal it and run `complete` so a concurrent
+    /// [`push`](Self::push) cannot land between the empty check and the terminal
+    /// event (which would 202 a steer that never gets applied).
+    /// Returns `true` when `complete` ran; `false` when the inbox was not empty.
+    pub fn try_complete<F: FnOnce()>(&self, complete: F) -> bool {
+        let queue = self.inner.queue.lock().unwrap();
+        if !queue.is_empty() || self.interrupt_requested() {
+            return false;
+        }
+        self.inner.sealed.store(true, Ordering::Release);
+        drop(queue);
+        complete();
+        true
     }
 
     /// A future that resolves once an interrupt is requested. Race it against the
@@ -140,13 +162,30 @@ mod tests {
         assert!(!inbox.interrupt_requested());
     }
 
+    #[test]
+    fn try_complete_seals_against_late_push() {
+        let inbox = SteerInbox::new();
+        assert!(inbox.try_complete(|| {}));
+        assert!(!inbox.push("too late", true));
+        assert!(inbox.drain().is_empty());
+    }
+
+    #[test]
+    fn try_complete_refuses_when_queue_has_work() {
+        let inbox = SteerInbox::new();
+        assert!(inbox.push("pending", false));
+        assert!(!inbox.try_complete(|| panic!("must not complete")));
+        assert_eq!(inbox.drain()[0].content, "pending");
+        assert!(inbox.push("after", false));
+    }
+
     #[tokio::test]
     async fn interrupted_future_resolves_on_interrupt_push() {
         let inbox = SteerInbox::new();
         let waiter = inbox.interrupted();
         let clone = inbox.clone();
         let push = tokio::spawn(async move {
-            clone.push("steer", true);
+            assert!(clone.push("steer", true));
         });
         waiter.await;
         push.await.unwrap();

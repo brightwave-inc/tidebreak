@@ -504,7 +504,8 @@ pub async fn post_steer(
 /// `202 Accepted` once the running turn has been signalled to stop; it winds down
 /// asynchronously and emits `TurnCancelled` as its terminal event (watch the
 /// event stream for it). `404` if the chat doesn't exist, `409` if no turn is
-/// currently running for it. Idempotent while a turn is winding down — a repeat
+/// accepting cancel (idle, or the agent has finished and only the journal is
+/// still draining). Idempotent while the agent is still running — a repeat
 /// cancel simply re-trips the already-tripped token.
 pub async fn post_cancel(
     State(state): State<AppState>,

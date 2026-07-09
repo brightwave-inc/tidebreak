@@ -341,7 +341,9 @@ impl Agent {
             if calls.is_empty() {
                 // Drain steers until the inbox is quiet, then complete. A steer
                 // that arrives as the stream finished must continue the turn
-                // rather than race a TurnCompleted.
+                // rather than race a TurnCompleted. `try_complete` holds the
+                // queue lock across the empty-check and terminal emit so a
+                // concurrent push cannot 202 and then be orphaned.
                 loop {
                     if self.cancel.is_cancelled() {
                         return self.finish_cancelled(events, total_usage);
@@ -352,14 +354,15 @@ impl Agent {
                     {
                         break; // continue the outer step loop below
                     }
-                    if self.steer.is_empty() {
+                    if self.steer.try_complete(|| {
                         let _ = events.unbounded_send(AgentEvent::TurnCompleted {
                             usage: total_usage,
                             stop_reason,
                         });
+                    }) {
                         return Ok(());
                     }
-                    // Steer arrived between drain and is_empty — loop.
+                    // Steer arrived between drain and try_complete — loop.
                 }
                 continue;
             }

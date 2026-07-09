@@ -138,8 +138,7 @@ impl TurnGuard {
     pub fn steer(&self, chat_id: ChatId, content: String, interrupt: bool) -> bool {
         match self.active.lock().unwrap().get(&chat_id) {
             Some(handles) if handles.accepting.load(std::sync::atomic::Ordering::Acquire) => {
-                handles.steer.push(content, interrupt);
-                true
+                handles.steer.push(content, interrupt)
             }
             _ => false,
         }
