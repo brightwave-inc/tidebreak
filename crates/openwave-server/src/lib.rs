@@ -11,6 +11,7 @@
 //! `WS /chats/{id}/events` to watch it — journaled events are replayed on connect
 //! and then streamed live (snapshot → replay → live).
 
+mod approvals;
 mod auth;
 mod bus;
 mod error;
@@ -73,6 +74,10 @@ pub fn app(state: AppState) -> Router {
             axum::routing::put(routes::put_api_key).delete(routes::delete_api_key),
         )
         .route("/chats/{id}/messages", post(routes::post_message))
+        .route(
+            "/chats/{id}/approvals/{call_id}",
+            post(routes::post_approval),
+        )
         .route("/chats/{id}/events", get(routes::chat_events))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -198,8 +203,9 @@ mod tests {
     use axum::http::{header, Request, StatusCode};
     use futures::stream::{self, BoxStream, StreamExt};
     use openwave_core::{
-        AgentErrorInfo, AgentEvent, Chat, ChatId, ChatRequest, ModelProvider, Project, ProjectId,
-        ProviderEvent, ProviderId, SecretProvider, SequencedEvent, StopReason, Usage,
+        AgentErrorInfo, AgentEvent, ApprovalClass, Chat, ChatId, ChatRequest, ModelProvider,
+        Project, ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent, StopReason,
+        Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
     };
     use resolver::ProviderResolver;
     use serde::de::DeserializeOwned;
@@ -1506,6 +1512,177 @@ mod tests {
             events.last().unwrap().event,
             AgentEvent::TurnFailed { .. }
         ));
+    }
+
+    /// Sensitive tool that records whether it ran.
+    struct SensitiveProbe {
+        ran: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for SensitiveProbe {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "probe".into(),
+                description: "sensitive probe".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::Sensitive
+        }
+        async fn execute(
+            &self,
+            _ctx: &ToolCtx,
+            _args: serde_json::Value,
+        ) -> openwave_core::Result<ToolOutput> {
+            self.ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolOutput::text("probed"))
+        }
+    }
+
+    /// Provider that asks for `probe` once, then finishes.
+    struct ProbeProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ProbeProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("probe")
+        }
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+        ) -> openwave_core::Result<BoxStream<'static, ProviderEvent>> {
+            let events = if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_probe".into(),
+                        name: "probe".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approval_endpoint_unparks_a_sensitive_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tools =
+            Arc::new(ToolRegistry::new().with(Box::new(SensitiveProbe { ran: ran.clone() })));
+        let state = AppState::new(
+            Config::desktop(dir.path()),
+            store.clone(),
+            Arc::new(FixedResolver(Arc::new(ProbeProvider {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }))),
+            Arc::new(MemSecrets::default()),
+            tools,
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        );
+        let token = state.token.clone();
+        let router = app(state);
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "probe it").await,
+            StatusCode::ACCEPTED
+        );
+
+        // Wait until the turn parks on ApprovalRequired.
+        let call_id = {
+            let mut found = None;
+            for _ in 0..200 {
+                let events = store.list_events(chat.id, 0).await.unwrap();
+                if let Some(id) = events.iter().find_map(|e| match &e.event {
+                    AgentEvent::ApprovalRequired { call_id, .. } => Some(*call_id),
+                    _ => None,
+                }) {
+                    found = Some(id);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            found.expect("turn should park on ApprovalRequired")
+        };
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // Approve via the HTTP endpoint.
+        let decide = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/chats/{}/approvals/{call_id}", chat.id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"decision": "approve"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decide.status(), StatusCode::NO_CONTENT);
+
+        let events = wait_for_turn(&store, chat.id).await;
+        assert!(events
+            .iter()
+            .any(|e| matches!(e.event, AgentEvent::ApprovalDecided { approved: true, .. })));
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            events.last().unwrap().event,
+            AgentEvent::TurnCompleted { .. }
+        ));
+
+        // A second decide for the same call is 404 (already resolved).
+        let again = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/chats/{}/approvals/{call_id}", chat.id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"decision": "approve"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

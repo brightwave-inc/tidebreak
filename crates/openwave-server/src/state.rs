@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use openwave_core::{AgentConfig, ChatId, Config, SecretProvider, Store, ToolRegistry};
 use uuid::Uuid;
 
+use crate::approvals::ApprovalBroker;
 use crate::bus::EventBus;
 use crate::resolver::ProviderResolver;
 
@@ -35,6 +36,8 @@ pub struct AppState {
     pub active_turns: Arc<TurnGuard>,
     /// Live fan-out of turn events to connected WebSocket clients.
     pub events: Arc<EventBus>,
+    /// Parks Sensitive tool calls until `POST .../approvals/{call_id}` decides.
+    pub approvals: Arc<ApprovalBroker>,
 }
 
 impl AppState {
@@ -57,6 +60,7 @@ impl AppState {
             token: Uuid::new_v4().to_string().into(),
             active_turns: Arc::new(TurnGuard::default()),
             events: Arc::new(EventBus::default()),
+            approvals: Arc::new(ApprovalBroker::new()),
         }
     }
 }

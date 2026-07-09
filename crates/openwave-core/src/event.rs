@@ -65,6 +65,13 @@ pub enum AgentEvent {
         /// A short, human-readable summary of what will happen.
         summary: String,
     },
+    /// The human decided on a parked tool call.
+    ApprovalDecided {
+        /// The call that was decided.
+        call_id: CallId,
+        /// `true` if approved, `false` if rejected.
+        approved: bool,
+    },
     /// A tool call finished; its result is attached.
     ToolCallCompleted {
         /// The call that completed.

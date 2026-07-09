@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
-    Agent, Chat, ChatId, Project, ProjectId, SecretProvider, SequencedEvent, Store,
+    Agent, ApprovalDecision, CallId, Chat, ChatId, Project, ProjectId, SecretProvider,
+    SequencedEvent, Store,
 };
 
 use crate::error::ServerError;
@@ -444,7 +445,8 @@ pub async fn post_message(
         state.tools.clone(),
         state.store.clone(),
         agent_config,
-    );
+    )
+    .with_approvals(state.approvals.clone());
     let store = state.store.clone();
     let events = state.events.clone();
     tokio::spawn(async move {
@@ -454,6 +456,57 @@ pub async fn post_message(
     });
 
     Ok(StatusCode::ACCEPTED)
+}
+
+/// Body of `POST /chats/{id}/approvals/{call_id}`.
+#[derive(Debug, Deserialize)]
+pub struct ApprovalBody {
+    /// `approve` or `reject`.
+    pub decision: ApprovalChoice,
+    /// Optional reject reason (ignored on approve).
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Wire form of an approval decision.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalChoice {
+    Approve,
+    Reject,
+}
+
+/// `POST /chats/{id}/approvals/{call_id}` — decide a parked Sensitive tool call.
+///
+/// `204` on success. `404` if the chat or call isn't pending. The turn stays
+/// holding its slot until it finishes after the decision.
+pub async fn post_approval(
+    State(state): State<AppState>,
+    Path((chat_id, call_id)): Path<(ChatId, CallId)>,
+    Json(body): Json<ApprovalBody>,
+) -> Result<StatusCode, ServerError> {
+    // Confirm the chat exists so a typo'd id doesn't look like "not pending".
+    if state.store.get_chat(chat_id).await?.is_none() {
+        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
+    }
+    let decision = match body.decision {
+        ApprovalChoice::Approve => ApprovalDecision::Approve,
+        ApprovalChoice::Reject => ApprovalDecision::Reject {
+            reason: body
+                .reason
+                .filter(|r| !r.is_empty())
+                .unwrap_or_else(|| "user denied approval".into()),
+        },
+    };
+    match state.approvals.resolve(chat_id, call_id, decision) {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(crate::approvals::DecideError::NotPending) => Err(ServerError::not_found(format!(
+            "no pending approval for call {call_id}"
+        ))),
+        Err(crate::approvals::DecideError::WrongChat) => Err(ServerError::not_found(format!(
+            "no pending approval for call {call_id}"
+        ))),
+    }
 }
 
 /// Query for `GET /chats/{id}/events`.
