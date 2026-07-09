@@ -58,15 +58,16 @@ impl Retriever {
 
     /// Ingest one document: parse its bytes, chunk, embed, and store.
     ///
-    /// A full **replace** for [`DocumentSource::Uri`] sources: the document id is
-    /// derived from the URI, so re-ingesting the same URI targets the same
-    /// document — its previously-stored chunks are pruned first, then the new ones
-    /// are stored. Re-ingesting identical content is therefore idempotent, and
-    /// re-ingesting *changed* (even shorter, or now-empty) content leaves no stale
-    /// chunks behind for search to surface. [`DocumentSource::Inline`] sources get
-    /// a fresh id every call, so they never collide with a prior ingest. A document
-    /// that chunks to nothing (empty or whitespace-only) stores nothing and reports
-    /// zero chunks — after clearing any prior version.
+    /// A full, **atomic replace** for [`DocumentSource::Uri`] sources: the document
+    /// id is derived from the URI, so re-ingesting the same URI targets the same
+    /// document, and the store swaps its chunks in one operation (see
+    /// [`VectorStore::replace_document`]). Re-ingesting identical content is
+    /// idempotent; re-ingesting *changed* (even shorter, or now-empty) content
+    /// leaves no stale chunks behind; and two concurrent re-ingests of the same URI
+    /// resolve to one version rather than a mix. [`DocumentSource::Inline`] sources
+    /// get a fresh id every call, so they never collide with a prior ingest. A
+    /// document that chunks to nothing (empty or whitespace-only) stores nothing and
+    /// reports zero chunks — after clearing any prior version.
     pub async fn ingest(
         &self,
         source: DocumentSource,
@@ -83,37 +84,38 @@ impl Retriever {
         let document = Document::with_id(id, source, media_type, parsed.text);
 
         let chunks = self.chunker.chunk(&document)?;
-        // Prune any prior version of this document before storing the new chunks,
-        // so a shrunk or rewritten document doesn't leave stale chunks indexed.
-        // A first ingest (or a fresh inline id) removes nothing.
-        self.store.delete_by_document(document.id).await?;
-        if chunks.is_empty() {
-            return Ok(IngestOutcome {
-                document,
-                chunks: 0,
-            });
-        }
 
-        let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-        let embeddings = self.embedder.embed_documents(&texts).await?;
-        if embeddings.len() != chunks.len() {
-            return Err(RetrievalError::embed(format!(
-                "embedder returned {} vectors for {} chunks",
-                embeddings.len(),
-                chunks.len()
-            )));
-        }
+        // Embed first (the slow, awaited step), then hand the store a single
+        // atomic replace. Doing the delete+insert as one store operation — rather
+        // than a separate prune then upsert with an embed await in between — is
+        // what keeps two concurrent re-ingests of the same document from
+        // interleaving and leaving a mix of versions. Empty content yields an
+        // empty record set, which clears any prior version of the document.
+        let records: Vec<VectorRecord> = if chunks.is_empty() {
+            Vec::new()
+        } else {
+            let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+            let embeddings = self.embedder.embed_documents(&texts).await?;
+            if embeddings.len() != chunks.len() {
+                return Err(RetrievalError::embed(format!(
+                    "embedder returned {} vectors for {} chunks",
+                    embeddings.len(),
+                    chunks.len()
+                )));
+            }
+            chunks
+                .into_iter()
+                .zip(embeddings)
+                .map(|(chunk, embedding)| VectorRecord { chunk, embedding })
+                .collect()
+        };
 
-        let records = chunks
-            .into_iter()
-            .zip(embeddings)
-            .map(|(chunk, embedding)| VectorRecord { chunk, embedding })
-            .collect();
-        self.store.upsert(records).await?;
+        let count = records.len();
+        self.store.replace_document(document.id, records).await?;
 
         Ok(IngestOutcome {
             document,
-            chunks: texts.len(),
+            chunks: count,
         })
     }
 

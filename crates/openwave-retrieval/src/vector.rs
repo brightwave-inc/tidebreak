@@ -45,13 +45,20 @@ pub trait VectorStore: Send + Sync {
     /// yields an empty result.
     async fn query(&self, query: &Embedding, k: usize) -> Result<Vec<ScoredChunk>>;
 
-    /// Remove every chunk belonging to `document_id`, returning how many were
-    /// removed. Removing a document that isn't present is a no-op (`Ok(0)`).
+    /// Atomically replace every chunk of `document_id` with `records`: remove the
+    /// document's existing chunks and store the new ones as one operation.
     ///
-    /// This is what lets re-ingesting *changed* content be a true replacement:
-    /// prune the document's old chunks, then upsert the new ones, so a shrunk or
-    /// rewritten document leaves no stale chunks behind to be surfaced by search.
-    async fn delete_by_document(&self, document_id: DocumentId) -> Result<usize>;
+    /// This is what lets re-ingesting *changed* content be a true replacement. It
+    /// must be atomic with respect to other store operations — two concurrent
+    /// re-ingests of the same document must not interleave a partial delete and
+    /// insert and leave a mix of versions. Passing an empty `records` clears the
+    /// document. Implementations validate each record's dimensionality, as
+    /// [`VectorStore::upsert`] does.
+    async fn replace_document(
+        &self,
+        document_id: DocumentId,
+        records: Vec<VectorRecord>,
+    ) -> Result<()>;
 
     /// The number of records currently stored.
     async fn len(&self) -> Result<usize>;
@@ -144,14 +151,23 @@ impl VectorStore for InMemoryVectorStore {
         Ok(scored)
     }
 
-    async fn delete_by_document(&self, document_id: DocumentId) -> Result<usize> {
+    async fn replace_document(
+        &self,
+        document_id: DocumentId,
+        records: Vec<VectorRecord>,
+    ) -> Result<()> {
+        for record in &records {
+            self.check_dims(&record.embedding)?;
+        }
+        // Delete + insert under a single write lock, so a concurrent ingest can't
+        // observe or race a half-applied replacement.
         let mut store = self
             .records
             .write()
             .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
-        let before = store.len();
         store.retain(|r| r.chunk.document_id != document_id);
-        Ok(before - store.len())
+        store.extend(records);
+        Ok(())
     }
 
     async fn len(&self) -> Result<usize> {
@@ -252,7 +268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_by_document_removes_only_that_document() {
+    async fn replace_document_swaps_only_that_documents_chunks() {
         let store = InMemoryVectorStore::new(2);
         let a = DocumentId::new();
         let b = DocumentId::new();
@@ -265,15 +281,48 @@ mod tests {
             .await
             .unwrap();
 
-        let removed = store.delete_by_document(a).await.unwrap();
-        assert_eq!(removed, 2);
-        assert_eq!(store.len().await.unwrap(), 1);
-        // Document b's chunk is untouched.
-        let hits = store.query(&Embedding(vec![1.0, 1.0]), 5).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].chunk.document_id, b);
+        // Replace document a's two chunks with a single new one.
+        store
+            .replace_document(a, vec![record(a, 0, "a-new", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+        assert_eq!(store.len().await.unwrap(), 2); // one a, one b
+        let hits = store.query(&Embedding(vec![1.0, 0.0]), 5).await.unwrap();
+        assert!(hits.iter().any(|h| h.chunk.text == "a-new"));
+        assert!(
+            !hits.iter().any(|h| h.chunk.text == "a1"),
+            "old a chunk gone"
+        );
+        // Document b is untouched.
+        assert!(hits.iter().any(|h| h.chunk.document_id == b));
+    }
 
-        // Deleting an absent document is a no-op.
-        assert_eq!(store.delete_by_document(a).await.unwrap(), 0);
+    #[tokio::test]
+    async fn replace_document_with_no_records_clears_it() {
+        let store = InMemoryVectorStore::new(2);
+        let a = DocumentId::new();
+        store
+            .upsert(vec![record(a, 0, "a0", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+        store.replace_document(a, vec![]).await.unwrap();
+        assert!(store.is_empty().await.unwrap());
+        // Replacing an absent document with nothing is a no-op.
+        store
+            .replace_document(DocumentId::new(), vec![])
+            .await
+            .unwrap();
+        assert!(store.is_empty().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn replace_document_validates_dimensionality() {
+        let store = InMemoryVectorStore::new(2);
+        let a = DocumentId::new();
+        let err = store
+            .replace_document(a, vec![record(a, 0, "bad", vec![1.0, 0.0, 0.0])])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RetrievalError::DimensionMismatch { .. }));
     }
 }
