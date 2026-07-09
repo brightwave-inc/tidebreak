@@ -10,8 +10,8 @@
 //!
 //! v1 scope (deliberately small; each is a tracked follow-up):
 //! - tool calls run **sequentially** (concurrency for independent calls later);
-//! - approval is **auto** for `ReadOnly`/`Workspace`; `Sensitive` is refused
-//!   (the park-and-resume approval flow lands next);
+//! - approval is **auto** for `ReadOnly`/`Workspace`; `Sensitive` parks via an
+//!   [`ApprovalGate`] until approve/reject (standing grants / auto-judge later);
 //! - cross-turn context is the stored text messages (structured tool-call
 //!   persistence + context summarization come later).
 
@@ -23,6 +23,7 @@ use futures::channel::mpsc::UnboundedSender;
 use futures::StreamExt;
 use serde_json::Value;
 
+use crate::approval::{ApprovalDecision, ApprovalGate, ApprovalRequest, RefuseGate};
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::id::{CallId, MessageId, TurnId};
@@ -119,6 +120,7 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     store: Arc<dyn Store>,
     config: AgentConfig,
+    approvals: Arc<dyn ApprovalGate>,
 }
 
 /// A tool call accumulated from the provider stream.
@@ -131,6 +133,9 @@ struct PendingCall {
 
 impl Agent {
     /// Assemble an agent from its dependencies and config.
+    ///
+    /// Sensitive tools are refused by default ([`RefuseGate`]). Wire a real
+    /// gate with [`with_approvals`](Self::with_approvals) for park-and-resume.
     pub fn new(
         provider: Arc<dyn ModelProvider>,
         tools: Arc<ToolRegistry>,
@@ -142,7 +147,15 @@ impl Agent {
             tools,
             store,
             config,
+            approvals: Arc::new(RefuseGate),
         }
+    }
+
+    /// Use `gate` for Sensitive-tool decisions (park-and-resume on the server).
+    #[must_use]
+    pub fn with_approvals(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
+        self.approvals = gate;
+        self
     }
 
     /// Run one turn: submit `user_input`, drive the loop to a final answer,
@@ -278,7 +291,7 @@ impl Agent {
             // Run the tool calls and feed the results back for the next step.
             let mut results: Vec<ContentBlock> = Vec::new();
             for call in &calls {
-                let output = self.run_tool(chat, call, events).await;
+                let output = self.run_tool(chat, turn_id, call, events).await;
                 let _ = events.unbounded_send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
                     output: output.clone(),
@@ -306,21 +319,40 @@ impl Agent {
     async fn run_tool(
         &self,
         chat: &Chat,
+        turn_id: TurnId,
         call: &PendingCall,
         events: &UnboundedSender<AgentEvent>,
     ) -> ToolOutput {
         let Some(tool) = self.tools.get(&call.name) else {
             return ToolOutput::error(format!("unknown tool: {}", call.name));
         };
-        // v1 policy: ReadOnly/Workspace auto; Sensitive refused until the
-        // park-and-resume approval flow lands.
+        // v1 policy: ReadOnly/Workspace auto; Sensitive parks on the approval gate.
+        // Arm *before* emitting ApprovalRequired so a client that sees the event
+        // can never race a 404 against a not-yet-parked call.
         if matches!(tool.approval_class(), ApprovalClass::Sensitive) {
+            let summary = format!("{} requires approval", call.name);
+            let pending = self.approvals.arm(ApprovalRequest {
+                call_id: call.call_id,
+                chat_id: chat.id,
+                turn_id,
+                tool_name: call.name.clone(),
+                class: ApprovalClass::Sensitive,
+                summary: summary.clone(),
+            });
             let _ = events.unbounded_send(AgentEvent::ApprovalRequired {
                 call_id: call.call_id,
                 class: ApprovalClass::Sensitive,
-                summary: format!("{} requires approval", call.name),
+                summary,
             });
-            return ToolOutput::error("this tool requires approval, which is not yet supported");
+            let decision = pending.await;
+            let approved = matches!(decision, ApprovalDecision::Approve);
+            let _ = events.unbounded_send(AgentEvent::ApprovalDecided {
+                call_id: call.call_id,
+                approved,
+            });
+            if let ApprovalDecision::Reject { reason } = decision {
+                return ToolOutput::error(reason);
+            }
         }
         let ctx = ToolCtx {
             chat_id: chat.id,
@@ -645,5 +677,178 @@ mod tests {
         assert!(!output.is_error);
         assert!(output.content.len() < 10_000, "result should be capped");
         assert!(output.content.contains("[truncated:"));
+    }
+
+    /// A Sensitive tool that records whether it ran.
+    struct BoomTool {
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for BoomTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "boom".into(),
+                description: "a sensitive tool".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::Sensitive
+        }
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::text("boomed"))
+        }
+    }
+
+    /// Provider that always asks for the `boom` tool once, then finishes.
+    struct BoomProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for BoomProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("boom")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_boom".into(),
+                        name: "boom".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta { text: "ok".into() },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn sensitive_tool_parks_until_approved() {
+        use crate::approval::AutoApproveGate;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            workspace_dir: workspace.path().to_path_buf(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let tools = Arc::new(ToolRegistry::new().with(Box::new(BoomTool { ran: ran.clone() })));
+        let agent = Agent::new(
+            Arc::new(BoomProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            tools,
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_approvals(Arc::new(AutoApproveGate));
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ApprovalDecided { approved: true, .. })));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolCallCompleted { output, .. }
+                if output.content == "boomed" && !output.is_error
+        )));
+    }
+
+    #[tokio::test]
+    async fn sensitive_tool_is_refused_without_a_gate() {
+        let workspace = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            workspace_dir: workspace.path().to_path_buf(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let agent = Agent::new(
+            Arc::new(BoomProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(BoomTool { ran: ran.clone() }))),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        );
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ApprovalDecided {
+                approved: false,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolCallCompleted { output, .. } if output.is_error
+        )));
     }
 }
