@@ -34,7 +34,7 @@ pub use config::{Config, Profile};
 #[cfg(feature = "sqlite")]
 pub use db::DbStore;
 pub use error::{AgentError, AgentErrorInfo, Result};
-pub use event::AgentEvent;
+pub use event::{AgentEvent, SequencedEvent};
 pub use id::{CallId, MessageId, SessionId, StepId, TurnId};
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;

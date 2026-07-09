@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::Result;
+use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::SessionId;
 use crate::model::{Message, Session};
 
@@ -48,6 +49,15 @@ pub trait Store: Send + Sync {
 
     /// Write a setting.
     async fn set_setting(&self, key: &str, value: &Value) -> Result<()>;
+
+    /// Append an event to a session's journal, returning its assigned sequence
+    /// number. Sequence numbers are per-session and monotonic (starting at 1),
+    /// so a client can replay the stream with [`list_events`](Self::list_events).
+    async fn append_event(&self, session_id: SessionId, event: &AgentEvent) -> Result<i64>;
+
+    /// List a session's journaled events with `seq` greater than `after`, in
+    /// sequence order. Pass `0` to replay from the start.
+    async fn list_events(&self, session_id: SessionId, after: i64) -> Result<Vec<SequencedEvent>>;
 }
 
 /// Credential custody: secrets keyed by a stable reference string (e.g.
@@ -94,6 +104,7 @@ mod tests {
     struct MemStore {
         sessions: Mutex<HashMap<SessionId, Session>>,
         settings: Mutex<HashMap<String, Value>>,
+        events: Mutex<Vec<(SessionId, SequencedEvent)>>,
     }
 
     #[async_trait]
@@ -126,6 +137,32 @@ mod tests {
                 .unwrap()
                 .insert(key.to_string(), value.clone());
             Ok(())
+        }
+        async fn append_event(&self, session_id: SessionId, event: &AgentEvent) -> Result<i64> {
+            let mut events = self.events.lock().unwrap();
+            let seq = events.iter().filter(|(id, _)| *id == session_id).count() as i64 + 1;
+            events.push((
+                session_id,
+                SequencedEvent {
+                    seq,
+                    event: event.clone(),
+                },
+            ));
+            Ok(seq)
+        }
+        async fn list_events(
+            &self,
+            session_id: SessionId,
+            after: i64,
+        ) -> Result<Vec<SequencedEvent>> {
+            Ok(self
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, e)| *id == session_id && e.seq > after)
+                .map(|(_, e)| e.clone())
+                .collect())
         }
     }
 

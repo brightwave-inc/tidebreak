@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
@@ -18,6 +19,7 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 
 use crate::error::{AgentError, Result};
+use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{MessageId, SessionId, TurnId};
 use crate::model::{Message, Role, Session};
 use crate::storage::Store;
@@ -139,6 +141,51 @@ impl Store for DbStore {
             .map_err(store_err)?;
         Ok(())
     }
+
+    async fn append_event(&self, session_id: SessionId, event: &AgentEvent) -> Result<i64> {
+        // Next seq for this session. This assumes a single writer per session —
+        // the server enforces it by allowing only one active turn per session at
+        // a time (a concurrent message is refused, not queued behind a second
+        // writer). Under that invariant read-then-insert is race-free; the
+        // composite (session_id, seq) primary key is the backstop that turns any
+        // concurrent double-write into an error, never a silent dup or lost seq.
+        let last = entities::event::Entity::find()
+            .filter(entities::event::Column::SessionId.eq(session_id.0))
+            .order_by_desc(entities::event::Column::Seq)
+            .one(&self.conn)
+            .await
+            .map_err(store_err)?;
+        let seq = last.map_or(0, |model| model.seq) + 1;
+
+        entities::event::ActiveModel {
+            session_id: Set(session_id.0),
+            seq: Set(seq),
+            payload: Set(serde_json::to_value(event)?),
+            created_at: Set(Utc::now()),
+        }
+        .insert(&self.conn)
+        .await
+        .map_err(store_err)?;
+        Ok(seq)
+    }
+
+    async fn list_events(&self, session_id: SessionId, after: i64) -> Result<Vec<SequencedEvent>> {
+        entities::event::Entity::find()
+            .filter(entities::event::Column::SessionId.eq(session_id.0))
+            .filter(entities::event::Column::Seq.gt(after))
+            .order_by_asc(entities::event::Column::Seq)
+            .all(&self.conn)
+            .await
+            .map_err(store_err)?
+            .into_iter()
+            .map(|model| {
+                Ok(SequencedEvent {
+                    seq: model.seq,
+                    event: serde_json::from_value(model.payload)?,
+                })
+            })
+            .collect()
+    }
 }
 
 fn session_from_model(model: entities::session::Model) -> Session {
@@ -243,6 +290,30 @@ mod entities {
 
         impl ActiveModelBehavior for ActiveModel {}
     }
+
+    pub mod event {
+        use sea_orm::entity::prelude::*;
+
+        // Composite primary key `(session_id, seq)`: `seq` is monotonic *per
+        // session*, and the pair both enforces uniqueness and indexes the
+        // "this session's events after a cursor" replay query.
+        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+        #[sea_orm(table_name = "event")]
+        pub struct Model {
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub session_id: Uuid,
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub seq: i64,
+            #[sea_orm(column_type = "JsonBinary")]
+            pub payload: Json,
+            pub created_at: DateTimeUtc,
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
 }
 
 /// Schema v1, defined once via SeaORM's schema builder; it emits dialect-correct
@@ -255,7 +326,7 @@ mod migration {
     #[async_trait::async_trait]
     impl MigratorTrait for Migrator {
         fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-            vec![Box::new(Init)]
+            vec![Box::new(Init), Box::new(AddEventJournal)]
         }
     }
 
@@ -351,6 +422,52 @@ mod migration {
         }
     }
 
+    /// Adds the per-session event journal that clients replay from on connect.
+    struct AddEventJournal;
+
+    impl MigrationName for AddEventJournal {
+        fn name(&self) -> &str {
+            "m0002_event_journal"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for AddEventJournal {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .create_table(
+                    Table::create()
+                        .table(Event::Table)
+                        .if_not_exists()
+                        .col(ColumnDef::new(Event::SessionId).uuid().not_null())
+                        .col(ColumnDef::new(Event::Seq).big_integer().not_null())
+                        .col(ColumnDef::new(Event::Payload).json_binary().not_null())
+                        .col(
+                            ColumnDef::new(Event::CreatedAt)
+                                .timestamp_with_time_zone()
+                                .not_null(),
+                        )
+                        .primary_key(Index::create().col(Event::SessionId).col(Event::Seq))
+                        .foreign_key(
+                            ForeignKey::create()
+                                .name("fk_event_session")
+                                .from(Event::Table, Event::SessionId)
+                                .to(Session::Table, Session::Id),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(Event::Table).to_owned())
+                .await?;
+            Ok(())
+        }
+    }
+
     #[derive(DeriveIden)]
     enum Session {
         Table,
@@ -376,6 +493,15 @@ mod migration {
         Table,
         Key,
         ValueJson,
+    }
+
+    #[derive(DeriveIden)]
+    enum Event {
+        Table,
+        SessionId,
+        Seq,
+        Payload,
+        CreatedAt,
     }
 }
 
@@ -476,6 +602,59 @@ mod tests {
         store.append_message(&m2).await.unwrap();
         let listed = store.list_messages(newer.id).await.unwrap();
         assert_eq!(listed, vec![m2, m1]);
+    }
+
+    #[tokio::test]
+    async fn event_journal_assigns_per_session_seq_and_replays_after_cursor() {
+        use crate::event::AgentEvent;
+        use crate::id::TurnId;
+        use crate::provider::{StopReason, Usage};
+
+        let (_dir, store) = temp_store().await;
+        let session = sample_session();
+        store.create_session(&session).await.unwrap();
+
+        let started = AgentEvent::TurnStarted {
+            turn_id: TurnId::new(),
+        };
+        let completed = AgentEvent::TurnCompleted {
+            usage: Usage::default(),
+            stop_reason: StopReason::EndTurn,
+        };
+        assert_eq!(store.append_event(session.id, &started).await.unwrap(), 1);
+        assert_eq!(store.append_event(session.id, &completed).await.unwrap(), 2);
+
+        // From the start: both events, in order, with their seq.
+        let all = store.list_events(session.id, 0).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!((all[0].seq, all[1].seq), (1, 2));
+        assert_eq!(all[0].event, started);
+
+        // After a cursor: only the newer event (what a reconnecting client needs).
+        let tail = store.list_events(session.id, 1).await.unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].seq, 2);
+        assert_eq!(tail[0].event, completed);
+
+        // A second session's seq restarts at 1 and its journal is isolated.
+        let other = sample_session();
+        store.create_session(&other).await.unwrap();
+        assert_eq!(store.append_event(other.id, &started).await.unwrap(), 1);
+        assert_eq!(store.list_events(session.id, 0).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn event_for_unknown_session_is_rejected() {
+        use crate::event::AgentEvent;
+
+        let (_dir, store) = temp_store().await;
+        // No create_session first: the `event -> session` foreign key must reject
+        // the orphan write. (The in-memory MemStore test double does *not* model
+        // this constraint, so orphan-rejection is only guaranteed by DbStore.)
+        let event = AgentEvent::TurnStarted {
+            turn_id: TurnId::new(),
+        };
+        assert!(store.append_event(SessionId::new(), &event).await.is_err());
     }
 
     #[tokio::test]
