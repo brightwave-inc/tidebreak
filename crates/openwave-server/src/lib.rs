@@ -17,6 +17,7 @@ mod error;
 mod extract;
 mod hub;
 mod provider;
+mod resolver;
 mod routes;
 mod state;
 
@@ -28,10 +29,11 @@ use axum::Router;
 use tokio::net::TcpListener;
 
 use openwave_core::{
-    AgentConfig, AgentError, Config, DbStore, ListDir, ModelProvider, Profile, ReadFile, Result,
-    Store, ToolRegistry, WriteFile,
+    AgentConfig, AgentError, Config, DbStore, KeychainSecretProvider, ListDir, Profile, ReadFile,
+    Result, SecretProvider, Store, ToolRegistry, WriteFile,
 };
-use openwave_router::AnthropicProvider;
+
+use resolver::KeyedResolver;
 
 pub use error::ServerError;
 pub use state::AppState;
@@ -52,6 +54,10 @@ pub fn app(state: AppState) -> Router {
         .route("/projects/{id}", get(routes::get_project))
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route("/chats/{id}", get(routes::get_chat))
+        .route(
+            "/settings/api-key",
+            axum::routing::put(routes::put_api_key).delete(routes::delete_api_key),
+        )
         .route("/chats/{id}/messages", post(routes::post_message))
         .route("/chats/{id}/events", get(routes::chat_events))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -103,8 +109,10 @@ const DEFAULT_MODEL: &str = "claude-opus-4-8";
 /// Wire the store from `config` and bind the API to an ephemeral loopback port.
 pub async fn bind(config: Config) -> Result<Server> {
     let store = connect_store(&config).await?;
-    let (provider, tools, agent_config) = agent_deps();
-    let state = AppState::new(config, store, provider, tools, agent_config);
+    let secrets: Arc<dyn SecretProvider> = Arc::new(KeychainSecretProvider::new());
+    let resolver = Arc::new(KeyedResolver::new(secrets.clone()));
+    let (tools, agent_config) = agent_deps();
+    let state = AppState::new(config, store, resolver, secrets, tools, agent_config);
     let token = state.token.clone();
     let router = app(state);
 
@@ -123,20 +131,13 @@ pub async fn bind(config: Config) -> Result<Server> {
     })
 }
 
-/// Assemble the agent's dependencies for a real launch.
-///
-/// The provider is Anthropic for now, keyed from `ANTHROPIC_API_KEY` (a
-/// keychain-backed secrets flow and the composite router land in later slices).
-/// **Fail closed:** an egressing provider is wired only when a key is actually
-/// present; with no key we wire [`UnconfiguredProvider`](provider::UnconfiguredProvider),
-/// which refuses without any network call, so the transcript never leaves the
-/// machine. A turn then surfaces a `TurnFailed`, never a silent default or a
-/// request sent with an empty key.
-fn agent_deps() -> (Arc<dyn ModelProvider>, Arc<ToolRegistry>, AgentConfig) {
-    let provider: Arc<dyn ModelProvider> = match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) if !key.is_empty() => Arc::new(AnthropicProvider::new(key)),
-        _ => Arc::new(provider::UnconfiguredProvider),
-    };
+/// Assemble the static agent dependencies for a real launch: the tool set and
+/// the per-turn tuning. The model **provider** is not built here — it is resolved
+/// per turn by the [`KeyedResolver`] from the configured API key (see
+/// [`resolver`]), so setting a key at runtime takes effect without a restart. The
+/// model *name* comes from `OPENWAVE_MODEL` (or the built-in default) and can be
+/// overridden at runtime via `PUT /settings`.
+fn agent_deps() -> (Arc<ToolRegistry>, AgentConfig) {
     let tools = Arc::new(
         ToolRegistry::new()
             .with(Box::new(ReadFile))
@@ -148,7 +149,7 @@ fn agent_deps() -> (Arc<dyn ModelProvider>, Arc<ToolRegistry>, AgentConfig) {
         model,
         ..AgentConfig::default()
     };
-    (provider, tools, agent_config)
+    (tools, agent_config)
 }
 
 /// Open the durable store the profile selects.
@@ -180,9 +181,10 @@ mod tests {
     use axum::http::{header, Request, StatusCode};
     use futures::stream::{self, BoxStream, StreamExt};
     use openwave_core::{
-        AgentErrorInfo, AgentEvent, Chat, ChatId, ChatRequest, Project, ProjectId, ProviderEvent,
-        ProviderId, SequencedEvent, StopReason, Usage,
+        AgentErrorInfo, AgentEvent, Chat, ChatId, ChatRequest, ModelProvider, Project, ProjectId,
+        ProviderEvent, ProviderId, SecretProvider, SequencedEvent, StopReason, Usage,
     };
+    use resolver::ProviderResolver;
     use serde::de::DeserializeOwned;
     use tokio::sync::Notify;
     use tower::ServiceExt;
@@ -255,6 +257,39 @@ mod tests {
         }
     }
 
+    /// A resolver that always hands back a fixed provider — lets a test inject a
+    /// fake in place of the real credential-driven resolution.
+    struct FixedResolver(Arc<dyn ModelProvider>);
+
+    #[async_trait]
+    impl ProviderResolver for FixedResolver {
+        async fn resolve(&self) -> Arc<dyn ModelProvider> {
+            self.0.clone()
+        }
+    }
+
+    /// An in-memory `SecretProvider` for tests (no OS keychain).
+    #[derive(Default)]
+    struct MemSecrets(std::sync::Mutex<std::collections::HashMap<String, String>>);
+
+    #[async_trait]
+    impl SecretProvider for MemSecrets {
+        async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_string());
+            Ok(())
+        }
+        async fn delete_secret(&self, key: &str) -> Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
     /// A router over a fresh temp SQLite store with the given provider; returns
     /// the router, token, the store (to inspect the journal), and the tempdir.
     async fn test_app_with(
@@ -272,7 +307,8 @@ mod tests {
         let state = AppState::new(
             Config::desktop(dir.path()),
             store.clone(),
-            provider,
+            Arc::new(FixedResolver(provider)),
+            Arc::new(MemSecrets::default()),
             Arc::new(ToolRegistry::new()),
             AgentConfig {
                 model: "fake".into(),
@@ -689,6 +725,100 @@ mod tests {
         let untouched = put_settings(&router, &bearer, serde_json::json!({})).await;
         let settings: serde_json::Value = json_body(untouched).await;
         assert!(settings["model"].is_null());
+    }
+
+    /// `has_api_key` from `GET /settings`.
+    async fn api_key_configured(router: &Router, bearer: &str) -> bool {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/settings")
+                    .header(header::AUTHORIZATION, bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        json_body::<serde_json::Value>(response).await["has_api_key"]
+            .as_bool()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn api_key_put_configures_it_and_delete_reverts() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+
+        // Capture the env-dependent baseline so the test is deterministic wherever
+        // it runs, then assert the transitions the API drives.
+        let baseline = api_key_configured(&router, &bearer).await;
+
+        let put = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/settings/api-key")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"api_key": "sk-test"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::NO_CONTENT);
+        assert!(api_key_configured(&router, &bearer).await);
+
+        let delete = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/settings/api-key")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+        assert_eq!(api_key_configured(&router, &bearer).await, baseline);
+    }
+
+    #[tokio::test]
+    async fn put_empty_api_key_is_rejected() {
+        let (router, token, _store, _dir) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/settings/api-key")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({"api_key": ""}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, "bad_request");
+    }
+
+    #[tokio::test]
+    async fn resolver_builds_a_real_provider_when_a_key_is_set() {
+        // A stored key takes precedence over the env fallback, so this is
+        // deterministic regardless of the ambient environment.
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+        secrets
+            .set_secret(resolver::ANTHROPIC_API_KEY, "sk-test")
+            .await
+            .unwrap();
+        let resolved = resolver::KeyedResolver::new(secrets).resolve().await;
+        assert_eq!(resolved.id().0, "anthropic");
     }
 
     #[tokio::test(flavor = "multi_thread")]
