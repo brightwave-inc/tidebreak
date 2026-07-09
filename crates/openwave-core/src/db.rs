@@ -705,6 +705,29 @@ mod tests {
             store.get_chat(loose.id).await.unwrap().unwrap().project_id,
             None
         );
+
+        // The project link survives a list, not just a by-id fetch.
+        let listed = store.list_chats().await.unwrap();
+        let listed_link = |id| {
+            listed
+                .iter()
+                .find(|c| c.id == id)
+                .and_then(|c| c.project_id)
+        };
+        assert_eq!(listed_link(in_project.id), Some(project.id));
+        assert_eq!(listed_link(loose.id), None);
+    }
+
+    #[tokio::test]
+    async fn list_projects_is_newest_first() {
+        let (_dir, store) = temp_store().await;
+        let mut older = sample_project();
+        older.created_at = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
+        let mut newer = sample_project();
+        newer.created_at = DateTime::<Utc>::from_timestamp(2_000, 0).unwrap();
+        store.create_project(&older).await.unwrap();
+        store.create_project(&newer).await.unwrap();
+        assert_eq!(store.list_projects().await.unwrap(), vec![newer, older]);
     }
 
     #[tokio::test]

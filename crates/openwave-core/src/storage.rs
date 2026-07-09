@@ -39,6 +39,12 @@ pub trait Store: Send + Sync {
     async fn list_projects(&self) -> Result<Vec<Project>>;
 
     /// Persist a new chat.
+    ///
+    /// A chat's `project_id`, when set, is not checked against an existing
+    /// project here — there is no database foreign key on the link (SQLite can't
+    /// add one to an existing table). Callers that accept a `project_id` from
+    /// outside must verify the project exists first (the server does so at its
+    /// API edge) to avoid persisting a dangling reference.
     async fn create_chat(&self, chat: &Chat) -> Result<()>;
 
     /// Fetch a chat by id, or `None` if it doesn't exist.
