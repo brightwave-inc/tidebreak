@@ -42,6 +42,10 @@ pub fn app(state: AppState) -> Router {
     // unknown path still answers `404` (not `401`), and `/healthz` stays open.
     let api = Router::new()
         .route(
+            "/settings",
+            get(routes::get_settings).put(routes::put_settings),
+        )
+        .route(
             "/projects",
             post(routes::create_project).get(routes::list_projects),
         )
@@ -203,6 +207,27 @@ mod tests {
                     reason: StopReason::EndTurn,
                 },
             ])
+            .boxed())
+        }
+    }
+
+    /// A provider that records the model each request asked for, then answers
+    /// like `FakeProvider`. Lets a test assert which model a turn ran against.
+    #[derive(Clone, Default)]
+    struct RecordingProvider {
+        models: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for RecordingProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("recording")
+        }
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            self.models.lock().unwrap().push(req.model);
+            Ok(stream::iter(vec![ProviderEvent::Stop {
+                reason: StopReason::EndTurn,
+            }])
             .boxed())
         }
     }
@@ -544,6 +569,104 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let info: AgentErrorInfo = json_body(response).await;
         assert_eq!(info.kind, "bad_request");
+    }
+
+    #[tokio::test]
+    async fn settings_default_then_update_roundtrips() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+
+        // Default: no model configured.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/settings")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let settings: serde_json::Value = json_body(response).await;
+        assert!(settings["model"].is_null());
+
+        // PUT a model, and it comes back.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/settings")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"model": "claude-x"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let settings: serde_json::Value = json_body(response).await;
+        assert_eq!(settings["model"], "claude-x");
+
+        // GET reflects the update.
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/settings")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let settings: serde_json::Value = json_body(response).await;
+        assert_eq!(settings["model"], "claude-x");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn configured_model_is_used_for_the_turn() {
+        let recorder = RecordingProvider::default();
+        let (router, token, store, _dir) = test_app_with(Arc::new(recorder.clone())).await;
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        // Configure the model, then run a turn.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/settings")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"model": "claude-configured"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "hi").await,
+            StatusCode::ACCEPTED
+        );
+        wait_for_turn(&store, chat.id).await;
+
+        assert!(
+            recorder
+                .models
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "claude-configured"),
+            "the turn should run against the configured model"
+        );
     }
 
     #[tokio::test]
