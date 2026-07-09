@@ -81,7 +81,7 @@ impl Retriever {
         };
         let document = Document::with_id(id, source, media_type, parsed.text);
 
-        let chunks = self.chunker.chunk(&document);
+        let chunks = self.chunker.chunk(&document)?;
         if chunks.is_empty() {
             return Ok(IngestOutcome {
                 document,
@@ -193,7 +193,7 @@ The Great Barrier Reef is the world's largest coral reef system.";
             "text/plain",
             "alpha beta gamma delta epsilon",
         );
-        let chunks = TextChunker::new(60, 12).chunk(&doc);
+        let chunks = TextChunker::new(60, 12).chunk(&doc).unwrap();
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
         let embeddings = HashEmbedder::new(512)
             .embed_documents(&texts)

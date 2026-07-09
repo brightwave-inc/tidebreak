@@ -14,13 +14,17 @@
 //! the dependable single-strategy floor.
 
 use crate::document::{ByteSpan, Chunk, Document};
+use crate::error::Result;
 
 /// Splits a document into chunks.
 ///
 /// Object-safe so strategies can be swapped or composed as `Box<dyn Chunker>`.
+/// Fallible like the other seams: today's [`TextChunker`] never errors, but a
+/// future service- or model-backed chunker (sentence tokenizers, layout models)
+/// can, and returning [`Result`] now keeps that from being a breaking change.
 pub trait Chunker: Send + Sync {
     /// Produce the chunks for `document`, in document order.
-    fn chunk(&self, document: &Document) -> Vec<Chunk>;
+    fn chunk(&self, document: &Document) -> Result<Vec<Chunk>>;
 }
 
 /// A boundary-aware, fixed-budget, overlapping chunker.
@@ -40,12 +44,14 @@ impl TextChunker {
 
     /// Build a chunker with the given window and overlap.
     ///
-    /// `max_chars` is clamped to at least 1. `overlap` is clamped below
-    /// `max_chars` so the window always advances and chunking terminates.
+    /// `max_chars` is clamped to at least 1. `overlap` is clamped to at most half
+    /// the window: that keeps the window advancing (so chunking terminates) and
+    /// bounds the chunk count at `O(len / (max_chars / 2))`, avoiding the blow-up
+    /// a near-`max_chars` overlap would cause on boundary-free text.
     #[must_use]
     pub fn new(max_chars: usize, overlap: usize) -> Self {
         let max_chars = max_chars.max(1);
-        let overlap = overlap.min(max_chars - 1);
+        let overlap = overlap.min(max_chars / 2);
         Self { max_chars, overlap }
     }
 }
@@ -57,7 +63,7 @@ impl Default for TextChunker {
 }
 
 impl Chunker for TextChunker {
-    fn chunk(&self, document: &Document) -> Vec<Chunk> {
+    fn chunk(&self, document: &Document) -> Result<Vec<Chunk>> {
         let text = &document.text;
 
         // Character view plus each char's starting byte offset. `byte_at[i]` is
@@ -74,7 +80,7 @@ impl Chunker for TextChunker {
 
         let n = chars.len();
         if n == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let mut chunks = Vec::new();
@@ -107,7 +113,7 @@ impl Chunker for TextChunker {
             start = if next <= start { start + 1 } else { next };
         }
 
-        chunks
+        Ok(chunks)
     }
 }
 
@@ -142,14 +148,17 @@ mod tests {
 
     #[test]
     fn empty_document_yields_no_chunks() {
-        assert!(TextChunker::default().chunk(&doc("")).is_empty());
-        assert!(TextChunker::default().chunk(&doc("   \n  ")).is_empty());
+        assert!(TextChunker::default().chunk(&doc("")).unwrap().is_empty());
+        assert!(TextChunker::default()
+            .chunk(&doc("   \n  "))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn short_document_is_a_single_chunk() {
         let d = doc("hello world");
-        let chunks = TextChunker::default().chunk(&d);
+        let chunks = TextChunker::default().chunk(&d).unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "hello world");
         assert_eq!(chunks[0].span, ByteSpan::new(0, 11));
@@ -159,7 +168,7 @@ mod tests {
     #[test]
     fn spans_slice_back_to_the_exact_source_text() {
         let d = doc("The quick brown fox jumps over the lazy dog. It was a fine day.");
-        let chunks = TextChunker::new(20, 5).chunk(&d);
+        let chunks = TextChunker::new(20, 5).chunk(&d).unwrap();
         assert!(chunks.len() > 1);
         for chunk in &chunks {
             // The recorded span must reproduce the chunk text exactly.
@@ -170,7 +179,7 @@ mod tests {
     #[test]
     fn ordinals_are_contiguous_from_zero() {
         let d = doc("alpha beta gamma delta epsilon zeta eta theta iota kappa");
-        let chunks = TextChunker::new(15, 4).chunk(&d);
+        let chunks = TextChunker::new(15, 4).chunk(&d).unwrap();
         for (i, chunk) in chunks.iter().enumerate() {
             assert_eq!(chunk.ordinal, i);
         }
@@ -179,7 +188,7 @@ mod tests {
     #[test]
     fn consecutive_chunks_overlap() {
         let d = doc("one two three four five six seven eight nine ten eleven twelve");
-        let chunks = TextChunker::new(20, 8).chunk(&d);
+        let chunks = TextChunker::new(20, 8).chunk(&d).unwrap();
         assert!(chunks.len() >= 2);
         // With overlap, each chunk after the first starts before the previous ends.
         for pair in chunks.windows(2) {
@@ -190,7 +199,7 @@ mod tests {
     #[test]
     fn prefers_newline_boundaries() {
         let d = doc("first line here\nsecond line here\nthird line here");
-        let chunks = TextChunker::new(24, 0).chunk(&d);
+        let chunks = TextChunker::new(24, 0).chunk(&d).unwrap();
         // The first cut should land right after a newline, so the first chunk
         // ends cleanly on a line and the next starts a fresh one.
         assert!(chunks[0].text.ends_with('\n') || chunks[0].text.ends_with("here"));
@@ -201,7 +210,7 @@ mod tests {
     fn handles_multibyte_without_splitting_codepoints() {
         // Each `é` is two bytes; a naive byte window could split one.
         let d = doc("café café café café café café café café");
-        let chunks = TextChunker::new(6, 1).chunk(&d);
+        let chunks = TextChunker::new(6, 1).chunk(&d).unwrap();
         assert!(chunks.len() > 1);
         for chunk in &chunks {
             // Spans land on char boundaries => slicing never panics and matches.
@@ -214,7 +223,7 @@ mod tests {
         // overlap >= max_chars is clamped so the window still advances.
         let chunker = TextChunker::new(4, 999);
         let d = doc("abcdefghijklmnop");
-        let chunks = chunker.chunk(&d);
+        let chunks = chunker.chunk(&d).unwrap();
         assert!(!chunks.is_empty());
         // Every byte is covered by the union of spans.
         assert_eq!(chunks.first().unwrap().span.start, 0);

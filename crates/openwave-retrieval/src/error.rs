@@ -28,6 +28,7 @@ pub enum RetrievalError {
 
     /// An embedding's dimensionality did not match what the store expects.
     #[error("dimension mismatch: expected {expected}, got {actual}")]
+    #[non_exhaustive]
     DimensionMismatch {
         /// The dimensionality the store was configured with.
         expected: usize,

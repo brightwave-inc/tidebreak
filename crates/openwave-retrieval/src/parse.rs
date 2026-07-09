@@ -60,8 +60,9 @@ impl PlainTextParser {
 impl DocumentParser for PlainTextParser {
     fn supports(&self, media_type: &str) -> bool {
         // Match the top-level `text` type, ignoring any `; charset=...` suffix.
+        // MIME types are case-insensitive (RFC 6838), so compare in lowercase.
         let base = media_type.split(';').next().unwrap_or(media_type).trim();
-        base.is_empty() || base.starts_with("text/")
+        base.is_empty() || base.to_ascii_lowercase().starts_with("text/")
     }
 
     fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {
@@ -86,6 +87,8 @@ mod tests {
         assert!(p.supports("text/plain"));
         assert!(p.supports("text/markdown"));
         assert!(p.supports("text/markdown; charset=utf-8"));
+        assert!(p.supports("TEXT/PLAIN")); // MIME types are case-insensitive
+        assert!(p.supports("Text/Markdown"));
         assert!(p.supports("")); // unknown/omitted => treat as text
         assert!(!p.supports("application/pdf"));
         assert!(!p.supports("image/png"));
