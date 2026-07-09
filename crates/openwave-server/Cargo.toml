@@ -14,7 +14,7 @@ workspace = true
 openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite", "tools"] }
 openwave-router = { path = "../openwave-router" }
 axum = { workspace = true }
-tokio = { workspace = true, features = ["net", "rt"] }
+tokio = { workspace = true, features = ["net", "rt", "sync", "macros"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -26,4 +26,5 @@ chrono = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 tower = { version = "0.5", features = ["util"] }
 reqwest = { workspace = true }
+tokio-tungstenite = "0.29"
 tempfile = "3"

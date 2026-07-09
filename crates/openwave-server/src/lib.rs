@@ -6,11 +6,13 @@
 //! binds to an ephemeral **loopback** port and mints a per-launch **bearer
 //! token**: only the local process it was handed to can reach it.
 //!
-//! This slice runs turns: the chat CRUD surface plus `POST /chats/{id}/messages`,
-//! which starts a turn (one per chat at a time) and journals its events. Streaming
-//! those events live over `WS /chats/{id}/events` lands next, on top of the journal.
+//! The surface runs turns end to end: the chat CRUD routes, `POST
+//! /chats/{id}/messages` to start a turn (one per chat at a time), and
+//! `WS /chats/{id}/events` to watch it — journaled events are replayed on connect
+//! and then streamed live (snapshot → replay → live).
 
 mod auth;
+mod bus;
 mod error;
 mod extract;
 mod hub;
@@ -42,6 +44,7 @@ pub fn app(state: AppState) -> Router {
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route("/chats/{id}", get(routes::get_chat))
         .route("/chats/{id}/messages", post(routes::post_message))
+        .route("/chats/{id}/events", get(routes::chat_events))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
@@ -651,5 +654,165 @@ mod tests {
             .unwrap();
         assert_eq!(authed.status(), reqwest::StatusCode::OK);
         assert_eq!(authed.json::<Vec<Chat>>().await.unwrap(), vec![]);
+    }
+
+    // --- WebSocket event stream ---
+
+    use std::net::SocketAddr;
+
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    /// Serve a router (with the given provider) over a real loopback socket.
+    async fn serve_app_with(
+        provider: Arc<dyn ModelProvider>,
+    ) -> (SocketAddr, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
+        let (router, token, store, dir) = test_app_with(provider).await;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (addr, token, store, dir)
+    }
+
+    async fn make_chat_http(client: &reqwest::Client, addr: SocketAddr, token: &str) -> Chat {
+        client
+            .post(format!("http://{addr}/chats"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({"workspace_dir": "/tmp/ws"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    async fn send_message_http(
+        client: &reqwest::Client,
+        addr: SocketAddr,
+        token: &str,
+        chat: ChatId,
+    ) {
+        let response = client
+            .post(format!("http://{addr}/chats/{chat}/messages"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({"content": "hi"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    }
+
+    /// Connect to a chat's event socket (authenticated) and read frames until the
+    /// turn ends (or a timeout), returning the decoded events in arrival order.
+    async fn read_until_turn_end(
+        addr: SocketAddr,
+        token: &str,
+        chat: ChatId,
+        after: i64,
+    ) -> Vec<SequencedEvent> {
+        let mut request = format!("ws://{addr}/chats/{chat}/events?after={after}")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+        let (mut socket, _response) = connect_async(request).await.unwrap();
+
+        let mut events = Vec::new();
+        let read = async {
+            while let Some(frame) = socket.next().await {
+                let WsMessage::Text(text) = frame.unwrap() else {
+                    continue;
+                };
+                let event: SequencedEvent = serde_json::from_str(text.as_str()).unwrap();
+                let done = matches!(
+                    event.event,
+                    AgentEvent::TurnCompleted { .. } | AgentEvent::TurnFailed { .. }
+                );
+                events.push(event);
+                if done {
+                    break;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .expect("turn did not complete over the socket");
+        events
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ws_replays_a_finished_turn_from_the_journal() {
+        let (addr, token, store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
+        let client = reqwest::Client::new();
+        let chat = make_chat_http(&client, addr, &token).await;
+
+        // Run the turn to completion, then connect — everything comes from replay.
+        send_message_http(&client, addr, &token, chat.id).await;
+        wait_for_turn(&store, chat.id).await;
+
+        let events = read_until_turn_end(addr, &token, chat.id, 0).await;
+        assert_eq!(events.first().unwrap().seq, 1, "replay starts at seq 1");
+        assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
+        assert!(events
+            .iter()
+            .any(|e| matches!(&e.event, AgentEvent::TextDelta { text } if text == "hi")));
+        assert!(matches!(
+            events.last().unwrap().event,
+            AgentEvent::TurnCompleted { .. }
+        ));
+        // Sequence numbers are strictly increasing.
+        assert!(events.windows(2).all(|w| w[0].seq < w[1].seq));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ws_streams_a_turn_started_after_connecting() {
+        let (addr, token, _store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
+        let client = reqwest::Client::new();
+        let chat = make_chat_http(&client, addr, &token).await;
+
+        // Connect first (journal empty), then trigger the turn — events arrive live.
+        let reader = {
+            let token = token.clone();
+            tokio::spawn(async move { read_until_turn_end(addr, &token, chat.id, 0).await })
+        };
+        send_message_http(&client, addr, &token, chat.id).await;
+
+        let events = reader.await.unwrap();
+        assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
+        assert!(matches!(
+            events.last().unwrap().event,
+            AgentEvent::TurnCompleted { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ws_after_cursor_replays_only_newer_events() {
+        let (addr, token, store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
+        let client = reqwest::Client::new();
+        let chat = make_chat_http(&client, addr, &token).await;
+        send_message_http(&client, addr, &token, chat.id).await;
+        wait_for_turn(&store, chat.id).await;
+
+        // Resume after seq 1: the first replayed event must be seq 2, and seq 1 is
+        // not re-sent.
+        let events = read_until_turn_end(addr, &token, chat.id, 1).await;
+        assert_eq!(events.first().unwrap().seq, 2);
+        assert!(events.iter().all(|e| e.seq > 1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ws_without_a_token_is_rejected() {
+        let (addr, _token, _store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
+        let chat = ChatId::new();
+        let request = format!("ws://{addr}/chats/{chat}/events")
+            .into_client_request()
+            .unwrap();
+        // No Authorization header: the handshake must fail (auth runs before upgrade).
+        assert!(connect_async(request).await.is_err());
     }
 }
