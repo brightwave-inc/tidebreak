@@ -1,0 +1,26 @@
+[package]
+name = "openwave-server"
+description = "OpenWave in-process HTTP/WebSocket surface: the local API the desktop and CLI clients drive the agent through."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite"] }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+tower = { version = "0.5", features = ["util"] }
+reqwest = { workspace = true }
+tempfile = "3"
