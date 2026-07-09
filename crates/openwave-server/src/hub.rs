@@ -15,6 +15,7 @@ use futures::{future, StreamExt};
 use openwave_core::{Agent, Chat, SequencedEvent, Store};
 
 use crate::bus::EventBus;
+use crate::state::ActiveTurn;
 
 /// Drive one turn to completion, journaling every event it emits and publishing
 /// it to the live bus.
@@ -22,12 +23,17 @@ use crate::bus::EventBus;
 /// The drive and the journal run concurrently, so events land in the store — and
 /// on the bus — as the turn produces them. Returns once the turn has finished and
 /// every event is persisted.
+///
+/// The [`ActiveTurn`] slot is released as soon as `run_turn` returns (before the
+/// journal finishes draining), so a late `POST .../steer` gets `409` rather than
+/// a silent `202` with nowhere to deliver.
 pub(crate) async fn drive_and_journal(
     agent: Agent,
     chat: Chat,
     input: String,
     store: Arc<dyn Store>,
     events: Arc<EventBus>,
+    active: ActiveTurn,
 ) {
     let (events_tx, mut events_rx) = unbounded();
     let chat_id = chat.id;
@@ -48,6 +54,9 @@ pub(crate) async fn drive_and_journal(
     };
 
     let drive = async move {
+        // Hold the slot only while the agent is running; drop it before the
+        // journal finishes so cancel/steer stop accepting once the turn ends.
+        let _active = active;
         // Dropping `events_tx` at the end of this future closes the channel,
         // which ends the journal loop.
         let _ = agent.run_turn(&chat, &input, &events_tx).await;

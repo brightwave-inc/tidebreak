@@ -6,9 +6,9 @@
 //! the same way cancel does — except the turn **continues** after injecting the
 //! message, rather than ending as [`TurnCancelled`](crate::AgentEvent::TurnCancelled).
 //!
-//! v1 scope: interrupt preempts the model stream only. A turn parked on approval
-//! or mid-`execute` queues the steer until the next boundary. Cancel still wins
-//! over steer when both are signalled.
+//! v1 scope: interrupt preempts the **model stream** only. A turn parked on
+//! approval or mid-`execute` queues the steer until the next boundary (cancel
+//! still unblocks approval). Cancel wins over steer when both are signalled.
 
 use std::collections::VecDeque;
 use std::future::Future;

@@ -455,9 +455,9 @@ pub async fn post_message(
     let store = state.store.clone();
     let events = state.events.clone();
     tokio::spawn(async move {
-        // Hold the slot for the turn's lifetime; dropping it frees the chat.
-        let _active = active;
-        crate::hub::drive_and_journal(agent, chat, body.content, store, events).await;
+        // Slot is released when run_turn returns (inside the hub), so a late
+        // steer/cancel gets 409 rather than a silent accept.
+        crate::hub::drive_and_journal(agent, chat, body.content, store, events, active).await;
     });
 
     Ok(StatusCode::ACCEPTED)
