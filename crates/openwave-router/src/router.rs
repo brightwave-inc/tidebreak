@@ -46,7 +46,7 @@ impl RouteKind {
 }
 
 /// One enabled, credentialed provider endpoint the router may select.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Route {
     /// Which adapter to build.
     pub kind: RouteKind,
@@ -57,6 +57,17 @@ pub struct Route {
     /// Curated model ids this route claims. Used for preferential selection;
     /// `OpenaiCompatible` typically passes an empty list (free-form fallback).
     pub curated_models: Vec<String>,
+}
+
+impl std::fmt::Debug for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Route")
+            .field("kind", &self.kind)
+            .field("api_key", &"***")
+            .field("base_url", &self.base_url)
+            .field("curated_models", &self.curated_models)
+            .finish()
+    }
 }
 
 /// A composite [`ModelProvider`] that picks a backend from `ChatRequest.model`.
@@ -190,19 +201,32 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
 }
 
 fn fingerprint_routes(routes: &[Route]) -> String {
+    // Hash key material so the fingerprint (cached on the resolver) never
+    // retains a cleartext API key.
     let mut parts: Vec<String> = routes
         .iter()
         .map(|r| {
             format!(
-                "{}|{}|{}",
+                "{}|{:x}|{}",
                 r.kind.as_str(),
-                r.api_key,
+                fnv1a64(&r.api_key),
                 r.base_url.as_deref().unwrap_or("")
             )
         })
         .collect();
     parts.sort();
     parts.join(";")
+}
+
+/// Tiny non-crypto FNV-1a 64-bit hash — enough to invalidate the cache when a
+/// key changes without storing the key itself.
+fn fnv1a64(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in s.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -263,6 +287,23 @@ mod tests {
         let a = Router::build(vec![route(RouteKind::Anthropic, "sk-1", &[], None)]);
         let b = Router::build(vec![route(RouteKind::Anthropic, "sk-2", &[], None)]);
         assert_ne!(a.fingerprint(), b.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_does_not_contain_raw_key() {
+        let router = Router::build(vec![route(
+            RouteKind::Anthropic,
+            "sk-super-secret",
+            &[],
+            None,
+        )]);
+        assert!(!router.fingerprint().contains("sk-super-secret"));
+    }
+
+    #[test]
+    fn route_debug_redacts_api_key() {
+        let r = route(RouteKind::Anthropic, "sk-super-secret", &[], None);
+        assert!(!format!("{r:?}").contains("sk-super-secret"));
     }
 
     #[tokio::test]

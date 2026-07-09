@@ -116,8 +116,8 @@ impl Server {
     }
 }
 
-/// Placeholder default model, used until the settings-driven model selection and
-/// the composite router land. Overridable with `OPENWAVE_MODEL`.
+/// Default model when none is configured via settings or per-chat. Overridable
+/// with `OPENWAVE_MODEL`.
 const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
 /// Wire the store from `config` and bind the API to an ephemeral loopback port.

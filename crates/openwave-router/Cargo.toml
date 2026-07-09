@@ -1,6 +1,6 @@
 [package]
 name = "openwave-router"
-description = "OpenWave model routing: provider adapters and (later) the composite Router."
+description = "OpenWave model routing: provider adapters and the composite Router."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

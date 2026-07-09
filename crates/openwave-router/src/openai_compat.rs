@@ -81,7 +81,13 @@ impl ModelProvider for OpenAiCompatProvider {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let body = build_request_json(&req)?;
+        let mut body = build_request_json(&req)?;
+        // Native OpenAI omits usage on streaming chunks unless asked. Local
+        // openai_compatible servers often reject unknown fields, so only set
+        // this for the openai provider id.
+        if self.provider_id == "openai" {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         let response = self
@@ -158,15 +164,19 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         extend_openai_messages(&mut messages, message)?;
     }
 
+    let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let mut body = json!({
         "model": req.model,
         "messages": messages,
-        "max_tokens": req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         "stream": true,
-        // OpenAI omits usage on streaming chunks unless asked; harmless on
-        // gateways that ignore unknown fields.
-        "stream_options": { "include_usage": true },
     });
+    // Reasoning models (o-series) reject `max_tokens` — they want
+    // `max_completion_tokens`. Everything else still speaks `max_tokens`.
+    if is_reasoning_model(&req.model) {
+        body["max_completion_tokens"] = json!(max_tokens);
+    } else {
+        body["max_tokens"] = json!(max_tokens);
+    }
 
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(
@@ -189,6 +199,15 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         body["temperature"] = json!(temperature);
     }
     Ok(body)
+}
+
+/// OpenAI reasoning models reject `max_tokens` in favor of
+/// `max_completion_tokens`. Match the common `o`-prefix ids (o1, o3, o4-mini, …).
+fn is_reasoning_model(model: &str) -> bool {
+    let base = model.split('/').next_back().unwrap_or(model);
+    let base = base.strip_prefix("openai.").unwrap_or(base);
+    matches!(base.as_bytes().first(), Some(b'o'))
+        && base.as_bytes().get(1).is_some_and(|b| b.is_ascii_digit())
 }
 
 /// Append one normalized message as one or more OpenAI Chat Completions messages.
@@ -444,13 +463,32 @@ mod tests {
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["model"], "gpt-4o");
         assert_eq!(body["stream"], true);
-        assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
+        assert!(body.get("max_completion_tokens").is_none());
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["role"], "user");
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "read_file");
         assert!((body["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reasoning_models_use_max_completion_tokens() {
+        let req = ChatRequest {
+            model: "o3".into(),
+            system: None,
+            messages: vec![ChatMessage::text(Role::User, "hi")],
+            tools: vec![],
+            max_tokens: Some(1024),
+            temperature: None,
+        };
+        let body = build_request_json(&req).unwrap();
+        assert_eq!(body["max_completion_tokens"], 1024);
+        assert!(body.get("max_tokens").is_none());
+        assert!(is_reasoning_model("o4-mini"));
+        assert!(is_reasoning_model("o1-preview"));
+        assert!(!is_reasoning_model("gpt-4o"));
+        assert!(!is_reasoning_model("claude-opus-4-8"));
     }
 
     #[test]
