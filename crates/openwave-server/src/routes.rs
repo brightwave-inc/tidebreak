@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{Agent, Chat, ChatId, Project, ProjectId, SequencedEvent, Store};
@@ -18,6 +18,85 @@ use openwave_core::{Agent, Chat, ChatId, Project, ProjectId, SequencedEvent, Sto
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
+
+/// The store-settings key for the selected model.
+const MODEL_SETTING: &str = "model";
+
+/// Runtime settings a client can read. Secrets (e.g. API keys) are never
+/// included here — they live in the `SecretProvider`, not the store.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Settings {
+    /// The model turns run against, or `None` to use the server's default.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Body of `PUT /settings`. Each field is a *double* option so an absent key is
+/// distinguished from an explicit `null`: absent leaves the value unchanged,
+/// `null` resets it to the server default, and a value sets it.
+#[derive(Debug, Deserialize)]
+pub struct SettingsUpdate {
+    #[serde(default, deserialize_with = "double_option")]
+    pub model: Option<Option<String>>,
+}
+
+/// Deserialize a present field (including JSON `null`) as `Some(..)`; `#[serde(default)]`
+/// supplies `None` when the field is absent.
+fn double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
+
+/// `GET /settings` — the current runtime settings.
+pub async fn get_settings(State(state): State<AppState>) -> Result<Json<Settings>, ServerError> {
+    Ok(Json(Settings {
+        model: read_model(&*state.store).await?,
+    }))
+}
+
+/// `PUT /settings` — update runtime settings, returning the new state. Only the
+/// fields present in the body are touched.
+pub async fn put_settings(
+    State(state): State<AppState>,
+    Json(body): Json<SettingsUpdate>,
+) -> Result<Json<Settings>, ServerError> {
+    match body.model {
+        // Absent: leave the model unchanged.
+        None => {}
+        // Explicit null: reset to the server default (stored as JSON null, which
+        // `read_model` reads back as "unset").
+        Some(None) => {
+            state
+                .store
+                .set_setting(MODEL_SETTING, &serde_json::Value::Null)
+                .await?;
+        }
+        // A value: reject empty (it would break every turn), else set it.
+        Some(Some(model)) => {
+            if model.is_empty() {
+                return Err(ServerError::bad_request("model must not be empty"));
+            }
+            state
+                .store
+                .set_setting(MODEL_SETTING, &serde_json::json!(model))
+                .await?;
+        }
+    }
+    Ok(Json(Settings {
+        model: read_model(&*state.store).await?,
+    }))
+}
+
+/// The configured model, if any.
+async fn read_model(store: &dyn Store) -> Result<Option<String>, ServerError> {
+    Ok(store
+        .get_setting(MODEL_SETTING)
+        .await?
+        .and_then(|value| value.as_str().map(str::to_owned)))
+}
 
 /// Body of `POST /projects`.
 #[derive(Debug, Deserialize)]
@@ -165,11 +244,17 @@ pub async fn post_message(
         ServerError::conflict(format!("chat {id} already has a turn in progress"))
     })?;
 
+    // The model is reconfigurable at runtime via PUT /settings; a stored value
+    // overrides the boot default for this turn.
+    let mut agent_config = state.agent_config.clone();
+    if let Some(model) = read_model(&*state.store).await? {
+        agent_config.model = model;
+    }
     let agent = Agent::new(
         state.provider.clone(),
         state.tools.clone(),
         state.store.clone(),
-        state.agent_config.clone(),
+        agent_config,
     );
     let store = state.store.clone();
     let events = state.events.clone();
