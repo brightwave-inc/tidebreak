@@ -20,8 +20,8 @@ use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, MessageId, ProjectId, TurnId};
-use crate::model::{Chat, Message, Project, Role};
+use crate::id::{CallId, ChatId, MessageId, ProjectId, TurnId};
+use crate::model::{Chat, Message, Project, Role, ToolCallRecord};
 use crate::storage::Store;
 
 /// Map any SeaORM failure into an [`AgentError::Store`].
@@ -164,6 +164,48 @@ impl Store for DbStore {
             .collect()
     }
 
+    async fn upsert_tool_call(&self, call: &ToolCallRecord) -> Result<()> {
+        let model = entities::tool_call::ActiveModel {
+            id: Set(call.id.0),
+            chat_id: Set(call.chat_id.0),
+            turn_id: Set(call.turn_id.0),
+            provider_id: Set(call.provider_id.clone()),
+            name: Set(call.name.clone()),
+            arguments: Set(call.arguments.clone()),
+            result: Set(call.result.clone()),
+            is_error: Set(call.is_error),
+            created_at: Set(call.created_at),
+            completed_at: Set(call.completed_at),
+        };
+        entities::tool_call::Entity::insert(model)
+            .on_conflict(
+                OnConflict::column(entities::tool_call::Column::Id)
+                    .update_columns([
+                        entities::tool_call::Column::Arguments,
+                        entities::tool_call::Column::Result,
+                        entities::tool_call::Column::IsError,
+                        entities::tool_call::Column::CompletedAt,
+                    ])
+                    .to_owned(),
+            )
+            .exec(&self.conn)
+            .await
+            .map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
+        Ok(entities::tool_call::Entity::find()
+            .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
+            .order_by_asc(entities::tool_call::Column::CreatedAt)
+            .all(&self.conn)
+            .await
+            .map_err(store_err)?
+            .into_iter()
+            .map(tool_call_from_model)
+            .collect())
+    }
+
     async fn get_setting(&self, key: &str) -> Result<Option<Value>> {
         Ok(entities::setting::Entity::find_by_id(key.to_string())
             .one(&self.conn)
@@ -266,6 +308,21 @@ fn message_from_model(model: entities::message::Model) -> Result<Message> {
     })
 }
 
+fn tool_call_from_model(model: entities::tool_call::Model) -> ToolCallRecord {
+    ToolCallRecord {
+        id: CallId(model.id),
+        chat_id: ChatId(model.chat_id),
+        turn_id: TurnId(model.turn_id),
+        provider_id: model.provider_id,
+        name: model.name,
+        arguments: model.arguments,
+        result: model.result,
+        is_error: model.is_error,
+        created_at: model.created_at,
+        completed_at: model.completed_at,
+    }
+}
+
 /// `Role` is persisted as its snake_case name (matching its serde encoding).
 fn role_to_db(role: Role) -> &'static str {
     match role {
@@ -351,6 +408,32 @@ mod entities {
         impl ActiveModelBehavior for ActiveModel {}
     }
 
+    pub mod tool_call {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+        #[sea_orm(table_name = "tool_call")]
+        pub struct Model {
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub id: Uuid,
+            pub chat_id: Uuid,
+            pub turn_id: Uuid,
+            pub provider_id: String,
+            pub name: String,
+            #[sea_orm(column_type = "JsonBinary")]
+            pub arguments: Json,
+            pub result: Option<String>,
+            pub is_error: bool,
+            pub created_at: DateTimeUtc,
+            pub completed_at: Option<DateTimeUtc>,
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+
     pub mod setting {
         use sea_orm::entity::prelude::*;
 
@@ -410,6 +493,7 @@ mod migration {
                 Box::new(AddEventJournal),
                 Box::new(AddProjects),
                 Box::new(AddChatModel),
+                Box::new(AddToolCalls),
             ]
         }
     }
@@ -647,6 +731,73 @@ mod migration {
         }
     }
 
+    /// Structured tool-call rows (args + result), distinct from text messages.
+    struct AddToolCalls;
+
+    impl MigrationName for AddToolCalls {
+        fn name(&self) -> &str {
+            "m0005_tool_calls"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for AddToolCalls {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .create_table(
+                    Table::create()
+                        .table(ToolCall::Table)
+                        .if_not_exists()
+                        .col(ColumnDef::new(ToolCall::Id).uuid().not_null().primary_key())
+                        .col(ColumnDef::new(ToolCall::ChatId).uuid().not_null())
+                        .col(ColumnDef::new(ToolCall::TurnId).uuid().not_null())
+                        .col(ColumnDef::new(ToolCall::ProviderId).text().not_null())
+                        .col(ColumnDef::new(ToolCall::Name).text().not_null())
+                        .col(ColumnDef::new(ToolCall::Arguments).json_binary().not_null())
+                        .col(ColumnDef::new(ToolCall::Result).text())
+                        .col(
+                            ColumnDef::new(ToolCall::IsError)
+                                .boolean()
+                                .not_null()
+                                .default(false),
+                        )
+                        .col(
+                            ColumnDef::new(ToolCall::CreatedAt)
+                                .timestamp_with_time_zone()
+                                .not_null(),
+                        )
+                        .col(ColumnDef::new(ToolCall::CompletedAt).timestamp_with_time_zone())
+                        .foreign_key(
+                            ForeignKey::create()
+                                .name("fk_tool_call_chat")
+                                .from(ToolCall::Table, ToolCall::ChatId)
+                                .to(Chat::Table, Chat::Id),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_tool_call_chat")
+                        .table(ToolCall::Table)
+                        .col(ToolCall::ChatId)
+                        .col(ToolCall::CreatedAt)
+                        .to_owned(),
+                )
+                .await?;
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(ToolCall::Table).to_owned())
+                .await?;
+            Ok(())
+        }
+    }
+
     #[derive(DeriveIden)]
     enum Project {
         Table,
@@ -676,6 +827,21 @@ mod migration {
         Role,
         Content,
         CreatedAt,
+    }
+
+    #[derive(DeriveIden)]
+    enum ToolCall {
+        Table,
+        Id,
+        ChatId,
+        TurnId,
+        ProviderId,
+        Name,
+        Arguments,
+        Result,
+        IsError,
+        CreatedAt,
+        CompletedAt,
     }
 
     #[derive(DeriveIden)]
@@ -966,5 +1132,46 @@ mod tests {
             .map(|m| m.role)
             .collect();
         assert_eq!(got, roles);
+    }
+
+    #[tokio::test]
+    async fn tool_calls_roundtrip_and_upsert_preserves_created_at() {
+        let (_dir, store) = temp_store().await;
+        let chat = sample_chat();
+        store.create_chat(&chat).await.unwrap();
+
+        let created = DateTime::<Utc>::from_timestamp(1_700_000_010, 0).unwrap();
+        let call = ToolCallRecord {
+            id: CallId::new(),
+            chat_id: chat.id,
+            turn_id: TurnId::new(),
+            provider_id: "tu_1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "note.txt"}),
+            result: None,
+            is_error: false,
+            created_at: created,
+            completed_at: None,
+        };
+        store.upsert_tool_call(&call).await.unwrap();
+
+        let completed = DateTime::<Utc>::from_timestamp(1_700_000_011, 0).unwrap();
+        store
+            .upsert_tool_call(&ToolCallRecord {
+                result: Some("hello".into()),
+                is_error: false,
+                created_at: Utc::now(), // must not overwrite the original
+                completed_at: Some(completed),
+                ..call.clone()
+            })
+            .await
+            .unwrap();
+
+        let listed = store.list_tool_calls(chat.id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].created_at, created);
+        assert_eq!(listed[0].completed_at, Some(completed));
+        assert_eq!(listed[0].result.as_deref(), Some("hello"));
+        assert_eq!(listed[0].arguments, serde_json::json!({"path": "note.txt"}));
     }
 }

@@ -45,7 +45,7 @@ pub use event::{AgentEvent, SequencedEvent};
 pub use id::{CallId, ChatId, MessageId, ProjectId, StepId, TurnId};
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
-pub use model::{Chat, Message, Project, Role};
+pub use model::{Chat, Message, Project, Role, ToolCallRecord};
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
     Usage,

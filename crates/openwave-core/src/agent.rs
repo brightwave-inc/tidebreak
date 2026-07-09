@@ -12,8 +12,8 @@
 //! - tool calls run **sequentially** (concurrency for independent calls later);
 //! - approval is **auto** for `ReadOnly`/`Workspace`; `Sensitive` parks via an
 //!   [`ApprovalGate`] until approve/reject (standing grants / auto-judge later);
-//! - cross-turn context is the stored text messages (structured tool-call
-//!   persistence + context summarization come later).
+//! - cross-turn context rebuilds text messages plus structured tool-call rows
+//!   (context summarization comes later).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use crate::cancel::CancelToken;
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::id::{CallId, MessageId, TurnId};
-use crate::model::{Chat, Message, Role};
+use crate::model::{Chat, Message, Role, ToolCallRecord};
 use crate::provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, StopReason, Usage,
 };
@@ -325,11 +325,28 @@ impl Agent {
                     .await?;
             }
             for call in &calls {
+                let args = parse_args(&call.args);
                 blocks.push(ContentBlock::ToolUse {
                     id: call.provider_id.clone(),
                     name: call.name.clone(),
-                    input: parse_args(&call.args),
+                    input: args.clone(),
                 });
+                // Persist the call as soon as args are known so a crash mid-tool
+                // still leaves a reconstructable ToolUse on the next turn.
+                self.store
+                    .upsert_tool_call(&ToolCallRecord {
+                        id: call.call_id,
+                        chat_id: chat.id,
+                        turn_id,
+                        provider_id: call.provider_id.clone(),
+                        name: call.name.clone(),
+                        arguments: args,
+                        result: None,
+                        is_error: false,
+                        created_at: Utc::now(),
+                        completed_at: None,
+                    })
+                    .await?;
             }
             if !blocks.is_empty() {
                 transcript.push(ChatMessage {
@@ -382,7 +399,19 @@ impl Agent {
                     call_id: call.call_id,
                     output: output.clone(),
                 });
-                self.persist(chat.id, turn_id, Role::Tool, &output.content)
+                self.store
+                    .upsert_tool_call(&ToolCallRecord {
+                        id: call.call_id,
+                        chat_id: chat.id,
+                        turn_id,
+                        provider_id: call.provider_id.clone(),
+                        name: call.name.clone(),
+                        arguments: parse_args(&call.args),
+                        result: Some(output.content.clone()),
+                        is_error: output.is_error,
+                        created_at: Utc::now(),
+                        completed_at: Some(Utc::now()),
+                    })
                     .await?;
                 results.push(ContentBlock::ToolResult {
                     tool_use_id: call.provider_id.clone(),
@@ -543,13 +572,155 @@ impl Agent {
     }
 
     async fn load_transcript(&self, chat_id: crate::id::ChatId) -> Result<Vec<ChatMessage>> {
-        Ok(self
-            .store
-            .list_messages(chat_id)
-            .await?
-            .into_iter()
-            .map(|message| ChatMessage::text(message.role, message.content))
-            .collect())
+        let messages = self.store.list_messages(chat_id).await?;
+        let tool_calls = self.store.list_tool_calls(chat_id).await?;
+        Ok(rebuild_transcript(&messages, &tool_calls))
+    }
+}
+
+/// Merge text messages and structured tool-call rows into the provider transcript.
+///
+/// Tool calls are partitioned into *batches*: a new batch starts when a call's
+/// `created_at` is at or after the previous batch's latest `completed_at`. That
+/// matches the agent loop (upsert all args for a model step, then complete them,
+/// then the next model step). Batches that fall after an assistant text message
+/// and before the next message attach as `ToolUse` on that assistant; otherwise
+/// they become a tool-only assistant step. `ToolResult` blocks follow as a user
+/// message. Legacy `Role::Tool` rows are ignored.
+fn rebuild_transcript(messages: &[Message], tool_calls: &[ToolCallRecord]) -> Vec<ChatMessage> {
+    let messages: Vec<&Message> = messages
+        .iter()
+        .filter(|message| message.role != Role::Tool)
+        .collect();
+    let batches = batch_tool_calls(tool_calls);
+    let mut batch_i = 0;
+    let mut out: Vec<ChatMessage> = Vec::new();
+
+    for (i, message) in messages.iter().enumerate() {
+        // Batches that started before this message are prior tool-only steps.
+        while batch_i < batches.len() && batches[batch_i][0].created_at < message.created_at {
+            push_tool_batch(&mut out, &batches[batch_i], None);
+            batch_i += 1;
+        }
+
+        if message.role == Role::Assistant {
+            let next_ts = messages.get(i + 1).map(|m| m.created_at);
+            let text = if message.content.is_empty() {
+                None
+            } else {
+                Some(message.content.as_str())
+            };
+            // Same model step: tools upserted right after the assistant text.
+            if batch_i < batches.len()
+                && next_ts.is_none_or(|end| batches[batch_i][0].created_at < end)
+            {
+                push_tool_batch(&mut out, &batches[batch_i], text);
+                batch_i += 1;
+                while batch_i < batches.len()
+                    && next_ts.is_none_or(|end| batches[batch_i][0].created_at < end)
+                {
+                    push_tool_batch(&mut out, &batches[batch_i], None);
+                    batch_i += 1;
+                }
+            } else if let Some(text) = text {
+                out.push(ChatMessage::text(Role::Assistant, text.to_string()));
+            }
+        } else {
+            out.push(ChatMessage::text(message.role, message.content.clone()));
+            // Tool-only steps between this message and the next non-assistant
+            // (e.g. user → tools → user steer). If the next message is
+            // assistant, that branch claims the batch instead.
+            let next_ts = messages.get(i + 1).map(|m| m.created_at);
+            let next_is_assistant = messages
+                .get(i + 1)
+                .is_some_and(|m| m.role == Role::Assistant);
+            if !next_is_assistant {
+                while batch_i < batches.len()
+                    && next_ts.is_none_or(|end| batches[batch_i][0].created_at < end)
+                {
+                    push_tool_batch(&mut out, &batches[batch_i], None);
+                    batch_i += 1;
+                }
+            }
+        }
+    }
+
+    while batch_i < batches.len() {
+        push_tool_batch(&mut out, &batches[batch_i], None);
+        batch_i += 1;
+    }
+
+    out
+}
+
+/// Partition calls into per-model-step batches (see [`rebuild_transcript`]).
+fn batch_tool_calls(tool_calls: &[ToolCallRecord]) -> Vec<Vec<&ToolCallRecord>> {
+    let mut batches: Vec<Vec<&ToolCallRecord>> = Vec::new();
+    let mut current: Vec<&ToolCallRecord> = Vec::new();
+    let mut batch_done_at: Option<chrono::DateTime<Utc>> = None;
+
+    for call in tool_calls {
+        if let Some(done) = batch_done_at {
+            if call.created_at >= done {
+                batches.push(std::mem::take(&mut current));
+                batch_done_at = None;
+            }
+        }
+        current.push(call);
+        if let Some(completed) = call.completed_at {
+            batch_done_at = Some(match batch_done_at {
+                Some(done) => done.max(completed),
+                None => completed,
+            });
+        }
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
+fn push_tool_batch(
+    out: &mut Vec<ChatMessage>,
+    batch: &[&ToolCallRecord],
+    assistant_text: Option<&str>,
+) {
+    let mut blocks: Vec<ContentBlock> = Vec::new();
+    if let Some(text) = assistant_text.filter(|t| !t.is_empty()) {
+        blocks.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
+    }
+    for call in batch {
+        blocks.push(ContentBlock::ToolUse {
+            id: call.provider_id.clone(),
+            name: call.name.clone(),
+            input: call.arguments.clone(),
+        });
+    }
+    if !blocks.is_empty() {
+        out.push(ChatMessage {
+            role: Role::Assistant,
+            content: blocks,
+        });
+    }
+    let results: Vec<ContentBlock> = batch
+        .iter()
+        .filter_map(|call| {
+            call.result
+                .as_ref()
+                .map(|content| ContentBlock::ToolResult {
+                    tool_use_id: call.provider_id.clone(),
+                    content: content.clone(),
+                    is_error: call.is_error,
+                })
+        })
+        .collect();
+    if !results.is_empty() {
+        out.push(ChatMessage {
+            role: Role::User,
+            content: results,
+        });
     }
 }
 
@@ -584,8 +755,10 @@ fn parse_args(raw: &str) -> Value {
 #[cfg(all(test, feature = "sqlite", feature = "tools"))]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use chrono::DateTime;
     use futures::channel::mpsc::unbounded;
     use futures::stream::{self, BoxStream};
 
@@ -714,10 +887,17 @@ mod tests {
             Some((8, 6))
         );
 
-        // User input, the tool result, and the final answer were persisted.
+        // User input and the final answer are text messages; the tool call is
+        // a structured row (not Role::Tool).
         let stored = store.list_messages(chat.id).await.unwrap();
         let roles: Vec<Role> = stored.iter().map(|m| m.role).collect();
-        assert_eq!(roles, vec![Role::User, Role::Tool, Role::Assistant]);
+        assert_eq!(roles, vec![Role::User, Role::Assistant]);
+        let calls = store.list_tool_calls(chat.id).await.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].result.as_deref(), Some("hello from disk"));
+        assert!(!calls[0].is_error);
+        assert!(calls[0].completed_at.is_some());
     }
 
     #[tokio::test]
@@ -1395,5 +1575,252 @@ mod tests {
             e,
             AgentEvent::ToolCallCompleted { output, .. } if output.is_error
         )));
+    }
+
+    #[test]
+    fn rebuild_attaches_tools_to_assistant_text() {
+        let turn = TurnId::new();
+        let chat = ChatId::new();
+        let t0 = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
+        let t1 = DateTime::<Utc>::from_timestamp(1_001, 0).unwrap();
+        let t2 = DateTime::<Utc>::from_timestamp(1_002, 0).unwrap();
+        let messages = vec![
+            Message {
+                id: MessageId::new(),
+                chat_id: chat,
+                turn_id: turn,
+                role: Role::User,
+                content: "read it".into(),
+                created_at: t0,
+            },
+            Message {
+                id: MessageId::new(),
+                chat_id: chat,
+                turn_id: turn,
+                role: Role::Assistant,
+                content: "looking…".into(),
+                created_at: t1,
+            },
+        ];
+        let calls = vec![ToolCallRecord {
+            id: CallId::new(),
+            chat_id: chat,
+            turn_id: turn,
+            provider_id: "tu_1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "a"}),
+            result: Some("ok".into()),
+            is_error: false,
+            created_at: t2,
+            completed_at: Some(DateTime::<Utc>::from_timestamp(1_003, 0).unwrap()),
+        }];
+        let rebuilt = rebuild_transcript(&messages, &calls);
+        assert_eq!(rebuilt.len(), 3);
+        assert_eq!(rebuilt[0].role, Role::User);
+        assert!(matches!(
+            &rebuilt[1].content[..],
+            [
+                ContentBlock::Text { text },
+                ContentBlock::ToolUse { id, name, .. }
+            ] if text == "looking…" && id == "tu_1" && name == "read_file"
+        ));
+        assert!(matches!(
+            &rebuilt[2].content[..],
+            [ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error: false
+            }] if tool_use_id == "tu_1" && content == "ok"
+        ));
+    }
+
+    #[test]
+    fn rebuild_emits_tool_only_step_before_final_text() {
+        let turn = TurnId::new();
+        let chat = ChatId::new();
+        let t0 = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
+        let t1 = DateTime::<Utc>::from_timestamp(1_001, 0).unwrap();
+        let t2 = DateTime::<Utc>::from_timestamp(1_002, 0).unwrap();
+        let messages = vec![
+            Message {
+                id: MessageId::new(),
+                chat_id: chat,
+                turn_id: turn,
+                role: Role::User,
+                content: "go".into(),
+                created_at: t0,
+            },
+            Message {
+                id: MessageId::new(),
+                chat_id: chat,
+                turn_id: turn,
+                role: Role::Assistant,
+                content: "done".into(),
+                created_at: t2,
+            },
+        ];
+        let calls = vec![ToolCallRecord {
+            id: CallId::new(),
+            chat_id: chat,
+            turn_id: turn,
+            provider_id: "tu_1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({}),
+            result: Some("data".into()),
+            is_error: false,
+            created_at: t1,
+            completed_at: Some(t1),
+        }];
+        let rebuilt = rebuild_transcript(&messages, &calls);
+        assert_eq!(rebuilt.len(), 4);
+        assert_eq!(rebuilt[0].role, Role::User);
+        assert!(matches!(
+            &rebuilt[1].content[..],
+            [ContentBlock::ToolUse { .. }]
+        ));
+        assert!(matches!(
+            &rebuilt[2].content[..],
+            [ContentBlock::ToolResult { .. }]
+        ));
+        assert_eq!(rebuilt[3].role, Role::Assistant);
+    }
+
+    #[test]
+    fn rebuild_skips_legacy_tool_role_rows() {
+        let turn = TurnId::new();
+        let chat = ChatId::new();
+        let messages = vec![
+            Message {
+                id: MessageId::new(),
+                chat_id: chat,
+                turn_id: turn,
+                role: Role::User,
+                content: "hi".into(),
+                created_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
+            },
+            Message {
+                id: MessageId::new(),
+                chat_id: chat,
+                turn_id: turn,
+                role: Role::Tool,
+                content: "legacy".into(),
+                created_at: DateTime::<Utc>::from_timestamp(2, 0).unwrap(),
+            },
+            Message {
+                id: MessageId::new(),
+                chat_id: chat,
+                turn_id: turn,
+                role: Role::Assistant,
+                content: "bye".into(),
+                created_at: DateTime::<Utc>::from_timestamp(3, 0).unwrap(),
+            },
+        ];
+        let rebuilt = rebuild_transcript(&messages, &[]);
+        assert_eq!(rebuilt.len(), 2);
+        assert_eq!(rebuilt[0].role, Role::User);
+        assert_eq!(rebuilt[1].role, Role::Assistant);
+    }
+
+    #[tokio::test]
+    async fn second_turn_rebuilds_prior_tool_calls_into_transcript() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("note.txt"), "hello from disk").unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            workspace_dir: workspace.path().to_path_buf(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        // Turn 1: tool call then finish (FakeProvider).
+        let agent = Agent::new(
+            Arc::new(FakeProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(ReadFile))),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        );
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "read note.txt", &tx).await.unwrap();
+        drop(tx);
+        let _: Vec<AgentEvent> = rx.collect().await;
+
+        // Turn 2: provider that records the request so we can assert ToolUse/Result
+        // blocks were rebuilt from the store.
+        let seen: Arc<Mutex<Vec<ChatMessage>>> = Arc::new(Mutex::new(Vec::new()));
+        struct CaptureProvider {
+            seen: Arc<Mutex<Vec<ChatMessage>>>,
+        }
+        #[async_trait]
+        impl ModelProvider for CaptureProvider {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("capture")
+            }
+            async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+                *self.seen.lock().unwrap() = req.messages;
+                Ok(stream::iter(vec![
+                    ProviderEvent::TextDelta { text: "ok".into() },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ])
+                .boxed())
+            }
+        }
+        let agent = Agent::new(
+            Arc::new(CaptureProvider { seen: seen.clone() }),
+            Arc::new(ToolRegistry::new()),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        );
+        let (tx, rx) = unbounded();
+        agent
+            .run_turn(&chat, "what did you find?", &tx)
+            .await
+            .unwrap();
+        drop(tx);
+        let _: Vec<AgentEvent> = rx.collect().await;
+
+        let messages = seen.lock().unwrap().clone();
+        assert!(
+            messages.iter().any(|m| {
+                m.role == Role::Assistant
+                    && m.content.iter().any(
+                        |b| matches!(b, ContentBlock::ToolUse { name, .. } if name == "read_file"),
+                    )
+            }),
+            "expected rebuilt ToolUse in cross-turn transcript: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| {
+                m.role == Role::User
+                    && m.content.iter().any(|b| {
+                        matches!(
+                            b,
+                            ContentBlock::ToolResult { content, .. } if content == "hello from disk"
+                        )
+                    })
+            }),
+            "expected rebuilt ToolResult in cross-turn transcript: {messages:?}"
+        );
     }
 }
