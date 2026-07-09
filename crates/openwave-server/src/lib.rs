@@ -654,6 +654,28 @@ mod tests {
         assert_eq!(chat.model.as_deref(), Some("claude-x"));
     }
 
+    #[tokio::test]
+    async fn chat_created_with_empty_model_is_rejected() {
+        let (router, token, _store, _dir) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chats")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"workspace_dir": "/tmp/ws", "model": ""}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, "bad_request");
+    }
+
     /// PATCH a chat's model with a raw JSON body, returning the response.
     async fn patch_chat(
         router: &Router,

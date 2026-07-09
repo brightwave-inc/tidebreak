@@ -380,8 +380,14 @@ pub async fn post_message(
 
     // Model resolution order: the chat's own selection wins, then the global
     // default setting (PUT /settings), then the boot default in agent_config.
+    // Short-circuit: only read the setting when the chat has no model of its own,
+    // so a chat with a model doesn't pay (or fail on) the settings lookup.
     let mut agent_config = state.agent_config.clone();
-    if let Some(model) = chat.model.clone().or(read_model(&*state.store).await?) {
+    let model = match chat.model.clone() {
+        Some(model) => Some(model),
+        None => read_model(&*state.store).await?,
+    };
+    if let Some(model) = model {
         agent_config.model = model;
     }
     // Resolve the provider from the currently-configured key, so a key set via
