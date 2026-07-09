@@ -817,8 +817,21 @@ mod tests {
             .set_secret(resolver::ANTHROPIC_API_KEY, "sk-test")
             .await
             .unwrap();
-        let resolved = resolver::KeyedResolver::new(secrets).resolve().await;
+        let resolver = resolver::KeyedResolver::new(secrets.clone());
+        let resolved = resolver.resolve().await;
         assert_eq!(resolved.id().0, "anthropic");
+
+        // Same key ⇒ the cached provider is reused (not rebuilt every turn).
+        let again = resolver.resolve().await;
+        assert!(Arc::ptr_eq(&resolved, &again));
+
+        // Changing the key rebuilds it.
+        secrets
+            .set_secret(resolver::ANTHROPIC_API_KEY, "sk-different")
+            .await
+            .unwrap();
+        let rebuilt = resolver.resolve().await;
+        assert!(!Arc::ptr_eq(&resolved, &rebuilt));
     }
 
     #[tokio::test(flavor = "multi_thread")]

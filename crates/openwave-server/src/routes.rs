@@ -115,11 +115,18 @@ async fn has_api_key(secrets: &dyn SecretProvider) -> bool {
 }
 
 /// Body of `PUT /settings/api-key`.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ApiKey {
     /// The provider API key to store. Written to the `SecretProvider` (the OS
     /// keychain on desktop), never to the database, and never read back out.
     pub api_key: String,
+}
+
+// Redact the key so it can't leak through a `{:?}` (logging, error context, …).
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKey").field("api_key", &"***").finish()
+    }
 }
 
 /// `PUT /settings/api-key` — store the model provider's API key. `204 No Content`.
@@ -138,6 +145,11 @@ pub async fn put_api_key(
 }
 
 /// `DELETE /settings/api-key` — remove the stored API key. `204 No Content`.
+///
+/// Clears only the stored key. If the daemon was launched with an
+/// `ANTHROPIC_API_KEY` in its environment, that fallback still applies — so
+/// `has_api_key` may stay `true` and turns keep resolving a provider after a
+/// delete. The environment is a deploy-time default the API doesn't override.
 pub async fn delete_api_key(State(state): State<AppState>) -> Result<StatusCode, ServerError> {
     state.secrets.delete_secret(ANTHROPIC_API_KEY).await?;
     Ok(StatusCode::NO_CONTENT)
