@@ -35,9 +35,9 @@ Present today:
 
 | Module | What it is |
 | --- | --- |
-| `id` | Typed identifiers (`SessionId`, `TurnId`, `CallId`, …) — newtypes so the compiler stops you mixing them up. |
+| `id` | Typed identifiers (`ChatId`, `TurnId`, `CallId`, …) — newtypes so the compiler stops you mixing them up. |
 | `error` | The crate-wide `AgentError` + `Result`. |
-| `model` | The persisted conversation model (`Session`, `Message`, `Role`). |
+| `model` | The persisted conversation model (`Chat`, `Message`, `Role`). |
 | `tool` | The tool contract (`Tool`, `ToolSpec`, `ToolOutput`, `ToolCtx`, `ApprovalClass`). |
 | `provider` | The model-provider contract (`ModelProvider`, `ChatRequest`, `ProviderEvent`, `Usage`). |
 

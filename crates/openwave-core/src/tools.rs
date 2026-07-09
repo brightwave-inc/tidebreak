@@ -1,7 +1,7 @@
 //! Built-in filesystem tools: `read_file`, `list_dir`, `write_file`.
 //!
 //! These are the M0 Workspace-class tools. Every path is resolved **relative to
-//! the session's workspace directory** and may not escape it (no absolute paths,
+//! the chat's workspace directory** and may not escape it (no absolute paths,
 //! no `..`); there is no sandbox yet, so that lexical confinement is the only
 //! guard. Failures the model should see and react to (missing file, bad path)
 //! come back as [`ToolOutput::error`], not `Err` — `Err` is reserved for
@@ -248,11 +248,11 @@ impl Tool for WriteFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::id::SessionId;
+    use crate::id::ChatId;
 
     fn ctx(dir: &std::path::Path) -> ToolCtx {
         ToolCtx {
-            session_id: SessionId::new(),
+            chat_id: ChatId::new(),
             workspace_dir: dir.to_path_buf(),
         }
     }

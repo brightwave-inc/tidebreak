@@ -3,7 +3,7 @@
 //! Three traits, deliberately backend-agnostic so a profile can wire different
 //! implementations without touching callers:
 //!
-//! - [`Store`] — durable metadata/state (sessions, messages, settings). The
+//! - [`Store`] — durable metadata/state (chats, messages, settings). The
 //!   default impl is SQLite; the same trait maps to Postgres for self-host.
 //! - [`SecretProvider`] — credentials (model API keys, connection tokens). These
 //!   live in the OS keychain (desktop) or a KMS/Vault (server) and are **never**
@@ -20,8 +20,8 @@ use serde_json::Value;
 
 use crate::error::Result;
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::SessionId;
-use crate::model::{Message, Session};
+use crate::id::ChatId;
+use crate::model::{Chat, Message};
 
 /// Durable metadata and conversation state.
 ///
@@ -29,20 +29,20 @@ use crate::model::{Message, Session};
 /// held behind `Arc<dyn Store>`, so this trait stays object-safe.
 #[async_trait]
 pub trait Store: Send + Sync {
-    /// Persist a new session.
-    async fn create_session(&self, session: &Session) -> Result<()>;
+    /// Persist a new chat.
+    async fn create_chat(&self, chat: &Chat) -> Result<()>;
 
-    /// Fetch a session by id, or `None` if it doesn't exist.
-    async fn get_session(&self, id: SessionId) -> Result<Option<Session>>;
+    /// Fetch a chat by id, or `None` if it doesn't exist.
+    async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>>;
 
-    /// List sessions, most-recently-created first.
-    async fn list_sessions(&self) -> Result<Vec<Session>>;
+    /// List chats, most-recently-created first.
+    async fn list_chats(&self) -> Result<Vec<Chat>>;
 
-    /// Append a message to its session.
+    /// Append a message to its chat.
     async fn append_message(&self, message: &Message) -> Result<()>;
 
-    /// List a session's messages in creation order.
-    async fn list_messages(&self, session_id: SessionId) -> Result<Vec<Message>>;
+    /// List a chat's messages in creation order.
+    async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>>;
 
     /// Read a setting (profile, model prefs, approval policy), or `None`.
     async fn get_setting(&self, key: &str) -> Result<Option<Value>>;
@@ -50,14 +50,14 @@ pub trait Store: Send + Sync {
     /// Write a setting.
     async fn set_setting(&self, key: &str, value: &Value) -> Result<()>;
 
-    /// Append an event to a session's journal, returning its assigned sequence
-    /// number. Sequence numbers are per-session and monotonic (starting at 1),
+    /// Append an event to a chat's journal, returning its assigned sequence
+    /// number. Sequence numbers are per-chat and monotonic (starting at 1),
     /// so a client can replay the stream with [`list_events`](Self::list_events).
-    async fn append_event(&self, session_id: SessionId, event: &AgentEvent) -> Result<i64>;
+    async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64>;
 
-    /// List a session's journaled events with `seq` greater than `after`, in
+    /// List a chat's journaled events with `seq` greater than `after`, in
     /// sequence order. Pass `0` to replay from the start.
-    async fn list_events(&self, session_id: SessionId, after: i64) -> Result<Vec<SequencedEvent>>;
+    async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>>;
 }
 
 /// Credential custody: secrets keyed by a stable reference string (e.g.
@@ -102,30 +102,27 @@ mod tests {
     /// behind `Arc<dyn Store>`, and exercises the signatures.
     #[derive(Default)]
     struct MemStore {
-        sessions: Mutex<HashMap<SessionId, Session>>,
+        chats: Mutex<HashMap<ChatId, Chat>>,
         settings: Mutex<HashMap<String, Value>>,
-        events: Mutex<Vec<(SessionId, SequencedEvent)>>,
+        events: Mutex<Vec<(ChatId, SequencedEvent)>>,
     }
 
     #[async_trait]
     impl Store for MemStore {
-        async fn create_session(&self, session: &Session) -> Result<()> {
-            self.sessions
-                .lock()
-                .unwrap()
-                .insert(session.id, session.clone());
+        async fn create_chat(&self, chat: &Chat) -> Result<()> {
+            self.chats.lock().unwrap().insert(chat.id, chat.clone());
             Ok(())
         }
-        async fn get_session(&self, id: SessionId) -> Result<Option<Session>> {
-            Ok(self.sessions.lock().unwrap().get(&id).cloned())
+        async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
+            Ok(self.chats.lock().unwrap().get(&id).cloned())
         }
-        async fn list_sessions(&self) -> Result<Vec<Session>> {
-            Ok(self.sessions.lock().unwrap().values().cloned().collect())
+        async fn list_chats(&self) -> Result<Vec<Chat>> {
+            Ok(self.chats.lock().unwrap().values().cloned().collect())
         }
         async fn append_message(&self, _message: &Message) -> Result<()> {
             Ok(())
         }
-        async fn list_messages(&self, _session_id: SessionId) -> Result<Vec<Message>> {
+        async fn list_messages(&self, _chat_id: ChatId) -> Result<Vec<Message>> {
             Ok(vec![])
         }
         async fn get_setting(&self, key: &str) -> Result<Option<Value>> {
@@ -138,11 +135,11 @@ mod tests {
                 .insert(key.to_string(), value.clone());
             Ok(())
         }
-        async fn append_event(&self, session_id: SessionId, event: &AgentEvent) -> Result<i64> {
+        async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64> {
             let mut events = self.events.lock().unwrap();
-            let seq = events.iter().filter(|(id, _)| *id == session_id).count() as i64 + 1;
+            let seq = events.iter().filter(|(id, _)| *id == chat_id).count() as i64 + 1;
             events.push((
-                session_id,
+                chat_id,
                 SequencedEvent {
                     seq,
                     event: event.clone(),
@@ -150,17 +147,13 @@ mod tests {
             ));
             Ok(seq)
         }
-        async fn list_events(
-            &self,
-            session_id: SessionId,
-            after: i64,
-        ) -> Result<Vec<SequencedEvent>> {
+        async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
             Ok(self
                 .events
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(id, e)| *id == session_id && e.seq > after)
+                .filter(|(id, e)| *id == chat_id && e.seq > after)
                 .map(|(_, e)| e.clone())
                 .collect())
         }
@@ -169,15 +162,15 @@ mod tests {
     #[test]
     fn store_is_object_safe_and_roundtrips() {
         let store: Arc<dyn Store> = Arc::new(MemStore::default());
-        let session = Session {
-            id: SessionId::new(),
+        let chat = Chat {
+            id: ChatId::new(),
             title: None,
             workspace_dir: "/tmp/ws".into(),
             created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
         };
-        block_on(store.create_session(&session)).unwrap();
-        let fetched = block_on(store.get_session(session.id)).unwrap();
-        assert_eq!(fetched.as_ref(), Some(&session));
+        block_on(store.create_chat(&chat)).unwrap();
+        let fetched = block_on(store.get_chat(chat.id)).unwrap();
+        assert_eq!(fetched.as_ref(), Some(&chat));
 
         block_on(store.set_setting("model", &serde_json::json!("claude"))).unwrap();
         assert_eq!(

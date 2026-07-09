@@ -20,8 +20,8 @@ use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{MessageId, SessionId, TurnId};
-use crate::model::{Message, Role, Session};
+use crate::id::{ChatId, MessageId, TurnId};
+use crate::model::{Chat, Message, Role};
 use crate::storage::Store;
 
 /// Map any SeaORM failure into an [`AgentError::Store`].
@@ -41,7 +41,7 @@ impl DbStore {
     /// `sqlite:///path/openwave.db?mode=rwc`).
     pub async fn connect(url: &str) -> Result<Self> {
         let conn = Database::connect(url).await.map_err(store_err)?;
-        // WAL lets a reader (e.g. the UI listing sessions) proceed concurrently
+        // WAL lets a reader (e.g. the UI listing chats) proceed concurrently
         // with a writer (a turn appending messages). SQLite-only; it's a
         // persistent, file-level setting, so running it once at connect suffices.
         if conn.get_database_backend() == sea_orm::DatabaseBackend::Sqlite {
@@ -58,12 +58,12 @@ impl DbStore {
 
 #[async_trait]
 impl Store for DbStore {
-    async fn create_session(&self, session: &Session) -> Result<()> {
-        entities::session::ActiveModel {
-            id: Set(session.id.0),
-            title: Set(session.title.clone()),
-            workspace_dir: Set(session.workspace_dir.to_string_lossy().into_owned()),
-            created_at: Set(session.created_at),
+    async fn create_chat(&self, chat: &Chat) -> Result<()> {
+        entities::chat::ActiveModel {
+            id: Set(chat.id.0),
+            title: Set(chat.title.clone()),
+            workspace_dir: Set(chat.workspace_dir.to_string_lossy().into_owned()),
+            created_at: Set(chat.created_at),
         }
         .insert(&self.conn)
         .await
@@ -71,29 +71,29 @@ impl Store for DbStore {
         Ok(())
     }
 
-    async fn get_session(&self, id: SessionId) -> Result<Option<Session>> {
-        Ok(entities::session::Entity::find_by_id(id.0)
+    async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
+        Ok(entities::chat::Entity::find_by_id(id.0)
             .one(&self.conn)
             .await
             .map_err(store_err)?
-            .map(session_from_model))
+            .map(chat_from_model))
     }
 
-    async fn list_sessions(&self) -> Result<Vec<Session>> {
-        Ok(entities::session::Entity::find()
-            .order_by_desc(entities::session::Column::CreatedAt)
+    async fn list_chats(&self) -> Result<Vec<Chat>> {
+        Ok(entities::chat::Entity::find()
+            .order_by_desc(entities::chat::Column::CreatedAt)
             .all(&self.conn)
             .await
             .map_err(store_err)?
             .into_iter()
-            .map(session_from_model)
+            .map(chat_from_model)
             .collect())
     }
 
     async fn append_message(&self, message: &Message) -> Result<()> {
         entities::message::ActiveModel {
             id: Set(message.id.0),
-            session_id: Set(message.session_id.0),
+            chat_id: Set(message.chat_id.0),
             turn_id: Set(message.turn_id.0),
             role: Set(role_to_db(message.role).to_string()),
             content: Set(message.content.clone()),
@@ -105,9 +105,9 @@ impl Store for DbStore {
         Ok(())
     }
 
-    async fn list_messages(&self, session_id: SessionId) -> Result<Vec<Message>> {
+    async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>> {
         entities::message::Entity::find()
-            .filter(entities::message::Column::SessionId.eq(session_id.0))
+            .filter(entities::message::Column::ChatId.eq(chat_id.0))
             .order_by_asc(entities::message::Column::CreatedAt)
             .all(&self.conn)
             .await
@@ -142,15 +142,15 @@ impl Store for DbStore {
         Ok(())
     }
 
-    async fn append_event(&self, session_id: SessionId, event: &AgentEvent) -> Result<i64> {
-        // Next seq for this session. This assumes a single writer per session —
-        // the server enforces it by allowing only one active turn per session at
+    async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64> {
+        // Next seq for this chat. This assumes a single writer per chat —
+        // the server enforces it by allowing only one active turn per chat at
         // a time (a concurrent message is refused, not queued behind a second
         // writer). Under that invariant read-then-insert is race-free; the
-        // composite (session_id, seq) primary key is the backstop that turns any
+        // composite (chat_id, seq) primary key is the backstop that turns any
         // concurrent double-write into an error, never a silent dup or lost seq.
         let last = entities::event::Entity::find()
-            .filter(entities::event::Column::SessionId.eq(session_id.0))
+            .filter(entities::event::Column::ChatId.eq(chat_id.0))
             .order_by_desc(entities::event::Column::Seq)
             .one(&self.conn)
             .await
@@ -158,7 +158,7 @@ impl Store for DbStore {
         let seq = last.map_or(0, |model| model.seq) + 1;
 
         entities::event::ActiveModel {
-            session_id: Set(session_id.0),
+            chat_id: Set(chat_id.0),
             seq: Set(seq),
             payload: Set(serde_json::to_value(event)?),
             created_at: Set(Utc::now()),
@@ -169,9 +169,9 @@ impl Store for DbStore {
         Ok(seq)
     }
 
-    async fn list_events(&self, session_id: SessionId, after: i64) -> Result<Vec<SequencedEvent>> {
+    async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
         entities::event::Entity::find()
-            .filter(entities::event::Column::SessionId.eq(session_id.0))
+            .filter(entities::event::Column::ChatId.eq(chat_id.0))
             .filter(entities::event::Column::Seq.gt(after))
             .order_by_asc(entities::event::Column::Seq)
             .all(&self.conn)
@@ -188,9 +188,9 @@ impl Store for DbStore {
     }
 }
 
-fn session_from_model(model: entities::session::Model) -> Session {
-    Session {
-        id: SessionId(model.id),
+fn chat_from_model(model: entities::chat::Model) -> Chat {
+    Chat {
+        id: ChatId(model.id),
         title: model.title,
         workspace_dir: PathBuf::from(model.workspace_dir),
         created_at: model.created_at,
@@ -200,7 +200,7 @@ fn session_from_model(model: entities::session::Model) -> Session {
 fn message_from_model(model: entities::message::Model) -> Result<Message> {
     Ok(Message {
         id: MessageId(model.id),
-        session_id: SessionId(model.session_id),
+        chat_id: ChatId(model.chat_id),
         turn_id: TurnId(model.turn_id),
         role: role_from_db(&model.role)?,
         content: model.content,
@@ -229,14 +229,14 @@ fn role_from_db(text: &str) -> Result<Role> {
 }
 
 /// SeaORM entity models. Kept internal — the public `Store` API speaks the domain
-/// types (`Session`, `Message`), never these, so the ORM never leaks into the
+/// types (`Chat`, `Message`), never these, so the ORM never leaks into the
 /// crate's contract.
 mod entities {
-    pub mod session {
+    pub mod chat {
         use sea_orm::entity::prelude::*;
 
         #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-        #[sea_orm(table_name = "session")]
+        #[sea_orm(table_name = "chat")]
         pub struct Model {
             #[sea_orm(primary_key, auto_increment = false)]
             pub id: Uuid,
@@ -259,7 +259,7 @@ mod entities {
         pub struct Model {
             #[sea_orm(primary_key, auto_increment = false)]
             pub id: Uuid,
-            pub session_id: Uuid,
+            pub chat_id: Uuid,
             pub turn_id: Uuid,
             pub role: String,
             pub content: String,
@@ -294,14 +294,14 @@ mod entities {
     pub mod event {
         use sea_orm::entity::prelude::*;
 
-        // Composite primary key `(session_id, seq)`: `seq` is monotonic *per
-        // session*, and the pair both enforces uniqueness and indexes the
-        // "this session's events after a cursor" replay query.
+        // Composite primary key `(chat_id, seq)`: `seq` is monotonic *per
+        // chat*, and the pair both enforces uniqueness and indexes the
+        // "this chat's events after a cursor" replay query.
         #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
         #[sea_orm(table_name = "event")]
         pub struct Model {
             #[sea_orm(primary_key, auto_increment = false)]
-            pub session_id: Uuid,
+            pub chat_id: Uuid,
             #[sea_orm(primary_key, auto_increment = false)]
             pub seq: i64,
             #[sea_orm(column_type = "JsonBinary")]
@@ -344,13 +344,13 @@ mod migration {
             manager
                 .create_table(
                     Table::create()
-                        .table(Session::Table)
+                        .table(Chat::Table)
                         .if_not_exists()
-                        .col(ColumnDef::new(Session::Id).uuid().not_null().primary_key())
-                        .col(ColumnDef::new(Session::Title).text())
-                        .col(ColumnDef::new(Session::WorkspaceDir).text().not_null())
+                        .col(ColumnDef::new(Chat::Id).uuid().not_null().primary_key())
+                        .col(ColumnDef::new(Chat::Title).text())
+                        .col(ColumnDef::new(Chat::WorkspaceDir).text().not_null())
                         .col(
-                            ColumnDef::new(Session::CreatedAt)
+                            ColumnDef::new(Chat::CreatedAt)
                                 .timestamp_with_time_zone()
                                 .not_null(),
                         )
@@ -364,7 +364,7 @@ mod migration {
                         .table(Message::Table)
                         .if_not_exists()
                         .col(ColumnDef::new(Message::Id).uuid().not_null().primary_key())
-                        .col(ColumnDef::new(Message::SessionId).uuid().not_null())
+                        .col(ColumnDef::new(Message::ChatId).uuid().not_null())
                         .col(ColumnDef::new(Message::TurnId).uuid().not_null())
                         .col(ColumnDef::new(Message::Role).text().not_null())
                         .col(ColumnDef::new(Message::Content).text().not_null())
@@ -375,9 +375,9 @@ mod migration {
                         )
                         .foreign_key(
                             ForeignKey::create()
-                                .name("fk_message_session")
-                                .from(Message::Table, Message::SessionId)
-                                .to(Session::Table, Session::Id),
+                                .name("fk_message_chat")
+                                .from(Message::Table, Message::ChatId)
+                                .to(Chat::Table, Chat::Id),
                         )
                         .to_owned(),
                 )
@@ -386,9 +386,9 @@ mod migration {
             manager
                 .create_index(
                     Index::create()
-                        .name("idx_message_session")
+                        .name("idx_message_chat")
                         .table(Message::Table)
-                        .col(Message::SessionId)
+                        .col(Message::ChatId)
                         .col(Message::CreatedAt)
                         .to_owned(),
                 )
@@ -416,13 +416,13 @@ mod migration {
                 .drop_table(Table::drop().table(Setting::Table).to_owned())
                 .await?;
             manager
-                .drop_table(Table::drop().table(Session::Table).to_owned())
+                .drop_table(Table::drop().table(Chat::Table).to_owned())
                 .await?;
             Ok(())
         }
     }
 
-    /// Adds the per-session event journal that clients replay from on connect.
+    /// Adds the per-chat event journal that clients replay from on connect.
     struct AddEventJournal;
 
     impl MigrationName for AddEventJournal {
@@ -439,7 +439,7 @@ mod migration {
                     Table::create()
                         .table(Event::Table)
                         .if_not_exists()
-                        .col(ColumnDef::new(Event::SessionId).uuid().not_null())
+                        .col(ColumnDef::new(Event::ChatId).uuid().not_null())
                         .col(ColumnDef::new(Event::Seq).big_integer().not_null())
                         .col(ColumnDef::new(Event::Payload).json_binary().not_null())
                         .col(
@@ -447,12 +447,12 @@ mod migration {
                                 .timestamp_with_time_zone()
                                 .not_null(),
                         )
-                        .primary_key(Index::create().col(Event::SessionId).col(Event::Seq))
+                        .primary_key(Index::create().col(Event::ChatId).col(Event::Seq))
                         .foreign_key(
                             ForeignKey::create()
-                                .name("fk_event_session")
-                                .from(Event::Table, Event::SessionId)
-                                .to(Session::Table, Session::Id),
+                                .name("fk_event_chat")
+                                .from(Event::Table, Event::ChatId)
+                                .to(Chat::Table, Chat::Id),
                         )
                         .to_owned(),
                 )
@@ -469,7 +469,7 @@ mod migration {
     }
 
     #[derive(DeriveIden)]
-    enum Session {
+    enum Chat {
         Table,
         Id,
         Title,
@@ -481,7 +481,7 @@ mod migration {
     enum Message {
         Table,
         Id,
-        SessionId,
+        ChatId,
         TurnId,
         Role,
         Content,
@@ -498,7 +498,7 @@ mod migration {
     #[derive(DeriveIden)]
     enum Event {
         Table,
-        SessionId,
+        ChatId,
         Seq,
         Payload,
         CreatedAt,
@@ -517,9 +517,9 @@ mod tests {
         (dir, store)
     }
 
-    fn sample_session() -> Session {
-        Session {
-            id: SessionId::new(),
+    fn sample_chat() -> Chat {
+        Chat {
+            id: ChatId::new(),
             title: Some("hello".into()),
             workspace_dir: PathBuf::from("/tmp/ws"),
             created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
@@ -527,28 +527,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_and_messages_roundtrip() {
+    async fn chats_and_messages_roundtrip() {
         let (_dir, store) = temp_store().await;
-        let session = sample_session();
-        store.create_session(&session).await.unwrap();
+        let chat = sample_chat();
+        store.create_chat(&chat).await.unwrap();
 
-        assert_eq!(
-            store.get_session(session.id).await.unwrap().as_ref(),
-            Some(&session)
-        );
-        assert_eq!(store.list_sessions().await.unwrap(), vec![session.clone()]);
-        assert_eq!(store.get_session(SessionId::new()).await.unwrap(), None);
+        assert_eq!(store.get_chat(chat.id).await.unwrap().as_ref(), Some(&chat));
+        assert_eq!(store.list_chats().await.unwrap(), vec![chat.clone()]);
+        assert_eq!(store.get_chat(ChatId::new()).await.unwrap(), None);
 
         let msg = Message {
             id: MessageId::new(),
-            session_id: session.id,
+            chat_id: chat.id,
             turn_id: TurnId::new(),
             role: Role::User,
             content: "hi there".into(),
             created_at: DateTime::<Utc>::from_timestamp(1_700_000_001, 0).unwrap(),
         };
         store.append_message(&msg).await.unwrap();
-        assert_eq!(store.list_messages(session.id).await.unwrap(), vec![msg]);
+        assert_eq!(store.list_messages(chat.id).await.unwrap(), vec![msg]);
     }
 
     #[tokio::test]
@@ -574,24 +571,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_sessions_is_newest_first_and_messages_oldest_first() {
+    async fn list_chats_is_newest_first_and_messages_oldest_first() {
         let (_dir, store) = temp_store().await;
-        let mut older = sample_session();
+        let mut older = sample_chat();
         older.created_at = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
-        let mut newer = sample_session();
+        let mut newer = sample_chat();
         newer.created_at = DateTime::<Utc>::from_timestamp(2_000, 0).unwrap();
-        store.create_session(&older).await.unwrap();
-        store.create_session(&newer).await.unwrap();
-        // list_sessions is newest-first.
+        store.create_chat(&older).await.unwrap();
+        store.create_chat(&newer).await.unwrap();
+        // list_chats is newest-first.
         assert_eq!(
-            store.list_sessions().await.unwrap(),
+            store.list_chats().await.unwrap(),
             vec![newer.clone(), older.clone()]
         );
 
         // Messages come back oldest-first regardless of insert order.
         let msg = |ts: i64| Message {
             id: MessageId::new(),
-            session_id: newer.id,
+            chat_id: newer.id,
             turn_id: TurnId::new(),
             role: Role::User,
             content: format!("t{ts}"),
@@ -605,14 +602,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_journal_assigns_per_session_seq_and_replays_after_cursor() {
+    async fn event_journal_assigns_per_chat_seq_and_replays_after_cursor() {
         use crate::event::AgentEvent;
         use crate::id::TurnId;
         use crate::provider::{StopReason, Usage};
 
         let (_dir, store) = temp_store().await;
-        let session = sample_session();
-        store.create_session(&session).await.unwrap();
+        let chat = sample_chat();
+        store.create_chat(&chat).await.unwrap();
 
         let started = AgentEvent::TurnStarted {
             turn_id: TurnId::new(),
@@ -621,53 +618,53 @@ mod tests {
             usage: Usage::default(),
             stop_reason: StopReason::EndTurn,
         };
-        assert_eq!(store.append_event(session.id, &started).await.unwrap(), 1);
-        assert_eq!(store.append_event(session.id, &completed).await.unwrap(), 2);
+        assert_eq!(store.append_event(chat.id, &started).await.unwrap(), 1);
+        assert_eq!(store.append_event(chat.id, &completed).await.unwrap(), 2);
 
         // From the start: both events, in order, with their seq.
-        let all = store.list_events(session.id, 0).await.unwrap();
+        let all = store.list_events(chat.id, 0).await.unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!((all[0].seq, all[1].seq), (1, 2));
         assert_eq!(all[0].event, started);
 
         // After a cursor: only the newer event (what a reconnecting client needs).
-        let tail = store.list_events(session.id, 1).await.unwrap();
+        let tail = store.list_events(chat.id, 1).await.unwrap();
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].seq, 2);
         assert_eq!(tail[0].event, completed);
 
-        // A second session's seq restarts at 1 and its journal is isolated.
-        let other = sample_session();
-        store.create_session(&other).await.unwrap();
+        // A second chat's seq restarts at 1 and its journal is isolated.
+        let other = sample_chat();
+        store.create_chat(&other).await.unwrap();
         assert_eq!(store.append_event(other.id, &started).await.unwrap(), 1);
-        assert_eq!(store.list_events(session.id, 0).await.unwrap().len(), 2);
+        assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
-    async fn event_for_unknown_session_is_rejected() {
+    async fn event_for_unknown_chat_is_rejected() {
         use crate::event::AgentEvent;
 
         let (_dir, store) = temp_store().await;
-        // No create_session first: the `event -> session` foreign key must reject
+        // No create_chat first: the `event -> chat` foreign key must reject
         // the orphan write. (The in-memory MemStore test double does *not* model
         // this constraint, so orphan-rejection is only guaranteed by DbStore.)
         let event = AgentEvent::TurnStarted {
             turn_id: TurnId::new(),
         };
-        assert!(store.append_event(SessionId::new(), &event).await.is_err());
+        assert!(store.append_event(ChatId::new(), &event).await.is_err());
     }
 
     #[tokio::test]
     async fn all_roles_round_trip() {
         let (_dir, store) = temp_store().await;
-        let session = sample_session();
-        store.create_session(&session).await.unwrap();
+        let chat = sample_chat();
+        store.create_chat(&chat).await.unwrap();
         let roles = [Role::System, Role::User, Role::Assistant, Role::Tool];
         for (i, role) in roles.iter().enumerate() {
             store
                 .append_message(&Message {
                     id: MessageId::new(),
-                    session_id: session.id,
+                    chat_id: chat.id,
                     turn_id: TurnId::new(),
                     role: *role,
                     content: String::new(),
@@ -677,7 +674,7 @@ mod tests {
                 .unwrap();
         }
         let got: Vec<Role> = store
-            .list_messages(session.id)
+            .list_messages(chat.id)
             .await
             .unwrap()
             .into_iter()

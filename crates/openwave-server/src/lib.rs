@@ -6,8 +6,8 @@
 //! binds to an ephemeral **loopback** port and mints a per-launch **bearer
 //! token**: only the local process it was handed to can reach it.
 //!
-//! This slice is the session surface — create / list / get, behind the token.
-//! Posting a message and streaming the turn over `WS /sessions/{id}/events`
+//! This slice is the chat surface — create / list / get, behind the token.
+//! Posting a message and streaming the turn over `WS /chats/{id}/events`
 //! lands next, on top of this skeleton.
 
 mod auth;
@@ -33,11 +33,8 @@ pub fn app(state: AppState) -> Router {
     // `route_layer` applies the token check to matched API routes only, so an
     // unknown path still answers `404` (not `401`), and `/healthz` stays open.
     let api = Router::new()
-        .route(
-            "/sessions",
-            post(routes::create_session).get(routes::list_sessions),
-        )
-        .route("/sessions/{id}", get(routes::get_session))
+        .route("/chats", post(routes::create_chat).get(routes::list_chats))
+        .route("/chats/{id}", get(routes::get_chat))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
@@ -126,7 +123,7 @@ mod tests {
 
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Request, StatusCode};
-    use openwave_core::{AgentErrorInfo, Profile, Session, SessionId};
+    use openwave_core::{AgentErrorInfo, Chat, ChatId, Profile};
     use serde::de::DeserializeOwned;
     use tower::ServiceExt;
 
@@ -172,7 +169,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/sessions")
+                    .uri("/chats")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -183,7 +180,7 @@ mod tests {
         let wrong = router
             .oneshot(
                 Request::builder()
-                    .uri("/sessions")
+                    .uri("/chats")
                     .header(header::AUTHORIZATION, "Bearer not-the-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -198,13 +195,13 @@ mod tests {
         let (router, token, _dir) = test_app().await;
         let bearer = format!("Bearer {token}");
 
-        let created: Session = {
+        let created: Chat = {
             let response = router
                 .clone()
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri("/sessions")
+                        .uri("/chats")
                         .header(header::AUTHORIZATION, &bearer)
                         .header(header::CONTENT_TYPE, "application/json")
                         .body(Body::from(
@@ -220,12 +217,12 @@ mod tests {
         };
         assert_eq!(created.title.as_deref(), Some("hi"));
 
-        let fetched: Session = {
+        let fetched: Chat = {
             let response = router
                 .clone()
                 .oneshot(
                     Request::builder()
-                        .uri(format!("/sessions/{}", created.id))
+                        .uri(format!("/chats/{}", created.id))
                         .header(header::AUTHORIZATION, &bearer)
                         .body(Body::empty())
                         .unwrap(),
@@ -237,11 +234,11 @@ mod tests {
         };
         assert_eq!(fetched, created);
 
-        let listed: Vec<Session> = {
+        let listed: Vec<Chat> = {
             let response = router
                 .oneshot(
                     Request::builder()
-                        .uri("/sessions")
+                        .uri("/chats")
                         .header(header::AUTHORIZATION, &bearer)
                         .body(Body::empty())
                         .unwrap(),
@@ -255,12 +252,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_session_is_404() {
+    async fn unknown_chat_is_404() {
         let (router, token, _dir) = test_app().await;
         let response = router
             .oneshot(
                 Request::builder()
-                    .uri(format!("/sessions/{}", SessionId::new()))
+                    .uri(format!("/chats/{}", ChatId::new()))
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -289,7 +286,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/sessions/not-a-uuid")
+                    .uri("/chats/not-a-uuid")
                     .header(header::AUTHORIZATION, &bearer)
                     .body(Body::empty())
                     .unwrap(),
@@ -305,7 +302,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/sessions")
+                    .uri("/chats")
                     .header(header::AUTHORIZATION, &bearer)
                     .body(Body::from(r#"{"workspace_dir":"/tmp/ws"}"#))
                     .unwrap(),
@@ -348,19 +345,19 @@ mod tests {
         assert_eq!(health.status(), reqwest::StatusCode::OK);
 
         let unauthed = client
-            .get(format!("http://{addr}/sessions"))
+            .get(format!("http://{addr}/chats"))
             .send()
             .await
             .unwrap();
         assert_eq!(unauthed.status(), reqwest::StatusCode::UNAUTHORIZED);
 
         let authed = client
-            .get(format!("http://{addr}/sessions"))
+            .get(format!("http://{addr}/chats"))
             .bearer_auth(&token)
             .send()
             .await
             .unwrap();
         assert_eq!(authed.status(), reqwest::StatusCode::OK);
-        assert_eq!(authed.json::<Vec<Session>>().await.unwrap(), vec![]);
+        assert_eq!(authed.json::<Vec<Chat>>().await.unwrap(), vec![]);
     }
 }
