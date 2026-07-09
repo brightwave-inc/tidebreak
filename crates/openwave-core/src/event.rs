@@ -91,6 +91,13 @@ pub enum AgentEvent {
         /// The serializable error description.
         error: AgentErrorInfo,
     },
+    /// The turn was cancelled at the client's request and stopped early. A
+    /// distinct terminal outcome from `TurnCompleted`/`TurnFailed` so the UI can
+    /// show "stopped" rather than success or error.
+    TurnCancelled {
+        /// Token accounting up to the point of cancellation.
+        usage: Usage,
+    },
 }
 
 /// An [`AgentEvent`] paired with its per-chat sequence number, as stored in

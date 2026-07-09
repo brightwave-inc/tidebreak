@@ -20,10 +20,12 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use futures::channel::mpsc::UnboundedSender;
+use futures::future::{self, Either};
 use futures::StreamExt;
 use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalGate, ApprovalRequest, RefuseGate};
+use crate::cancel::CancelToken;
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::id::{CallId, MessageId, TurnId};
@@ -121,6 +123,7 @@ pub struct Agent {
     store: Arc<dyn Store>,
     config: AgentConfig,
     approvals: Arc<dyn ApprovalGate>,
+    cancel: CancelToken,
 }
 
 /// A tool call accumulated from the provider stream.
@@ -148,6 +151,7 @@ impl Agent {
             store,
             config,
             approvals: Arc::new(RefuseGate),
+            cancel: CancelToken::new(),
         }
     }
 
@@ -155,6 +159,14 @@ impl Agent {
     #[must_use]
     pub fn with_approvals(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
         self.approvals = gate;
+        self
+    }
+
+    /// Watch `cancel` so the turn can be stopped early. Without this the turn
+    /// runs to completion (the default token is never tripped).
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
+        self.cancel = cancel;
         self
     }
 
@@ -198,6 +210,11 @@ impl Agent {
         let mut total_usage = Usage::default();
 
         for step in 0..self.config.max_steps {
+            // Between steps: stop before starting a fresh model call if cancelled.
+            if self.cancel.is_cancelled() {
+                return self.finish_cancelled(events, total_usage);
+            }
+
             let request = ChatRequest {
                 model: self.config.model.clone(),
                 system: self.config.system_prompt.clone(),
@@ -213,7 +230,15 @@ impl Agent {
             let mut by_index: HashMap<u32, usize> = HashMap::new();
             let mut stop_reason = StopReason::EndTurn;
 
-            while let Some(event) = stream.next().await {
+            // Race each stream item against cancellation so a long or hung model
+            // call is preempted promptly. On cancel we discard this step's
+            // partial output — nothing from it has been persisted yet.
+            let cancelled = loop {
+                let event = match future::select(stream.next(), self.cancel.cancelled()).await {
+                    Either::Left((Some(event), _)) => event,
+                    Either::Left((None, _)) => break false,
+                    Either::Right(((), _)) => break true,
+                };
                 match event {
                     ProviderEvent::TextDelta { text: delta } => {
                         let _ = events.unbounded_send(AgentEvent::TextDelta {
@@ -250,6 +275,9 @@ impl Agent {
                     ProviderEvent::Usage(reported) => total_usage += reported,
                     ProviderEvent::Stop { reason } => stop_reason = reason,
                 }
+            };
+            if cancelled {
+                return self.finish_cancelled(events, total_usage);
             }
 
             // Record the assistant message (text + any tool-use blocks).
@@ -303,6 +331,11 @@ impl Agent {
                     content: output.content,
                     is_error: output.is_error,
                 });
+                // A cancel that arrived during this tool (including while it was
+                // parked on approval) stops the turn before the next model call.
+                if self.cancel.is_cancelled() {
+                    return self.finish_cancelled(events, total_usage);
+                }
             }
             // Tool results ride in a user-role message (the Messages convention).
             transcript.push(ChatMessage {
@@ -312,6 +345,13 @@ impl Agent {
         }
 
         Err(AgentError::msg("max steps per turn exceeded"))
+    }
+
+    /// Emit the cancellation terminal event and end the turn as a (non-error)
+    /// success — the client asked for the stop, so it isn't a `TurnFailed`.
+    fn finish_cancelled(&self, events: &UnboundedSender<AgentEvent>, usage: Usage) -> Result<()> {
+        let _ = events.unbounded_send(AgentEvent::TurnCancelled { usage });
+        Ok(())
     }
 
     /// Resolve approval and execute one tool call, returning its output. Tool and
@@ -344,7 +384,20 @@ impl Agent {
                 class: ApprovalClass::Sensitive,
                 summary,
             });
-            let decision = pending.await;
+            // Race the decision against cancellation so a turn parked on approval
+            // can still be stopped. On cancel we close the approval card
+            // (`ApprovalDecided { approved: false }`) and return an error result;
+            // the loop's post-tool check then ends the turn as cancelled.
+            let decision = match future::select(pending, self.cancel.cancelled()).await {
+                Either::Left((decision, _)) => decision,
+                Either::Right(((), _)) => {
+                    let _ = events.unbounded_send(AgentEvent::ApprovalDecided {
+                        call_id: call.call_id,
+                        approved: false,
+                    });
+                    return ToolOutput::error("turn cancelled while awaiting approval");
+                }
+            };
             let approved = matches!(decision, ApprovalDecision::Approve);
             let _ = events.unbounded_send(AgentEvent::ApprovalDecided {
                 call_id: call.call_id,
@@ -796,6 +849,200 @@ mod tests {
             AgentEvent::ToolCallCompleted { output, .. }
                 if output.content == "boomed" && !output.is_error
         )));
+    }
+
+    /// Streams one text delta, then stalls forever — lets a test cancel mid-stream
+    /// at a known point (after the delta lands).
+    struct StallProvider;
+
+    #[async_trait]
+    impl ModelProvider for StallProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("stall")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let head = stream::iter(vec![ProviderEvent::TextDelta {
+                text: "partial".into(),
+            }]);
+            Ok(head.chain(stream::pending()).boxed())
+        }
+    }
+
+    /// Gate that signals once a call is parked, then never resolves — so a test
+    /// can cancel a turn while it is genuinely waiting on approval.
+    struct SignalPendingGate {
+        armed: std::sync::Mutex<Option<futures::channel::oneshot::Sender<()>>>,
+    }
+
+    impl ApprovalGate for SignalPendingGate {
+        fn arm(&self, _request: ApprovalRequest) -> crate::approval::ApprovalFuture<'_> {
+            if let Some(tx) = self.armed.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            Box::pin(future::pending())
+        }
+    }
+
+    async fn cancel_test_chat() -> (Arc<dyn Store>, Chat, tempfile::TempDir) {
+        let workspace = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            workspace_dir: workspace.path().to_path_buf(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        (store, chat, workspace)
+    }
+
+    #[tokio::test]
+    async fn cancel_before_the_turn_stops_before_any_model_call() {
+        let (store, chat, _workspace) = cancel_test_chat().await;
+
+        // A provider whose stream would panic the test if ever polled — proving
+        // the loop-top check short-circuits before the first model call.
+        let provider = FakeProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let agent = Agent::new(
+            Arc::new(provider),
+            Arc::new(ToolRegistry::new()),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_cancel(cancel);
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        // Only the lifecycle bookends: started → cancelled, no model work between.
+        assert!(matches!(
+            events.first(),
+            Some(AgentEvent::TurnStarted { .. })
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCancelled { .. })
+        ));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta { .. })));
+    }
+
+    #[tokio::test]
+    async fn cancel_mid_stream_preempts_the_model_call() {
+        let (store, chat, _workspace) = cancel_test_chat().await;
+
+        let cancel = CancelToken::new();
+        let agent = Agent::new(
+            Arc::new(StallProvider),
+            Arc::new(ToolRegistry::new()),
+            store.clone(),
+            AgentConfig {
+                model: "stall".into(),
+                ..Default::default()
+            },
+        )
+        .with_cancel(cancel.clone());
+
+        let (tx, mut rx) = unbounded();
+        let chat_id = chat.id;
+        let handle = tokio::spawn(async move {
+            let _ = agent.run_turn(&chat, "go", &tx).await;
+        });
+
+        // Cancel the instant the first delta lands; the stream then stalls, so
+        // only the cancel can end the turn.
+        let mut cancelled = false;
+        while let Some(event) = rx.next().await {
+            match event {
+                AgentEvent::TextDelta { text } if text == "partial" => cancel.cancel(),
+                AgentEvent::TurnCancelled { .. } => cancelled = true,
+                _ => {}
+            }
+        }
+        handle.await.unwrap();
+
+        assert!(cancelled, "a mid-stream cancel ends the turn as cancelled");
+        // The partial assistant text of the preempted step is discarded, not stored.
+        let roles: Vec<Role> = store
+            .list_messages(chat_id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|m| m.role)
+            .collect();
+        assert_eq!(roles, vec![Role::User]);
+    }
+
+    #[tokio::test]
+    async fn cancel_unblocks_a_turn_parked_on_approval() {
+        let (store, chat, _workspace) = cancel_test_chat().await;
+
+        let (armed_tx, armed_rx) = futures::channel::oneshot::channel();
+        let gate = Arc::new(SignalPendingGate {
+            armed: std::sync::Mutex::new(Some(armed_tx)),
+        });
+        let ran = Arc::new(AtomicUsize::new(0));
+        let cancel = CancelToken::new();
+        let agent = Agent::new(
+            Arc::new(BoomProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(BoomTool { ran: ran.clone() }))),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_approvals(gate)
+        .with_cancel(cancel.clone());
+
+        let (tx, rx) = unbounded();
+        let handle = tokio::spawn(async move {
+            let _ = agent.run_turn(&chat, "go", &tx).await;
+        });
+
+        // Wait until the Sensitive call is genuinely parked, then cancel.
+        armed_rx.await.unwrap();
+        cancel.cancel();
+        handle.await.unwrap();
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "the parked tool never runs");
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ApprovalDecided {
+                approved: false,
+                ..
+            }
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCancelled { .. })
+        ));
     }
 
     #[tokio::test]
