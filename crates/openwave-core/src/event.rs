@@ -86,6 +86,20 @@ pub enum AgentEvent {
     },
 }
 
+/// An [`AgentEvent`] paired with its per-session sequence number, as stored in
+/// the journal.
+///
+/// The journal is what makes reconnect work: a client tracks the highest `seq`
+/// it has seen and resumes with `after = <seq>`, so a dropped or reconnecting
+/// connection catches up without gaps and without replaying what it already has.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SequencedEvent {
+    /// Monotonic per-session sequence number; the first event in a session is 1.
+    pub seq: i64,
+    /// The event at this position in the session's stream.
+    pub event: AgentEvent,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
