@@ -124,7 +124,10 @@ const DEFAULT_MODEL: &str = "claude-opus-4-8";
 pub async fn bind(config: Config) -> Result<Server> {
     let store = connect_store(&config).await?;
     let secrets: Arc<dyn SecretProvider> = Arc::new(KeychainSecretProvider::new());
-    let resolver = Arc::new(KeyedResolver::new(secrets.clone()));
+    // Pre-providers installs may only have an env/legacy key — enable Anthropic
+    // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade.
+    providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
+    let resolver = Arc::new(KeyedResolver::new(store.clone(), secrets.clone()));
     let (tools, agent_config) = agent_deps();
     let state = AppState::new(config, store, resolver, secrets, tools, agent_config);
     let token = state.token.clone();
@@ -1080,6 +1083,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+        let list = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/providers")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value = json_body(list).await;
+        let openai = body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["kind"] == "openai")
+            .unwrap();
+        assert_eq!(openai["has_credential"], false);
     }
 
     #[tokio::test]
@@ -1162,14 +1185,36 @@ mod tests {
 
     #[tokio::test]
     async fn resolver_builds_a_real_provider_when_a_key_is_set() {
-        // A stored key takes precedence over the env fallback, so this is
-        // deterministic regardless of the ambient environment.
-        let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
-        secrets
-            .set_secret(providers::LEGACY_ANTHROPIC_API_KEY, "sk-test")
+        // Typed credential blob + enabled config — the primary write path.
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}/test.db?mode=rwc",
+                dir.path().display()
+            ))
             .await
-            .unwrap();
-        let resolver = resolver::KeyedResolver::new(secrets.clone());
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+        providers::write_credential(
+            &*secrets,
+            providers::ProviderKind::Anthropic,
+            &providers::ProviderCredential::api_key("sk-test"),
+        )
+        .await
+        .unwrap();
+        providers::write_config(
+            &*store,
+            providers::ProviderKind::Anthropic,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let resolver = resolver::KeyedResolver::new(store.clone(), secrets.clone());
         let resolved = resolver.resolve().await;
         assert_eq!(resolved.id().0, "anthropic");
 
@@ -1178,12 +1223,28 @@ mod tests {
         assert!(Arc::ptr_eq(&resolved, &again));
 
         // Changing the key rebuilds it.
-        secrets
-            .set_secret(providers::LEGACY_ANTHROPIC_API_KEY, "sk-different")
-            .await
-            .unwrap();
+        providers::write_credential(
+            &*secrets,
+            providers::ProviderKind::Anthropic,
+            &providers::ProviderCredential::api_key("sk-different"),
+        )
+        .await
+        .unwrap();
         let rebuilt = resolver.resolve().await;
         assert!(!Arc::ptr_eq(&resolved, &rebuilt));
+
+        // Disabling Anthropic fails closed even with a key present.
+        providers::write_config(
+            &*store,
+            providers::ProviderKind::Anthropic,
+            &providers::ProviderConfig {
+                enabled: false,
+                base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolver.resolve().await.id().0, "unconfigured");
     }
 
     #[tokio::test(flavor = "multi_thread")]

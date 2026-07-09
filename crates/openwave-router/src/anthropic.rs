@@ -16,7 +16,7 @@ use openwave_core::provider::{
 };
 use openwave_core::Role;
 
-use crate::sse::{drain_frames, frame_data};
+use crate::sse::{drain_frames, frame_data, safe_http_error};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -77,13 +77,16 @@ impl ModelProvider for AnthropicProvider {
             .await
             .map_err(provider_err)?;
 
-        // Surface non-2xx with the provider's error body (the Router needs the
-        // body to classify rate-limit vs auth vs bad-request).
+        // Surface non-2xx without the raw body — it can echo key material, and
+        // `AgentError` strings reach the client via TurnFailed. Status (+ a
+        // stable error type/code when present) is enough for classification.
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(AgentError::Provider(format!(
-                "anthropic returned {status}: {body}"
+            return Err(AgentError::Provider(safe_http_error(
+                "anthropic",
+                status.as_u16(),
+                &body,
             )));
         }
 

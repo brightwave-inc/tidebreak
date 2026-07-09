@@ -64,6 +64,25 @@ pub fn frame_data(frame: &str) -> Option<serde_json::Value> {
     frame_data_raw(frame).and_then(|data| serde_json::from_str(&data).ok())
 }
 
+/// Build a client-safe provider error: status + optional stable `error.type` /
+/// `error.code` from the JSON body. Never include the raw body (it can echo
+/// secrets, and `AgentError` strings reach the client via `TurnFailed`).
+pub fn safe_http_error(provider: &str, status: u16, body: &str) -> String {
+    let detail = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            let err = v.get("error").unwrap_or(&v);
+            err.get("type")
+                .or_else(|| err.get("code"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    match detail {
+        Some(code) => format!("{provider} returned {status} ({code})"),
+        None => format!("{provider} returned {status}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

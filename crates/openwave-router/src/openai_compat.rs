@@ -18,7 +18,7 @@ use openwave_core::provider::{
 };
 use openwave_core::Role;
 
-use crate::sse::{drain_frames, frame_data};
+use crate::sse::{drain_frames, frame_data, safe_http_error};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
@@ -96,9 +96,13 @@ impl ModelProvider for OpenAiCompatProvider {
 
         let status = response.status();
         if !status.is_success() {
+            // Never forward the raw body — gateways sometimes echo key material
+            // or request fragments, and `AgentError` strings reach the client.
             let body = response.text().await.unwrap_or_default();
-            return Err(AgentError::Provider(format!(
-                "openai-compat returned {status}: {body}"
+            return Err(AgentError::Provider(safe_http_error(
+                "openai-compat",
+                status.as_u16(),
+                &body,
             )));
         }
 
@@ -159,6 +163,9 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         "messages": messages,
         "max_tokens": req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         "stream": true,
+        // OpenAI omits usage on streaming chunks unless asked; harmless on
+        // gateways that ignore unknown fields.
+        "stream_options": { "include_usage": true },
     });
 
     if !req.tools.is_empty() {
@@ -284,6 +291,10 @@ struct ToolCallBuf {
     id: String,
     name: String,
     started: bool,
+    /// Argument fragments that arrived before id+name were known. Flushed as
+    /// `ToolCallArgsDelta`s once [`Self::started`] flips true — never invent a
+    /// synthetic call id the gateway won't accept on the tool-result round-trip.
+    pending_args: String,
 }
 
 /// Map one parsed Chat Completions stream chunk into zero or more events.
@@ -350,6 +361,24 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                         buf.name = name.to_string();
                     }
                 }
+                if let Some(args) = tc
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(Value::as_str)
+                {
+                    if !args.is_empty() {
+                        if buf.started {
+                            events.push(ProviderEvent::ToolCallArgsDelta {
+                                index,
+                                fragment: args.to_string(),
+                            });
+                        } else {
+                            buf.pending_args.push_str(args);
+                        }
+                    }
+                }
+                // Emit ToolCallStarted only once both id and name are known —
+                // never invent a synthetic id. Flush any buffered args after.
                 if !buf.started && !buf.id.is_empty() && !buf.name.is_empty() {
                     buf.started = true;
                     state.saw_tool_call = true;
@@ -358,32 +387,9 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                         id: buf.id.clone(),
                         name: buf.name.clone(),
                     });
-                }
-                if let Some(args) = tc
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(Value::as_str)
-                {
-                    if !args.is_empty() {
-                        // Name/id can arrive on a later chunk than the first
-                        // arguments fragment; start the call lazily if needed.
-                        if !buf.started {
-                            buf.started = true;
-                            state.saw_tool_call = true;
-                            events.push(ProviderEvent::ToolCallStarted {
-                                index,
-                                id: if buf.id.is_empty() {
-                                    format!("call_{index}")
-                                } else {
-                                    buf.id.clone()
-                                },
-                                name: buf.name.clone(),
-                            });
-                        }
-                        events.push(ProviderEvent::ToolCallArgsDelta {
-                            index,
-                            fragment: args.to_string(),
-                        });
+                    if !buf.pending_args.is_empty() {
+                        let fragment = std::mem::take(&mut buf.pending_args);
+                        events.push(ProviderEvent::ToolCallArgsDelta { index, fragment });
                     }
                 }
             }
@@ -438,6 +444,7 @@ mod tests {
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["model"], "gpt-4o");
         assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["role"], "user");
@@ -550,6 +557,45 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn buffers_args_until_id_and_name_are_known() {
+        // Some gateways send argument fragments before id/name. Never invent a
+        // synthetic call id — buffer args and flush once both are present.
+        let out = run(&[
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"p\":"}}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_real","function":{"name":"read_file","arguments":"1}"}}]}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "call_real".into(),
+                    name: "read_file".into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: "{\"p\":1}".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn safe_http_error_omits_raw_body() {
+        let msg = crate::sse::safe_http_error(
+            "openai-compat",
+            401,
+            r#"{"error":{"type":"invalid_api_key","message":"sk-leaked"}}"#,
+        );
+        assert_eq!(msg, "openai-compat returned 401 (invalid_api_key)");
+        assert!(!msg.contains("sk-leaked"));
     }
 
     #[test]

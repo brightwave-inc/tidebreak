@@ -21,7 +21,7 @@ impl ModelProvider for UnconfiguredProvider {
 
     async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         Err(AgentError::config(
-            "no model provider is configured (set ANTHROPIC_API_KEY)",
+            "no model provider is configured (enable a provider and set its credential)",
         ))
     }
 }

@@ -362,6 +362,37 @@ pub async fn resolve_anthropic_api_key(secrets: &dyn SecretProvider) -> Option<S
         .filter(|k| !k.is_empty())
 }
 
+/// One-shot boot migration: if Anthropic has no stored config yet but a key is
+/// available (legacy secret or `ANTHROPIC_API_KEY` env), enable it.
+///
+/// Preserves pre-providers behavior where an env key alone was enough to run
+/// turns. An explicit `enabled: false` written later wins; this only fills in
+/// a missing row.
+pub async fn migrate_legacy_anthropic(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+) -> Result<()> {
+    if store
+        .get_setting(&ProviderKind::Anthropic.setting_key())
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    if resolve_anthropic_api_key(secrets).await.is_some() {
+        write_config(
+            store,
+            ProviderKind::Anthropic,
+            &ProviderConfig {
+                enabled: true,
+                base_url: None,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Models from providers that are both enabled and credentialed.
 pub async fn catalog_models(
     store: &dyn Store,
