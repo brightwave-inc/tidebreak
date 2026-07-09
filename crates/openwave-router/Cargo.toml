@@ -11,9 +11,11 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["anthropic"]
+default = ["anthropic", "openai-compat"]
 # The Anthropic (Messages API) provider adapter.
 anthropic = ["dep:reqwest", "dep:async-stream"]
+# OpenAI-compatible Chat Completions adapter (OpenAI, OpenRouter, vLLM, …).
+openai-compat = ["dep:reqwest", "dep:async-stream"]
 
 [dependencies]
 openwave-core = { path = "../openwave-core", default-features = false }

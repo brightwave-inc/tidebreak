@@ -80,7 +80,7 @@ pub trait Store: Send + Sync {
 }
 
 /// Credential custody: secrets keyed by a stable reference string (e.g.
-/// `provider.anthropic.api_key`). Backed by the OS keychain on desktop, a
+/// `provider.anthropic.credential`). Backed by the OS keychain on desktop, a
 /// KMS/Vault on a server — never the [`Store`].
 #[async_trait]
 pub trait SecretProvider: Send + Sync {

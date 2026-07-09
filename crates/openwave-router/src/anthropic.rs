@@ -16,6 +16,8 @@ use openwave_core::provider::{
 };
 use openwave_core::Role;
 
+use crate::sse::{drain_frames, frame_data};
+
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
@@ -179,57 +181,6 @@ struct StreamState {
     input_tokens: u32,
     cache_read_input_tokens: u32,
     cache_creation_input_tokens: u32,
-}
-
-/// Naive byte-substring search.
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-/// Drain all complete SSE frames from `buffer`, returning each frame's decoded
-/// text and leaving any incomplete trailing bytes behind.
-///
-/// Frames are separated by a blank line (`\n\n` or `\r\n\r\n`). Decoding to UTF-8
-/// happens only on a complete frame, so a multi-byte character split across
-/// network chunks is never decoded until all its bytes have arrived.
-fn drain_frames(buffer: &mut Vec<u8>) -> Vec<String> {
-    let mut frames = Vec::new();
-    loop {
-        let lf = find_subslice(buffer, b"\n\n");
-        let crlf = find_subslice(buffer, b"\r\n\r\n");
-        let (content_end, consume_to) = match (lf, crlf) {
-            (Some(i), Some(j)) => {
-                if i <= j {
-                    (i, i + 2)
-                } else {
-                    (j, j + 4)
-                }
-            }
-            (Some(i), None) => (i, i + 2),
-            (None, Some(j)) => (j, j + 4),
-            (None, None) => break,
-        };
-        frames.push(String::from_utf8_lossy(&buffer[..content_end]).into_owned());
-        buffer.drain(..consume_to);
-    }
-    frames
-}
-
-/// Extract and parse the `data:` JSON payload from one SSE frame.
-fn frame_data(frame: &str) -> Option<Value> {
-    let mut data = String::new();
-    for line in frame.lines() {
-        if let Some(rest) = line.strip_prefix("data:") {
-            data.push_str(rest.trim_start());
-        }
-    }
-    if data.is_empty() {
-        return None;
-    }
-    serde_json::from_str(&data).ok()
 }
 
 fn u32_at(value: &Value, key: &str) -> u32 {
@@ -415,45 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_frames_handles_lf_crlf_and_partial_tail() {
-        // LF-separated, plus a partial trailing frame left in the buffer.
-        let mut buf = b"data: {\"a\":1}\n\ndata: partial".to_vec();
-        let frames = drain_frames(&mut buf);
-        assert_eq!(frames.len(), 1);
-        assert!(frames[0].contains("{\"a\":1}"));
-        assert_eq!(buf, b"data: partial");
-
-        // CRLF-separated frame.
-        let mut buf = b"event: x\r\ndata: {\"b\":2}\r\n\r\n".to_vec();
-        let frames = drain_frames(&mut buf);
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frame_data(&frames[0]).unwrap()["b"], 2);
-        assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn multibyte_char_split_across_chunks_is_not_corrupted() {
-        // The é in "café" is two bytes (0xC3 0xA9); split the buffer between them
-        // to mimic a network chunk boundary landing mid-character.
-        let full = "data: {\"t\":\"café\"}\n\n".as_bytes().to_vec();
-        let split = full.iter().position(|&b| b == 0xC3).unwrap() + 1;
-        let (head, tail) = full.split_at(split);
-
-        let mut buf = head.to_vec();
-        assert!(drain_frames(&mut buf).is_empty(), "no complete frame yet");
-        buf.extend_from_slice(tail);
-        let frames = drain_frames(&mut buf);
-        assert_eq!(frames.len(), 1);
-        // Would be "caf\u{fffd}\u{fffd}" if we had decoded the partial chunk.
-        assert_eq!(frame_data(&frames[0]).unwrap()["t"], "café");
-    }
-
-    #[test]
-    fn frame_data_extracts_json_and_maps_stop_reasons() {
-        let data = frame_data("event: message_stop\ndata: {\"type\":\"message_stop\"}").unwrap();
-        assert_eq!(data["type"], "message_stop");
-        assert!(frame_data("event: ping").is_none());
-
+    fn maps_stop_reasons() {
         assert_eq!(map_stop_reason("tool_use"), StopReason::ToolUse);
         assert_eq!(map_stop_reason("max_tokens"), StopReason::MaxTokens);
         assert_eq!(map_stop_reason("refusal"), StopReason::EndTurn);

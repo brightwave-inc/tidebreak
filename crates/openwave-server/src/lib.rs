@@ -17,6 +17,7 @@ mod error;
 mod extract;
 mod hub;
 mod provider;
+mod providers;
 mod resolver;
 mod routes;
 mod state;
@@ -53,6 +54,15 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/projects/{id}", get(routes::get_project))
         .route("/models", get(routes::list_models))
+        .route("/providers", get(routes::list_providers))
+        .route(
+            "/providers/{kind}",
+            axum::routing::put(routes::put_provider),
+        )
+        .route(
+            "/providers/{kind}/credential",
+            axum::routing::delete(routes::delete_provider_credential),
+        )
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route(
             "/chats/{id}",
@@ -987,12 +997,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn providers_list_and_put_roundtrip() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+
+        let list = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/providers")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(list).await;
+        let providers = body["providers"].as_array().unwrap();
+        assert!(providers.iter().any(|p| p["kind"] == "anthropic"));
+        assert!(providers.iter().any(|p| p["kind"] == "openai"));
+        assert!(providers.iter().any(|p| p["kind"] == "openai_compatible"));
+
+        let put = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/providers/openai")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "enabled": true,
+                            "credential": {"type": "api_key", "key": "sk-openai"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+        let info: serde_json::Value = json_body(put).await;
+        assert_eq!(info["kind"], "openai");
+        assert_eq!(info["enabled"], true);
+        assert_eq!(info["has_credential"], true);
+        assert!(info.get("credential").is_none());
+
+        // Credential never appears on the list either.
+        let list = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/providers")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value = json_body(list).await;
+        let openai = body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["kind"] == "openai")
+            .unwrap();
+        assert_eq!(openai["has_credential"], true);
+        assert!(openai.get("credential").is_none());
+
+        let delete = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/providers/openai/credential")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_requires_base_url_when_enabled() {
+        let (router, token, _store, _dir) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/providers/openai_compatible")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({"enabled": true}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_kind_is_404() {
+        let (router, token, _store, _dir) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/providers/not-a-provider")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({"enabled": true}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn models_catalog_includes_enabled_credentialed_providers() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+
+        let put = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/providers/openai")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "enabled": true,
+                            "credential": {"type": "api_key", "key": "sk-openai"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/models")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let catalog: serde_json::Value = json_body(response).await;
+        let models = catalog["models"].as_array().unwrap();
+        assert!(models.iter().any(|m| m["provider"] == "openai"));
+    }
+
+    #[tokio::test]
     async fn resolver_builds_a_real_provider_when_a_key_is_set() {
         // A stored key takes precedence over the env fallback, so this is
         // deterministic regardless of the ambient environment.
         let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
         secrets
-            .set_secret(resolver::ANTHROPIC_API_KEY, "sk-test")
+            .set_secret(providers::LEGACY_ANTHROPIC_API_KEY, "sk-test")
             .await
             .unwrap();
         let resolver = resolver::KeyedResolver::new(secrets.clone());
@@ -1005,7 +1179,7 @@ mod tests {
 
         // Changing the key rebuilds it.
         secrets
-            .set_secret(resolver::ANTHROPIC_API_KEY, "sk-different")
+            .set_secret(providers::LEGACY_ANTHROPIC_API_KEY, "sk-different")
             .await
             .unwrap();
         let rebuilt = resolver.resolve().await;

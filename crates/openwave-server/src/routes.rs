@@ -19,7 +19,7 @@ use openwave_core::{
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
-use crate::resolver::ANTHROPIC_API_KEY;
+use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
 use crate::state::AppState;
 
 /// The store-settings key for the selected model.
@@ -108,13 +108,13 @@ async fn read_model(store: &dyn Store) -> Result<Option<String>, ServerError> {
 /// Whether a model API key is configured — in the secret store or the
 /// environment fallback the resolver also honors.
 async fn has_api_key(secrets: &dyn SecretProvider) -> bool {
-    if matches!(secrets.get_secret(ANTHROPIC_API_KEY).await, Ok(Some(key)) if !key.is_empty()) {
-        return true;
-    }
-    std::env::var("ANTHROPIC_API_KEY").is_ok_and(|key| !key.is_empty())
+    providers::has_credential(secrets, ProviderKind::Anthropic).await
 }
 
 /// Body of `PUT /settings/api-key`.
+///
+/// Legacy shim: writes the Anthropic credential in the typed blob shape and
+/// enables the Anthropic provider. Prefer `PUT /providers/anthropic`.
 #[derive(Deserialize)]
 pub struct ApiKey {
     /// The provider API key to store. Written to the `SecretProvider` (the OS
@@ -122,14 +122,14 @@ pub struct ApiKey {
     pub api_key: String,
 }
 
-// Redact the key so it can't leak through a `{:?}` (logging, error context, …).
+// Redact the key so it can't leak through a `{:?}`.
 impl std::fmt::Debug for ApiKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApiKey").field("api_key", &"***").finish()
     }
 }
 
-/// `PUT /settings/api-key` — store the model provider's API key. `204 No Content`.
+/// `PUT /settings/api-key` — store the Anthropic API key. `204 No Content`.
 pub async fn put_api_key(
     State(state): State<AppState>,
     Json(body): Json<ApiKey>,
@@ -137,21 +137,66 @@ pub async fn put_api_key(
     if body.api_key.is_empty() {
         return Err(ServerError::bad_request("api_key must not be empty"));
     }
-    state
-        .secrets
-        .set_secret(ANTHROPIC_API_KEY, &body.api_key)
-        .await?;
+    // Write the typed credential and enable Anthropic so the new providers
+    // surface and the legacy shim stay equivalent.
+    providers::write_credential(
+        &*state.secrets,
+        ProviderKind::Anthropic,
+        &ProviderCredential::api_key(&body.api_key),
+    )
+    .await?;
+    let mut config = providers::read_config(&*state.store, ProviderKind::Anthropic).await?;
+    config.enabled = true;
+    providers::write_config(&*state.store, ProviderKind::Anthropic, &config).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `DELETE /settings/api-key` — remove the stored API key. `204 No Content`.
+/// `DELETE /settings/api-key` — remove the stored Anthropic API key. `204`.
 ///
 /// Clears only the stored key. If the daemon was launched with an
 /// `ANTHROPIC_API_KEY` in its environment, that fallback still applies — so
 /// `has_api_key` may stay `true` and turns keep resolving a provider after a
 /// delete. The environment is a deploy-time default the API doesn't override.
 pub async fn delete_api_key(State(state): State<AppState>) -> Result<StatusCode, ServerError> {
-    state.secrets.delete_secret(ANTHROPIC_API_KEY).await?;
+    providers::delete_credential(&*state.secrets, ProviderKind::Anthropic).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Response for `GET /providers`.
+#[derive(Debug, Serialize)]
+pub struct ProvidersList {
+    pub providers: Vec<ProviderInfo>,
+}
+
+/// `GET /providers` — every known provider kind and its current config.
+pub async fn list_providers(
+    State(state): State<AppState>,
+) -> Result<Json<ProvidersList>, ServerError> {
+    Ok(Json(ProvidersList {
+        providers: providers::list_providers(&*state.store, &*state.secrets).await?,
+    }))
+}
+
+/// `PUT /providers/{kind}` — update a provider's config and/or credential.
+pub async fn put_provider(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+    Json(body): Json<ProviderUpdate>,
+) -> Result<Json<ProviderInfo>, ServerError> {
+    let kind = ProviderKind::parse(&kind)
+        .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
+    let info = providers::update_provider(&*state.store, &*state.secrets, kind, body).await?;
+    Ok(Json(info))
+}
+
+/// `DELETE /providers/{kind}/credential` — remove the stored credential. `204`.
+pub async fn delete_provider_credential(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+) -> Result<StatusCode, ServerError> {
+    let kind = ProviderKind::parse(&kind)
+        .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
+    providers::delete_credential(&*state.secrets, kind).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -159,9 +204,9 @@ pub async fn delete_api_key(State(state): State<AppState>) -> Result<StatusCode,
 #[derive(Debug, Serialize)]
 pub struct ModelInfo {
     /// The identifier passed to the provider and stored as `chat.model`.
-    pub id: &'static str,
+    pub id: String,
     /// The provider that serves the model.
-    pub provider: &'static str,
+    pub provider: String,
 }
 
 /// Response for `GET /models`.
@@ -173,24 +218,18 @@ pub struct ModelCatalog {
 
 /// `GET /models` — the catalog a chat's model selector chooses from.
 ///
-/// A curated static list for now (Anthropic only, matching the single provider
-/// wired today). When multiple providers are configurable this becomes
-/// provider-driven — the enabled, credentialed providers' models.
-pub async fn list_models() -> Json<ModelCatalog> {
-    const ANTHROPIC_MODELS: &[&str] = &[
-        "claude-opus-4-8",
-        "claude-sonnet-5",
-        "claude-haiku-4-5-20251001",
-    ];
-    Json(ModelCatalog {
-        models: ANTHROPIC_MODELS
-            .iter()
-            .map(|id| ModelInfo {
-                id,
-                provider: "anthropic",
-            })
-            .collect(),
-    })
+/// Models of enabled, credentialed providers. Falls back to Anthropic's curated
+/// list when nothing is configured yet so the selector isn't empty on first run.
+pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCatalog>, ServerError> {
+    let models = providers::catalog_models(&*state.store, &*state.secrets)
+        .await?
+        .into_iter()
+        .map(|(kind, id)| ModelInfo {
+            id: id.to_string(),
+            provider: kind.as_str().to_string(),
+        })
+        .collect();
+    Ok(Json(ModelCatalog { models }))
 }
 
 /// Body of `POST /projects`.

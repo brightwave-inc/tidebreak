@@ -1,9 +1,15 @@
 //! Resolving the model provider for a turn from configured credentials.
 //!
 //! The provider is built *per turn* rather than once at boot, so setting an API
-//! key at runtime (`PUT /settings/api-key`) takes effect on the next turn without
-//! a restart. The [`ProviderResolver`] seam also lets tests inject a provider
-//! directly instead of standing up a real backend.
+//! key at runtime (`PUT /providers/anthropic` or the legacy
+//! `PUT /settings/api-key`) takes effect on the next turn without a restart.
+//! The [`ProviderResolver`] seam also lets tests inject a provider directly
+//! instead of standing up a real backend.
+//!
+//! Today this still resolves Anthropic only — the composite router (model →
+//! provider selection across configured kinds) is the next slice. Credentials
+//! are read through the providers module so the new typed blob and the legacy
+//! plain-string key both work.
 
 use std::sync::{Arc, Mutex};
 
@@ -13,9 +19,7 @@ use openwave_core::{ModelProvider, SecretProvider};
 use openwave_router::AnthropicProvider;
 
 use crate::provider::UnconfiguredProvider;
-
-/// Secret key under which the Anthropic API key is stored.
-pub const ANTHROPIC_API_KEY: &str = "provider.anthropic.api_key";
+use crate::providers;
 
 /// The provider last built by a [`KeyedResolver`], tagged with the key it was
 /// built from so it can be reused until the key changes.
@@ -34,7 +38,7 @@ pub trait ProviderResolver: Send + Sync {
 ///
 /// The built provider is cached and reused while the key is unchanged, so a
 /// provider (and its `reqwest` connection pool) isn't rebuilt every turn; a key
-/// change (via `PUT /settings/api-key`) rebuilds it on the next turn.
+/// change rebuilds it on the next turn.
 pub struct KeyedResolver {
     secrets: Arc<dyn SecretProvider>,
     cached: Mutex<CachedProvider>,
@@ -53,14 +57,7 @@ impl KeyedResolver {
 #[async_trait]
 impl ProviderResolver for KeyedResolver {
     async fn resolve(&self) -> Arc<dyn ModelProvider> {
-        let key = self
-            .secrets
-            .get_secret(ANTHROPIC_API_KEY)
-            .await
-            .ok()
-            .flatten()
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-            .filter(|key| !key.is_empty());
+        let key = providers::resolve_anthropic_api_key(&*self.secrets).await;
 
         // Reuse the cached provider while the key is unchanged. The lock is held
         // only across the cheap, synchronous build below — never over an await.
