@@ -116,8 +116,8 @@ impl Server {
     }
 }
 
-/// Placeholder default model, used until the settings-driven model selection and
-/// the composite router land. Overridable with `OPENWAVE_MODEL`.
+/// Default model when none is configured via settings or per-chat. Overridable
+/// with `OPENWAVE_MODEL`.
 const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
 /// Wire the store from `config` and bind the API to an ephemeral loopback port.
@@ -150,10 +150,10 @@ pub async fn bind(config: Config) -> Result<Server> {
 
 /// Assemble the static agent dependencies for a real launch: the tool set and
 /// the per-turn tuning. The model **provider** is not built here — it is resolved
-/// per turn by the [`KeyedResolver`] from the configured API key (see
-/// [`resolver`]), so setting a key at runtime takes effect without a restart. The
-/// model *name* comes from `OPENWAVE_MODEL` (or the built-in default) and can be
-/// overridden at runtime via `PUT /settings`.
+/// per turn by the [`KeyedResolver`] (a composite router over enabled providers;
+/// see [`resolver`]), so configuring a provider at runtime takes effect without a
+/// restart. The model *name* comes from `OPENWAVE_MODEL` (or the built-in default)
+/// and can be overridden at runtime via `PUT /settings` or per-chat.
 fn agent_deps() -> (Arc<ToolRegistry>, AgentConfig) {
     let tools = Arc::new(
         ToolRegistry::new()
@@ -1184,8 +1184,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolver_builds_a_real_provider_when_a_key_is_set() {
-        // Typed credential blob + enabled config — the primary write path.
+    async fn resolver_builds_a_router_from_enabled_providers() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -1216,9 +1215,10 @@ mod tests {
 
         let resolver = resolver::KeyedResolver::new(store.clone(), secrets.clone());
         let resolved = resolver.resolve().await;
-        assert_eq!(resolved.id().0, "anthropic");
+        // Composite router — selection happens on stream from req.model.
+        assert_eq!(resolved.id().0, "router");
 
-        // Same key ⇒ the cached provider is reused (not rebuilt every turn).
+        // Same route set ⇒ the cached provider is reused.
         let again = resolver.resolve().await;
         assert!(Arc::ptr_eq(&resolved, &again));
 
@@ -1232,8 +1232,9 @@ mod tests {
         .unwrap();
         let rebuilt = resolver.resolve().await;
         assert!(!Arc::ptr_eq(&resolved, &rebuilt));
+        assert_eq!(rebuilt.id().0, "router");
 
-        // Disabling Anthropic fails closed even with a key present.
+        // Disabling Anthropic with no other providers fails closed.
         providers::write_config(
             &*store,
             providers::ProviderKind::Anthropic,
@@ -1245,6 +1246,92 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(resolver.resolve().await.id().0, "unconfigured");
+    }
+
+    #[tokio::test]
+    async fn resolver_includes_openai_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}/test.db?mode=rwc",
+                dir.path().display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+        providers::write_credential(
+            &*secrets,
+            providers::ProviderKind::Openai,
+            &providers::ProviderCredential::api_key("sk-openai"),
+        )
+        .await
+        .unwrap();
+        providers::write_config(
+            &*store,
+            providers::ProviderKind::Openai,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let routes = providers::collect_routes(&*store, &*secrets).await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].kind, openwave_router::RouteKind::Openai);
+
+        let resolver = resolver::KeyedResolver::new(store, secrets);
+        let provider = resolver.resolve().await;
+        assert_eq!(provider.id().0, "router");
+
+        // A curated openai model is selectable; an anthropic model is not
+        // (no anthropic route, no openai_compatible fallback).
+        let router = openwave_router::Router::build(routes);
+        assert_eq!(
+            router.select("gpt-4o"),
+            Some(openwave_router::RouteKind::Openai)
+        );
+        assert_eq!(router.select("claude-opus-4-8"), None);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_route_is_free_form_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}/test.db?mode=rwc",
+                dir.path().display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+        providers::write_credential(
+            &*secrets,
+            providers::ProviderKind::OpenaiCompatible,
+            &providers::ProviderCredential::api_key("sk-local"),
+        )
+        .await
+        .unwrap();
+        providers::write_config(
+            &*store,
+            providers::ProviderKind::OpenaiCompatible,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: Some("http://127.0.0.1:1234/v1".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let routes = providers::collect_routes(&*store, &*secrets).await;
+        let router = openwave_router::Router::build(routes);
+        assert_eq!(
+            router.select("llama-3-local"),
+            Some(openwave_router::RouteKind::OpenaiCompatible)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

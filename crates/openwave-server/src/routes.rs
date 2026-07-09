@@ -105,10 +105,16 @@ async fn read_model(store: &dyn Store) -> Result<Option<String>, ServerError> {
         .and_then(|value| value.as_str().map(str::to_owned)))
 }
 
-/// Whether a model API key is configured — in the secret store or the
-/// environment fallback the resolver also honors.
+/// Whether any model provider credential is configured — stored or via the
+/// env fallbacks the resolver also honors. Prefer `GET /providers` for
+/// per-kind detail; this field is the legacy "is anything ready?" signal.
 async fn has_api_key(secrets: &dyn SecretProvider) -> bool {
-    providers::has_credential(secrets, ProviderKind::Anthropic).await
+    for &kind in ProviderKind::ALL {
+        if providers::has_credential(secrets, kind).await {
+            return true;
+        }
+    }
+    false
 }
 
 /// Body of `PUT /settings/api-key`.
@@ -429,8 +435,9 @@ pub async fn post_message(
     if let Some(model) = model {
         agent_config.model = model;
     }
-    // Resolve the provider from the currently-configured key, so a key set via
-    // PUT /settings/api-key takes effect on this turn.
+    // Resolve the provider from currently-configured providers, so a key set via
+    // PUT /providers/{kind} (or the legacy /settings/api-key) takes effect on
+    // this turn. The composite router selects the adapter from the model name.
     let provider = state.resolver.resolve().await;
     let agent = Agent::new(
         provider,
