@@ -6,17 +6,17 @@
 use std::path::PathBuf;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 
-use openwave_core::{Agent, Chat, ChatId, SequencedEvent};
+use openwave_core::{Agent, Chat, ChatId, SequencedEvent, Store};
 
 use crate::error::ServerError;
-use crate::extract::{Json, Path};
+use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
 
 /// Body of `POST /chats`.
@@ -152,17 +152,13 @@ async fn stream_events(mut socket: WebSocket, state: AppState, chat: ChatId, aft
     // the live channel rather than lost in the gap between the two.
     let mut live = state.events.subscribe(chat);
 
-    let replay = match state.store.list_events(chat, after).await {
-        Ok(events) => events,
-        // A store failure mid-replay: drop the connection; the client reconnects.
-        Err(_) => return,
-    };
+    // Replay everything the client hasn't seen yet from the durable journal.
     let mut last_seq = after;
-    for event in replay {
-        last_seq = event.seq;
-        if send_event(&mut socket, &event).await.is_err() {
-            return;
-        }
+    if replay_after(&mut socket, &*state.store, chat, &mut last_seq)
+        .await
+        .is_err()
+    {
+        return;
     }
 
     loop {
@@ -182,16 +178,45 @@ async fn stream_events(mut socket: WebSocket, state: AppState, chat: ChatId, aft
                         break;
                     }
                 }
-                // Fell behind the live buffer: close so the client reconnects with
-                // an `after` cursor and replays the gap from the journal.
-                Err(RecvError::Lagged(_)) | Err(RecvError::Closed) => break,
+                // Fell behind the live buffer. Rather than drop the client, catch
+                // up from the journal (durable truth) and resume live — the seq
+                // dedup above absorbs any overlap. A long/fast turn can outrun the
+                // 256-slot buffer, so this keeps an ordinary client connected.
+                Err(RecvError::Lagged(_)) => {
+                    if replay_after(&mut socket, &*state.store, chat, &mut last_seq)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(RecvError::Closed) => break,
             },
         }
     }
 }
 
-/// Send one event as a JSON text frame.
+/// Send journaled events with `seq > *last_seq` to the socket, advancing
+/// `*last_seq`. `Err(())` means the connection should end (send or store failure).
+async fn replay_after(
+    socket: &mut WebSocket,
+    store: &dyn Store,
+    chat: ChatId,
+    last_seq: &mut i64,
+) -> Result<(), ()> {
+    let events = store.list_events(chat, *last_seq).await.map_err(|_| ())?;
+    for event in events {
+        *last_seq = event.seq;
+        send_event(socket, &event).await.map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+/// Send one event as a JSON text frame. An event that fails to serialize is
+/// skipped rather than sent as an empty frame (which a client couldn't decode).
 async fn send_event(socket: &mut WebSocket, event: &SequencedEvent) -> Result<(), axum::Error> {
-    let json = serde_json::to_string(event).unwrap_or_default();
+    let Ok(json) = serde_json::to_string(event) else {
+        return Ok(());
+    };
     socket.send(Message::Text(json.into())).await
 }

@@ -706,13 +706,15 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
     }
 
-    /// Connect to a chat's event socket (authenticated) and read frames until the
-    /// turn ends (or a timeout), returning the decoded events in arrival order.
-    async fn read_until_turn_end(
+    /// Connect to a chat's event socket (authenticated) and read frames until
+    /// `want` turns have ended (or a timeout), returning the decoded events in
+    /// arrival order.
+    async fn read_until_turns_end(
         addr: SocketAddr,
         token: &str,
         chat: ChatId,
         after: i64,
+        want: usize,
     ) -> Vec<SequencedEvent> {
         let mut request = format!("ws://{addr}/chats/{chat}/events?after={after}")
             .into_client_request()
@@ -723,26 +725,39 @@ mod tests {
         let (mut socket, _response) = connect_async(request).await.unwrap();
 
         let mut events = Vec::new();
+        let mut completed = 0;
         let read = async {
             while let Some(frame) = socket.next().await {
                 let WsMessage::Text(text) = frame.unwrap() else {
                     continue;
                 };
                 let event: SequencedEvent = serde_json::from_str(text.as_str()).unwrap();
-                let done = matches!(
+                if matches!(
                     event.event,
                     AgentEvent::TurnCompleted { .. } | AgentEvent::TurnFailed { .. }
-                );
+                ) {
+                    completed += 1;
+                }
                 events.push(event);
-                if done {
+                if completed >= want {
                     break;
                 }
             }
         };
         tokio::time::timeout(Duration::from_secs(5), read)
             .await
-            .expect("turn did not complete over the socket");
+            .expect("turns did not complete over the socket");
         events
+    }
+
+    /// Read one turn's worth of events over a fresh connection.
+    async fn read_until_turn_end(
+        addr: SocketAddr,
+        token: &str,
+        chat: ChatId,
+        after: i64,
+    ) -> Vec<SequencedEvent> {
+        read_until_turns_end(addr, token, chat, after, 1).await
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -803,6 +818,59 @@ mod tests {
         let events = read_until_turn_end(addr, &token, chat.id, 1).await;
         assert_eq!(events.first().unwrap().seq, 2);
         assert!(events.iter().all(|e| e.seq > 1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ws_replays_one_turn_then_streams_the_next_live() {
+        let (addr, token, store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
+        let client = reqwest::Client::new();
+        let chat = make_chat_http(&client, addr, &token).await;
+
+        // Turn 1 runs to completion and is journaled.
+        send_message_http(&client, addr, &token, chat.id).await;
+        wait_for_turn(&store, chat.id).await;
+
+        // Connect (replays turn 1) and keep reading; then run turn 2, whose events
+        // arrive live on the same connection. Assert both turns come through in
+        // one gap-free, duplicate-free, strictly-increasing stream.
+        let reader = {
+            let token = token.clone();
+            tokio::spawn(async move { read_until_turns_end(addr, &token, chat.id, 0, 2).await })
+        };
+        // Let the reader connect, subscribe, and drain the replay before turn 2.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        send_message_http(&client, addr, &token, chat.id).await;
+
+        let events = reader.await.unwrap();
+        assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
+        assert_eq!(events[0].seq, 1);
+        assert!(events.windows(2).all(|w| w[0].seq < w[1].seq));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, AgentEvent::TurnCompleted { .. }))
+                .count(),
+            2,
+            "both turns completed over one connection"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ws_bad_after_cursor_is_a_json_400() {
+        let (addr, token, _store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
+        let client = reqwest::Client::new();
+        let chat = make_chat_http(&client, addr, &token).await;
+        // A non-integer `after` fails extraction; it must answer the API-wide
+        // `{ kind, message }` JSON, not axum's plain-text rejection.
+        let response = client
+            .get(format!("http://{addr}/chats/{}/events?after=abc", chat.id))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let info: AgentErrorInfo = response.json().await.unwrap();
+        assert_eq!(info.kind, "bad_request");
     }
 
     #[tokio::test(flavor = "multi_thread")]
