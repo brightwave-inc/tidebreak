@@ -1,5 +1,70 @@
-//! OpenWave retrieval — embeddings, vector search, chunking, ingestion, and
-//! citations, behind a `VectorStore` seam that runs embedded (sqlite-vec) or
-//! against pgvector / Qdrant.
+//! OpenWave retrieval — ingest documents, embed them, search by meaning, and get
+//! back grounded citations.
 //!
-//! Scaffolding only. Implementation lands in Phase 1.
+//! The crate is built from four seams, each a trait with a working default:
+//!
+//! - [`DocumentParser`] — raw bytes → plain text. Default: [`PlainTextParser`]
+//!   (zero-dependency `text/*`). Rich formats (PDF/office/images) land later as a
+//!   feature-gated parser behind this trait.
+//! - [`Chunker`] — text → overlapping, span-tracked [`Chunk`]s. Default:
+//!   [`TextChunker`], a boundary-aware sliding window. Hierarchical and
+//!   sentence-shingle strategies can compose behind the trait later.
+//! - [`Embedder`] — text → dense vectors, with separate document/query encodings.
+//!   Default: [`HashEmbedder`], a deterministic offline hashing encoder for tests
+//!   and local use; real providers (OpenAI/Cohere/ONNX) slot in behind the trait.
+//! - [`VectorStore`] — store embedded chunks, query by similarity. Default:
+//!   [`InMemoryVectorStore`], a brute-force cosine scan. Persistent, filtered, and
+//!   hybrid backends (sqlite-vec, pgvector, Qdrant) land later behind the trait.
+//!
+//! [`Retriever`] wires all four into `ingest` and `search`. Everything a chunk or
+//! citation carries a [`ByteSpan`] — a precise byte range into the source text —
+//! so every answer points back to exactly where it came from.
+//!
+//! ```
+//! use std::sync::Arc;
+//! use openwave_retrieval::{
+//!     Retriever, PlainTextParser, TextChunker, HashEmbedder, InMemoryVectorStore,
+//!     DocumentSource,
+//! };
+//!
+//! # async fn demo() -> openwave_retrieval::Result<()> {
+//! let dims = 256;
+//! let retriever = Retriever::new(
+//!     Box::new(PlainTextParser::new()),
+//!     Box::new(TextChunker::default()),
+//!     Arc::new(HashEmbedder::new(dims)),
+//!     Arc::new(InMemoryVectorStore::new(dims)),
+//! );
+//!
+//! retriever
+//!     .ingest(DocumentSource::uri("notes.txt"), "text/plain", b"Jupiter is a gas giant.")
+//!     .await?;
+//! let hits = retriever.search("largest planet", 3).await?;
+//! for hit in hits {
+//!     println!("[{:.3}] {}", hit.score, hit.snippet);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Not yet wired: real embedding providers and reranking, persistent/hybrid vector
+//! backends, rich-format parsing, and the agent-facing `search` tool + server
+//! ingest API. Each lands as its own slice behind these seams.
+
+mod chunk;
+mod document;
+mod embed;
+mod error;
+mod id;
+mod parse;
+mod retriever;
+mod vector;
+
+pub use chunk::{Chunker, TextChunker};
+pub use document::{ByteSpan, Chunk, Citation, Document, DocumentSource, ScoredChunk};
+pub use embed::{Embedder, Embedding, HashEmbedder};
+pub use error::{Result, RetrievalError};
+pub use id::{ChunkId, DocumentId};
+pub use parse::{DocumentParser, ParsedDocument, PlainTextParser};
+pub use retriever::{IngestOutcome, Retriever};
+pub use vector::{InMemoryVectorStore, VectorRecord, VectorStore};

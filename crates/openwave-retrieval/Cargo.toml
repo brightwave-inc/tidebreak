@@ -11,3 +11,13 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# `v5` (name-based UUIDs) is additive over the workspace's `v4`/`serde`; it
+# backs the deterministic chunk ids derived from (document, byte span).
+uuid = { workspace = true, features = ["v5"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
