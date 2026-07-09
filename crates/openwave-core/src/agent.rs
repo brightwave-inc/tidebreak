@@ -392,7 +392,7 @@ impl Agent {
             // `future::select` polls the left arm first, so when both are ready
             // (approve lands in the same tick as cancel) the decision would win
             // and a Sensitive tool would still run. Prefer cancel whenever the
-            // token is already tripped — same bias as the post-stream check.
+            // token is already tripped (same idea as the post-stream\n            // `is_cancelled()` re-check after `select`).
             let decision = match future::select(pending, self.cancel.cancelled()).await {
                 Either::Left((decision, _)) if !self.cancel.is_cancelled() => decision,
                 Either::Left(_) | Either::Right(((), _)) => {
@@ -410,6 +410,11 @@ impl Agent {
             });
             if let ApprovalDecision::Reject { reason } = decision {
                 return ToolOutput::error(reason);
+            }
+            // A cancel that lands after Approve won `select` but before execute
+            // (concurrent trip of the token) must not run the Sensitive tool.
+            if self.cancel.is_cancelled() {
+                return ToolOutput::error("turn cancelled while awaiting approval");
             }
         }
         let ctx = ToolCtx {
