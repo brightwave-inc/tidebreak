@@ -2993,6 +2993,7 @@ dependencies = [
  "chrono",
  "futures",
  "openwave-core",
+ "openwave-retrieval",
  "openwave-router",
  "reqwest 0.12.28",
  "serde",

@@ -17,6 +17,7 @@ use openwave_core::{
     Agent, ApprovalDecision, CallId, Chat, ChatId, Project, ProjectId, SecretProvider,
     SequencedEvent, Store,
 };
+use openwave_retrieval::{Citation, DocumentId, DocumentSource, RetrievalError, SearchTool};
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::error::ServerError;
@@ -289,6 +290,109 @@ pub async fn get_project(
         .await?
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("project {id} not found")))
+}
+
+/// Body of `POST /documents`.
+#[derive(Debug, Deserialize)]
+pub struct IngestDocument {
+    /// The document's text/content, as a UTF-8 string.
+    pub content: String,
+    /// Optional source URI, recorded for provenance and used to make re-ingesting
+    /// the same location idempotent. Omitted for inline content.
+    #[serde(default)]
+    pub uri: Option<String>,
+    /// Media (MIME) type; defaults to `text/plain` when omitted.
+    #[serde(default)]
+    pub media_type: Option<String>,
+}
+
+/// Result of `POST /documents`.
+#[derive(Debug, Serialize)]
+pub struct IngestResult {
+    /// The ingested document's id (derived from the URI when one is given).
+    pub document_id: DocumentId,
+    /// How many chunks were embedded and indexed.
+    pub chunks: usize,
+}
+
+/// Map a retrieval failure to an HTTP error: a parse problem is the caller's
+/// (unsupported media type / bad content), everything else is server-side.
+fn retrieval_error(err: RetrievalError) -> ServerError {
+    match err {
+        RetrievalError::Parse(_) => ServerError::bad_request(err.to_string()),
+        _ => ServerError::internal(err.to_string()),
+    }
+}
+
+/// `POST /documents` — ingest a document into the shared retrieval index
+/// (`201 Created`). The index is in-memory for now, so it does not survive a
+/// restart. The ingested chunks are immediately searchable via `POST /search` and
+/// the agent's `search` tool.
+pub async fn ingest_document(
+    State(state): State<AppState>,
+    Json(body): Json<IngestDocument>,
+) -> Result<impl IntoResponse, ServerError> {
+    if body.content.trim().is_empty() {
+        return Err(ServerError::bad_request("content must not be empty"));
+    }
+    let source = match body.uri {
+        Some(uri) if !uri.trim().is_empty() => DocumentSource::uri(uri),
+        _ => DocumentSource::Inline,
+    };
+    let media_type = body.media_type.as_deref().unwrap_or("text/plain");
+    let outcome = state
+        .retrieval
+        .ingest(source, media_type, body.content.as_bytes())
+        .await
+        .map_err(retrieval_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(IngestResult {
+            document_id: outcome.document.id,
+            chunks: outcome.chunks,
+        }),
+    ))
+}
+
+/// Body of `POST /search`.
+#[derive(Debug, Deserialize)]
+pub struct SearchRequest {
+    /// The natural-language query.
+    pub query: String,
+    /// How many passages to return (optional; clamped to `[1, SearchTool::MAX_K]`).
+    #[serde(default)]
+    pub k: Option<usize>,
+}
+
+/// Result of `POST /search`.
+#[derive(Debug, Serialize)]
+pub struct SearchResults {
+    /// Ranked citations, most relevant first.
+    pub citations: Vec<Citation>,
+}
+
+/// `POST /search` — search the shared index and return grounded citations. This
+/// is the direct HTTP counterpart to the agent's `search` tool; both read the
+/// same index. `k` defaults to [`SearchTool::DEFAULT_K`] and is clamped, never
+/// rejected.
+pub async fn search_documents(
+    State(state): State<AppState>,
+    Json(body): Json<SearchRequest>,
+) -> Result<Json<SearchResults>, ServerError> {
+    let query = body.query.trim();
+    if query.is_empty() {
+        return Err(ServerError::bad_request("query must not be empty"));
+    }
+    let k = body
+        .k
+        .unwrap_or(SearchTool::DEFAULT_K)
+        .clamp(1, SearchTool::MAX_K);
+    let citations = state
+        .retrieval
+        .search(query, k)
+        .await
+        .map_err(retrieval_error)?;
+    Ok(Json(SearchResults { citations }))
 }
 
 /// Body of `POST /chats`.

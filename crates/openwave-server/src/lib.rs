@@ -36,6 +36,10 @@ use openwave_core::{
     AgentConfig, AgentError, Config, DbStore, KeychainSecretProvider, ListDir, Profile, ReadFile,
     Result, SecretProvider, Store, ToolRegistry, WriteFile,
 };
+use openwave_retrieval::{
+    Embedder, HashEmbedder, InMemoryVectorStore, PlainTextParser, Retriever, SearchTool,
+    TextChunker, VectorStore,
+};
 
 use resolver::KeyedResolver;
 
@@ -66,6 +70,8 @@ pub fn app(state: AppState) -> Router {
             "/providers/{kind}/credential",
             axum::routing::delete(routes::delete_provider_credential),
         )
+        .route("/documents", post(routes::ingest_document))
+        .route("/search", post(routes::search_documents))
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route(
             "/chats/{id}",
@@ -155,8 +161,16 @@ pub async fn bind(config: Config) -> Result<Server> {
     // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade.
     providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
     let resolver = Arc::new(KeyedResolver::new(store.clone(), secrets.clone()));
-    let (tools, agent_config) = agent_deps();
-    let state = AppState::new(config, store, resolver, secrets, tools, agent_config);
+    let (retrieval, tools, agent_config) = agent_deps();
+    let state = AppState::new(
+        config,
+        store,
+        resolver,
+        secrets,
+        tools,
+        retrieval,
+        agent_config,
+    );
     let token = state.token.clone();
     let router = app(state);
 
@@ -175,25 +189,47 @@ pub async fn bind(config: Config) -> Result<Server> {
     })
 }
 
-/// Assemble the static agent dependencies for a real launch: the tool set and
-/// the per-turn tuning. The model **provider** is not built here — it is resolved
-/// per turn by the [`KeyedResolver`] (a composite router over enabled providers;
-/// see [`resolver`]), so configuring a provider at runtime takes effect without a
-/// restart. The model *name* comes from `OPENWAVE_MODEL` (or the built-in default)
-/// and can be overridden at runtime via `PUT /settings` or per-chat.
-fn agent_deps() -> (Arc<ToolRegistry>, AgentConfig) {
+/// Assemble the agent dependencies for a real launch: the retrieval pipeline, the
+/// tool set, and the per-turn tuning. The model **provider** is not built here — it
+/// is resolved per turn by the [`KeyedResolver`] (a composite router over enabled
+/// providers; see [`resolver`]), so configuring a provider at runtime takes effect
+/// without a restart. The model *name* comes from `OPENWAVE_MODEL` (or the built-in
+/// default) and can be overridden at runtime via `PUT /settings` or per-chat.
+fn agent_deps() -> (Arc<Retriever>, Arc<ToolRegistry>, AgentConfig) {
+    let (retrieval, search) = build_retrieval();
     let tools = Arc::new(
         ToolRegistry::new()
             .with(Box::new(ReadFile))
             .with(Box::new(ListDir))
-            .with(Box::new(WriteFile)),
+            .with(Box::new(WriteFile))
+            .with(search),
     );
     let model = std::env::var("OPENWAVE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let agent_config = AgentConfig {
         model,
         ..AgentConfig::default()
     };
-    (tools, agent_config)
+    (retrieval, tools, agent_config)
+}
+
+/// Build the retrieval pipeline and the `search` tool that shares its index.
+///
+/// The [`Retriever`] (used to ingest and to serve `POST /search`) and the returned
+/// [`SearchTool`] (registered for the agent) hold the **same** embedder and vector
+/// store, so a document ingested through the API is immediately visible to the
+/// agent's search. The store is in-memory today — durable/hybrid backends and real
+/// embedding providers are later slices — so an index does not survive a restart.
+fn build_retrieval() -> (Arc<Retriever>, Box<SearchTool>) {
+    let embedder: Arc<dyn Embedder> = Arc::new(HashEmbedder::default());
+    let store: Arc<dyn VectorStore> = Arc::new(InMemoryVectorStore::new(embedder.dimensions()));
+    let retrieval = Arc::new(Retriever::new(
+        Box::new(PlainTextParser::new()),
+        Box::new(TextChunker::default()),
+        embedder.clone(),
+        store.clone(),
+    ));
+    let search = Box::new(SearchTool::new(embedder, store));
+    (retrieval, search)
 }
 
 /// Open the durable store the profile selects.
@@ -435,12 +471,14 @@ mod tests {
             .await
             .unwrap(),
         );
+        let (retrieval, _search) = build_retrieval();
         let state = AppState::new(
             Config::desktop(dir.path()),
             store.clone(),
             Arc::new(FixedResolver(provider)),
             Arc::new(MemSecrets::default()),
             Arc::new(ToolRegistry::new()),
+            retrieval,
             AgentConfig {
                 model: "fake".into(),
                 ..AgentConfig::default()
@@ -721,6 +759,174 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e.event, AgentEvent::TurnCancelled { .. })),
             "steer continues the turn"
+        );
+    }
+
+    /// POST a JSON body to `uri`, returning the response.
+    async fn post_json(
+        router: &Router,
+        bearer: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ingest_then_search_finds_the_passage() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+
+        let ingest = post_json(
+            &router,
+            &bearer,
+            "/documents",
+            serde_json::json!({
+                "uri": "file:///solar.txt",
+                "content": "Jupiter is the largest planet in the Solar System, a gas giant.",
+            }),
+        )
+        .await;
+        assert_eq!(ingest.status(), StatusCode::CREATED);
+        let ingest: serde_json::Value = json_body(ingest).await;
+        assert!(ingest["chunks"].as_u64().unwrap() >= 1);
+        assert!(ingest["document_id"].is_string());
+
+        // The ingested chunk is immediately searchable over the shared index.
+        let search = post_json(
+            &router,
+            &bearer,
+            "/search",
+            serde_json::json!({ "query": "largest gas giant planet", "k": 1 }),
+        )
+        .await;
+        assert_eq!(search.status(), StatusCode::OK);
+        let results: serde_json::Value = json_body(search).await;
+        let citations = results["citations"].as_array().unwrap();
+        assert_eq!(citations.len(), 1);
+        assert!(citations[0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("Jupiter"));
+        assert_eq!(citations[0]["document_id"], ingest["document_id"]);
+    }
+
+    #[tokio::test]
+    async fn re_ingesting_the_same_uri_is_idempotent() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let doc = serde_json::json!({
+            "uri": "file:///notes.txt",
+            "content": "one two three four five six seven eight nine ten",
+        });
+
+        let first: serde_json::Value =
+            json_body(post_json(&router, &bearer, "/documents", doc.clone()).await).await;
+        let second: serde_json::Value =
+            json_body(post_json(&router, &bearer, "/documents", doc).await).await;
+        // Same URI => same derived document id => replaced in place.
+        assert_eq!(first["document_id"], second["document_id"]);
+
+        // A broad search still returns each chunk once, not doubled.
+        let results: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/search",
+                serde_json::json!({ "query": "three four five", "k": 50 }),
+            )
+            .await,
+        )
+        .await;
+        let citations = results["citations"].as_array().unwrap();
+        let ids: std::collections::HashSet<_> = citations
+            .iter()
+            .map(|c| c["chunk_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), citations.len());
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_empty_content_and_search_rejects_empty_query() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+
+        let bad_ingest = post_json(
+            &router,
+            &bearer,
+            "/documents",
+            serde_json::json!({ "content": "   " }),
+        )
+        .await;
+        assert_eq!(bad_ingest.status(), StatusCode::BAD_REQUEST);
+
+        let bad_search = post_json(
+            &router,
+            &bearer,
+            "/search",
+            serde_json::json!({ "query": "  " }),
+        )
+        .await;
+        assert_eq!(bad_search.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_unsupported_media_type() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let response = post_json(
+            &router,
+            &bearer,
+            "/documents",
+            serde_json::json!({ "content": "%PDF-1.7", "media_type": "application/pdf" }),
+        )
+        .await;
+        // A parser that can't handle the media type is the caller's problem: 400.
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, "bad_request");
+    }
+
+    #[tokio::test]
+    async fn search_on_an_empty_index_returns_no_citations() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let results: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/search",
+                serde_json::json!({ "query": "anything" }),
+            )
+            .await,
+        )
+        .await;
+        assert!(results["citations"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn agent_deps_registers_the_search_tool_alongside_the_file_tools() {
+        let (_retrieval, tools, _config) = agent_deps();
+        let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
+        assert!(
+            names.iter().any(|n| n == "search"),
+            "search tool registered"
+        );
+        assert!(
+            names.iter().any(|n| n == "read_file"),
+            "file tools still present"
         );
     }
 
@@ -1827,6 +2033,7 @@ mod tests {
             Arc::new(FixedResolver(Arc::new(FakeProvider))),
             Arc::new(MemSecrets::default()),
             Arc::new(ToolRegistry::new()),
+            build_retrieval().0,
             AgentConfig {
                 model: "fake".into(),
                 ..AgentConfig::default()
@@ -1981,6 +2188,7 @@ mod tests {
             }))),
             Arc::new(MemSecrets::default()),
             tools,
+            build_retrieval().0,
             AgentConfig {
                 model: "fake".into(),
                 ..AgentConfig::default()
