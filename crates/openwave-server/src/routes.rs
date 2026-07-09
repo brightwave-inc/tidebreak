@@ -18,6 +18,7 @@ use openwave_core::{
     SequencedEvent, Store,
 };
 
+use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
@@ -525,15 +526,25 @@ pub struct EventsQuery {
 /// to the live tail *before* replaying, and dropping any live event whose `seq`
 /// was already replayed, means nothing is missed or duplicated across the handoff.
 /// `404` if the chat doesn't exist.
+///
+/// Auth is checked by the bearer middleware. Browser clients that authenticated
+/// via `Sec-WebSocket-Protocol` must offer `openwave-v1` so this handler can
+/// select it in the upgrade response (browsers require a matching selection).
 pub async fn chat_events(
     State(state): State<AppState>,
     Path(id): Path<ChatId>,
     Query(query): Query<EventsQuery>,
+    headers: axum::http::HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, ServerError> {
     if state.store.get_chat(id).await?.is_none() {
         return Err(ServerError::not_found(format!("chat {id} not found")));
     }
+    let upgrade = if offered_handshake_subprotocol(&headers) {
+        upgrade.protocols([WS_HANDSHAKE_SUBPROTOCOL])
+    } else {
+        upgrade
+    };
     Ok(upgrade.on_upgrade(move |socket| stream_events(socket, state, id, query.after)))
 }
 
