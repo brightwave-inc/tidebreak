@@ -56,16 +56,18 @@ impl Retriever {
         &self.store
     }
 
-    /// Ingest one document: parse its bytes, chunk, embed, and upsert.
+    /// Ingest one document: parse its bytes, chunk, embed, and store.
     ///
-    /// Idempotent for [`DocumentSource::Uri`] sources: the document id is derived
-    /// from the URI, so re-ingesting the *same* bytes from the same URI reuses the
-    /// document id, re-derives identical chunk ids, and upserts in place rather
-    /// than duplicating. (Re-ingesting *changed* content at the same URI upserts
-    /// the new chunks but does not yet delete chunks the old version left behind —
-    /// stale-chunk cleanup is a later slice.) [`DocumentSource::Inline`] sources
-    /// get a fresh id every call. A document that chunks to nothing (empty or
-    /// whitespace-only) stores nothing and reports zero chunks.
+    /// A full, **atomic replace** for [`DocumentSource::Uri`] sources: the document
+    /// id is derived from the URI, so re-ingesting the same URI targets the same
+    /// document, and the store swaps its chunks in one operation (see
+    /// [`VectorStore::replace_document`]). Re-ingesting identical content is
+    /// idempotent; re-ingesting *changed* (even shorter, or now-empty) content
+    /// leaves no stale chunks behind; and two concurrent re-ingests of the same URI
+    /// resolve to one version rather than a mix. [`DocumentSource::Inline`] sources
+    /// get a fresh id every call, so they never collide with a prior ingest. A
+    /// document that chunks to nothing (empty or whitespace-only) stores nothing and
+    /// reports zero chunks — after clearing any prior version.
     pub async fn ingest(
         &self,
         source: DocumentSource,
@@ -82,33 +84,38 @@ impl Retriever {
         let document = Document::with_id(id, source, media_type, parsed.text);
 
         let chunks = self.chunker.chunk(&document)?;
-        if chunks.is_empty() {
-            return Ok(IngestOutcome {
-                document,
-                chunks: 0,
-            });
-        }
 
-        let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-        let embeddings = self.embedder.embed_documents(&texts).await?;
-        if embeddings.len() != chunks.len() {
-            return Err(RetrievalError::embed(format!(
-                "embedder returned {} vectors for {} chunks",
-                embeddings.len(),
-                chunks.len()
-            )));
-        }
+        // Embed first (the slow, awaited step), then hand the store a single
+        // atomic replace. Doing the delete+insert as one store operation — rather
+        // than a separate prune then upsert with an embed await in between — is
+        // what keeps two concurrent re-ingests of the same document from
+        // interleaving and leaving a mix of versions. Empty content yields an
+        // empty record set, which clears any prior version of the document.
+        let records: Vec<VectorRecord> = if chunks.is_empty() {
+            Vec::new()
+        } else {
+            let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+            let embeddings = self.embedder.embed_documents(&texts).await?;
+            if embeddings.len() != chunks.len() {
+                return Err(RetrievalError::embed(format!(
+                    "embedder returned {} vectors for {} chunks",
+                    embeddings.len(),
+                    chunks.len()
+                )));
+            }
+            chunks
+                .into_iter()
+                .zip(embeddings)
+                .map(|(chunk, embedding)| VectorRecord { chunk, embedding })
+                .collect()
+        };
 
-        let records = chunks
-            .into_iter()
-            .zip(embeddings)
-            .map(|(chunk, embedding)| VectorRecord { chunk, embedding })
-            .collect();
-        self.store.upsert(records).await?;
+        let count = records.len();
+        self.store.replace_document(document.id, records).await?;
 
         Ok(IngestOutcome {
             document,
-            chunks: texts.len(),
+            chunks: count,
         })
     }
 
@@ -238,6 +245,50 @@ The Great Barrier Reef is the world's largest coral reef system.";
         let hits = r.search("three four five", 10).await.unwrap();
         let unique: std::collections::HashSet<_> = hits.iter().map(|h| h.chunk_id).collect();
         assert_eq!(unique.len(), hits.len());
+    }
+
+    #[tokio::test]
+    async fn re_ingesting_shorter_content_prunes_stale_chunks() {
+        let r = retriever();
+        let uri = || DocumentSource::uri("file:///doc.txt");
+        // Long enough (and multi-line) to split into several chunks.
+        let long = "alpha alpha alpha alpha alpha alpha alpha\n\
+                    beta beta beta beta beta beta beta\n\
+                    gamma gamma gamma gamma gamma gamma";
+        let first = r
+            .ingest(uri(), "text/plain", long.as_bytes())
+            .await
+            .unwrap();
+        assert!(first.chunks >= 2);
+
+        // Re-ingest much shorter content at the same URI.
+        let second = r
+            .ingest(uri(), "text/plain", b"alpha alpha alpha")
+            .await
+            .unwrap();
+        assert_eq!(second.document.id, first.document.id);
+        // The store holds only the new chunks — the old beta/gamma ones are pruned.
+        assert_eq!(r.store().len().await.unwrap(), second.chunks);
+        let hits = r.search("gamma", 10).await.unwrap();
+        assert!(
+            hits.iter().all(|h| !h.snippet.contains("gamma")),
+            "stale chunks from the longer version must be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_ingesting_empty_content_clears_the_document() {
+        let r = retriever();
+        let uri = || DocumentSource::uri("file:///doc.txt");
+        r.ingest(uri(), "text/plain", b"alpha beta gamma delta epsilon")
+            .await
+            .unwrap();
+        assert!(r.store().len().await.unwrap() > 0);
+
+        // Re-ingesting empty content at the same URI clears its chunks entirely.
+        let out = r.ingest(uri(), "text/plain", b"   ").await.unwrap();
+        assert_eq!(out.chunks, 0);
+        assert!(r.store().is_empty().await.unwrap());
     }
 
     #[tokio::test]
