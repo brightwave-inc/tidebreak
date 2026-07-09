@@ -227,8 +227,8 @@ mod tests {
     use futures::stream::{self, BoxStream, StreamExt};
     use openwave_core::{
         AgentErrorInfo, AgentEvent, ApprovalClass, Chat, ChatId, ChatRequest, ModelProvider,
-        Project, ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent, StopReason,
-        Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
+        Message, Project, ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent,
+        StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
     };
     use resolver::ProviderResolver;
     use serde::de::DeserializeOwned;
@@ -333,6 +333,82 @@ mod tests {
         async fn delete_secret(&self, key: &str) -> Result<()> {
             self.0.lock().unwrap().remove(key);
             Ok(())
+        }
+    }
+
+    /// Store wrapper that pauses the first terminal event append. This exposes
+    /// races between `run_turn` returning and the journal finishing.
+    struct PauseTerminalStore {
+        inner: Arc<dyn Store>,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+        blocked: std::sync::atomic::AtomicBool,
+    }
+
+    impl PauseTerminalStore {
+        fn new(inner: Arc<dyn Store>, entered: Arc<Notify>, release: Arc<Notify>) -> Self {
+            Self {
+                inner,
+                entered,
+                release,
+                blocked: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Store for PauseTerminalStore {
+        async fn create_project(&self, project: &Project) -> Result<()> {
+            self.inner.create_project(project).await
+        }
+        async fn get_project(&self, id: ProjectId) -> Result<Option<Project>> {
+            self.inner.get_project(id).await
+        }
+        async fn list_projects(&self) -> Result<Vec<Project>> {
+            self.inner.list_projects().await
+        }
+        async fn create_chat(&self, chat: &Chat) -> Result<()> {
+            self.inner.create_chat(chat).await
+        }
+        async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
+            self.inner.get_chat(id).await
+        }
+        async fn list_chats(&self) -> Result<Vec<Chat>> {
+            self.inner.list_chats().await
+        }
+        async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
+            self.inner.set_chat_model(id, model).await
+        }
+        async fn append_message(&self, message: &Message) -> Result<()> {
+            self.inner.append_message(message).await
+        }
+        async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>> {
+            self.inner.list_messages(chat_id).await
+        }
+        async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>> {
+            self.inner.get_setting(key).await
+        }
+        async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
+            self.inner.set_setting(key, value).await
+        }
+        async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64> {
+            if matches!(
+                event,
+                AgentEvent::TurnCompleted { .. }
+                    | AgentEvent::TurnFailed { .. }
+                    | AgentEvent::TurnCancelled { .. }
+            ) && self
+                .blocked
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                self.entered.notify_waiters();
+                self.release.notified().await;
+            }
+            self.inner.append_event(chat_id, event).await
+        }
+        async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
+            self.inner.list_events(chat_id, after).await
         }
     }
 
@@ -601,6 +677,20 @@ mod tests {
         );
 
         let events = wait_for_turn(&store, chat.id).await;
+        let stream_interrupted_at = events.iter().position(|e| {
+            matches!(
+                e.event,
+                AgentEvent::StreamInterrupted
+            )
+        });
+        let user_steered_at = events.iter().position(|e| matches!(
+            &e.event,
+            AgentEvent::UserSteered { content } if content == "change course"
+        ));
+        assert!(
+            matches!((stream_interrupted_at, user_steered_at), (Some(a), Some(b)) if a < b),
+            "interrupted stream is marked before steer is injected"
+        );
         assert!(events.iter().any(|e| matches!(
             &e.event,
             AgentEvent::UserSteered { content } if content == "change course"
@@ -609,6 +699,15 @@ mod tests {
             events.last().map(|e| &e.event),
             Some(AgentEvent::TurnCompleted { .. })
         ));
+        let mut visible_assistant = String::new();
+        for event in events.iter().map(|e| &e.event) {
+            match event {
+                AgentEvent::TextDelta { text } => visible_assistant.push_str(text),
+                AgentEvent::StreamInterrupted => visible_assistant.clear(),
+                _ => {}
+            }
+        }
+        assert_eq!(visible_assistant, "after steer");
         assert!(
             !events
                 .iter()
@@ -1690,6 +1789,62 @@ mod tests {
         wait_for_turn(&store, chat.id).await;
 
         // The turn finished, so its slot is released and a follow-up is accepted.
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "two").await,
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slot_stays_held_until_journal_drains() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let store: Arc<dyn Store> = Arc::new(PauseTerminalStore::new(
+            inner,
+            entered.clone(),
+            release.clone(),
+        ));
+        let state = AppState::new(
+            Config::desktop(dir.path()),
+            store.clone(),
+            Arc::new(FixedResolver(Arc::new(FakeProvider))),
+            Arc::new(MemSecrets::default()),
+            Arc::new(ToolRegistry::new()),
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        );
+        let token = state.token.clone();
+        let router = app(state);
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "one").await,
+            StatusCode::ACCEPTED
+        );
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("turn reached blocked terminal journal append");
+
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "two").await,
+            StatusCode::CONFLICT,
+            "slot must remain held while terminal event is still being journaled"
+        );
+
+        release.notify_waiters();
+        wait_for_turn(&store, chat.id).await;
         assert_eq!(
             send_message(&router, &bearer, chat.id, "two").await,
             StatusCode::ACCEPTED

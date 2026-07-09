@@ -308,7 +308,10 @@ impl Agent {
                 return self.finish_cancelled(events, total_usage);
             }
             if matches!(stream_end, StreamEnd::Steered) {
-                // Discard this step's partial output — nothing from it was persisted.
+                // Discard this step's partial output — nothing from it was
+                // persisted. The marker lets replay/live clients clear deltas
+                // that were already streamed for this abandoned provider step.
+                let _ = events.unbounded_send(AgentEvent::StreamInterrupted);
                 self.apply_steers(chat, turn_id, &mut transcript, events)
                     .await?;
                 continue;
@@ -1241,11 +1244,15 @@ mod tests {
         });
 
         let mut steered = false;
+        let mut interrupted = false;
         let mut completed = false;
         while let Some(event) = rx.next().await {
             match event {
                 AgentEvent::TextDelta { text } if text == "partial" => {
                     steer.push("please change course", true);
+                }
+                AgentEvent::StreamInterrupted => {
+                    interrupted = true;
                 }
                 AgentEvent::UserSteered { content } => {
                     assert_eq!(content, "please change course");
@@ -1260,6 +1267,10 @@ mod tests {
         }
         handle.await.unwrap();
 
+        assert!(
+            interrupted,
+            "interrupt steer marks the partial provider stream as abandoned"
+        );
         assert!(steered, "steer event emitted");
         assert!(completed, "turn completes after steer");
         let roles: Vec<_> = store

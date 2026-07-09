@@ -37,6 +37,7 @@ export type AgentEvent =
   | { type: "turn_started"; turn_id: string }
   | { type: "text_delta"; text: string }
   | { type: "reasoning_delta"; text: string }
+  | { type: "stream_interrupted" }
   | { type: "tool_call_started"; call_id: string; name: string }
   | { type: "tool_call_args_delta"; call_id: string; fragment: string }
   | {

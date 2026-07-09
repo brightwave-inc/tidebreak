@@ -132,12 +132,23 @@ export default function App() {
       const text = assistantBufRef.current;
       setMessages((prev) => {
         const copy = [...prev];
-        for (let i = copy.length - 1; i >= 0; i -= 1) {
-          const msg = copy[i];
-          if (msg.role === "assistant") {
-            copy[i] = { id: msg.id, role: "assistant", text };
-            break;
-          }
+        const last = copy[copy.length - 1];
+        if (last?.role === "assistant") {
+          copy[copy.length - 1] = { id: last.id, role: "assistant", text };
+        } else {
+          copy.push({ id: nextId(), role: "assistant", text });
+        }
+        return copy;
+      });
+      return;
+    }
+
+    if (event.type === "stream_interrupted") {
+      assistantBufRef.current = "";
+      setMessages((prev) => {
+        const copy = [...prev];
+        if (copy[copy.length - 1]?.role === "assistant") {
+          copy.pop();
         }
         return copy;
       });

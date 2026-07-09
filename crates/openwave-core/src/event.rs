@@ -41,6 +41,9 @@ pub enum AgentEvent {
         /// The reasoning fragment.
         text: String,
     },
+    /// The current provider stream was preempted and any partial assistant/tool
+    /// deltas since the last stable boundary should be discarded by clients.
+    StreamInterrupted,
     /// The model has begun a tool call; its name is known.
     ToolCallStarted {
         /// Correlates the following args deltas, approval, and result.
