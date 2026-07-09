@@ -13,22 +13,27 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
-use openwave_core::{Agent, Chat, ChatId, Project, ProjectId, SequencedEvent, Store};
+use openwave_core::{
+    Agent, Chat, ChatId, Project, ProjectId, SecretProvider, SequencedEvent, Store,
+};
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
+use crate::resolver::ANTHROPIC_API_KEY;
 use crate::state::AppState;
 
 /// The store-settings key for the selected model.
 const MODEL_SETTING: &str = "model";
 
-/// Runtime settings a client can read. Secrets (e.g. API keys) are never
-/// included here — they live in the `SecretProvider`, not the store.
+/// Runtime settings a client can read. The API key itself is never returned —
+/// it lives in the `SecretProvider`, not the store — only whether one is set.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Settings {
     /// The model turns run against, or `None` to use the server's default.
     #[serde(default)]
     pub model: Option<String>,
+    /// Whether a model API key is configured (never the key itself).
+    pub has_api_key: bool,
 }
 
 /// Body of `PUT /settings`. Each field is a *double* option so an absent key is
@@ -54,6 +59,7 @@ where
 pub async fn get_settings(State(state): State<AppState>) -> Result<Json<Settings>, ServerError> {
     Ok(Json(Settings {
         model: read_model(&*state.store).await?,
+        has_api_key: has_api_key(&*state.secrets).await,
     }))
 }
 
@@ -87,6 +93,7 @@ pub async fn put_settings(
     }
     Ok(Json(Settings {
         model: read_model(&*state.store).await?,
+        has_api_key: has_api_key(&*state.secrets).await,
     }))
 }
 
@@ -96,6 +103,56 @@ async fn read_model(store: &dyn Store) -> Result<Option<String>, ServerError> {
         .get_setting(MODEL_SETTING)
         .await?
         .and_then(|value| value.as_str().map(str::to_owned)))
+}
+
+/// Whether a model API key is configured — in the secret store or the
+/// environment fallback the resolver also honors.
+async fn has_api_key(secrets: &dyn SecretProvider) -> bool {
+    if matches!(secrets.get_secret(ANTHROPIC_API_KEY).await, Ok(Some(key)) if !key.is_empty()) {
+        return true;
+    }
+    std::env::var("ANTHROPIC_API_KEY").is_ok_and(|key| !key.is_empty())
+}
+
+/// Body of `PUT /settings/api-key`.
+#[derive(Deserialize)]
+pub struct ApiKey {
+    /// The provider API key to store. Written to the `SecretProvider` (the OS
+    /// keychain on desktop), never to the database, and never read back out.
+    pub api_key: String,
+}
+
+// Redact the key so it can't leak through a `{:?}` (logging, error context, …).
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKey").field("api_key", &"***").finish()
+    }
+}
+
+/// `PUT /settings/api-key` — store the model provider's API key. `204 No Content`.
+pub async fn put_api_key(
+    State(state): State<AppState>,
+    Json(body): Json<ApiKey>,
+) -> Result<StatusCode, ServerError> {
+    if body.api_key.is_empty() {
+        return Err(ServerError::bad_request("api_key must not be empty"));
+    }
+    state
+        .secrets
+        .set_secret(ANTHROPIC_API_KEY, &body.api_key)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /settings/api-key` — remove the stored API key. `204 No Content`.
+///
+/// Clears only the stored key. If the daemon was launched with an
+/// `ANTHROPIC_API_KEY` in its environment, that fallback still applies — so
+/// `has_api_key` may stay `true` and turns keep resolving a provider after a
+/// delete. The environment is a deploy-time default the API doesn't override.
+pub async fn delete_api_key(State(state): State<AppState>) -> Result<StatusCode, ServerError> {
+    state.secrets.delete_secret(ANTHROPIC_API_KEY).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Body of `POST /projects`.
@@ -250,8 +307,11 @@ pub async fn post_message(
     if let Some(model) = read_model(&*state.store).await? {
         agent_config.model = model;
     }
+    // Resolve the provider from the currently-configured key, so a key set via
+    // PUT /settings/api-key takes effect on this turn.
+    let provider = state.resolver.resolve().await;
     let agent = Agent::new(
-        state.provider.clone(),
+        provider,
         state.tools.clone(),
         state.store.clone(),
         agent_config,

@@ -3,10 +3,11 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use openwave_core::{AgentConfig, ChatId, Config, ModelProvider, Store, ToolRegistry};
+use openwave_core::{AgentConfig, ChatId, Config, SecretProvider, Store, ToolRegistry};
 use uuid::Uuid;
 
 use crate::bus::EventBus;
+use crate::resolver::ProviderResolver;
 
 /// The state cloned into each handler: the boot config, the durable store, the
 /// agent's dependencies (provider + tools + tuning), the per-launch bearer token,
@@ -19,8 +20,10 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Durable metadata, conversation state, and the event journal.
     pub store: Arc<dyn Store>,
-    /// The model backend turns stream completions from.
-    pub provider: Arc<dyn ModelProvider>,
+    /// Builds the model provider for each turn from the configured credentials.
+    pub resolver: Arc<dyn ProviderResolver>,
+    /// Credential custody — where the model API key is read from and written to.
+    pub secrets: Arc<dyn SecretProvider>,
     /// The tools available to the agent.
     pub tools: Arc<ToolRegistry>,
     /// Per-turn agent tuning (model, limits, …).
@@ -39,14 +42,16 @@ impl AppState {
     pub fn new(
         config: Config,
         store: Arc<dyn Store>,
-        provider: Arc<dyn ModelProvider>,
+        resolver: Arc<dyn ProviderResolver>,
+        secrets: Arc<dyn SecretProvider>,
         tools: Arc<ToolRegistry>,
         agent_config: AgentConfig,
     ) -> Self {
         Self {
             config: Arc::new(config),
             store,
-            provider,
+            resolver,
+            secrets,
             tools,
             agent_config,
             token: Uuid::new_v4().to_string().into(),
