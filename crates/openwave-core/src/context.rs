@@ -300,27 +300,42 @@ fn mark_pair_kept(
 
 fn truncate_message(msg: &ChatMessage, target_tokens: usize) -> ChatMessage {
     let available = target_tokens.saturating_sub(ROLE_OVERHEAD);
-    let total: usize = msg.content.iter().map(estimate_block_tokens).sum();
-    if total == 0 {
+    if msg.content.is_empty() {
         return msg.clone();
     }
 
-    let mut blocks: Vec<ContentBlock> = Vec::new();
-    let mut remaining = available;
+    // Every block costs at least its fixed overhead (it can't shrink below the
+    // JSON envelope + ids), so reserve overheads first, then split whatever
+    // remains across blocks in proportion to their content size. Callers keep
+    // `target_tokens >= message_floor`, so `available >= overhead_total` and the
+    // shares sum to at most `available` — the message never exceeds its budget.
+    let overhead_total: usize = msg.content.iter().map(block_overhead).sum();
+    let content_total: usize = msg
+        .content
+        .iter()
+        .map(|b| estimate_block_tokens(b).saturating_sub(block_overhead(b)))
+        .sum();
+    let content_budget = available.saturating_sub(overhead_total);
 
-    for block in &msg.content {
-        let full = estimate_block_tokens(block);
-        let share = ((available as u64 * full as u64) / total as u64) as usize;
-        let share = share.min(remaining).max(block_overhead(block));
-
-        if share >= full {
-            blocks.push(block.clone());
-            remaining = remaining.saturating_sub(full);
-        } else {
-            blocks.push(truncate_block(block, share));
-            remaining = remaining.saturating_sub(share);
-        }
-    }
+    let blocks: Vec<ContentBlock> = msg
+        .content
+        .iter()
+        .map(|block| {
+            let overhead = block_overhead(block);
+            let block_content = estimate_block_tokens(block).saturating_sub(overhead);
+            let content_share = if content_total == 0 {
+                0
+            } else {
+                (content_budget as u64 * block_content as u64 / content_total as u64) as usize
+            };
+            let share = overhead + content_share;
+            if share >= estimate_block_tokens(block) {
+                block.clone()
+            } else {
+                truncate_block(block, share)
+            }
+        })
+        .collect();
 
     ChatMessage {
         role: msg.role,
@@ -369,7 +384,12 @@ fn truncate_str(s: &str, target_tokens: usize) -> String {
         return s.to_string();
     }
     let suffix_chars = TRUNCATION_SUFFIX.chars().count();
-    let keep = char_budget.saturating_sub(suffix_chars);
+    // When the budget can't even hold the notice, hard-cut to the budget — the
+    // notice itself must never push the block back over `target_tokens`.
+    if char_budget <= suffix_chars {
+        return s.chars().take(char_budget).collect();
+    }
+    let keep = char_budget - suffix_chars;
     let truncated: String = s.chars().take(keep).collect();
     format!("{truncated}{TRUNCATION_SUFFIX}")
 }
@@ -572,6 +592,64 @@ mod tests {
         let (result, reduced) = fit_to_budget(&msgs, budget, 100);
         assert!(reduced);
         assert!(estimate_transcript_tokens(&result) <= budget);
+    }
+
+    #[test]
+    fn multi_block_message_never_exceeds_its_allocation() {
+        // A message with many small blocks used to overshoot its target: each
+        // block was force-allocated its overhead *after* the remaining-budget
+        // cap, so the shares summed above the allocation. Truncating to a tight
+        // target must produce a message at or under that target.
+        let blocks: Vec<ContentBlock> = (0..10)
+            .map(|i| ContentBlock::Text {
+                text: format!("block {i} ").repeat(20),
+            })
+            .collect();
+        let msg = ChatMessage {
+            role: Role::User,
+            content: blocks,
+        };
+        // Callers never allocate below the message's irreducible overhead floor
+        // (role + each block's fixed envelope); test at and above it.
+        let overhead_floor: usize =
+            ROLE_OVERHEAD + msg.content.iter().map(block_overhead).sum::<usize>();
+        for target in [overhead_floor, overhead_floor + 40, 200, 400] {
+            let truncated = truncate_message(&msg, target);
+            assert!(
+                estimate_message_tokens(&truncated) <= target,
+                "target {target}: got {}",
+                estimate_message_tokens(&truncated)
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_with_many_block_messages_fits_budget() {
+        // End-to-end: a transcript of multi-block messages must fit the budget
+        // after reduction, so the proactive path doesn't fall through to the
+        // provider's PromptTooLong retry.
+        let make = |role: Role, n: usize| ChatMessage {
+            role,
+            content: (0..n)
+                .map(|i| ContentBlock::Text {
+                    text: format!("chunk {i} ").repeat(30),
+                })
+                .collect(),
+        };
+        let msgs = vec![
+            user_msg("kick off the conversation here"),
+            make(Role::Assistant, 8),
+            make(Role::User, 6),
+            make(Role::Assistant, 10),
+        ];
+        let budget = estimate_transcript_tokens(&msgs) / 3;
+        let (result, reduced) = fit_to_budget(&msgs, budget, 50);
+        assert!(reduced);
+        assert!(
+            estimate_transcript_tokens(&result) <= budget,
+            "fitted {} > budget {budget}",
+            estimate_transcript_tokens(&result)
+        );
     }
 
     #[test]
