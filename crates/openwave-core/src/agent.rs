@@ -327,24 +327,24 @@ impl Agent {
             return ToolOutput::error(format!("unknown tool: {}", call.name));
         };
         // v1 policy: ReadOnly/Workspace auto; Sensitive parks on the approval gate.
+        // Arm *before* emitting ApprovalRequired so a client that sees the event
+        // can never race a 404 against a not-yet-parked call.
         if matches!(tool.approval_class(), ApprovalClass::Sensitive) {
             let summary = format!("{} requires approval", call.name);
-            let _ = events.unbounded_send(AgentEvent::ApprovalRequired {
+            let pending = self.approvals.arm(ApprovalRequest {
                 call_id: call.call_id,
+                chat_id: chat.id,
+                turn_id,
+                tool_name: call.name.clone(),
                 class: ApprovalClass::Sensitive,
                 summary: summary.clone(),
             });
-            let decision = self
-                .approvals
-                .decide(ApprovalRequest {
-                    call_id: call.call_id,
-                    chat_id: chat.id,
-                    turn_id,
-                    tool_name: call.name.clone(),
-                    class: ApprovalClass::Sensitive,
-                    summary,
-                })
-                .await;
+            let _ = events.unbounded_send(AgentEvent::ApprovalRequired {
+                call_id: call.call_id,
+                class: ApprovalClass::Sensitive,
+                summary,
+            });
+            let decision = pending.await;
             let approved = matches!(decision, ApprovalDecision::Approve);
             let _ = events.unbounded_send(AgentEvent::ApprovalDecided {
                 call_id: call.call_id,

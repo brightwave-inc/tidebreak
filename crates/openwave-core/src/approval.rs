@@ -1,12 +1,18 @@
 //! Approval park-and-resume for Sensitive tools.
 //!
 //! When the agent hits a tool whose [`ApprovalClass`](crate::tool::ApprovalClass)
-//! requires a human decision, it emits `ApprovalRequired` and awaits an
-//! [`ApprovalGate`]. The server's gate parks the turn on a oneshot channel until
+//! requires a human decision, it arms an [`ApprovalGate`] (so the call is
+//! resolvable), emits `ApprovalRequired`, then awaits the decision. The
+//! server's gate parks the turn on a oneshot channel until
 //! `POST /chats/{id}/approvals/{call_id}` decides; tests inject an auto-approve
 //! or refuse gate instead.
+//!
+//! **Ordering invariant:** the gate must make the call resolvable *before*
+//! returning from [`ApprovalGate::arm`], so a client that sees
+//! `ApprovalRequired` can never race a 404 against a not-yet-parked call.
 
-use async_trait::async_trait;
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::id::{CallId, ChatId, TurnId};
 use crate::tool::ApprovalClass;
@@ -40,39 +46,46 @@ pub struct ApprovalRequest {
     pub summary: String,
 }
 
+/// A future that resolves to an [`ApprovalDecision`].
+pub type ApprovalFuture<'a> = Pin<Box<dyn Future<Output = ApprovalDecision> + Send + 'a>>;
+
 /// Decides whether a Sensitive tool call may run.
 ///
 /// Object-safe and held behind `Arc` so the server can park on a channel while
 /// tests inject an immediate approve/reject.
-#[async_trait]
 pub trait ApprovalGate: Send + Sync {
-    /// Await a decision for `request`. Must not return until the call is
-    /// approved or rejected (or the turn is abandoned).
-    async fn decide(&self, request: ApprovalRequest) -> ApprovalDecision;
+    /// Synchronously arm a pending approval, returning a future that resolves
+    /// when decided.
+    ///
+    /// Parking implementations MUST register the call (so HTTP resolve can find
+    /// it) before returning. The agent emits `ApprovalRequired` only after
+    /// `arm` returns, then awaits the future — closing the race where a client
+    /// sees the event before the call is parked.
+    fn arm(&self, request: ApprovalRequest) -> ApprovalFuture<'_>;
 }
 
 /// Always rejects — the default when no gate is wired. Keeps fail-closed
 /// behavior for Sensitive tools outside the server's park-and-resume path.
 pub struct RefuseGate;
 
-#[async_trait]
 impl ApprovalGate for RefuseGate {
-    async fn decide(&self, request: ApprovalRequest) -> ApprovalDecision {
-        ApprovalDecision::Reject {
-            reason: format!(
-                "{} requires approval, which is not configured",
-                request.tool_name
-            ),
-        }
+    fn arm(&self, request: ApprovalRequest) -> ApprovalFuture<'_> {
+        Box::pin(async move {
+            ApprovalDecision::Reject {
+                reason: format!(
+                    "{} requires approval, which is not configured",
+                    request.tool_name
+                ),
+            }
+        })
     }
 }
 
 /// Always approves — for tests that exercise Sensitive tools without a UI.
 pub struct AutoApproveGate;
 
-#[async_trait]
 impl ApprovalGate for AutoApproveGate {
-    async fn decide(&self, _request: ApprovalRequest) -> ApprovalDecision {
-        ApprovalDecision::Approve
+    fn arm(&self, _request: ApprovalRequest) -> ApprovalFuture<'_> {
+        Box::pin(async { ApprovalDecision::Approve })
     }
 }

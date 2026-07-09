@@ -31,7 +31,9 @@ pub mod tool;
 pub mod tools;
 
 pub use agent::{Agent, AgentConfig, ToolRegistry};
-pub use approval::{ApprovalDecision, ApprovalGate, ApprovalRequest, AutoApproveGate, RefuseGate};
+pub use approval::{
+    ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalRequest, AutoApproveGate, RefuseGate,
+};
 pub use config::{Config, Profile};
 #[cfg(feature = "sqlite")]
 pub use db::DbStore;

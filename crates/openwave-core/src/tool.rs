@@ -16,9 +16,9 @@ use crate::id::ChatId;
 
 /// The approval policy class a tool declares for itself.
 ///
-/// Policy maps class → auto-approve / ask / deny. In v1: `ReadOnly` auto;
-/// `Workspace` auto inside the chat workspace, ask outside; `Sensitive`
-/// always asks.
+/// Policy maps class → auto-approve / ask / deny. In v1: `ReadOnly` and
+/// `Workspace` auto-approve; `Sensitive` always parks on the approval gate.
+/// (Workspace-outside prompting and standing grants are deferred.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalClass {
