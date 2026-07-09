@@ -47,9 +47,15 @@
 //! # }
 //! ```
 //!
+//! The agent-facing [`SearchTool`] (behind the default `tool` feature) adapts the
+//! query side to `openwave-core`'s `Tool` contract, so the agent loop can search a
+//! shared index. Turn the feature off to use the pipeline as a standalone library
+//! with no dependency on the core crate.
+//!
 //! Not yet wired: real embedding providers and reranking, persistent/hybrid vector
-//! backends, rich-format parsing, and the agent-facing `search` tool + server
-//! ingest API. Each lands as its own slice behind these seams.
+//! backends, rich-format parsing, and the server ingest API + `AppState` wiring
+//! that hands the agent a live index. Each lands as its own slice behind these
+//! seams.
 
 mod chunk;
 mod document;
@@ -58,6 +64,8 @@ mod error;
 mod id;
 mod parse;
 mod retriever;
+#[cfg(feature = "tool")]
+mod search;
 mod vector;
 
 pub use chunk::{Chunker, TextChunker};
@@ -67,4 +75,6 @@ pub use error::{Result, RetrievalError};
 pub use id::{ChunkId, DocumentId};
 pub use parse::{DocumentParser, ParsedDocument, PlainTextParser};
 pub use retriever::{IngestOutcome, Retriever};
+#[cfg(feature = "tool")]
+pub use search::SearchTool;
 pub use vector::{InMemoryVectorStore, VectorRecord, VectorStore};
