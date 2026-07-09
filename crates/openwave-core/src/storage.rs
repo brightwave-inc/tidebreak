@@ -20,8 +20,8 @@ use serde_json::Value;
 
 use crate::error::Result;
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::ChatId;
-use crate::model::{Chat, Message};
+use crate::id::{ChatId, ProjectId};
+use crate::model::{Chat, Message, Project};
 
 /// Durable metadata and conversation state.
 ///
@@ -29,7 +29,22 @@ use crate::model::{Chat, Message};
 /// held behind `Arc<dyn Store>`, so this trait stays object-safe.
 #[async_trait]
 pub trait Store: Send + Sync {
+    /// Persist a new project.
+    async fn create_project(&self, project: &Project) -> Result<()>;
+
+    /// Fetch a project by id, or `None` if it doesn't exist.
+    async fn get_project(&self, id: ProjectId) -> Result<Option<Project>>;
+
+    /// List projects, most-recently-created first.
+    async fn list_projects(&self) -> Result<Vec<Project>>;
+
     /// Persist a new chat.
+    ///
+    /// A chat's `project_id`, when set, is not checked against an existing
+    /// project here — there is no database foreign key on the link (SQLite can't
+    /// add one to an existing table). Callers that accept a `project_id` from
+    /// outside must verify the project exists first (the server does so at its
+    /// API edge) to avoid persisting a dangling reference.
     async fn create_chat(&self, chat: &Chat) -> Result<()>;
 
     /// Fetch a chat by id, or `None` if it doesn't exist.
@@ -102,6 +117,7 @@ mod tests {
     /// behind `Arc<dyn Store>`, and exercises the signatures.
     #[derive(Default)]
     struct MemStore {
+        projects: Mutex<HashMap<ProjectId, Project>>,
         chats: Mutex<HashMap<ChatId, Chat>>,
         settings: Mutex<HashMap<String, Value>>,
         events: Mutex<Vec<(ChatId, SequencedEvent)>>,
@@ -109,6 +125,19 @@ mod tests {
 
     #[async_trait]
     impl Store for MemStore {
+        async fn create_project(&self, project: &Project) -> Result<()> {
+            self.projects
+                .lock()
+                .unwrap()
+                .insert(project.id, project.clone());
+            Ok(())
+        }
+        async fn get_project(&self, id: ProjectId) -> Result<Option<Project>> {
+            Ok(self.projects.lock().unwrap().get(&id).cloned())
+        }
+        async fn list_projects(&self) -> Result<Vec<Project>> {
+            Ok(self.projects.lock().unwrap().values().cloned().collect())
+        }
         async fn create_chat(&self, chat: &Chat) -> Result<()> {
             self.chats.lock().unwrap().insert(chat.id, chat.clone());
             Ok(())
@@ -164,6 +193,7 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(MemStore::default());
         let chat = Chat {
             id: ChatId::new(),
+            project_id: None,
             title: None,
             workspace_dir: "/tmp/ws".into(),
             created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),

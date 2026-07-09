@@ -41,6 +41,11 @@ pub fn app(state: AppState) -> Router {
     // `route_layer` applies the token check to matched API routes only, so an
     // unknown path still answers `404` (not `401`), and `/healthz` stays open.
     let api = Router::new()
+        .route(
+            "/projects",
+            post(routes::create_project).get(routes::list_projects),
+        )
+        .route("/projects/{id}", get(routes::get_project))
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route("/chats/{id}", get(routes::get_chat))
         .route("/chats/{id}/messages", post(routes::post_message))
@@ -171,8 +176,8 @@ mod tests {
     use axum::http::{header, Request, StatusCode};
     use futures::stream::{self, BoxStream, StreamExt};
     use openwave_core::{
-        AgentErrorInfo, AgentEvent, Chat, ChatId, ChatRequest, ProviderEvent, ProviderId,
-        SequencedEvent, StopReason, Usage,
+        AgentErrorInfo, AgentEvent, Chat, ChatId, ChatRequest, Project, ProjectId, ProviderEvent,
+        ProviderId, SequencedEvent, StopReason, Usage,
     };
     use serde::de::DeserializeOwned;
     use tokio::sync::Notify;
@@ -428,6 +433,117 @@ mod tests {
             json_body(response).await
         };
         assert_eq!(listed, vec![created]);
+    }
+
+    /// Create a project and return it.
+    async fn make_project(router: &Router, bearer: &str) -> Project {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/projects")
+                    .header(header::AUTHORIZATION, bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"workspace_dir": "/tmp/proj", "title": "p"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        json_body(response).await
+    }
+
+    #[tokio::test]
+    async fn project_create_get_and_list() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let created = make_project(&router, &bearer).await;
+        assert_eq!(created.title.as_deref(), Some("p"));
+
+        let fetched: Project = {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/projects/{}", created.id))
+                        .header(header::AUTHORIZATION, &bearer)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            json_body(response).await
+        };
+        assert_eq!(fetched, created);
+
+        let listed: Vec<Project> = {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .uri("/projects")
+                        .header(header::AUTHORIZATION, &bearer)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            json_body(response).await
+        };
+        assert_eq!(listed, vec![created]);
+    }
+
+    #[tokio::test]
+    async fn chat_can_be_filed_under_a_project() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let project = make_project(&router, &bearer).await;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chats")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"workspace_dir": "/tmp/ws", "project_id": project.id})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let chat: Chat = json_body(response).await;
+        assert_eq!(chat.project_id, Some(project.id));
+    }
+
+    #[tokio::test]
+    async fn chat_referencing_an_unknown_project_is_rejected() {
+        let (router, token, _store, _dir) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chats")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"workspace_dir": "/tmp/ws", "project_id": ProjectId::new()})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, "bad_request");
     }
 
     #[tokio::test]

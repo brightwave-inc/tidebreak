@@ -35,10 +35,10 @@ pub use config::{Config, Profile};
 pub use db::DbStore;
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
-pub use id::{CallId, ChatId, MessageId, StepId, TurnId};
+pub use id::{CallId, ChatId, MessageId, ProjectId, StepId, TurnId};
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
-pub use model::{Chat, Message, Role};
+pub use model::{Chat, Message, Project, Role};
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
     Usage,
