@@ -10,4 +10,12 @@ authors.workspace = true
 [lints]
 workspace = true
 
+# The binary is `openwave` (not `openwave-cli`), so `openwave serve` is the command.
+[[bin]]
+name = "openwave"
+path = "src/main.rs"
+
 [dependencies]
+openwave-core = { path = "../openwave-core", default-features = false }
+openwave-server = { path = "../openwave-server" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
