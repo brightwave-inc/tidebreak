@@ -12,19 +12,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::Result;
-use crate::id::SessionId;
+use crate::id::ChatId;
 
 /// The approval policy class a tool declares for itself.
 ///
 /// Policy maps class → auto-approve / ask / deny. In v1: `ReadOnly` auto;
-/// `Workspace` auto inside the session workspace, ask outside; `Sensitive`
+/// `Workspace` auto inside the chat workspace, ask outside; `Sensitive`
 /// always asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalClass {
     /// Never mutates anything (e.g. `read_file`, `list_dir`, `search`).
     ReadOnly,
-    /// Mutates the session workspace (e.g. `write_file`).
+    /// Mutates the chat workspace (e.g. `write_file`).
     Workspace,
     /// Escapes the workspace or reaches the network / external services
     /// (connector writes, networked `exec`, writes outside the workspace).
@@ -94,9 +94,9 @@ impl ToolOutput {
 /// as the agent loop lands.
 #[derive(Debug, Clone)]
 pub struct ToolCtx {
-    /// The session this call belongs to.
-    pub session_id: SessionId,
-    /// Absolute path to the session's workspace directory. Workspace-class
+    /// The chat this call belongs to.
+    pub chat_id: ChatId,
+    /// Absolute path to the chat's workspace directory. Workspace-class
     /// tools stay within it without prompting.
     pub workspace_dir: PathBuf,
 }

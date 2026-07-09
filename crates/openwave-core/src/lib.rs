@@ -9,7 +9,7 @@
 //! publishable on crates.io.
 //!
 //! Built incrementally with the M0 walking skeleton. Present so far: [`id`]
-//! (typed identifiers), [`error`], [`model`] (the persisted session/message
+//! (typed identifiers), [`error`], [`model`] (the persisted chat/message
 //! model), [`tool`] (the tool contract), and [`provider`] (the model-provider
 //! contract).
 
@@ -35,10 +35,10 @@ pub use config::{Config, Profile};
 pub use db::DbStore;
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
-pub use id::{CallId, MessageId, SessionId, StepId, TurnId};
+pub use id::{CallId, ChatId, MessageId, StepId, TurnId};
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
-pub use model::{Message, Role, Session};
+pub use model::{Chat, Message, Role};
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
     Usage,

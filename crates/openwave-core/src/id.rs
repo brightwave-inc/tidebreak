@@ -1,7 +1,7 @@
 //! Strongly-typed identifiers.
 //!
 //! Every entity gets its own newtype over a UUID so the compiler stops us from,
-//! say, passing a [`TurnId`] where a [`SessionId`] is expected. All ids
+//! say, passing a [`TurnId`] where a [`ChatId`] is expected. All ids
 //! serialize transparently (as the bare UUID string), so on the wire and in the
 //! `Store` they are indistinguishable from a plain UUID.
 
@@ -60,10 +60,10 @@ macro_rules! id_type {
 
 id_type!(
     /// Identifies a persistent conversation (owns a workspace directory).
-    SessionId
+    ChatId
 );
 id_type!(
-    /// Identifies a persisted message within a session.
+    /// Identifies a persisted message within a chat.
     MessageId
 );
 id_type!(
@@ -85,19 +85,19 @@ mod tests {
 
     #[test]
     fn ids_of_different_types_are_distinct_uuids() {
-        let session = SessionId::new();
+        let chat = ChatId::new();
         let turn = TurnId::new();
-        assert_ne!(session.0, turn.0);
+        assert_ne!(chat.0, turn.0);
     }
 
     #[test]
     fn roundtrips_through_string_and_json() {
-        let id = SessionId::new();
-        assert_eq!(id.to_string().parse::<SessionId>().unwrap(), id);
+        let id = ChatId::new();
+        assert_eq!(id.to_string().parse::<ChatId>().unwrap(), id);
 
         let json = serde_json::to_string(&id).unwrap();
         // Transparent: serializes as the bare quoted UUID, no wrapper.
         assert_eq!(json, format!("\"{id}\""));
-        assert_eq!(serde_json::from_str::<SessionId>(&json).unwrap(), id);
+        assert_eq!(serde_json::from_str::<ChatId>(&json).unwrap(), id);
     }
 }

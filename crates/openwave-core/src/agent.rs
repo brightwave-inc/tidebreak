@@ -26,7 +26,7 @@ use serde_json::Value;
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::id::{CallId, MessageId, TurnId};
-use crate::model::{Message, Role, Session};
+use crate::model::{Chat, Message, Role};
 use crate::provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, StopReason, Usage,
 };
@@ -113,7 +113,7 @@ impl Default for AgentConfig {
     }
 }
 
-/// Drives turns for a session over a provider, tool set, and store.
+/// Drives turns for a chat over a provider, tool set, and store.
 pub struct Agent {
     provider: Arc<dyn ModelProvider>,
     tools: Arc<ToolRegistry>,
@@ -153,13 +153,13 @@ impl Agent {
     /// not errors — they come back to the model as failed tool output.
     pub async fn run_turn(
         &self,
-        session: &Session,
+        chat: &Chat,
         user_input: &str,
         events: &UnboundedSender<AgentEvent>,
     ) -> Result<()> {
         let turn_id = TurnId::new();
         let _ = events.unbounded_send(AgentEvent::TurnStarted { turn_id });
-        match self.drive(session, turn_id, user_input, events).await {
+        match self.drive(chat, turn_id, user_input, events).await {
             Ok(()) => Ok(()),
             Err(err) => {
                 let _ = events.unbounded_send(AgentEvent::TurnFailed {
@@ -172,16 +172,16 @@ impl Agent {
 
     async fn drive(
         &self,
-        session: &Session,
+        chat: &Chat,
         turn_id: TurnId,
         user_input: &str,
         events: &UnboundedSender<AgentEvent>,
     ) -> Result<()> {
-        self.persist(session.id, turn_id, Role::User, user_input)
+        self.persist(chat.id, turn_id, Role::User, user_input)
             .await?;
         // The provider transcript for this turn: prior stored text + the blocks
         // we build up as the loop runs.
-        let mut transcript = self.load_transcript(session.id).await?;
+        let mut transcript = self.load_transcript(chat.id).await?;
         let mut total_usage = Usage::default();
 
         for step in 0..self.config.max_steps {
@@ -243,7 +243,7 @@ impl Agent {
             let mut blocks: Vec<ContentBlock> = Vec::new();
             if !text.is_empty() {
                 blocks.push(ContentBlock::Text { text: text.clone() });
-                self.persist(session.id, turn_id, Role::Assistant, &text)
+                self.persist(chat.id, turn_id, Role::Assistant, &text)
                     .await?;
             }
             for call in &calls {
@@ -278,12 +278,12 @@ impl Agent {
             // Run the tool calls and feed the results back for the next step.
             let mut results: Vec<ContentBlock> = Vec::new();
             for call in &calls {
-                let output = self.run_tool(session, call, events).await;
+                let output = self.run_tool(chat, call, events).await;
                 let _ = events.unbounded_send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
                     output: output.clone(),
                 });
-                self.persist(session.id, turn_id, Role::Tool, &output.content)
+                self.persist(chat.id, turn_id, Role::Tool, &output.content)
                     .await?;
                 results.push(ContentBlock::ToolResult {
                     tool_use_id: call.provider_id.clone(),
@@ -305,7 +305,7 @@ impl Agent {
     /// approval failures surface as error output, never `Err`.
     async fn run_tool(
         &self,
-        session: &Session,
+        chat: &Chat,
         call: &PendingCall,
         events: &UnboundedSender<AgentEvent>,
     ) -> ToolOutput {
@@ -323,8 +323,8 @@ impl Agent {
             return ToolOutput::error("this tool requires approval, which is not yet supported");
         }
         let ctx = ToolCtx {
-            session_id: session.id,
-            workspace_dir: session.workspace_dir.clone(),
+            chat_id: chat.id,
+            workspace_dir: chat.workspace_dir.clone(),
         };
         let mut output = match tool.execute(&ctx, parse_args(&call.args)).await {
             Ok(output) => output,
@@ -340,7 +340,7 @@ impl Agent {
 
     async fn persist(
         &self,
-        session_id: crate::id::SessionId,
+        chat_id: crate::id::ChatId,
         turn_id: TurnId,
         role: Role,
         content: &str,
@@ -348,7 +348,7 @@ impl Agent {
         self.store
             .append_message(&Message {
                 id: MessageId::new(),
-                session_id,
+                chat_id,
                 turn_id,
                 role,
                 content: content.to_string(),
@@ -357,10 +357,10 @@ impl Agent {
             .await
     }
 
-    async fn load_transcript(&self, session_id: crate::id::SessionId) -> Result<Vec<ChatMessage>> {
+    async fn load_transcript(&self, chat_id: crate::id::ChatId) -> Result<Vec<ChatMessage>> {
         Ok(self
             .store
-            .list_messages(session_id)
+            .list_messages(chat_id)
             .await?
             .into_iter()
             .map(|message| ChatMessage::text(message.role, message.content))
@@ -406,7 +406,7 @@ mod tests {
 
     use super::*;
     use crate::db::DbStore;
-    use crate::id::SessionId;
+    use crate::id::ChatId;
     use crate::provider::ProviderId;
     use crate::tools::ReadFile;
 
@@ -474,13 +474,13 @@ mod tests {
             .await
             .unwrap(),
         );
-        let session = Session {
-            id: SessionId::new(),
+        let chat = Chat {
+            id: ChatId::new(),
             title: None,
             workspace_dir: workspace.path().to_path_buf(),
             created_at: Utc::now(),
         };
-        store.create_session(&session).await.unwrap();
+        store.create_chat(&chat).await.unwrap();
 
         let tools = Arc::new(ToolRegistry::new().with(Box::new(ReadFile)));
         let agent = Agent::new(
@@ -496,10 +496,7 @@ mod tests {
         );
 
         let (tx, rx) = unbounded();
-        agent
-            .run_turn(&session, "read note.txt", &tx)
-            .await
-            .unwrap();
+        agent.run_turn(&chat, "read note.txt", &tx).await.unwrap();
         drop(tx);
         let events: Vec<AgentEvent> = rx.collect().await;
 
@@ -531,7 +528,7 @@ mod tests {
         );
 
         // User input, the tool result, and the final answer were persisted.
-        let stored = store.list_messages(session.id).await.unwrap();
+        let stored = store.list_messages(chat.id).await.unwrap();
         let roles: Vec<Role> = stored.iter().map(|m| m.role).collect();
         assert_eq!(roles, vec![Role::User, Role::Tool, Role::Assistant]);
     }
@@ -549,13 +546,13 @@ mod tests {
             .await
             .unwrap(),
         );
-        let session = Session {
-            id: SessionId::new(),
+        let chat = Chat {
+            id: ChatId::new(),
             title: None,
             workspace_dir: workspace.path().to_path_buf(),
             created_at: Utc::now(),
         };
-        store.create_session(&session).await.unwrap();
+        store.create_chat(&chat).await.unwrap();
 
         // Only one step allowed, but step 0 returns a tool call — there's no
         // step left to consume the result, so the tool must NOT run.
@@ -573,7 +570,7 @@ mod tests {
         );
 
         let (tx, rx) = unbounded();
-        let result = agent.run_turn(&session, "read note.txt", &tx).await;
+        let result = agent.run_turn(&chat, "read note.txt", &tx).await;
         drop(tx);
         let events: Vec<AgentEvent> = rx.collect().await;
 
@@ -584,7 +581,7 @@ mod tests {
             .iter()
             .any(|e| matches!(e, AgentEvent::ToolCallCompleted { .. })));
         let roles: Vec<Role> = store
-            .list_messages(session.id)
+            .list_messages(chat.id)
             .await
             .unwrap()
             .iter()
@@ -606,13 +603,13 @@ mod tests {
             .await
             .unwrap(),
         );
-        let session = Session {
-            id: SessionId::new(),
+        let chat = Chat {
+            id: ChatId::new(),
             title: None,
             workspace_dir: workspace.path().to_path_buf(),
             created_at: Utc::now(),
         };
-        store.create_session(&session).await.unwrap();
+        store.create_chat(&chat).await.unwrap();
 
         let agent = Agent::new(
             Arc::new(FakeProvider {
@@ -628,10 +625,7 @@ mod tests {
         );
 
         let (tx, rx) = unbounded();
-        agent
-            .run_turn(&session, "read note.txt", &tx)
-            .await
-            .unwrap();
+        agent.run_turn(&chat, "read note.txt", &tx).await.unwrap();
         drop(tx);
         let events: Vec<AgentEvent> = rx.collect().await;
 

@@ -1,7 +1,7 @@
-//! Session HTTP handlers.
+//! Chat HTTP handlers.
 //!
-//! The conversation CRUD surface: create a session (which owns a workspace
-//! directory), list them, fetch one. Driving a session — posting a message and
+//! The conversation CRUD surface: create a chat (which owns a workspace
+//! directory), list them, fetch one. Driving a chat — posting a message and
 //! streaming the turn's events over WebSocket — lands in the next slice.
 
 use std::path::PathBuf;
@@ -12,15 +12,15 @@ use axum::response::IntoResponse;
 use chrono::Utc;
 use serde::Deserialize;
 
-use openwave_core::{Session, SessionId};
+use openwave_core::{Chat, ChatId};
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::state::AppState;
 
-/// Body of `POST /sessions`.
+/// Body of `POST /chats`.
 #[derive(Debug, Deserialize)]
-pub struct CreateSession {
+pub struct CreateChat {
     /// Absolute path to the workspace directory the agent operates in.
     pub workspace_dir: PathBuf,
     /// Optional human-facing title.
@@ -28,37 +28,35 @@ pub struct CreateSession {
     pub title: Option<String>,
 }
 
-/// `POST /sessions` — create a session and return it (`201 Created`).
-pub async fn create_session(
+/// `POST /chats` — create a chat and return it (`201 Created`).
+pub async fn create_chat(
     State(state): State<AppState>,
-    Json(body): Json<CreateSession>,
+    Json(body): Json<CreateChat>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let session = Session {
-        id: SessionId::new(),
+    let chat = Chat {
+        id: ChatId::new(),
         title: body.title,
         workspace_dir: body.workspace_dir,
         created_at: Utc::now(),
     };
-    state.store.create_session(&session).await?;
-    Ok((StatusCode::CREATED, Json(session)))
+    state.store.create_chat(&chat).await?;
+    Ok((StatusCode::CREATED, Json(chat)))
 }
 
-/// `GET /sessions` — list sessions, most-recently-created first.
-pub async fn list_sessions(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<Session>>, ServerError> {
-    Ok(Json(state.store.list_sessions().await?))
+/// `GET /chats` — list chats, most-recently-created first.
+pub async fn list_chats(State(state): State<AppState>) -> Result<Json<Vec<Chat>>, ServerError> {
+    Ok(Json(state.store.list_chats().await?))
 }
 
-/// `GET /sessions/{id}` — fetch one session, or `404`.
-pub async fn get_session(
+/// `GET /chats/{id}` — fetch one chat, or `404`.
+pub async fn get_chat(
     State(state): State<AppState>,
-    Path(id): Path<SessionId>,
-) -> Result<Json<Session>, ServerError> {
+    Path(id): Path<ChatId>,
+) -> Result<Json<Chat>, ServerError> {
     state
         .store
-        .get_session(id)
+        .get_chat(id)
         .await?
         .map(Json)
-        .ok_or_else(|| ServerError::not_found(format!("session {id} not found")))
+        .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))
 }
