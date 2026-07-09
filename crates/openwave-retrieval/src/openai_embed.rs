@@ -33,6 +33,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// parameter (many models and gateways `400` on it); call
 /// [`OpenAiEmbedder::project_dimensions`] to ask a `text-embedding-3` model to
 /// project its output down to `dimensions`.
+///
+/// So the two must agree: if `dimensions` differs from what the model actually
+/// returns and you haven't called `project_dimensions`, every embed fails the
+/// response's dimensionality check at call time (not at construction).
 #[derive(Clone)]
 pub struct OpenAiEmbedder {
     client: reqwest::Client,
