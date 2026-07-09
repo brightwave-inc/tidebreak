@@ -20,8 +20,8 @@ use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, MessageId, TurnId};
-use crate::model::{Chat, Message, Role};
+use crate::id::{ChatId, MessageId, ProjectId, TurnId};
+use crate::model::{Chat, Message, Project, Role};
 use crate::storage::Store;
 
 /// Map any SeaORM failure into an [`AgentError::Store`].
@@ -58,9 +58,42 @@ impl DbStore {
 
 #[async_trait]
 impl Store for DbStore {
+    async fn create_project(&self, project: &Project) -> Result<()> {
+        entities::project::ActiveModel {
+            id: Set(project.id.0),
+            title: Set(project.title.clone()),
+            workspace_dir: Set(project.workspace_dir.to_string_lossy().into_owned()),
+            created_at: Set(project.created_at),
+        }
+        .insert(&self.conn)
+        .await
+        .map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn get_project(&self, id: ProjectId) -> Result<Option<Project>> {
+        Ok(entities::project::Entity::find_by_id(id.0)
+            .one(&self.conn)
+            .await
+            .map_err(store_err)?
+            .map(project_from_model))
+    }
+
+    async fn list_projects(&self) -> Result<Vec<Project>> {
+        Ok(entities::project::Entity::find()
+            .order_by_desc(entities::project::Column::CreatedAt)
+            .all(&self.conn)
+            .await
+            .map_err(store_err)?
+            .into_iter()
+            .map(project_from_model)
+            .collect())
+    }
+
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
         entities::chat::ActiveModel {
             id: Set(chat.id.0),
+            project_id: Set(chat.project_id.map(|p| p.0)),
             title: Set(chat.title.clone()),
             workspace_dir: Set(chat.workspace_dir.to_string_lossy().into_owned()),
             created_at: Set(chat.created_at),
@@ -188,9 +221,19 @@ impl Store for DbStore {
     }
 }
 
+fn project_from_model(model: entities::project::Model) -> Project {
+    Project {
+        id: ProjectId(model.id),
+        title: model.title,
+        workspace_dir: PathBuf::from(model.workspace_dir),
+        created_at: model.created_at,
+    }
+}
+
 fn chat_from_model(model: entities::chat::Model) -> Chat {
     Chat {
         id: ChatId(model.id),
+        project_id: model.project_id.map(ProjectId),
         title: model.title,
         workspace_dir: PathBuf::from(model.workspace_dir),
         created_at: model.created_at,
@@ -232,6 +275,25 @@ fn role_from_db(text: &str) -> Result<Role> {
 /// types (`Chat`, `Message`), never these, so the ORM never leaks into the
 /// crate's contract.
 mod entities {
+    pub mod project {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+        #[sea_orm(table_name = "project")]
+        pub struct Model {
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub id: Uuid,
+            pub title: Option<String>,
+            pub workspace_dir: String,
+            pub created_at: DateTimeUtc,
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+
     pub mod chat {
         use sea_orm::entity::prelude::*;
 
@@ -240,6 +302,7 @@ mod entities {
         pub struct Model {
             #[sea_orm(primary_key, auto_increment = false)]
             pub id: Uuid,
+            pub project_id: Option<Uuid>,
             pub title: Option<String>,
             pub workspace_dir: String,
             pub created_at: DateTimeUtc,
@@ -326,7 +389,11 @@ mod migration {
     #[async_trait::async_trait]
     impl MigratorTrait for Migrator {
         fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-            vec![Box::new(Init), Box::new(AddEventJournal)]
+            vec![
+                Box::new(Init),
+                Box::new(AddEventJournal),
+                Box::new(AddProjects),
+            ]
         }
     }
 
@@ -468,10 +535,79 @@ mod migration {
         }
     }
 
+    /// Adds the `project` table and the optional `chat.project_id` link.
+    struct AddProjects;
+
+    impl MigrationName for AddProjects {
+        fn name(&self) -> &str {
+            "m0003_projects"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for AddProjects {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .create_table(
+                    Table::create()
+                        .table(Project::Table)
+                        .if_not_exists()
+                        .col(ColumnDef::new(Project::Id).uuid().not_null().primary_key())
+                        .col(ColumnDef::new(Project::Title).text())
+                        .col(ColumnDef::new(Project::WorkspaceDir).text().not_null())
+                        .col(
+                            ColumnDef::new(Project::CreatedAt)
+                                .timestamp_with_time_zone()
+                                .not_null(),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+
+            // A nullable link, no DB-level foreign key: SQLite can't add an FK to
+            // an existing table, so membership is validated at the API edge (the
+            // server checks the project exists before creating the chat).
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Chat::Table)
+                        .add_column(ColumnDef::new(Chat::ProjectId).uuid())
+                        .to_owned(),
+                )
+                .await?;
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Chat::Table)
+                        .drop_column(Chat::ProjectId)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .drop_table(Table::drop().table(Project::Table).to_owned())
+                .await?;
+            Ok(())
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum Project {
+        Table,
+        Id,
+        Title,
+        WorkspaceDir,
+        CreatedAt,
+    }
+
     #[derive(DeriveIden)]
     enum Chat {
         Table,
         Id,
+        ProjectId,
         Title,
         WorkspaceDir,
         CreatedAt,
@@ -520,10 +656,55 @@ mod tests {
     fn sample_chat() -> Chat {
         Chat {
             id: ChatId::new(),
+            project_id: None,
             title: Some("hello".into()),
             workspace_dir: PathBuf::from("/tmp/ws"),
             created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
         }
+    }
+
+    fn sample_project() -> Project {
+        Project {
+            id: ProjectId::new(),
+            title: Some("proj".into()),
+            workspace_dir: PathBuf::from("/tmp/proj"),
+            created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn projects_roundtrip_and_a_chat_can_belong_to_one() {
+        let (_dir, store) = temp_store().await;
+        let project = sample_project();
+        store.create_project(&project).await.unwrap();
+
+        assert_eq!(
+            store.get_project(project.id).await.unwrap().as_ref(),
+            Some(&project)
+        );
+        assert_eq!(store.list_projects().await.unwrap(), vec![project.clone()]);
+        assert_eq!(store.get_project(ProjectId::new()).await.unwrap(), None);
+
+        // A chat carrying the project link round-trips it; a loose chat stays None.
+        let mut in_project = sample_chat();
+        in_project.project_id = Some(project.id);
+        store.create_chat(&in_project).await.unwrap();
+        assert_eq!(
+            store
+                .get_chat(in_project.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .project_id,
+            Some(project.id)
+        );
+
+        let loose = sample_chat();
+        store.create_chat(&loose).await.unwrap();
+        assert_eq!(
+            store.get_chat(loose.id).await.unwrap().unwrap().project_id,
+            None
+        );
     }
 
     #[tokio::test]

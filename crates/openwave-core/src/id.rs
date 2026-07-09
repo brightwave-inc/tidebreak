@@ -59,6 +59,10 @@ macro_rules! id_type {
 }
 
 id_type!(
+    /// Identifies a project: an optional grouping a chat may belong to.
+    ProjectId
+);
+id_type!(
     /// Identifies a persistent conversation (owns a workspace directory).
     ChatId
 );

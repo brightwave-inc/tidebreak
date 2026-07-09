@@ -13,11 +13,62 @@ use chrono::Utc;
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 
-use openwave_core::{Agent, Chat, ChatId, SequencedEvent, Store};
+use openwave_core::{Agent, Chat, ChatId, Project, ProjectId, SequencedEvent, Store};
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
+
+/// Body of `POST /projects`.
+#[derive(Debug, Deserialize)]
+pub struct CreateProject {
+    /// Absolute path to the project's workspace/corpus root.
+    pub workspace_dir: PathBuf,
+    /// Optional human-facing title.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// `POST /projects` — create a project and return it (`201 Created`).
+pub async fn create_project(
+    State(state): State<AppState>,
+    Json(body): Json<CreateProject>,
+) -> Result<impl IntoResponse, ServerError> {
+    if !body.workspace_dir.is_absolute() {
+        return Err(ServerError::bad_request(format!(
+            "workspace_dir must be an absolute path, got {:?}",
+            body.workspace_dir
+        )));
+    }
+    let project = Project {
+        id: ProjectId::new(),
+        title: body.title,
+        workspace_dir: body.workspace_dir,
+        created_at: Utc::now(),
+    };
+    state.store.create_project(&project).await?;
+    Ok((StatusCode::CREATED, Json(project)))
+}
+
+/// `GET /projects` — list projects, most-recently-created first.
+pub async fn list_projects(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Project>>, ServerError> {
+    Ok(Json(state.store.list_projects().await?))
+}
+
+/// `GET /projects/{id}` — fetch one project, or `404`.
+pub async fn get_project(
+    State(state): State<AppState>,
+    Path(id): Path<ProjectId>,
+) -> Result<Json<Project>, ServerError> {
+    state
+        .store
+        .get_project(id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ServerError::not_found(format!("project {id} not found")))
+}
 
 /// Body of `POST /chats`.
 #[derive(Debug, Deserialize)]
@@ -27,6 +78,9 @@ pub struct CreateChat {
     /// Optional human-facing title.
     #[serde(default)]
     pub title: Option<String>,
+    /// Optional project to file this chat under; omitted for a loose chat.
+    #[serde(default)]
+    pub project_id: Option<ProjectId>,
 }
 
 /// `POST /chats` — create a chat and return it (`201 Created`).
@@ -44,8 +98,18 @@ pub async fn create_chat(
             body.workspace_dir
         )));
     }
+    // Membership is validated here (the store has no DB-level foreign key): a
+    // chat can't reference a project that doesn't exist.
+    if let Some(project_id) = body.project_id {
+        if state.store.get_project(project_id).await?.is_none() {
+            return Err(ServerError::bad_request(format!(
+                "project {project_id} not found"
+            )));
+        }
+    }
     let chat = Chat {
         id: ChatId::new(),
+        project_id: body.project_id,
         title: body.title,
         workspace_dir: body.workspace_dir,
         created_at: Utc::now(),

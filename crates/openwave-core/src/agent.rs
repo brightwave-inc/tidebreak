@@ -476,6 +476,7 @@ mod tests {
         );
         let chat = Chat {
             id: ChatId::new(),
+            project_id: None,
             title: None,
             workspace_dir: workspace.path().to_path_buf(),
             created_at: Utc::now(),
@@ -548,6 +549,7 @@ mod tests {
         );
         let chat = Chat {
             id: ChatId::new(),
+            project_id: None,
             title: None,
             workspace_dir: workspace.path().to_path_buf(),
             created_at: Utc::now(),
@@ -605,6 +607,7 @@ mod tests {
         );
         let chat = Chat {
             id: ChatId::new(),
+            project_id: None,
             title: None,
             workspace_dir: workspace.path().to_path_buf(),
             created_at: Utc::now(),

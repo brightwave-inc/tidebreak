@@ -13,7 +13,22 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::id::{ChatId, MessageId, TurnId};
+use crate::id::{ChatId, MessageId, ProjectId, TurnId};
+
+/// An optional grouping of chats that share a workspace and (later) a document
+/// corpus. A chat may belong to a project or stand alone — unlike some designs
+/// that make a project mandatory, OpenWave keeps loose, projectless chats.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Project {
+    /// Stable identifier.
+    pub id: ProjectId,
+    /// Human-facing title.
+    pub title: Option<String>,
+    /// Absolute path to the project's workspace/corpus root.
+    pub workspace_dir: PathBuf,
+    /// When the project was created.
+    pub created_at: DateTime<Utc>,
+}
 
 /// Who authored a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +49,8 @@ pub enum Role {
 pub struct Chat {
     /// Stable identifier.
     pub id: ChatId,
+    /// The project this chat belongs to, or `None` for a loose (projectless) chat.
+    pub project_id: Option<ProjectId>,
     /// Human-facing title; `None` until one is set or derived.
     pub title: Option<String>,
     /// Absolute path to this chat's workspace directory.
