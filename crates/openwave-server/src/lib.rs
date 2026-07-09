@@ -6,13 +6,14 @@
 //! binds to an ephemeral **loopback** port and mints a per-launch **bearer
 //! token**: only the local process it was handed to can reach it.
 //!
-//! This slice is the chat surface — create / list / get, behind the token.
-//! Posting a message and streaming the turn over `WS /chats/{id}/events`
-//! lands next, on top of this skeleton.
+//! This slice runs turns: the chat CRUD surface plus `POST /chats/{id}/messages`,
+//! which starts a turn (one per chat at a time) and journals its events. Streaming
+//! those events live over `WS /chats/{id}/events` lands next, on top of the journal.
 
 mod auth;
 mod error;
 mod extract;
+mod hub;
 mod routes;
 mod state;
 
@@ -23,7 +24,11 @@ use axum::routing::{get, post};
 use axum::Router;
 use tokio::net::TcpListener;
 
-use openwave_core::{AgentError, Config, DbStore, Profile, Result, Store};
+use openwave_core::{
+    AgentConfig, AgentError, Config, DbStore, ListDir, ModelProvider, Profile, ReadFile, Result,
+    Store, ToolRegistry, WriteFile,
+};
+use openwave_router::AnthropicProvider;
 
 pub use error::ServerError;
 pub use state::AppState;
@@ -35,6 +40,7 @@ pub fn app(state: AppState) -> Router {
     let api = Router::new()
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route("/chats/{id}", get(routes::get_chat))
+        .route("/chats/{id}/messages", post(routes::post_message))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
@@ -77,10 +83,15 @@ impl Server {
     }
 }
 
+/// Placeholder default model, used until the settings-driven model selection and
+/// the composite router land. Overridable with `OPENWAVE_MODEL`.
+const DEFAULT_MODEL: &str = "claude-opus-4-8";
+
 /// Wire the store from `config` and bind the API to an ephemeral loopback port.
 pub async fn bind(config: Config) -> Result<Server> {
     let store = connect_store(&config).await?;
-    let state = AppState::new(config, store);
+    let (provider, tools, agent_config) = agent_deps();
+    let state = AppState::new(config, store, provider, tools, agent_config);
     let token = state.token.clone();
     let router = app(state);
 
@@ -97,6 +108,29 @@ pub async fn bind(config: Config) -> Result<Server> {
         listener,
         router,
     })
+}
+
+/// Assemble the agent's dependencies for a real launch.
+///
+/// The provider is Anthropic for now, keyed from `ANTHROPIC_API_KEY` in the
+/// environment (a keychain-backed secrets flow and the composite router land in
+/// later slices). No key means egress fails closed at turn time — surfaced as a
+/// `TurnFailed` event — rather than a silent default.
+fn agent_deps() -> (Arc<dyn ModelProvider>, Arc<ToolRegistry>, AgentConfig) {
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let provider: Arc<dyn ModelProvider> = Arc::new(AnthropicProvider::new(api_key));
+    let tools = Arc::new(
+        ToolRegistry::new()
+            .with(Box::new(ReadFile))
+            .with(Box::new(ListDir))
+            .with(Box::new(WriteFile)),
+    );
+    let model = std::env::var("OPENWAVE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+    let agent_config = AgentConfig {
+        model,
+        ..AgentConfig::default()
+    };
+    (provider, tools, agent_config)
 }
 
 /// Open the durable store the profile selects.
@@ -121,25 +155,97 @@ async fn connect_store(config: &Config) -> Result<Arc<dyn Store>> {
 mod tests {
     use super::*;
 
+    use std::time::Duration;
+
+    use async_trait::async_trait;
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Request, StatusCode};
-    use openwave_core::{AgentErrorInfo, Chat, ChatId, Profile};
+    use futures::stream::{self, BoxStream, StreamExt};
+    use openwave_core::{
+        AgentErrorInfo, AgentEvent, Chat, ChatId, ChatRequest, ProviderEvent, ProviderId,
+        SequencedEvent, StopReason, Usage,
+    };
     use serde::de::DeserializeOwned;
+    use tokio::sync::Notify;
     use tower::ServiceExt;
 
-    /// A router backed by a fresh temp SQLite store, plus its token and the
-    /// tempdir (kept alive for the test's duration).
-    async fn test_app() -> (Router, Arc<str>, tempfile::TempDir) {
+    /// A provider that answers with a one-line completion and no tool calls.
+    struct FakeProvider;
+
+    #[async_trait]
+    impl ModelProvider for FakeProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("fake")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta { text: "hi".into() },
+                ProviderEvent::Usage(Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    ..Default::default()
+                }),
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    /// A provider whose completion blocks on `gate` until the test releases it —
+    /// so a turn stays active while the test checks concurrency behavior.
+    struct GatedProvider {
+        gate: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for GatedProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("gated")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let gate = self.gate.clone();
+            Ok(stream::once(async move {
+                gate.notified().await;
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                }
+            })
+            .boxed())
+        }
+    }
+
+    /// A router over a fresh temp SQLite store with the given provider; returns
+    /// the router, token, the store (to inspect the journal), and the tempdir.
+    async fn test_app_with(
+        provider: Arc<dyn ModelProvider>,
+    ) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let store = DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap();
-        let state = AppState::new(Config::desktop(dir.path()), Arc::new(store));
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let state = AppState::new(
+            Config::desktop(dir.path()),
+            store.clone(),
+            provider,
+            Arc::new(ToolRegistry::new()),
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        );
         let token = state.token.clone();
-        (app(state), token, dir)
+        (app(state), token, store, dir)
+    }
+
+    async fn test_app() -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
+        test_app_with(Arc::new(FakeProvider)).await
     }
 
     async fn json_body<T: DeserializeOwned>(response: axum::response::Response) -> T {
@@ -147,9 +253,73 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    /// Create a chat and return it.
+    async fn make_chat(router: &Router, bearer: &str) -> Chat {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chats")
+                    .header(header::AUTHORIZATION, bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"workspace_dir": "/tmp/ws"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        json_body(response).await
+    }
+
+    /// POST a message to a chat, returning the response status.
+    async fn send_message(
+        router: &Router,
+        bearer: &str,
+        chat: ChatId,
+        content: &str,
+    ) -> StatusCode {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/chats/{chat}/messages"))
+                    .header(header::AUTHORIZATION, bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"content": content}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// Poll the journal until the turn terminates (or time out), returning its
+    /// events in sequence order.
+    async fn wait_for_turn(store: &Arc<dyn Store>, chat: ChatId) -> Vec<SequencedEvent> {
+        for _ in 0..200 {
+            let events = store.list_events(chat, 0).await.unwrap();
+            if events.iter().any(|e| {
+                matches!(
+                    e.event,
+                    AgentEvent::TurnCompleted { .. } | AgentEvent::TurnFailed { .. }
+                )
+            }) {
+                return events;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("turn did not finish within the timeout");
+    }
+
     #[tokio::test]
     async fn health_needs_no_token() {
-        let (router, _token, _dir) = test_app().await;
+        let (router, _token, _store, _dir) = test_app().await;
         let response = router
             .oneshot(
                 Request::builder()
@@ -164,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_rejects_missing_and_wrong_tokens() {
-        let (router, _token, _dir) = test_app().await;
+        let (router, _token, _store, _dir) = test_app().await;
         let missing = router
             .clone()
             .oneshot(
@@ -192,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_then_get_and_list() {
-        let (router, token, _dir) = test_app().await;
+        let (router, token, _store, _dir) = test_app().await;
         let bearer = format!("Bearer {token}");
 
         let created: Chat = {
@@ -253,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn relative_workspace_dir_is_rejected() {
-        let (router, token, _dir) = test_app().await;
+        let (router, token, _store, _dir) = test_app().await;
         let response = router
             .oneshot(
                 Request::builder()
@@ -275,7 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_chat_is_404() {
-        let (router, token, _dir) = test_app().await;
+        let (router, token, _store, _dir) = test_app().await;
         let response = router
             .oneshot(
                 Request::builder()
@@ -289,6 +459,61 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn post_message_runs_a_turn_and_journals_its_events() {
+        let (router, token, store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "hello").await,
+            StatusCode::ACCEPTED
+        );
+
+        let events = wait_for_turn(&store, chat.id).await;
+        assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
+        assert!(events
+            .iter()
+            .any(|e| matches!(&e.event, AgentEvent::TextDelta { text } if text == "hi")));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e.event, AgentEvent::TurnCompleted { .. })));
+    }
+
+    #[tokio::test]
+    async fn message_to_unknown_chat_is_404() {
+        let (router, token, _store, _dir) = test_app().await;
+        assert_eq!(
+            send_message(&router, &format!("Bearer {token}"), ChatId::new(), "hi").await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_turn_on_the_same_chat_is_refused() {
+        // A gated provider keeps the first turn active (blocked on the gate) while
+        // we submit a second one, which must be refused with 409.
+        let gate = Arc::new(Notify::new());
+        let (router, token, _store, _dir) =
+            test_app_with(Arc::new(GatedProvider { gate: gate.clone() })).await;
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        // The handler claims the chat's slot synchronously before returning, so by
+        // the time this 202 is observed the turn is holding the slot.
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "one").await,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "two").await,
+            StatusCode::CONFLICT
+        );
+
+        // Release the first turn so it can finish and free the slot.
+        gate.notify_one();
+    }
+
     #[tokio::test]
     async fn bind_yields_a_loopback_addr_and_token() {
         let dir = tempfile::tempdir().unwrap();
@@ -299,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_requests_get_json_errors_not_plaintext() {
-        let (router, token, _dir) = test_app().await;
+        let (router, token, _store, _dir) = test_app().await;
         let bearer = format!("Bearer {token}");
 
         // A non-UUID path segment: 400 with a parseable `{ kind, message }` body,

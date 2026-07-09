@@ -11,16 +11,19 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite"] }
+openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite", "tools"] }
+openwave-router = { path = "../openwave-router" }
 axum = { workspace = true }
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "rt"] }
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 tower = { version = "0.5", features = ["util"] }
 reqwest = { workspace = true }
+async-trait = { workspace = true }
 tempfile = "3"

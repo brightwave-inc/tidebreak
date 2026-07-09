@@ -1683,9 +1683,12 @@ dependencies = [
 name = "openwave-server"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "axum",
  "chrono",
+ "futures",
  "openwave-core",
+ "openwave-router",
  "reqwest",
  "serde",
  "serde_json",

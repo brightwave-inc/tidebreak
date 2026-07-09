@@ -42,6 +42,18 @@ impl ServerError {
             },
         }
     }
+
+    /// A `409 Conflict` for a request that clashes with current state (e.g. a
+    /// turn is already running for the chat).
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            info: AgentErrorInfo {
+                kind: "conflict".to_string(),
+                message: message.into(),
+            },
+        }
+    }
 }
 
 /// Core errors surfacing from a handler are internal failures (a store write
