@@ -2062,7 +2062,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_yields_a_loopback_addr_and_token() {
-        std::env::set_var("OPENWAVE_KEYCHAIN_MOCK", "1");
+        openwave_core::KeychainSecretProvider::use_mock();
         let dir = tempfile::tempdir().unwrap();
         let server = bind(Config::desktop(dir.path())).await.unwrap();
         assert!(server.local_addr().ip().is_loopback());
@@ -2120,7 +2120,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn serve_answers_over_a_real_socket() {
-        std::env::set_var("OPENWAVE_KEYCHAIN_MOCK", "1");
+        openwave_core::KeychainSecretProvider::use_mock();
         let dir = tempfile::tempdir().unwrap();
         let server = bind(Config::desktop(dir.path())).await.unwrap();
         let addr = server.local_addr();
@@ -2158,7 +2158,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cors_preflight_allows_localhost_origin() {
-        std::env::set_var("OPENWAVE_KEYCHAIN_MOCK", "1");
+        openwave_core::KeychainSecretProvider::use_mock();
         let dir = tempfile::tempdir().unwrap();
         let server = bind(Config::desktop(dir.path())).await.unwrap();
         let addr = server.local_addr();
