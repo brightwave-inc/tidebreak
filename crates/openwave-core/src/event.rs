@@ -108,6 +108,14 @@ pub enum AgentEvent {
         /// The steered user text.
         content: String,
     },
+    /// The transcript was truncated to fit the model's context window before a
+    /// model call. Informational — the turn continues with reduced context.
+    ContextTruncated {
+        /// Estimated tokens of the full transcript before reduction.
+        original_tokens: u32,
+        /// Estimated tokens after fitting to the budget.
+        fitted_tokens: u32,
+    },
 }
 
 /// An [`AgentEvent`] paired with its per-chat sequence number, as stored in

@@ -17,6 +17,7 @@ pub mod agent;
 pub mod approval;
 pub mod cancel;
 pub mod config;
+pub mod context;
 #[cfg(feature = "sqlite")]
 pub mod db;
 pub mod error;

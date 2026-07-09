@@ -16,7 +16,7 @@ use openwave_core::provider::{
 };
 use openwave_core::Role;
 
-use crate::sse::{drain_frames, frame_data, safe_http_error};
+use crate::sse::{classify_provider_error, drain_frames, frame_data};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -83,11 +83,7 @@ impl ModelProvider for AnthropicProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(AgentError::Provider(safe_http_error(
-                "anthropic",
-                status.as_u16(),
-                &body,
-            )));
+            return Err(classify_provider_error("anthropic", status.as_u16(), &body));
         }
 
         let stream = async_stream::stream! {

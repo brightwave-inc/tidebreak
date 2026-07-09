@@ -22,6 +22,7 @@ fn serve_announces_its_address_and_answers_health() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_openwave"))
         .arg("serve")
         .env("OPENWAVE_DATA_DIR", dir.path())
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
         .env_remove("ANTHROPIC_API_KEY")
         .stdout(Stdio::piped())
         .spawn()

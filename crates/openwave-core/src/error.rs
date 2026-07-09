@@ -31,6 +31,11 @@ pub enum AgentError {
     #[error("provider error: {0}")]
     Provider(String),
 
+    /// The prompt exceeded the model's context window. The agent loop retries
+    /// with a tighter context budget before giving up.
+    #[error("prompt too long: {0}")]
+    PromptTooLong(String),
+
     /// A catch-all for contexts that do not yet warrant their own variant.
     #[error("{0}")]
     Message(String),
@@ -61,6 +66,7 @@ impl AgentError {
             Self::Store(_) => "store",
             Self::Secret(_) => "secret",
             Self::Provider(_) => "provider",
+            Self::PromptTooLong(_) => "prompt_too_long",
             Self::Message(_) => "message",
             Self::Serde(_) => "serde",
         }

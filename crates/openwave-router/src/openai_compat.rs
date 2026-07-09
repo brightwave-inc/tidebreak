@@ -18,7 +18,7 @@ use openwave_core::provider::{
 };
 use openwave_core::Role;
 
-use crate::sse::{drain_frames, frame_data, safe_http_error};
+use crate::sse::{classify_provider_error, drain_frames, frame_data};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
@@ -105,11 +105,11 @@ impl ModelProvider for OpenAiCompatProvider {
             // Never forward the raw body — gateways sometimes echo key material
             // or request fragments, and `AgentError` strings reach the client.
             let body = response.text().await.unwrap_or_default();
-            return Err(AgentError::Provider(safe_http_error(
+            return Err(classify_provider_error(
                 "openai-compat",
                 status.as_u16(),
                 &body,
-            )));
+            ));
         }
 
         let stream = async_stream::stream! {

@@ -83,6 +83,35 @@ pub fn safe_http_error(provider: &str, status: u16, body: &str) -> String {
     }
 }
 
+/// Classify a provider HTTP error, detecting prompt-too-long patterns that the
+/// agent loop can retry with a tighter context budget.
+pub fn classify_provider_error(
+    provider: &str,
+    status: u16,
+    body: &str,
+) -> openwave_core::error::AgentError {
+    use openwave_core::error::AgentError;
+
+    if status == 400 {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
+            let err = parsed.get("error").unwrap_or(&parsed);
+            let code = err
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let message = err
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+
+            if code == "context_length_exceeded" || message.contains("prompt is too long") {
+                return AgentError::PromptTooLong(safe_http_error(provider, status, body));
+            }
+        }
+    }
+    AgentError::Provider(safe_http_error(provider, status, body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +149,49 @@ mod tests {
     fn frame_data_skips_done_terminator() {
         assert!(frame_data_raw("data: [DONE]").is_none());
         assert!(frame_data("event: ping").is_none());
+    }
+
+    #[test]
+    fn classify_detects_anthropic_prompt_too_long() {
+        use openwave_core::error::AgentError;
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens > 200000 maximum"}}"#;
+        let err = classify_provider_error("anthropic", 400, body);
+        assert!(
+            matches!(err, AgentError::PromptTooLong(_)),
+            "expected PromptTooLong, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_detects_openai_context_length_exceeded() {
+        use openwave_core::error::AgentError;
+        let body = r#"{"error":{"message":"maximum context length","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+        let err = classify_provider_error("openai-compat", 400, body);
+        assert!(
+            matches!(err, AgentError::PromptTooLong(_)),
+            "expected PromptTooLong, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_returns_provider_for_other_400s() {
+        use openwave_core::error::AgentError;
+        let body = r#"{"error":{"type":"invalid_request_error","message":"invalid api key"}}"#;
+        let err = classify_provider_error("anthropic", 400, body);
+        assert!(
+            matches!(err, AgentError::Provider(_)),
+            "expected Provider, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_returns_provider_for_non_400_status() {
+        use openwave_core::error::AgentError;
+        let body = r#"{"error":{"type":"overloaded_error"}}"#;
+        let err = classify_provider_error("anthropic", 529, body);
+        assert!(
+            matches!(err, AgentError::Provider(_)),
+            "expected Provider, got {err:?}"
+        );
     }
 }

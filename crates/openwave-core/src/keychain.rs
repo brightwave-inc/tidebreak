@@ -28,8 +28,21 @@ pub struct KeychainSecretProvider {
 
 impl KeychainSecretProvider {
     /// Use the default service name (`openwave`).
+    ///
+    /// When the `OPENWAVE_KEYCHAIN_MOCK` env var is set (any non-empty value),
+    /// all keyring operations are routed to an in-memory mock so no OS
+    /// keychain prompt appears — useful for integration tests and CI.
     #[must_use]
     pub fn new() -> Self {
+        use std::sync::Once;
+        static MOCK: Once = Once::new();
+        if std::env::var("OPENWAVE_KEYCHAIN_MOCK").is_ok_and(|v| !v.is_empty()) {
+            MOCK.call_once(|| {
+                keyring::set_default_credential_builder(
+                    keyring::mock::default_credential_builder(),
+                );
+            });
+        }
         Self {
             service: DEFAULT_SERVICE.to_string(),
         }
