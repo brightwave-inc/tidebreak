@@ -12,8 +12,8 @@
 //! - tool calls run **sequentially** (concurrency for independent calls later);
 //! - approval is **auto** for `ReadOnly`/`Workspace`; `Sensitive` parks via an
 //!   [`ApprovalGate`] until approve/reject (standing grants / auto-judge later);
-//! - cross-turn context rebuilds text messages plus structured tool-call rows
-//!   (context summarization comes later).
+//! - context reduction is deterministic floor+restore (no LLM summarization);
+//!   retries with progressive reduction on provider prompt-too-long errors.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,6 +26,7 @@ use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalGate, ApprovalRequest, RefuseGate};
 use crate::cancel::CancelToken;
+use crate::context;
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::id::{CallId, MessageId, TurnId};
@@ -102,7 +103,13 @@ pub struct AgentConfig {
     /// Max bytes of a single tool result fed back to the model; larger results
     /// are truncated with a notice, so one big read can't blow the context.
     pub max_tool_result_bytes: usize,
+    /// The model's context window in tokens. Used to compute the message budget
+    /// for context reduction (default: 200 000).
+    pub context_window: usize,
 }
+
+/// Default context window: 200k tokens (Claude Opus/Sonnet).
+pub const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -113,6 +120,7 @@ impl Default for AgentConfig {
             temperature: None,
             max_steps: 16,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_BYTES,
+            context_window: DEFAULT_CONTEXT_WINDOW,
         }
     }
 }
@@ -219,6 +227,7 @@ impl Agent {
         // we build up as the loop runs.
         let mut transcript = self.load_transcript(chat.id).await?;
         let mut total_usage = Usage::default();
+        let mut reduction_level: u32 = 0;
 
         for step in 0..self.config.max_steps {
             // Between steps: stop before starting a fresh model call if cancelled.
@@ -229,16 +238,43 @@ impl Agent {
             self.apply_steers(chat, turn_id, &mut transcript, events)
                 .await?;
 
-            let request = ChatRequest {
-                model: self.config.model.clone(),
-                system: self.config.system_prompt.clone(),
-                messages: transcript.clone(),
-                tools: self.tools.specs(),
-                max_tokens: self.config.max_tokens,
-                temperature: self.config.temperature,
-            };
+            // Fit the transcript to the context window, retrying with tighter
+            // budgets on prompt-too-long errors from the provider.
+            let mut stream = loop {
+                let (fitted, reduced) = self.fit_transcript(&transcript, reduction_level);
+                let fitted_tokens = context::estimate_transcript_tokens(&fitted);
+                let request = ChatRequest {
+                    model: self.config.model.clone(),
+                    system: self.config.system_prompt.clone(),
+                    messages: fitted,
+                    tools: self.tools.specs(),
+                    max_tokens: self.config.max_tokens,
+                    temperature: self.config.temperature,
+                };
 
-            let mut stream = self.provider.stream(request).await?;
+                match self.provider.stream(request).await {
+                    Ok(stream) => {
+                        // Tell clients the history was shortened for this call so
+                        // a UI can surface it. Emitted only for the request that
+                        // actually went out (after any retry climb).
+                        if reduced {
+                            let _ = events.unbounded_send(AgentEvent::ContextTruncated {
+                                original_tokens: context::estimate_transcript_tokens(&transcript)
+                                    as u32,
+                                fitted_tokens: fitted_tokens as u32,
+                            });
+                        }
+                        reduction_level = 0;
+                        break stream;
+                    }
+                    Err(AgentError::PromptTooLong(_))
+                        if reduction_level < context::MAX_REDUCTION_LEVEL =>
+                    {
+                        reduction_level += 1;
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
             let mut text = String::new();
             let mut calls: Vec<PendingCall> = Vec::new();
             let mut by_index: HashMap<u32, usize> = HashMap::new();
@@ -575,6 +611,23 @@ impl Agent {
         let messages = self.store.list_messages(chat_id).await?;
         let tool_calls = self.store.list_tool_calls(chat_id).await?;
         Ok(rebuild_transcript(&messages, &tool_calls))
+    }
+
+    /// Fit the transcript to the context budget at the given reduction level.
+    /// Returns the fitted transcript and whether it was shortened.
+    fn fit_transcript(
+        &self,
+        transcript: &[ChatMessage],
+        reduction_level: u32,
+    ) -> (Vec<ChatMessage>, bool) {
+        let budget = context::compute_message_budget(
+            self.config.context_window,
+            reduction_level,
+            self.config.system_prompt.as_deref(),
+            &self.tools.specs(),
+        );
+        let floor = context::content_floor_for_level(reduction_level);
+        context::fit_to_budget(transcript, budget, floor)
     }
 }
 
@@ -1239,6 +1292,74 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, AgentEvent::TextDelta { .. })));
+    }
+
+    #[tokio::test]
+    async fn oversized_transcript_emits_context_truncated() {
+        let (store, chat, _workspace) = cancel_test_chat().await;
+
+        // Records what the provider actually received, and answers immediately.
+        struct AnswerProvider {
+            seen_tokens: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl ModelProvider for AnswerProvider {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("answer")
+            }
+            async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+                self.seen_tokens.store(
+                    context::estimate_transcript_tokens(&req.messages),
+                    Ordering::SeqCst,
+                );
+                Ok(stream::iter(vec![
+                    ProviderEvent::TextDelta { text: "ok".into() },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ])
+                .boxed())
+            }
+        }
+
+        let seen_tokens = Arc::new(AtomicUsize::new(0));
+        // A small context window forces reduction of a large input.
+        let context_window = 3000;
+        let agent = Agent::new(
+            Arc::new(AnswerProvider {
+                seen_tokens: seen_tokens.clone(),
+            }),
+            Arc::new(ToolRegistry::new()),
+            store,
+            AgentConfig {
+                model: "answer".into(),
+                context_window,
+                ..Default::default()
+            },
+        );
+
+        let huge = "word ".repeat(2000); // ~3300 tokens, over the ~2250 budget
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, &huge, &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        let truncated = events.iter().find_map(|e| match e {
+            AgentEvent::ContextTruncated {
+                original_tokens,
+                fitted_tokens,
+            } => Some((*original_tokens, *fitted_tokens)),
+            _ => None,
+        });
+        let (original, fitted) = truncated.expect("ContextTruncated emitted for oversized input");
+        assert!(
+            fitted < original,
+            "fitted {fitted} should be < original {original}"
+        );
+        // What actually went to the provider matches the reported fitted size and
+        // is within the reduced budget.
+        assert_eq!(seen_tokens.load(Ordering::SeqCst), fitted as usize);
+        assert!(fitted as usize <= context::compute_message_budget(context_window, 0, None, &[]));
     }
 
     #[tokio::test]
