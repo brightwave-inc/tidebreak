@@ -12,7 +12,7 @@ use axum::response::IntoResponse;
 use chrono::Utc;
 use serde::Deserialize;
 
-use openwave_core::{Chat, ChatId};
+use openwave_core::{Agent, Chat, ChatId};
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
@@ -69,4 +69,49 @@ pub async fn get_chat(
         .await?
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))
+}
+
+/// Body of `POST /chats/{id}/messages`.
+#[derive(Debug, Deserialize)]
+pub struct PostMessage {
+    /// The user's input for this turn.
+    pub content: String,
+}
+
+/// `POST /chats/{id}/messages` — submit a message and start a turn.
+///
+/// Returns `202 Accepted` immediately; the turn runs in the background and its
+/// events are journaled as they emit (a client watches them over the event
+/// stream). `404` if the chat doesn't exist, `409` if a turn is already running
+/// for it (one turn per chat at a time).
+pub async fn post_message(
+    State(state): State<AppState>,
+    Path(id): Path<ChatId>,
+    Json(body): Json<PostMessage>,
+) -> Result<StatusCode, ServerError> {
+    let chat = state
+        .store
+        .get_chat(id)
+        .await?
+        .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
+
+    // Claim the chat's single turn slot up front; a concurrent turn is refused.
+    let active = state.active_turns.try_acquire(id).ok_or_else(|| {
+        ServerError::conflict(format!("chat {id} already has a turn in progress"))
+    })?;
+
+    let agent = Agent::new(
+        state.provider.clone(),
+        state.tools.clone(),
+        state.store.clone(),
+        state.agent_config.clone(),
+    );
+    let store = state.store.clone();
+    tokio::spawn(async move {
+        // Hold the slot for the turn's lifetime; dropping it frees the chat.
+        let _active = active;
+        crate::hub::drive_and_journal(agent, chat, body.content, store).await;
+    });
+
+    Ok(StatusCode::ACCEPTED)
 }
