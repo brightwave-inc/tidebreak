@@ -6,7 +6,7 @@
 //! unparseable body, wrong/absent `Content-Type` — answers with the same
 //! `{ kind, message }` JSON a client can always parse.
 
-use axum::extract::rejection::{JsonRejection, PathRejection};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts, Request};
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
@@ -56,6 +56,28 @@ where
         let axum::extract::Path(value) = axum::extract::Path::<T>::from_request_parts(parts, state)
             .await
             .map_err(|rejection: PathRejection| ServerError::bad_request(rejection.body_text()))?;
+        Ok(Self(value))
+    }
+}
+
+/// Like [`axum::extract::Query`], but an unparseable query string (e.g. a
+/// non-integer `after`) becomes a `400` with a JSON `{ kind, message }` body.
+pub struct Query<T>(pub T);
+
+impl<T, S> FromRequestParts<S> for Query<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ServerError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let axum::extract::Query(value) =
+            axum::extract::Query::<T>::from_request_parts(parts, state)
+                .await
+                .map_err(|rejection: QueryRejection| {
+                    ServerError::bad_request(rejection.body_text())
+                })?;
         Ok(Self(value))
     }
 }

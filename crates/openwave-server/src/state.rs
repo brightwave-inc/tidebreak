@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 use openwave_core::{AgentConfig, ChatId, Config, ModelProvider, Store, ToolRegistry};
 use uuid::Uuid;
 
+use crate::bus::EventBus;
+
 /// The state cloned into each handler: the boot config, the durable store, the
 /// agent's dependencies (provider + tools + tuning), the per-launch bearer token,
 /// and the guard that keeps a chat to one running turn at a time.
@@ -28,6 +30,8 @@ pub struct AppState {
     /// Tracks which chats have a turn in flight, so a second concurrent turn on
     /// the same chat is refused rather than racing the event journal.
     pub active_turns: Arc<TurnGuard>,
+    /// Live fan-out of turn events to connected WebSocket clients.
+    pub events: Arc<EventBus>,
 }
 
 impl AppState {
@@ -47,6 +51,7 @@ impl AppState {
             agent_config,
             token: Uuid::new_v4().to_string().into(),
             active_turns: Arc::new(TurnGuard::default()),
+            events: Arc::new(EventBus::default()),
         }
     }
 }
