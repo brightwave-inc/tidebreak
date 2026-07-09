@@ -161,7 +161,7 @@ pub async fn bind(config: Config) -> Result<Server> {
     // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade.
     providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
     let resolver = Arc::new(KeyedResolver::new(store.clone(), secrets.clone()));
-    let embedder = resolve_embedder(&*secrets).await;
+    let embedder = resolve_embedder(&*store, &*secrets).await;
     let (retrieval, tools, agent_config) = agent_deps(embedder);
     let state = AppState::new(
         config,
@@ -222,14 +222,27 @@ const EMBED_DIMS: usize = 1536;
 
 /// Choose the embedder for this launch.
 ///
-/// If an OpenAI API key is configured (stored credential or `OPENAI_API_KEY`), use
-/// real semantic embeddings via [`OpenAiEmbedder`] — documents are embedded through
-/// OpenAI's API, consistent with the bring-your-own-key egress model. Otherwise
-/// fall back to the offline, lexical [`HashEmbedder`], so search works with no
-/// credentials (just less well). Chosen once at startup: the in-memory index is
-/// per-launch and dimension-bound to the embedder, so switching requires a restart.
-async fn resolve_embedder(secrets: &dyn SecretProvider) -> Arc<dyn Embedder> {
-    match providers::resolve_api_key(secrets, providers::ProviderKind::Openai).await {
+/// Use real semantic embeddings via [`OpenAiEmbedder`] when the OpenAI provider is
+/// both **enabled** and has a key configured (stored credential or `OPENAI_API_KEY`)
+/// — documents are then embedded through OpenAI's API, consistent with the
+/// bring-your-own-key egress model. Gating on `enabled` (the same flag that gates
+/// chat routing) means a user who disabled OpenAI doesn't silently get document
+/// text egressed for embeddings. Otherwise fall back to the offline, lexical
+/// [`HashEmbedder`], so search works with no credentials (just less well).
+///
+/// Chosen once at startup: the in-memory index is per-launch and dimension-bound to
+/// the embedder, so enabling OpenAI (or adding a key) takes effect on restart.
+async fn resolve_embedder(store: &dyn Store, secrets: &dyn SecretProvider) -> Arc<dyn Embedder> {
+    let enabled = providers::read_config(store, providers::ProviderKind::Openai)
+        .await
+        .map(|config| config.enabled)
+        .unwrap_or(false);
+    let key = if enabled {
+        providers::resolve_api_key(secrets, providers::ProviderKind::Openai).await
+    } else {
+        None
+    };
+    match key {
         Some(key) => Arc::new(OpenAiEmbedder::new(key, EMBED_MODEL, EMBED_DIMS)),
         None => Arc::new(HashEmbedder::default()),
     }
@@ -985,10 +998,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_embedder_uses_openai_when_a_key_is_configured() {
-        // A stored OpenAI credential (which takes precedence over any env var, so
-        // this is deterministic) selects the real 1536-dim embedder over the
-        // offline HashEmbedder default. No network call — construction only.
+    async fn resolve_embedder_uses_openai_only_when_enabled_and_keyed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
         let secrets = MemSecrets::default();
         providers::write_credential(
             &secrets,
@@ -997,9 +1016,39 @@ mod tests {
         )
         .await
         .unwrap();
-        let embedder = resolve_embedder(&secrets).await;
-        assert_eq!(embedder.dimensions(), EMBED_DIMS);
+
+        // Enabled + keyed → the real 1536-dim embedder. A stored credential takes
+        // precedence over any env var, so this is deterministic; construction only,
+        // no network call.
+        providers::write_config(
+            &*store,
+            providers::ProviderKind::Openai,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        let online = resolve_embedder(&*store, &secrets).await;
+        assert_eq!(online.dimensions(), EMBED_DIMS);
         assert_ne!(EMBED_DIMS, HashEmbedder::default().dimensions());
+
+        // Disabled but keyed → the key is ignored (no silent egress), even though
+        // it's present. Deterministic regardless of any ambient OPENAI_API_KEY,
+        // since a disabled provider never consults the key at all.
+        providers::write_config(
+            &*store,
+            providers::ProviderKind::Openai,
+            &providers::ProviderConfig {
+                enabled: false,
+                base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        let offline = resolve_embedder(&*store, &secrets).await;
+        assert_eq!(offline.dimensions(), HashEmbedder::default().dimensions());
     }
 
     #[tokio::test]
