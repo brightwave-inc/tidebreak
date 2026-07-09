@@ -78,6 +78,12 @@ impl SteerInbox {
         self.inner.interrupt.load(Ordering::Acquire)
     }
 
+    /// Whether the inbox has no queued messages and no pending interrupt.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.queue.lock().unwrap().is_empty() && !self.interrupt_requested()
+    }
+
     /// A future that resolves once an interrupt is requested. Race it against the
     /// provider stream to preempt mid-step.
     #[must_use]

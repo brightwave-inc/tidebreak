@@ -57,6 +57,9 @@ pub(crate) async fn drive_and_journal(
     // another turn for this chat can start.
     let _active = active;
     let _ = agent.run_turn(&chat, &input, &events_tx).await;
+    // Agent is done — refuse further cancel/steer (would be 202-with-no-effect)
+    // while the slot stays held for journal drain / seq safety.
+    _active.close_ingress();
     drop(events_tx);
     journal.await;
 }

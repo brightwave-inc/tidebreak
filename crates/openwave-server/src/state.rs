@@ -68,10 +68,14 @@ impl AppState {
 }
 
 /// Handles held for one running turn — cancel + steer mailboxes.
+///
+/// `accepting` is cleared when the agent returns so cancel/steer get `409`
+/// during journal drain (the slot stays held for seq safety, but ingress stops).
 #[derive(Clone)]
 struct TurnHandles {
     cancel: CancelToken,
     steer: SteerInbox,
+    accepting: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Admits one running turn per chat, and holds each running turn's
@@ -96,11 +100,13 @@ impl TurnGuard {
         }
         let cancel = CancelToken::new();
         let steer = SteerInbox::new();
+        let accepting = Arc::new(std::sync::atomic::AtomicBool::new(true));
         active.insert(
             chat_id,
             TurnHandles {
                 cancel: cancel.clone(),
                 steer: steer.clone(),
+                accepting: accepting.clone(),
             },
         );
         Some(ActiveTurn {
@@ -108,32 +114,34 @@ impl TurnGuard {
             chat_id,
             cancel,
             steer,
+            accepting,
         })
     }
 
     /// Trip the cancel token of the turn running for `chat_id`, if any. Returns
-    /// whether a turn was found to cancel. Idempotent — a second cancel while the
-    /// turn winds down just re-trips the already-tripped token.
+    /// whether a turn was found and still accepting cancel. Idempotent while the
+    /// agent is running; returns false once ingress is closed (journal drain).
     pub fn cancel(&self, chat_id: ChatId) -> bool {
         match self.active.lock().unwrap().get(&chat_id) {
-            Some(handles) => {
+            Some(handles) if handles.accepting.load(std::sync::atomic::Ordering::Acquire) => {
                 handles.cancel.cancel();
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
     /// Push a steer message into the turn running for `chat_id`, if any. Returns
-    /// whether a turn was found. When `interrupt` is true the agent preempts the
-    /// provider stream; otherwise the message waits for the next step boundary.
+    /// whether a turn was found and still accepting steer. When `interrupt` is
+    /// true the agent preempts the provider stream; otherwise the message waits
+    /// for the next step boundary.
     pub fn steer(&self, chat_id: ChatId, content: String, interrupt: bool) -> bool {
         match self.active.lock().unwrap().get(&chat_id) {
-            Some(handles) => {
+            Some(handles) if handles.accepting.load(std::sync::atomic::Ordering::Acquire) => {
                 handles.steer.push(content, interrupt);
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 }
@@ -144,6 +152,7 @@ pub struct ActiveTurn {
     chat_id: ChatId,
     cancel: CancelToken,
     steer: SteerInbox,
+    accepting: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ActiveTurn {
@@ -157,6 +166,13 @@ impl ActiveTurn {
     /// routed through [`TurnGuard::steer`] injects mid-turn.
     pub fn steer_inbox(&self) -> SteerInbox {
         self.steer.clone()
+    }
+
+    /// Stop accepting cancel/steer (agent finished). The slot stays held until
+    /// drop so the journal can finish without a concurrent turn racing seq.
+    pub fn close_ingress(&self) {
+        self.accepting
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -200,8 +216,23 @@ mod tests {
         assert!(!held.cancel_token().is_cancelled());
         assert!(guard.cancel(chat));
         assert!(held.cancel_token().is_cancelled());
-        // Idempotent while the turn is still held.
+        // Idempotent while the turn is still accepting.
         assert!(guard.cancel(chat));
+    }
+
+    #[test]
+    fn close_ingress_refuses_further_cancel_and_steer() {
+        let guard = Arc::new(TurnGuard::default());
+        let chat = ChatId::new();
+        let held = guard.try_acquire(chat).expect("acquire");
+        held.close_ingress();
+        assert!(!guard.cancel(chat), "cancel refused after ingress closed");
+        assert!(
+            !guard.steer(chat, "late".into(), false),
+            "steer refused after ingress closed"
+        );
+        // Slot still held for seq safety.
+        assert!(guard.try_acquire(chat).is_none());
     }
 
     #[test]

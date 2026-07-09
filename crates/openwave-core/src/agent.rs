@@ -339,19 +339,29 @@ impl Agent {
             }
 
             if calls.is_empty() {
-                // A steer that arrived as the stream finished should continue the
-                // turn rather than report completion.
-                if self
-                    .apply_steers(chat, turn_id, &mut transcript, events)
-                    .await?
-                {
-                    continue;
+                // Drain steers until the inbox is quiet, then complete. A steer
+                // that arrives as the stream finished must continue the turn
+                // rather than race a TurnCompleted.
+                loop {
+                    if self.cancel.is_cancelled() {
+                        return self.finish_cancelled(events, total_usage);
+                    }
+                    if self
+                        .apply_steers(chat, turn_id, &mut transcript, events)
+                        .await?
+                    {
+                        break; // continue the outer step loop below
+                    }
+                    if self.steer.is_empty() {
+                        let _ = events.unbounded_send(AgentEvent::TurnCompleted {
+                            usage: total_usage,
+                            stop_reason,
+                        });
+                        return Ok(());
+                    }
+                    // Steer arrived between drain and is_empty — loop.
                 }
-                let _ = events.unbounded_send(AgentEvent::TurnCompleted {
-                    usage: total_usage,
-                    stop_reason,
-                });
-                return Ok(());
+                continue;
             }
 
             // Tool calls need a following model call to consume their results. If

@@ -226,9 +226,9 @@ mod tests {
     use axum::http::{header, Request, StatusCode};
     use futures::stream::{self, BoxStream, StreamExt};
     use openwave_core::{
-        AgentErrorInfo, AgentEvent, ApprovalClass, Chat, ChatId, ChatRequest, ModelProvider,
-        Message, Project, ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent,
-        StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
+        AgentErrorInfo, AgentEvent, ApprovalClass, Chat, ChatId, ChatRequest, Message,
+        ModelProvider, Project, ProjectId, ProviderEvent, ProviderId, SecretProvider,
+        SequencedEvent, StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
     };
     use resolver::ProviderResolver;
     use serde::de::DeserializeOwned;
@@ -677,16 +677,15 @@ mod tests {
         );
 
         let events = wait_for_turn(&store, chat.id).await;
-        let stream_interrupted_at = events.iter().position(|e| {
+        let stream_interrupted_at = events
+            .iter()
+            .position(|e| matches!(e.event, AgentEvent::StreamInterrupted));
+        let user_steered_at = events.iter().position(|e| {
             matches!(
-                e.event,
-                AgentEvent::StreamInterrupted
+                &e.event,
+                AgentEvent::UserSteered { content } if content == "change course"
             )
         });
-        let user_steered_at = events.iter().position(|e| matches!(
-            &e.event,
-            AgentEvent::UserSteered { content } if content == "change course"
-        ));
         assert!(
             matches!((stream_interrupted_at, user_steered_at), (Some(a), Some(b)) if a < b),
             "interrupted stream is marked before steer is injected"
@@ -1841,6 +1840,16 @@ mod tests {
             send_message(&router, &bearer, chat.id, "two").await,
             StatusCode::CONFLICT,
             "slot must remain held while terminal event is still being journaled"
+        );
+        assert_eq!(
+            steer_turn(&router, &bearer, chat.id, "late", false).await,
+            StatusCode::CONFLICT,
+            "steer must not 202 after the agent finished (journal still draining)"
+        );
+        assert_eq!(
+            cancel_turn(&router, &bearer, chat.id).await,
+            StatusCode::CONFLICT,
+            "cancel must not 202 after the agent finished (journal still draining)"
         );
 
         release.notify_waiters();
