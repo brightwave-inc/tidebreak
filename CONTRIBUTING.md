@@ -28,6 +28,13 @@ cargo test --workspace
 The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml);
 `rustup` will pick it up automatically.
 
+### Desktop UI
+
+See [`crates/openwave-desktop/README.md`](crates/openwave-desktop/README.md).
+Short version: `cd crates/openwave-desktop && pnpm --dir ui install && cargo tauri
+dev`, or run the React UI in a browser against `openwave serve` via
+`ui/.env.local`.
+
 ## Commit and PR conventions
 
 - Use [Conventional Commits](https://www.conventionalcommits.org/) prefixes:

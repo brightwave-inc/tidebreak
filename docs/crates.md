@@ -91,13 +91,15 @@ OpenWave's core tools to external agents (Claude Code, Codex, Cursor…), and a
 
 ---
 
-## `openwave-desktop` — the desktop app ⚪
+## `openwave-desktop` — the desktop app 🟡
 
-The Tauri application: it compiles `openwave-core` in, hosts the chat UI, and
-talks to it over an in-process HTTP surface on an ephemeral local port. This is
-the primary way most people will run OpenWave.
+The Tauri application: it compiles the server in-process, hosts the chat UI, and
+talks to it over an ephemeral loopback HTTP/WebSocket surface. This is the
+primary way most people will run OpenWave. See
+[`crates/openwave-desktop/README.md`](../crates/openwave-desktop/README.md) for
+local run instructions.
 
-**Depends on:** `openwave-core` (+ Tauri).
+**Depends on:** `openwave-core`, `openwave-server` (+ Tauri).
 
 ## `openwave-cli` — headless daemon + CLI ⚪
 
