@@ -10,6 +10,13 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["tool"]
+# The agent-facing `search` Tool. Pulls in `openwave-core` for the `Tool` trait;
+# turn it off (`default-features = false`) to use the retrieval pipeline as a
+# standalone library with no dependency on the core crate.
+tool = ["dep:openwave-core"]
+
 [dependencies]
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -18,6 +25,9 @@ thiserror = { workspace = true }
 # `v5` (name-based UUIDs) is additive over the workspace's `v4`/`serde`; it
 # backs the deterministic chunk ids derived from (document, byte span).
 uuid = { workspace = true, features = ["v5"] }
+# Only the trait contracts (Tool/ToolSpec/…), not the SQLite/keychain/file-tool
+# machinery — hence default-features = false.
+openwave-core = { path = "../openwave-core", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
