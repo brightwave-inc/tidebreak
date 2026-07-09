@@ -166,7 +166,17 @@ impl VectorStore for InMemoryVectorStore {
             .write()
             .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
         store.retain(|r| r.chunk.document_id != document_id);
-        store.extend(records);
+        // Insert with the same by-chunk-id dedupe `upsert` uses, so the two write
+        // paths give symmetric guarantees: if a chunker ever emits two records with
+        // the same derived id (identical span), the last wins rather than both
+        // landing and producing duplicate citations.
+        for record in records {
+            if let Some(existing) = store.iter_mut().find(|r| r.chunk.id == record.chunk.id) {
+                *existing = record;
+            } else {
+                store.push(record);
+            }
+        }
         Ok(())
     }
 
@@ -295,6 +305,26 @@ mod tests {
         );
         // Document b is untouched.
         assert!(hits.iter().any(|h| h.chunk.document_id == b));
+    }
+
+    #[tokio::test]
+    async fn replace_document_dedupes_records_by_chunk_id() {
+        // Two records with the same derived chunk id (same document + span) must
+        // collapse to one — the last wins — not both land as duplicate citations.
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let first = record(doc, 0, "old", vec![1.0, 0.0]);
+        let second = record(doc, 0, "new", vec![0.0, 1.0]);
+        assert_eq!(first.chunk.id, second.chunk.id, "same span => same id");
+
+        store
+            .replace_document(doc, vec![first, second])
+            .await
+            .unwrap();
+        assert_eq!(store.len().await.unwrap(), 1);
+        let hits = store.query(&Embedding(vec![0.0, 1.0]), 5).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.text, "new");
     }
 
     #[tokio::test]
