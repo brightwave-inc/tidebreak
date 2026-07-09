@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use openwave_core::{
-    AgentConfig, CancelToken, ChatId, Config, SecretProvider, Store, ToolRegistry,
+    AgentConfig, CancelToken, ChatId, Config, SecretProvider, SteerInbox, Store, ToolRegistry,
 };
 use uuid::Uuid;
 
@@ -67,15 +67,26 @@ impl AppState {
     }
 }
 
+/// Handles held for one running turn — cancel + steer mailboxes.
+///
+/// `accepting` is cleared when the agent returns so cancel/steer get `409`
+/// during journal drain (the slot stays held for seq safety, but ingress stops).
+#[derive(Clone)]
+struct TurnHandles {
+    cancel: CancelToken,
+    steer: SteerInbox,
+    accepting: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Admits one running turn per chat, and holds each running turn's
-/// [`CancelToken`] so a cancel request can find and trip it.
+/// [`CancelToken`] / [`SteerInbox`] so cancel and steer requests can find them.
 ///
 /// The agent's per-chat sequence numbering assumes a single writer; this guard
 /// upholds that at the API edge — a turn holds its chat's slot until it finishes,
 /// and a concurrent request for the same chat is refused (never queued behind it).
 #[derive(Default)]
 pub struct TurnGuard {
-    active: Mutex<HashMap<ChatId, CancelToken>>,
+    active: Mutex<HashMap<ChatId, TurnHandles>>,
 }
 
 impl TurnGuard {
@@ -88,24 +99,48 @@ impl TurnGuard {
             return None;
         }
         let cancel = CancelToken::new();
-        active.insert(chat_id, cancel.clone());
+        let steer = SteerInbox::new();
+        let accepting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        active.insert(
+            chat_id,
+            TurnHandles {
+                cancel: cancel.clone(),
+                steer: steer.clone(),
+                accepting: accepting.clone(),
+            },
+        );
         Some(ActiveTurn {
             guard: Arc::clone(self),
             chat_id,
             cancel,
+            steer,
+            accepting,
         })
     }
 
     /// Trip the cancel token of the turn running for `chat_id`, if any. Returns
-    /// whether a turn was found to cancel. Idempotent — a second cancel while the
-    /// turn winds down just re-trips the already-tripped token.
+    /// whether a turn was found and still accepting cancel. Idempotent while the
+    /// agent is running; returns false once ingress is closed (journal drain).
     pub fn cancel(&self, chat_id: ChatId) -> bool {
         match self.active.lock().unwrap().get(&chat_id) {
-            Some(token) => {
-                token.cancel();
+            Some(handles) if handles.accepting.load(std::sync::atomic::Ordering::Acquire) => {
+                handles.cancel.cancel();
                 true
             }
-            None => false,
+            _ => false,
+        }
+    }
+
+    /// Push a steer message into the turn running for `chat_id`, if any. Returns
+    /// whether a turn was found and still accepting steer. When `interrupt` is
+    /// true the agent preempts the provider stream; otherwise the message waits
+    /// for the next step boundary.
+    pub fn steer(&self, chat_id: ChatId, content: String, interrupt: bool) -> bool {
+        match self.active.lock().unwrap().get(&chat_id) {
+            Some(handles) if handles.accepting.load(std::sync::atomic::Ordering::Acquire) => {
+                handles.steer.push(content, interrupt)
+            }
+            _ => false,
         }
     }
 }
@@ -115,6 +150,8 @@ pub struct ActiveTurn {
     guard: Arc<TurnGuard>,
     chat_id: ChatId,
     cancel: CancelToken,
+    steer: SteerInbox,
+    accepting: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ActiveTurn {
@@ -122,6 +159,19 @@ impl ActiveTurn {
     /// routed through [`TurnGuard::cancel`] stops it.
     pub fn cancel_token(&self) -> CancelToken {
         self.cancel.clone()
+    }
+
+    /// The steer inbox for this turn — handed to the agent so a `POST .../steer`
+    /// routed through [`TurnGuard::steer`] injects mid-turn.
+    pub fn steer_inbox(&self) -> SteerInbox {
+        self.steer.clone()
+    }
+
+    /// Stop accepting cancel/steer (agent finished). The slot stays held until
+    /// drop so the journal can finish without a concurrent turn racing seq.
+    pub fn close_ingress(&self) {
+        self.accepting
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -151,27 +201,49 @@ mod tests {
         drop(held);
         assert!(
             guard.try_acquire(chat).is_some(),
-            "the slot frees once the turn is dropped"
+            "dropping the slot frees the chat for another turn"
         );
     }
 
     #[test]
-    fn cancel_trips_the_running_turns_token() {
+    fn cancel_trips_the_held_token() {
         let guard = Arc::new(TurnGuard::default());
         let chat = ChatId::new();
 
-        // No turn running yet: nothing to cancel.
-        assert!(!guard.cancel(chat));
-
+        assert!(!guard.cancel(chat), "nothing to cancel yet");
         let held = guard.try_acquire(chat).expect("acquire");
-        let token = held.cancel_token();
-        assert!(!token.is_cancelled());
+        assert!(!held.cancel_token().is_cancelled());
+        assert!(guard.cancel(chat));
+        assert!(held.cancel_token().is_cancelled());
+        // Idempotent while the turn is still accepting.
+        assert!(guard.cancel(chat));
+    }
 
-        assert!(guard.cancel(chat), "a running turn is found and cancelled");
-        assert!(token.is_cancelled(), "the turn's own token is tripped");
+    #[test]
+    fn close_ingress_refuses_further_cancel_and_steer() {
+        let guard = Arc::new(TurnGuard::default());
+        let chat = ChatId::new();
+        let held = guard.try_acquire(chat).expect("acquire");
+        held.close_ingress();
+        assert!(!guard.cancel(chat), "cancel refused after ingress closed");
+        assert!(
+            !guard.steer(chat, "late".into(), false),
+            "steer refused after ingress closed"
+        );
+        // Slot still held for seq safety.
+        assert!(guard.try_acquire(chat).is_none());
+    }
 
-        // Once the slot frees, there's again nothing to cancel.
-        drop(held);
-        assert!(!guard.cancel(chat));
+    #[test]
+    fn steer_pushes_into_the_held_inbox() {
+        let guard = Arc::new(TurnGuard::default());
+        let chat = ChatId::new();
+
+        assert!(!guard.steer(chat, "x".into(), false));
+        let held = guard.try_acquire(chat).expect("acquire");
+        assert!(guard.steer(chat, "course correct".into(), true));
+        let msgs = held.steer_inbox().drain();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "course correct");
     }
 }

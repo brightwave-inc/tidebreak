@@ -41,6 +41,9 @@ pub enum AgentEvent {
         /// The reasoning fragment.
         text: String,
     },
+    /// The current provider stream was preempted and any partial assistant/tool
+    /// deltas since the last stable boundary should be discarded by clients.
+    StreamInterrupted,
     /// The model has begun a tool call; its name is known.
     ToolCallStarted {
         /// Correlates the following args deltas, approval, and result.
@@ -97,6 +100,13 @@ pub enum AgentEvent {
     TurnCancelled {
         /// Token accounting up to the point of cancellation.
         usage: Usage,
+    },
+    /// A mid-turn steer message was injected into the running turn. The turn
+    /// continues (unlike `TurnCancelled`); the content is also persisted as a
+    /// user message.
+    UserSteered {
+        /// The steered user text.
+        content: String,
     },
 }
 

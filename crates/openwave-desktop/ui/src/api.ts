@@ -37,6 +37,7 @@ export type AgentEvent =
   | { type: "turn_started"; turn_id: string }
   | { type: "text_delta"; text: string }
   | { type: "reasoning_delta"; text: string }
+  | { type: "stream_interrupted" }
   | { type: "tool_call_started"; call_id: string; name: string }
   | { type: "tool_call_args_delta"; call_id: string; fragment: string }
   | {
@@ -48,7 +49,9 @@ export type AgentEvent =
   | { type: "approval_decided"; call_id: string; approved: boolean }
   | { type: "tool_call_completed"; call_id: string; output: unknown }
   | { type: "turn_completed"; usage: unknown; stop_reason: string }
-  | { type: "turn_failed"; error: { kind: string; message: string } };
+  | { type: "turn_failed"; error: { kind: string; message: string } }
+  | { type: "turn_cancelled"; usage: unknown }
+  | { type: "user_steered"; content: string };
 
 const WS_HANDSHAKE = "openwave-v1";
 const WS_TOKEN_PREFIX = "openwave-token.";
@@ -139,6 +142,25 @@ export class ApiClient {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ content }),
+    });
+  }
+
+  steer(
+    chatId: string,
+    content: string,
+    interrupt = false,
+  ): Promise<void> {
+    return this.json(`/chats/${chatId}/steer`, {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({ content, interrupt }),
+    });
+  }
+
+  cancel(chatId: string): Promise<void> {
+    return this.json(`/chats/${chatId}/cancel`, {
+      method: "POST",
+      headers: this.headers(),
     });
   }
 
