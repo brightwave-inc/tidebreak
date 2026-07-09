@@ -347,19 +347,84 @@ pub async fn update_provider(
     })
 }
 
-/// Resolve the Anthropic API key the turn path uses today: stored credential
-/// (new blob or legacy), then `ANTHROPIC_API_KEY` env.
-pub async fn resolve_anthropic_api_key(secrets: &dyn SecretProvider) -> Option<String> {
-    if let Ok(Some(cred)) = read_credential(secrets, ProviderKind::Anthropic).await {
+/// Resolve an API-key credential for `kind`: stored blob (or Anthropic legacy),
+/// then the matching env fallback.
+pub async fn resolve_api_key(secrets: &dyn SecretProvider, kind: ProviderKind) -> Option<String> {
+    if let Ok(Some(cred)) = read_credential(secrets, kind).await {
         if let Some(key) = cred.as_api_key() {
             if !key.is_empty() {
                 return Some(key.to_string());
             }
         }
     }
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
+    match kind {
+        ProviderKind::Anthropic => std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty()),
+        ProviderKind::Openai => std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty()),
+        ProviderKind::OpenaiCompatible => None,
+    }
+}
+
+/// Resolve the Anthropic API key (stored / legacy / env). Thin wrapper kept for
+/// call sites that are Anthropic-specific.
+pub async fn resolve_anthropic_api_key(secrets: &dyn SecretProvider) -> Option<String> {
+    resolve_api_key(secrets, ProviderKind::Anthropic).await
+}
+
+/// Map a server [`ProviderKind`] to the router's [`openwave_router::RouteKind`].
+pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
+    match kind {
+        ProviderKind::Anthropic => openwave_router::RouteKind::Anthropic,
+        ProviderKind::Openai => openwave_router::RouteKind::Openai,
+        ProviderKind::OpenaiCompatible => openwave_router::RouteKind::OpenaiCompatible,
+    }
+}
+
+/// Collect enabled, credentialed routes for the composite router.
+///
+/// A kind with no usable API key is skipped. `openai_compatible` also requires
+/// a `base_url`. Store-read failures for a single kind skip that kind (fail
+/// closed for it) rather than aborting the whole list.
+pub async fn collect_routes(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+) -> Vec<openwave_router::Route> {
+    let mut routes = Vec::new();
+    for &kind in ProviderKind::ALL {
+        let config = match read_config(store, kind).await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !config.enabled {
+            continue;
+        }
+        let Some(api_key) = resolve_api_key(secrets, kind).await else {
+            continue;
+        };
+        if kind == ProviderKind::OpenaiCompatible && config.base_url.is_none() {
+            continue;
+        }
+        if kind == ProviderKind::OpenaiCompatible {
+            let base = config.base_url.as_deref().unwrap_or("");
+            if !(base.starts_with("https://") || base.starts_with("http://")) {
+                continue;
+            }
+        }
+        routes.push(openwave_router::Route {
+            kind: route_kind(kind),
+            api_key,
+            base_url: config.base_url,
+            curated_models: kind
+                .curated_models()
+                .iter()
+                .map(|m| (*m).to_string())
+                .collect(),
+        });
+    }
+    routes
 }
 
 /// One-shot boot migration: if Anthropic has no stored config yet but a key is

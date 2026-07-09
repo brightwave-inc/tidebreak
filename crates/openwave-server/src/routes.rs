@@ -429,8 +429,9 @@ pub async fn post_message(
     if let Some(model) = model {
         agent_config.model = model;
     }
-    // Resolve the provider from the currently-configured key, so a key set via
-    // PUT /settings/api-key takes effect on this turn.
+    // Resolve the provider from currently-configured providers, so a key set via
+    // PUT /providers/{kind} (or the legacy /settings/api-key) takes effect on
+    // this turn. The composite router selects the adapter from the model name.
     let provider = state.resolver.resolve().await;
     let agent = Agent::new(
         provider,
