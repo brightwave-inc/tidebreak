@@ -335,8 +335,10 @@ pub async fn ingest_document(
     if body.content.trim().is_empty() {
         return Err(ServerError::bad_request("content must not be empty"));
     }
-    let source = match body.uri {
-        Some(uri) if !uri.trim().is_empty() => DocumentSource::uri(uri),
+    let source = match body.uri.as_deref().map(str::trim) {
+        // Trim before deriving the document id: a padded URI must resolve to the
+        // same document as its unpadded form, or idempotent re-ingest breaks.
+        Some(uri) if !uri.is_empty() => DocumentSource::uri(uri),
         _ => DocumentSource::Inline,
     };
     let media_type = body.media_type.as_deref().unwrap_or("text/plain");

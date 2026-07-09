@@ -859,6 +859,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_padded_uri_targets_the_same_document() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+
+        // Surrounding whitespace must not change the derived document id, or
+        // "re-ingest the same file" would silently create a second document.
+        let padded: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/documents",
+                serde_json::json!({ "uri": "  file:///a.txt  ", "content": "hello world" }),
+            )
+            .await,
+        )
+        .await;
+        let clean: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/documents",
+                serde_json::json!({ "uri": "file:///a.txt", "content": "hello world" }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(padded["document_id"], clean["document_id"]);
+    }
+
+    #[tokio::test]
     async fn ingest_rejects_empty_content_and_search_rejects_empty_query() {
         let (router, token, _store, _dir) = test_app().await;
         let bearer = format!("Bearer {token}");
@@ -971,6 +1001,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn retrieval_routes_require_a_token() {
+        let (router, _token, _store, _dir) = test_app().await;
+        // Both retrieval routes sit behind the bearer-token layer, not out in the
+        // open like /healthz — a request with no token is rejected before it runs.
+        for uri in ["/documents", "/search"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(serde_json::json!({}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{uri} must require a token"
+            );
+        }
     }
 
     #[tokio::test]
