@@ -17,21 +17,33 @@
 
 ---
 
+> [!WARNING]
+> **Early and in active development.** OpenWave is being built in the open, one
+> slice at a time. Interfaces, schema, and crate layout change frequently, and
+> it isn't ready for real-world use yet. Star the repo to follow along — and
+> expect rough edges.
+
 ## Where this comes from
 
 OpenWave is the open core of the [Brightwave](https://brightwave.io) platform.
 
-Brightwave spent years building an agentic system for demanding, real-world
-knowledge work — a runtime that plans and executes multi-step tasks, calls tools
-through a strict schema-first contract, runs skills in a sandbox, connects to
-your sources, and grounds its answers in citations. **We're taking the core
-pieces of that platform — the agent loop, the tool and skill model, connectors,
-and retrieval — and opening them up** under Apache-2.0, rebuilt lean in Rust as a
+We've spent years building Brightwave — an agentic system for demanding,
+real-world knowledge work: a runtime that plans and executes multi-step tasks,
+runs **fleets of agents in parallel** inside sandboxes, connects to your
+sources, and grounds its answers in citations. Skills and prompts are features
+on top of that runtime, not the point of it. **We're taking the core pieces of
+that platform — the agent loop, the tool model, sandboxing, connectors, and
+retrieval — and opening them up** under Apache-2.0, rebuilt lean in Rust as a
 local-first application you run yourself.
 
 The idea is simple: the engine that does the work shouldn't be a cloud service
 that holds your data and meters your tokens. It should be something you own —
 local by default, model-agnostic, and open.
+
+The open version is **configurable end to end**. Bring your own API keys to
+connect the LLMs, embedding services, and document parsers you prefer — each
+behind a common interface — with sensible, local-friendly defaults out of the
+box, so it works on your machine from the first run.
 
 ## Why
 
@@ -44,8 +56,10 @@ so it works with the agents and tools you already use.
 ## Principles
 
 - **Local-first & private.** Your files, keys, and history stay on your machine.
-- **Bring your own model.** Anthropic, OpenAI, Google, or anything
-  OpenAI-compatible (vLLM, LM Studio, Ollama, OpenRouter). We never meter tokens.
+- **Bring your own keys.** Configure the models (Anthropic, OpenAI, Google, or
+  anything OpenAI-compatible — vLLM, LM Studio, Ollama, OpenRouter), embedding
+  services, and document parsers you want — with local-friendly defaults. We
+  never meter tokens.
 - **Slim by default.** Small install; no bundled model weights or language
   runtimes — fetched on first use, cached locally.
 - **Works with any agent.** An MCP server _and_ a client — OpenWave both exposes
@@ -54,9 +68,11 @@ so it works with the agents and tools you already use.
 
 ## Status
 
-Pre-alpha, built in the open. The workspace scaffold is in place; the walking
-skeleton (chat + local file tools + streaming) is next. Expect rapid change and
-rough edges — and see [CONTRIBUTING](CONTRIBUTING.md) if you'd like to help.
+Pre-alpha, built in the open. The walking skeleton runs today: projects and
+chats, local file tools, a turn engine, and live event streaming over WebSocket,
+all behind `openwave serve`. Desktop UI, connectors, and retrieval come next.
+Expect rapid change and rough edges — and see [CONTRIBUTING](CONTRIBUTING.md) if
+you'd like to help.
 
 ## Building
 
