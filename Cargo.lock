@@ -1686,6 +1686,7 @@ dependencies = [
  "axum",
  "chrono",
  "openwave-core",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

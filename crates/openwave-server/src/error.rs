@@ -28,6 +28,20 @@ impl ServerError {
             },
         }
     }
+
+    /// A `400 Bad Request` for a malformed request (bad path segment, or an
+    /// unparseable / wrong-typed / wrong-content-type body). Used to map axum's
+    /// built-in extractor rejections into the same `{ kind, message }` shape as
+    /// every other error, so a client can always parse the body as JSON.
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            info: AgentErrorInfo {
+                kind: "bad_request".to_string(),
+                message: message.into(),
+            },
+        }
+    }
 }
 
 /// Core errors surfacing from a handler are internal failures (a store write

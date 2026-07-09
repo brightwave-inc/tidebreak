@@ -6,16 +6,16 @@
 
 use std::path::PathBuf;
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use chrono::Utc;
 use serde::Deserialize;
 
 use openwave_core::{Session, SessionId};
 
 use crate::error::ServerError;
+use crate::extract::{Json, Path};
 use crate::state::AppState;
 
 /// Body of `POST /sessions`.

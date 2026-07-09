@@ -12,6 +12,7 @@
 
 mod auth;
 mod error;
+mod extract;
 mod routes;
 mod state;
 
@@ -125,7 +126,7 @@ mod tests {
 
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Request, StatusCode};
-    use openwave_core::{Session, SessionId};
+    use openwave_core::{AgentErrorInfo, Profile, Session, SessionId};
     use serde::de::DeserializeOwned;
     use tower::ServiceExt;
 
@@ -275,5 +276,91 @@ mod tests {
         let server = bind(Config::desktop(dir.path())).await.unwrap();
         assert!(server.local_addr().ip().is_loopback());
         assert!(!server.token().is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_requests_get_json_errors_not_plaintext() {
+        let (router, token, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+
+        // A non-UUID path segment: 400 with a parseable `{ kind, message }` body,
+        // not axum's default plain-text rejection.
+        let bad_path = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/not-a-uuid")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_path.status(), StatusCode::BAD_REQUEST);
+        let info: AgentErrorInfo = json_body(bad_path).await;
+        assert_eq!(info.kind, "bad_request");
+
+        // A body with no `Content-Type: application/json`: also a JSON 400.
+        let no_content_type = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sessions")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::from(r#"{"workspace_dir":"/tmp/ws"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_content_type.status(), StatusCode::BAD_REQUEST);
+        let info: AgentErrorInfo = json_body(no_content_type).await;
+        assert_eq!(info.kind, "bad_request");
+    }
+
+    #[tokio::test]
+    async fn self_host_profile_is_not_yet_supported() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            profile: Profile::SelfHost,
+            data_dir: dir.path().to_path_buf(),
+        };
+        assert!(bind(config).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn serve_answers_over_a_real_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = bind(Config::desktop(dir.path())).await.unwrap();
+        let addr = server.local_addr();
+        let token = server.token().to_string();
+        // The listener is already bound, so connections queue immediately; drive
+        // the accept loop in the background for the duration of the test.
+        tokio::spawn(async move {
+            let _ = server.serve().await;
+        });
+
+        let client = reqwest::Client::new();
+        let health = client
+            .get(format!("http://{addr}/healthz"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health.status(), reqwest::StatusCode::OK);
+
+        let unauthed = client
+            .get(format!("http://{addr}/sessions"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthed.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let authed = client
+            .get(format!("http://{addr}/sessions"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authed.status(), reqwest::StatusCode::OK);
+        assert_eq!(authed.json::<Vec<Session>>().await.unwrap(), vec![]);
     }
 }
