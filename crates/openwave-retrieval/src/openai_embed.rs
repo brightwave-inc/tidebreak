@@ -12,6 +12,8 @@
 //!
 //! Enabled by the `embed-openai` feature.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -20,13 +22,17 @@ use crate::embed::{Embedder, Embedding};
 use crate::error::{Result, RetrievalError};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+/// Cap on a single embeddings request, so a hung call can't wedge ingest forever.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An [`Embedder`] backed by an OpenAI-compatible `/embeddings` endpoint.
 ///
-/// `dimensions` is sent as the request's `dimensions` parameter (supported by the
-/// `text-embedding-3` family, which can project to a smaller size) and is the size
-/// every returned vector is validated against — so it always matches what a
-/// [`crate::VectorStore`] is configured to expect.
+/// `dimensions` is the size every returned vector is validated against, so it
+/// always matches what a [`crate::VectorStore`] expects — declare the model's
+/// output size here. By default the request does **not** send a `dimensions`
+/// parameter (many models and gateways `400` on it); call
+/// [`OpenAiEmbedder::project_dimensions`] to ask a `text-embedding-3` model to
+/// project its output down to `dimensions`.
 #[derive(Clone)]
 pub struct OpenAiEmbedder {
     client: reqwest::Client,
@@ -34,19 +40,28 @@ pub struct OpenAiEmbedder {
     base_url: String,
     model: String,
     dimensions: usize,
+    /// Whether to send the `dimensions` request parameter (v3 projection).
+    project_dimensions: bool,
 }
 
 impl OpenAiEmbedder {
     /// Build an embedder hitting OpenAI's embeddings API with the given model and
-    /// output dimensionality (e.g. `"text-embedding-3-small"`, `1536`).
+    /// its output dimensionality (e.g. `"text-embedding-3-small"`, `1536`).
     #[must_use]
     pub fn new(api_key: impl Into<String>, model: impl Into<String>, dimensions: usize) -> Self {
+        // A build failure (e.g. TLS init) falls back to the default client rather
+        // than panicking at construction; the timeout is best-effort.
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            client: reqwest::Client::new(),
+            client,
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             model: model.into(),
             dimensions,
+            project_dimensions: false,
         }
     }
 
@@ -55,6 +70,15 @@ impl OpenAiEmbedder {
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Send the `dimensions` request parameter, asking the model to project its
+    /// output to the configured size. Only for `text-embedding-3` models — other
+    /// models and many gateways reject the parameter. Off by default.
+    #[must_use]
+    pub fn project_dimensions(mut self) -> Self {
+        self.project_dimensions = true;
         self
     }
 }
@@ -71,7 +95,8 @@ impl Embedder for OpenAiEmbedder {
             return Ok(Vec::new());
         }
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
-        let body = build_request_body(&self.model, texts, self.dimensions);
+        let sent_dimensions = self.project_dimensions.then_some(self.dimensions);
+        let body = build_request_body(&self.model, texts, sent_dimensions);
 
         let response = self
             .client
@@ -85,25 +110,53 @@ impl Embedder for OpenAiEmbedder {
         let status = response.status();
         let bytes = response.bytes().await.map_err(embed_err)?;
         if !status.is_success() {
-            // Never forward the raw body — a gateway may echo key material or
-            // request fragments, and the error string can reach a client.
-            return Err(RetrievalError::embed(format!(
-                "embeddings request failed with HTTP {}",
-                status.as_u16()
-            )));
+            return Err(safe_http_error(status.as_u16(), &bytes));
         }
         parse_response(&bytes, texts.len(), self.dimensions)
     }
 }
 
-/// Build the JSON request body for an embeddings call.
-fn build_request_body(model: &str, texts: &[String], dimensions: usize) -> Value {
-    json!({
+/// Build the JSON request body for an embeddings call. `dimensions` is included
+/// only when the caller opted into projection (v3 models); omitting it keeps the
+/// request compatible with models and gateways that reject the parameter.
+fn build_request_body(model: &str, texts: &[String], dimensions: Option<usize>) -> Value {
+    let mut body = json!({
         "model": model,
         "input": texts,
         "encoding_format": "float",
-        "dimensions": dimensions,
-    })
+    });
+    if let Some(dimensions) = dimensions {
+        body["dimensions"] = json!(dimensions);
+    }
+    body
+}
+
+/// Turn a non-2xx response into an error carrying the status plus the API's
+/// structured `error.type`/`error.code` — never the free-text `message`, which a
+/// gateway can echo request fragments or key material into.
+fn safe_http_error(status: u16, body: &[u8]) -> RetrievalError {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        error: ErrorDetail,
+    }
+    #[derive(Deserialize)]
+    struct ErrorDetail {
+        #[serde(default, rename = "type")]
+        kind: Option<String>,
+        #[serde(default)]
+        code: Option<String>,
+    }
+
+    let detail = serde_json::from_slice::<ErrorBody>(body)
+        .ok()
+        .map(|b| b.error)
+        .and_then(|e| e.code.or(e.kind));
+    match detail {
+        Some(detail) => RetrievalError::embed(format!(
+            "embeddings request failed with HTTP {status} ({detail})"
+        )),
+        None => RetrievalError::embed(format!("embeddings request failed with HTTP {status}")),
+    }
 }
 
 /// The subset of the embeddings response we consume.
@@ -163,13 +216,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_body_has_the_expected_shape() {
+    fn request_body_omits_dimensions_by_default() {
         let texts = vec!["hello".to_string(), "world".to_string()];
-        let body = build_request_body("text-embedding-3-small", &texts, 1536);
+        let body = build_request_body("text-embedding-3-small", &texts, None);
         assert_eq!(body["model"], "text-embedding-3-small");
         assert_eq!(body["encoding_format"], "float");
-        assert_eq!(body["dimensions"], 1536);
         assert_eq!(body["input"], json!(["hello", "world"]));
+        // Absent by default — many models/gateways 400 on an unexpected field.
+        assert!(body.get("dimensions").is_none());
+    }
+
+    #[test]
+    fn request_body_includes_dimensions_when_projecting() {
+        let body = build_request_body("text-embedding-3-small", &["x".to_string()], Some(512));
+        assert_eq!(body["dimensions"], 512);
+    }
+
+    #[test]
+    fn safe_http_error_surfaces_code_not_free_text() {
+        let body = json!({
+            "error": {
+                "message": "Incorrect API key sk-secret-leaked provided",
+                "type": "invalid_request_error",
+                "code": "invalid_api_key"
+            }
+        })
+        .to_string();
+        let err = safe_http_error(401, body.as_bytes()).to_string();
+        assert!(err.contains("401"));
+        assert!(err.contains("invalid_api_key"));
+        // The free-text message (which echoed the key) must not leak through.
+        assert!(!err.contains("sk-secret-leaked"));
+    }
+
+    #[test]
+    fn safe_http_error_without_a_body_is_just_the_status() {
+        let err = safe_http_error(500, b"gateway timeout, not json").to_string();
+        assert!(err.contains("500"));
     }
 
     #[test]
