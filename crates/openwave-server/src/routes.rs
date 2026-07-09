@@ -22,13 +22,32 @@ use crate::state::AppState;
 /// The store-settings key for the selected model.
 const MODEL_SETTING: &str = "model";
 
-/// Runtime settings a client can read and change. Secrets (e.g. API keys) are
-/// never included here — they live in the `SecretProvider`, not the store.
+/// Runtime settings a client can read. Secrets (e.g. API keys) are never
+/// included here — they live in the `SecretProvider`, not the store.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Settings {
     /// The model turns run against, or `None` to use the server's default.
     #[serde(default)]
     pub model: Option<String>,
+}
+
+/// Body of `PUT /settings`. Each field is a *double* option so an absent key is
+/// distinguished from an explicit `null`: absent leaves the value unchanged,
+/// `null` resets it to the server default, and a value sets it.
+#[derive(Debug, Deserialize)]
+pub struct SettingsUpdate {
+    #[serde(default, deserialize_with = "double_option")]
+    pub model: Option<Option<String>>,
+}
+
+/// Deserialize a present field (including JSON `null`) as `Some(..)`; `#[serde(default)]`
+/// supplies `None` when the field is absent.
+fn double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 /// `GET /settings` — the current runtime settings.
@@ -39,16 +58,32 @@ pub async fn get_settings(State(state): State<AppState>) -> Result<Json<Settings
 }
 
 /// `PUT /settings` — update runtime settings, returning the new state. Only the
-/// fields present in the body are changed.
+/// fields present in the body are touched.
 pub async fn put_settings(
     State(state): State<AppState>,
-    Json(body): Json<Settings>,
+    Json(body): Json<SettingsUpdate>,
 ) -> Result<Json<Settings>, ServerError> {
-    if let Some(model) = &body.model {
-        state
-            .store
-            .set_setting(MODEL_SETTING, &serde_json::json!(model))
-            .await?;
+    match body.model {
+        // Absent: leave the model unchanged.
+        None => {}
+        // Explicit null: reset to the server default (stored as JSON null, which
+        // `read_model` reads back as "unset").
+        Some(None) => {
+            state
+                .store
+                .set_setting(MODEL_SETTING, &serde_json::Value::Null)
+                .await?;
+        }
+        // A value: reject empty (it would break every turn), else set it.
+        Some(Some(model)) => {
+            if model.is_empty() {
+                return Err(ServerError::bad_request("model must not be empty"));
+            }
+            state
+                .store
+                .set_setting(MODEL_SETTING, &serde_json::json!(model))
+                .await?;
+        }
     }
     Ok(Json(Settings {
         model: read_model(&*state.store).await?,

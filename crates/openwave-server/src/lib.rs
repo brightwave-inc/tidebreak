@@ -627,6 +627,70 @@ mod tests {
         assert_eq!(settings["model"], "claude-x");
     }
 
+    /// PUT /settings with a raw JSON body, returning the response.
+    async fn put_settings(
+        router: &Router,
+        bearer: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/settings")
+                    .header(header::AUTHORIZATION, bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn put_empty_model_is_rejected() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let response = put_settings(&router, &bearer, serde_json::json!({"model": ""})).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, "bad_request");
+    }
+
+    #[tokio::test]
+    async fn put_non_string_model_is_rejected() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        // A number where a string is expected fails extraction as a JSON 400.
+        let response = put_settings(&router, &bearer, serde_json::json!({"model": 5})).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let info: AgentErrorInfo = json_body(response).await;
+        assert_eq!(info.kind, "bad_request");
+    }
+
+    #[tokio::test]
+    async fn explicit_null_model_clears_a_configured_one() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+
+        // Set, then clear with an explicit null.
+        let set = put_settings(&router, &bearer, serde_json::json!({"model": "claude-x"})).await;
+        assert_eq!(set.status(), StatusCode::OK);
+        let cleared = put_settings(&router, &bearer, serde_json::json!({"model": null})).await;
+        assert_eq!(cleared.status(), StatusCode::OK);
+        let settings: serde_json::Value = json_body(cleared).await;
+        assert!(
+            settings["model"].is_null(),
+            "explicit null resets the model"
+        );
+
+        // An empty body leaves the (now-cleared) value unchanged.
+        let untouched = put_settings(&router, &bearer, serde_json::json!({})).await;
+        let settings: serde_json::Value = json_body(untouched).await;
+        assert!(settings["model"].is_null());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn configured_model_is_used_for_the_turn() {
         let recorder = RecordingProvider::default();
