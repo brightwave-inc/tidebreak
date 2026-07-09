@@ -29,8 +29,6 @@ use crate::vector::VectorStore;
 pub struct SearchTool {
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn VectorStore>,
-    default_k: usize,
-    max_k: usize,
 }
 
 impl SearchTool {
@@ -42,12 +40,7 @@ impl SearchTool {
     /// Build a search tool over a shared embedder and vector store.
     #[must_use]
     pub fn new(embedder: Arc<dyn Embedder>, store: Arc<dyn VectorStore>) -> Self {
-        Self {
-            embedder,
-            store,
-            default_k: Self::DEFAULT_K,
-            max_k: Self::MAX_K,
-        }
+        Self { embedder, store }
     }
 }
 
@@ -68,7 +61,8 @@ fn parse_args<T: for<'de> Deserialize<'de>>(args: Value) -> std::result::Result<
 
 /// Render citations into a compact, model-readable listing.
 fn render(citations: &[Citation]) -> String {
-    let mut out = format!("Found {} passage(s):", citations.len());
+    let plural = if citations.len() == 1 { "" } else { "s" };
+    let mut out = format!("Found {} passage{plural}:", citations.len());
     for (i, c) in citations.iter().enumerate() {
         out.push_str(&format!(
             "\n\n{}. [score {:.3}] document {} (bytes {}..{})\n{}",
@@ -119,14 +113,18 @@ impl Tool for SearchTool {
             Ok(args) => args,
             Err(output) => return Ok(output),
         };
-        if args.query.trim().is_empty() {
+        // Trim once and use the same value for both the guard and the embedder,
+        // so a padded query can't slip past validation yet embed differently on a
+        // real (non-hashing) provider.
+        let query = args.query.trim();
+        if query.is_empty() {
             return Ok(ToolOutput::error("query must not be empty"));
         }
-        let k = args.k.unwrap_or(self.default_k).clamp(1, self.max_k);
+        let k = args.k.unwrap_or(Self::DEFAULT_K).clamp(1, Self::MAX_K);
 
-        let embedding = match self.embedder.embed_query(&args.query).await {
+        let embedding = match self.embedder.embed_query(query).await {
             Ok(embedding) => embedding,
-            Err(err) => return Ok(ToolOutput::error(format!("search failed: {err}"))),
+            Err(err) => return Ok(ToolOutput::error(format!("embedding failed: {err}"))),
         };
         let hits = match self.store.query(&embedding, k).await {
             Ok(hits) => hits,
@@ -250,6 +248,14 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.is_error);
+
+        // k = 0 is clamped up to 1, not treated as "return nothing".
+        let out = tool
+            .execute(&ctx(), json!({ "query": "alpha", "k": 0 }))
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert_eq!(out.data.unwrap().as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
