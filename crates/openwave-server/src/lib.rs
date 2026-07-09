@@ -14,6 +14,7 @@ mod auth;
 mod error;
 mod extract;
 mod hub;
+mod provider;
 mod routes;
 mod state;
 
@@ -112,13 +113,18 @@ pub async fn bind(config: Config) -> Result<Server> {
 
 /// Assemble the agent's dependencies for a real launch.
 ///
-/// The provider is Anthropic for now, keyed from `ANTHROPIC_API_KEY` in the
-/// environment (a keychain-backed secrets flow and the composite router land in
-/// later slices). No key means egress fails closed at turn time — surfaced as a
-/// `TurnFailed` event — rather than a silent default.
+/// The provider is Anthropic for now, keyed from `ANTHROPIC_API_KEY` (a
+/// keychain-backed secrets flow and the composite router land in later slices).
+/// **Fail closed:** an egressing provider is wired only when a key is actually
+/// present; with no key we wire [`UnconfiguredProvider`](provider::UnconfiguredProvider),
+/// which refuses without any network call, so the transcript never leaves the
+/// machine. A turn then surfaces a `TurnFailed`, never a silent default or a
+/// request sent with an empty key.
 fn agent_deps() -> (Arc<dyn ModelProvider>, Arc<ToolRegistry>, AgentConfig) {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-    let provider: Arc<dyn ModelProvider> = Arc::new(AnthropicProvider::new(api_key));
+    let provider: Arc<dyn ModelProvider> = match std::env::var("ANTHROPIC_API_KEY") {
+        Ok(key) if !key.is_empty() => Arc::new(AnthropicProvider::new(key)),
+        _ => Arc::new(provider::UnconfiguredProvider),
+    };
     let tools = Arc::new(
         ToolRegistry::new()
             .with(Box::new(ReadFile))
@@ -512,6 +518,45 @@ mod tests {
 
         // Release the first turn so it can finish and free the slot.
         gate.notify_one();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slot_frees_after_a_turn_completes() {
+        let (router, token, store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "one").await,
+            StatusCode::ACCEPTED
+        );
+        wait_for_turn(&store, chat.id).await;
+
+        // The turn finished, so its slot is released and a follow-up is accepted.
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "two").await,
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn turn_fails_closed_with_no_provider_configured() {
+        // The unconfigured provider errors without any network call; the turn must
+        // end in TurnFailed, not hang or egress.
+        let (router, token, store, _dir) =
+            test_app_with(Arc::new(crate::provider::UnconfiguredProvider)).await;
+        let bearer = format!("Bearer {token}");
+        let chat = make_chat(&router, &bearer).await;
+
+        assert_eq!(
+            send_message(&router, &bearer, chat.id, "hello").await,
+            StatusCode::ACCEPTED
+        );
+        let events = wait_for_turn(&store, chat.id).await;
+        assert!(matches!(
+            events.last().unwrap().event,
+            AgentEvent::TurnFailed { .. }
+        ));
     }
 
     #[tokio::test]
