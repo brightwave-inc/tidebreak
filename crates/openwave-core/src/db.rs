@@ -143,10 +143,12 @@ impl Store for DbStore {
     }
 
     async fn append_event(&self, session_id: SessionId, event: &AgentEvent) -> Result<i64> {
-        // Next seq for this session. A session's events are written by one turn
-        // at a time (single writer), so read-then-insert is race-free in
-        // practice; the composite (session_id, seq) primary key is the backstop
-        // that turns any concurrent double-write into an error, not a silent dup.
+        // Next seq for this session. This assumes a single writer per session —
+        // the server enforces it by allowing only one active turn per session at
+        // a time (a concurrent message is refused, not queued behind a second
+        // writer). Under that invariant read-then-insert is race-free; the
+        // composite (session_id, seq) primary key is the backstop that turns any
+        // concurrent double-write into an error, never a silent dup or lost seq.
         let last = entities::event::Entity::find()
             .filter(entities::event::Column::SessionId.eq(session_id.0))
             .order_by_desc(entities::event::Column::Seq)
@@ -639,6 +641,20 @@ mod tests {
         store.create_session(&other).await.unwrap();
         assert_eq!(store.append_event(other.id, &started).await.unwrap(), 1);
         assert_eq!(store.list_events(session.id, 0).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn event_for_unknown_session_is_rejected() {
+        use crate::event::AgentEvent;
+
+        let (_dir, store) = temp_store().await;
+        // No create_session first: the `event -> session` foreign key must reject
+        // the orphan write. (The in-memory MemStore test double does *not* model
+        // this constraint, so orphan-rejection is only guaranteed by DbStore.)
+        let event = AgentEvent::TurnStarted {
+            turn_id: TurnId::new(),
+        };
+        assert!(store.append_event(SessionId::new(), &event).await.is_err());
     }
 
     #[tokio::test]
