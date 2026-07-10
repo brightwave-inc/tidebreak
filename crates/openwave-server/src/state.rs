@@ -1,14 +1,14 @@
 //! Shared application state handed to every request handler.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use openwave_core::{
     AgentConfig, CancelToken, ChatId, Config, DocumentId, SecretProvider, SteerInbox, Store,
     ToolRegistry,
 };
 use openwave_retrieval::Retriever;
-use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::approvals::ApprovalBroker;
@@ -32,16 +32,13 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretProvider>,
     /// The tools available to the agent.
     pub tools: Arc<ToolRegistry>,
-    /// The retrieval pipeline: ingest documents and search the shared index that
-    /// backs the agent's `search` tool. Its vector store is the same one the
-    /// registered `SearchTool` queries, so an ingest is immediately searchable.
+    /// The retrieval pipeline used by the durable document worker and the
+    /// agent's shared `search` tool.
     pub retrieval: Arc<Retriever>,
-    /// Serializes source, index, and watermark writes for one document while
-    /// allowing unrelated documents to ingest concurrently.
-    pub document_writes: Arc<DocumentWriteGuard>,
-    /// Wakes the background reconciler when a live document operation leaves
-    /// authoritative source in a stale, rebuildable state.
-    pub(crate) index_repair_wake: Arc<Notify>,
+    /// Wakes the durable document worker after an enqueue commits.
+    pub(crate) document_job_wake: Arc<Notify>,
+    /// Serializes the final publish transition with source replacement/deletion.
+    pub(crate) document_writes: Arc<DocumentWriteGuard>,
     /// Per-turn agent tuning (model, limits, …).
     pub agent_config: AgentConfig,
     /// The secret every request must present as `Authorization: Bearer <token>`.
@@ -74,8 +71,8 @@ impl AppState {
             secrets,
             tools,
             retrieval,
+            document_job_wake: Arc::new(Notify::new()),
             document_writes: Arc::new(DocumentWriteGuard::default()),
-            index_repair_wake: Arc::new(Notify::new()),
             agent_config,
             token: Uuid::new_v4().to_string().into(),
             active_turns: Arc::new(TurnGuard::default()),
@@ -85,31 +82,36 @@ impl AppState {
     }
 }
 
-/// Keyed asynchronous lock for document lifecycle writes.
+/// A bounded keyed async lock for document lifecycle transitions.
 ///
-/// Weak entries let locks disappear after the last holder/waiter finishes, so
-/// ingesting new document ids does not grow the map forever.
-#[derive(Default)]
-pub struct DocumentWriteGuard {
-    locks: Mutex<HashMap<DocumentId, Weak<AsyncMutex<()>>>>,
+/// Lance admits one writer process for a dataset. Within that process these
+/// stripes close the gap between the worker's final durable lease proof and
+/// vector activation by excluding a concurrent source replacement or deletion.
+pub(crate) struct DocumentWriteGuard {
+    stripes: Box<[Arc<tokio::sync::Mutex<()>>]>,
+}
+
+impl Default for DocumentWriteGuard {
+    fn default() -> Self {
+        Self {
+            stripes: (0..256)
+                .map(|_| Arc::new(tokio::sync::Mutex::new(())))
+                .collect(),
+        }
+    }
 }
 
 impl DocumentWriteGuard {
-    /// Wait for exclusive access to `document_id`.
-    pub async fn acquire(&self, document_id: DocumentId) -> OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self.locks.lock().unwrap();
-            locks.retain(|_, lock| lock.strong_count() > 0);
-            match locks.get(&document_id).and_then(Weak::upgrade) {
-                Some(lock) => lock,
-                None => {
-                    let lock = Arc::new(AsyncMutex::new(()));
-                    locks.insert(document_id, Arc::downgrade(&lock));
-                    lock
-                }
-            }
-        };
-        lock.lock_owned().await
+    pub(crate) async fn acquire(
+        &self,
+        document_id: DocumentId,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        document_id.hash(&mut hasher);
+        let stripe = hasher.finish() as usize % self.stripes.len();
+        self.stripes[stripe].clone().lock_owned().await
     }
 }
 
