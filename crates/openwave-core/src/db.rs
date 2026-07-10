@@ -13,7 +13,7 @@ use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
-    QueryFilter, QueryOrder, Set, TryInsertResult,
+    FromQueryResult, QueryFilter, QueryOrder, QuerySelect, Set, TryInsertResult,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
@@ -22,7 +22,8 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, ChatId, DocumentId, MessageId, ProjectId, TurnId};
 use crate::model::{
-    Chat, DocumentRecord, DocumentScope, DocumentUpsert, Message, Project, Role, ToolCallRecord,
+    Chat, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert,
+    Message, Project, Role, ToolCallRecord,
 };
 use crate::storage::Store;
 
@@ -35,6 +36,24 @@ fn store_err(err: impl std::fmt::Display) -> AgentError {
 #[derive(Clone)]
 pub struct DbStore {
     conn: DatabaseConnection,
+}
+
+/// Projected row for metadata-only document listings. Keeping this distinct
+/// from the entity model makes it impossible for this query to select the
+/// canonical text or revision token by accident.
+#[derive(Debug, FromQueryResult)]
+struct DocumentSummaryRow {
+    id: uuid::Uuid,
+    project_id: Option<uuid::Uuid>,
+    source_uri: Option<String>,
+    media_type: String,
+    title: Option<String>,
+    content_revision: i64,
+    indexed_revision: Option<i64>,
+    index_fingerprint: Option<String>,
+    created_at: chrono::DateTime<Utc>,
+    updated_at: chrono::DateTime<Utc>,
+    indexed_at: Option<chrono::DateTime<Utc>>,
 }
 
 impl DbStore {
@@ -140,6 +159,61 @@ impl Store for DbStore {
             .map_err(store_err)?
             .into_iter()
             .map(document_from_model)
+            .collect())
+    }
+
+    async fn list_document_summaries(
+        &self,
+        scope: DocumentScope,
+        after: Option<DocumentListCursor>,
+        limit: u64,
+    ) -> Result<Vec<DocumentSummaryRecord>> {
+        let mut query = entities::document::Entity::find();
+        query = match scope {
+            DocumentScope::All => query,
+            DocumentScope::Unscoped => {
+                query.filter(entities::document::Column::ProjectId.is_null())
+            }
+            DocumentScope::Project(id) => {
+                query.filter(entities::document::Column::ProjectId.eq(id.0))
+            }
+        };
+        if let Some(cursor) = after {
+            query = query.filter(
+                sea_orm::Condition::any()
+                    .add(entities::document::Column::CreatedAt.lt(cursor.created_at))
+                    .add(
+                        sea_orm::Condition::all()
+                            .add(entities::document::Column::CreatedAt.eq(cursor.created_at))
+                            .add(entities::document::Column::Id.lt(cursor.id.0)),
+                    ),
+            );
+        }
+
+        Ok(query
+            .select_only()
+            .columns([
+                entities::document::Column::Id,
+                entities::document::Column::ProjectId,
+                entities::document::Column::SourceUri,
+                entities::document::Column::MediaType,
+                entities::document::Column::Title,
+                entities::document::Column::ContentRevision,
+                entities::document::Column::IndexedRevision,
+                entities::document::Column::IndexFingerprint,
+                entities::document::Column::CreatedAt,
+                entities::document::Column::UpdatedAt,
+                entities::document::Column::IndexedAt,
+            ])
+            .order_by_desc(entities::document::Column::CreatedAt)
+            .order_by_desc(entities::document::Column::Id)
+            .limit(limit)
+            .into_model::<DocumentSummaryRow>()
+            .all(&self.conn)
+            .await
+            .map_err(store_err)?
+            .into_iter()
+            .map(document_summary_from_row)
             .collect())
     }
 
@@ -530,6 +604,22 @@ fn document_from_model(model: entities::document::Model) -> DocumentRecord {
         created_at: model.created_at,
         updated_at: model.updated_at,
         indexed_at: model.indexed_at,
+    }
+}
+
+fn document_summary_from_row(row: DocumentSummaryRow) -> DocumentSummaryRecord {
+    DocumentSummaryRecord {
+        id: DocumentId(row.id),
+        project_id: row.project_id.map(ProjectId),
+        source_uri: row.source_uri,
+        media_type: row.media_type,
+        title: row.title,
+        content_revision: row.content_revision,
+        indexed_revision: row.indexed_revision,
+        index_fingerprint: row.index_fingerprint,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        indexed_at: row.indexed_at,
     }
 }
 
@@ -1470,6 +1560,84 @@ mod tests {
         store.delete_document(unscoped.id).await.unwrap();
         store.delete_document(unscoped.id).await.unwrap();
         assert_eq!(store.get_document(unscoped.id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn document_summaries_page_by_created_at_then_id_without_gaps() {
+        let (_dir, store) = temp_store().await;
+        // Keep both groups inside one microsecond so cursor implementations
+        // that truncate sub-microsecond precision would skip the older group.
+        let newer = DateTime::<Utc>::from_timestamp(2_000, 900).unwrap();
+        let older = DateTime::<Utc>::from_timestamp(2_000, 700).unwrap();
+        let fixtures = [
+            (3_u128, newer, "newest tie"),
+            (2, newer, "middle tie"),
+            (1, newer, "last tie"),
+            (5, older, "older high id"),
+            (4, older, "older low id"),
+        ];
+        for (raw_id, created_at, title) in fixtures {
+            let mut document = sample_document(None);
+            document.id = DocumentId(uuid::Uuid::from_u128(raw_id));
+            document.title = Some(title.into());
+            document.canonical_text = format!("content that listings must not load: {title}");
+            document.created_at = created_at;
+            document.updated_at = created_at;
+            store.create_document(&document).await.unwrap();
+        }
+
+        let first = store
+            .list_document_summaries(DocumentScope::All, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|document| document.id.0)
+                .collect::<Vec<_>>(),
+            vec![uuid::Uuid::from_u128(3), uuid::Uuid::from_u128(2)]
+        );
+        let second = store
+            .list_document_summaries(
+                DocumentScope::All,
+                Some(DocumentListCursor {
+                    created_at: first[1].created_at,
+                    id: first[1].id,
+                }),
+                2,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .iter()
+                .map(|document| document.id.0)
+                .collect::<Vec<_>>(),
+            vec![uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(5)]
+        );
+        let third = store
+            .list_document_summaries(
+                DocumentScope::All,
+                Some(DocumentListCursor {
+                    created_at: second[1].created_at,
+                    id: second[1].id,
+                }),
+                2,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            third
+                .iter()
+                .map(|document| document.id.0)
+                .collect::<Vec<_>>(),
+            vec![uuid::Uuid::from_u128(4)]
+        );
+        assert!(store
+            .list_document_summaries(DocumentScope::All, None, 0)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

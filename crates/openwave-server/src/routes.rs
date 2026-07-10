@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
-    Agent, ApprovalDecision, CallId, Chat, ChatId, DocumentUpsert, Project, ProjectId,
-    SecretProvider, SequencedEvent, Store,
+    Agent, ApprovalDecision, CallId, Chat, ChatId, DocumentListCursor, DocumentRecord,
+    DocumentScope, DocumentSummaryRecord, DocumentUpsert, Project, ProjectId, SecretProvider,
+    SequencedEvent, Store,
 };
 use openwave_retrieval::{Citation, DocumentId, DocumentSource, RetrievalError, SearchTool};
 
@@ -315,6 +316,134 @@ pub struct IngestResult {
     pub chunks: usize,
 }
 
+/// Catalog metadata returned by document listings.
+#[derive(Debug, Serialize)]
+pub struct DocumentSummary {
+    /// Stable identifier shared with citations and delete/get routes.
+    pub document_id: DocumentId,
+    /// Owning project, or `None` for the unscoped corpus.
+    pub project_id: Option<ProjectId>,
+    /// Source path or URL, or `None` for inline content.
+    pub uri: Option<String>,
+    /// Media type of the canonical content.
+    pub media_type: String,
+    /// Optional human-facing title.
+    pub title: Option<String>,
+    /// Current authoritative source revision.
+    pub content_revision: i64,
+    /// Source revision currently represented in the index.
+    pub indexed_revision: Option<i64>,
+    /// Parser/chunker/embedder identity for the current indexed revision.
+    pub index_fingerprint: Option<String>,
+    /// When this document was first created.
+    pub created_at: chrono::DateTime<Utc>,
+    /// When its authoritative source last changed.
+    pub updated_at: chrono::DateTime<Utc>,
+    /// When the current index watermark was recorded.
+    pub indexed_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl From<DocumentSummaryRecord> for DocumentSummary {
+    fn from(document: DocumentSummaryRecord) -> Self {
+        Self {
+            document_id: document.id,
+            project_id: document.project_id,
+            uri: document.source_uri,
+            media_type: document.media_type,
+            title: document.title,
+            content_revision: document.content_revision,
+            indexed_revision: document.indexed_revision,
+            index_fingerprint: document.index_fingerprint,
+            created_at: document.created_at,
+            updated_at: document.updated_at,
+            indexed_at: document.indexed_at,
+        }
+    }
+}
+
+impl From<&DocumentRecord> for DocumentSummary {
+    fn from(document: &DocumentRecord) -> Self {
+        Self {
+            document_id: document.id,
+            project_id: document.project_id,
+            uri: document.source_uri.clone(),
+            media_type: document.media_type.clone(),
+            title: document.title.clone(),
+            content_revision: document.content_revision,
+            indexed_revision: document.indexed_revision,
+            index_fingerprint: document.index_fingerprint.clone(),
+            created_at: document.created_at,
+            updated_at: document.updated_at,
+            indexed_at: document.indexed_at,
+        }
+    }
+}
+
+/// Query parameters for bounded document catalog pagination.
+#[derive(Debug, Default, Deserialize)]
+pub struct DocumentListQuery {
+    /// Maximum number of documents to return (defaults to 50, maximum 200).
+    pub limit: Option<u64>,
+    /// Opaque cursor returned by the previous page.
+    pub cursor: Option<String>,
+}
+
+/// One bounded page of catalog metadata.
+#[derive(Debug, Serialize)]
+pub struct DocumentListPage {
+    /// Documents in newest-first order.
+    pub documents: Vec<DocumentSummary>,
+    /// Cursor for the next page, or `None` when this is the final page.
+    pub next_cursor: Option<String>,
+}
+
+const DEFAULT_DOCUMENT_PAGE_SIZE: u64 = 50;
+const MAX_DOCUMENT_PAGE_SIZE: u64 = 200;
+
+fn encode_document_cursor(cursor: DocumentListCursor) -> String {
+    format!(
+        "{}:{:09}:{}",
+        cursor.created_at.timestamp(),
+        cursor.created_at.timestamp_subsec_nanos(),
+        cursor.id
+    )
+}
+
+fn decode_document_cursor(raw: &str) -> Result<DocumentListCursor, ServerError> {
+    let mut parts = raw.splitn(3, ':');
+    let seconds = parts.next().and_then(|part| part.parse::<i64>().ok());
+    let nanos = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let id = parts.next();
+    let created_at = seconds
+        .zip(nanos)
+        .and_then(|(seconds, nanos)| chrono::DateTime::<Utc>::from_timestamp(seconds, nanos))
+        .ok_or_else(|| ServerError::bad_request("invalid document cursor"))?;
+    let id = id
+        .ok_or_else(|| ServerError::bad_request("invalid document cursor"))?
+        .parse()
+        .map_err(|_| ServerError::bad_request("invalid document cursor"))?;
+    Ok(DocumentListCursor { created_at, id })
+}
+
+/// Full document response, including the canonical text used for reindexing.
+#[derive(Debug, Serialize)]
+pub struct DocumentDetail {
+    /// Catalog metadata.
+    #[serde(flatten)]
+    pub summary: DocumentSummary,
+    /// Parsed text-of-record. Citation spans index into this string.
+    pub content: String,
+}
+
+impl From<DocumentRecord> for DocumentDetail {
+    fn from(document: DocumentRecord) -> Self {
+        Self {
+            summary: DocumentSummary::from(&document),
+            content: document.canonical_text,
+        }
+    }
+}
+
 /// Map a retrieval failure to an HTTP error: a parse problem is the caller's
 /// (unsupported media type / bad content), everything else is server-side.
 fn retrieval_error(err: RetrievalError) -> ServerError {
@@ -416,6 +545,60 @@ pub async fn ingest_document(
             chunks,
         }),
     ))
+}
+
+/// `GET /documents` — list the explicitly unscoped corpus without returning each
+/// document's potentially large canonical text. Project-scoped listing lands with
+/// corpus scoping; this endpoint never widens to every project's documents.
+pub async fn list_documents(
+    State(state): State<AppState>,
+    Query(query): Query<DocumentListQuery>,
+) -> Result<Json<DocumentListPage>, ServerError> {
+    let limit = query.limit.unwrap_or(DEFAULT_DOCUMENT_PAGE_SIZE);
+    if limit == 0 || limit > MAX_DOCUMENT_PAGE_SIZE {
+        return Err(ServerError::bad_request(format!(
+            "document limit must be between 1 and {MAX_DOCUMENT_PAGE_SIZE}"
+        )));
+    }
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(decode_document_cursor)
+        .transpose()?;
+    let mut records = state
+        .store
+        .list_document_summaries(DocumentScope::Unscoped, cursor, limit + 1)
+        .await?;
+    let has_more = records.len() > limit as usize;
+    records.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        let last = records
+            .last()
+            .expect("a page with another row has at least one returned row");
+        encode_document_cursor(DocumentListCursor {
+            created_at: last.created_at,
+            id: last.id,
+        })
+    });
+    Ok(Json(DocumentListPage {
+        documents: records.into_iter().map(DocumentSummary::from).collect(),
+        next_cursor,
+    }))
+}
+
+/// `GET /documents/{id}` — fetch canonical source and catalog metadata, or `404`.
+pub async fn get_document(
+    State(state): State<AppState>,
+    Path(id): Path<DocumentId>,
+) -> Result<Json<DocumentDetail>, ServerError> {
+    state
+        .store
+        .get_document(id)
+        .await?
+        .filter(|document| document.project_id.is_none())
+        .map(DocumentDetail::from)
+        .map(Json)
+        .ok_or_else(|| ServerError::not_found(format!("document {id} not found")))
 }
 
 /// `DELETE /documents/{id}` — remove a document's index rows and authoritative

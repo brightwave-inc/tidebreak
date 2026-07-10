@@ -69,6 +69,50 @@ pub struct DocumentRecord {
     pub indexed_at: Option<DateTime<Utc>>,
 }
 
+/// Metadata returned by bounded document listings.
+///
+/// This deliberately excludes canonical content and the revision token so list
+/// callers cannot accidentally load either large source text or write-only
+/// concurrency credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentSummaryRecord {
+    /// Stable identifier shared with the retrieval index.
+    pub id: DocumentId,
+    /// Owning project, or `None` for an explicitly unscoped document.
+    pub project_id: Option<ProjectId>,
+    /// Source path or URL, or `None` for content supplied inline.
+    pub source_uri: Option<String>,
+    /// Media type of the canonical content.
+    pub media_type: String,
+    /// Optional human-facing title.
+    pub title: Option<String>,
+    /// Current authoritative source revision.
+    pub content_revision: i64,
+    /// Revision currently represented in the retrieval index, if any.
+    pub indexed_revision: Option<i64>,
+    /// Chunker/embedder fingerprint for the indexed revision.
+    pub index_fingerprint: Option<String>,
+    /// When this record was first created.
+    pub created_at: DateTime<Utc>,
+    /// When authoritative content or metadata last changed.
+    pub updated_at: DateTime<Utc>,
+    /// When the current index watermark was recorded.
+    pub indexed_at: Option<DateTime<Utc>>,
+}
+
+/// Stable position in a newest-first document listing.
+///
+/// Cursors use both creation time and id because creation timestamps need not
+/// be unique. Records following this cursor compare strictly lower by the
+/// descending `(created_at, id)` display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentListCursor {
+    /// Creation time of the final item in the preceding page.
+    pub created_at: DateTime<Utc>,
+    /// Id of the final item in the preceding page.
+    pub id: DocumentId,
+}
+
 /// Authoritative content to create or replace for a document.
 ///
 /// The store owns revision and index-watermark transitions: the first upsert is
