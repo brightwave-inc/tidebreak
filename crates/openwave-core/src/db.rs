@@ -26,7 +26,7 @@ use crate::model::{
     DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert,
     Message, Project, Role, ToolCallRecord,
 };
-use crate::storage::Store;
+use crate::storage::{DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, Store};
 
 /// Map any SeaORM failure into an [`AgentError::Store`].
 fn store_err(err: impl std::fmt::Display) -> AgentError {
@@ -540,6 +540,207 @@ impl Store for DbStore {
             .map_err(store_err)?
             .map(document_job_from_model)
             .transpose()
+    }
+
+    async fn ensure_document_index_job(
+        &self,
+        document_id: DocumentId,
+        expected_generation: DocumentGeneration,
+        pipeline_fingerprint: &str,
+        max_attempts: i32,
+        reason: DocumentIndexJobReason,
+    ) -> Result<EnsureDocumentIndexJobOutcome> {
+        if pipeline_fingerprint.is_empty()
+            || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
+        {
+            return Err(AgentError::Store(
+                "document job pipeline fingerprint must contain 1 to 512 characters".into(),
+            ));
+        }
+        if max_attempts < 1 {
+            return Err(AgentError::Store(
+                "document job max_attempts must be at least one".into(),
+            ));
+        }
+
+        loop {
+            let transaction = self.conn.begin().await.map_err(store_err)?;
+            acquire_document_write_lock(&transaction, document_id).await?;
+            let Some(document) = entities::document::Entity::find_by_id(document_id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?
+            else {
+                transaction.commit().await.map_err(store_err)?;
+                return Ok(EnsureDocumentIndexJobOutcome::MissingDocument);
+            };
+            ensure_live_document_generation_on(&transaction, &document).await?;
+            let current_generation = DocumentGeneration {
+                content_revision: document.content_revision,
+                revision_token: document.revision_token,
+            };
+
+            if current_generation != expected_generation {
+                if reason.advances_generation()
+                    && expected_generation
+                        .content_revision
+                        .checked_add(1)
+                        .is_some_and(|revision| revision == document.content_revision)
+                {
+                    if let Some(job) = find_exact_document_index_job_on(
+                        &transaction,
+                        document_id,
+                        current_generation,
+                        pipeline_fingerprint,
+                    )
+                    .await?
+                    {
+                        let job = document_job_from_model(job)?;
+                        transaction.commit().await.map_err(store_err)?;
+                        return Ok(if job.status == DocumentJobStatus::Failed {
+                            EnsureDocumentIndexJobOutcome::Failed(job)
+                        } else {
+                            EnsureDocumentIndexJobOutcome::Existing(job)
+                        });
+                    }
+                }
+                transaction.commit().await.map_err(store_err)?;
+                return Ok(EnsureDocumentIndexJobOutcome::GenerationChanged(
+                    current_generation,
+                ));
+            }
+
+            if let Some(candidate) = find_exact_document_index_job_on(
+                &transaction,
+                document_id,
+                current_generation,
+                pipeline_fingerprint,
+            )
+            .await?
+            {
+                let parsed = document_job_from_model(candidate.clone())?;
+                if matches!(
+                    parsed.status,
+                    DocumentJobStatus::Queued
+                        | DocumentJobStatus::Running
+                        | DocumentJobStatus::RetryWait
+                ) || (reason == DocumentIndexJobReason::PipelineChanged
+                    && parsed.status == DocumentJobStatus::Succeeded)
+                {
+                    transaction.commit().await.map_err(store_err)?;
+                    return Ok(EnsureDocumentIndexJobOutcome::Existing(parsed));
+                }
+                if parsed.status == DocumentJobStatus::Failed {
+                    transaction.commit().await.map_err(store_err)?;
+                    return Ok(EnsureDocumentIndexJobOutcome::Failed(parsed));
+                }
+                if reason == DocumentIndexJobReason::DerivedStateMissing {
+                    let now = Utc::now();
+                    reset_document_index_job_on(
+                        &transaction,
+                        candidate.id,
+                        &candidate.status,
+                        max_attempts,
+                        now,
+                    )
+                    .await?;
+                    clear_document_index_watermark_on(
+                        &transaction,
+                        document_id,
+                        current_generation,
+                    )
+                    .await?;
+                    let job = entities::document_job::Entity::find_by_id(candidate.id)
+                        .one(&transaction)
+                        .await
+                        .map_err(store_err)?
+                        .ok_or_else(|| {
+                            AgentError::Store("reset document job disappeared".into())
+                        })?;
+                    let job = document_job_from_model(job)?;
+                    transaction.commit().await.map_err(store_err)?;
+                    return Ok(EnsureDocumentIndexJobOutcome::Enqueued(job));
+                }
+            }
+
+            let target_generation = if reason.advances_generation() {
+                let Some(advanced) =
+                    try_advance_document_generation_on(&transaction, document_id, false).await?
+                else {
+                    transaction.rollback().await.map_err(store_err)?;
+                    continue;
+                };
+                if advanced.previous != Some(current_generation) {
+                    return Err(AgentError::Store(format!(
+                        "document {document_id} does not match its retained generation clock"
+                    )));
+                }
+                let updated = entities::document::Entity::update_many()
+                    .col_expr(
+                        entities::document::Column::ContentRevision,
+                        sea_orm::sea_query::Expr::value(advanced.current.content_revision),
+                    )
+                    .col_expr(
+                        entities::document::Column::RevisionToken,
+                        sea_orm::sea_query::Expr::value(advanced.current.revision_token),
+                    )
+                    .col_expr(
+                        entities::document::Column::ProcessingStatus,
+                        sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
+                    )
+                    .col_expr(
+                        entities::document::Column::IndexedRevision,
+                        sea_orm::sea_query::Expr::value(Option::<i64>::None),
+                    )
+                    .col_expr(
+                        entities::document::Column::IndexFingerprint,
+                        sea_orm::sea_query::Expr::value(Option::<String>::None),
+                    )
+                    .col_expr(
+                        entities::document::Column::IndexedAt,
+                        sea_orm::sea_query::Expr::value(
+                            Option::<chrono::DateTime<chrono::Utc>>::None,
+                        ),
+                    )
+                    .filter(entities::document::Column::Id.eq(document_id.0))
+                    .filter(
+                        entities::document::Column::ContentRevision
+                            .eq(current_generation.content_revision),
+                    )
+                    .filter(
+                        entities::document::Column::RevisionToken
+                            .eq(current_generation.revision_token),
+                    )
+                    .exec(&transaction)
+                    .await
+                    .map_err(store_err)?;
+                if updated.rows_affected != 1 {
+                    transaction.rollback().await.map_err(store_err)?;
+                    continue;
+                }
+                advanced.current
+            } else {
+                clear_document_index_watermark_on(&transaction, document_id, current_generation)
+                    .await?;
+                current_generation
+            };
+
+            let now = Utc::now();
+            cancel_live_document_jobs_on(&transaction, document_id, now).await?;
+            let job = new_document_index_job(
+                document_id,
+                target_generation,
+                pipeline_fingerprint,
+                max_attempts,
+                now,
+            );
+            document_job_active_model(&job)
+                .insert(&transaction)
+                .await
+                .map_err(store_err)?;
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(EnsureDocumentIndexJobOutcome::Enqueued(job));
+        }
     }
 
     async fn list_document_jobs(&self, document_id: DocumentId) -> Result<Vec<DocumentJob>> {
@@ -1554,6 +1755,203 @@ where
         .await
         .map_err(store_err)?;
     Ok(())
+}
+
+async fn find_exact_document_index_job_on<C>(
+    conn: &C,
+    document_id: DocumentId,
+    generation: DocumentGeneration,
+    pipeline_fingerprint: &str,
+) -> Result<Option<entities::document_job::Model>>
+where
+    C: ConnectionTrait,
+{
+    entities::document_job::Entity::find()
+        .filter(entities::document_job::Column::DocumentId.eq(document_id.0))
+        .filter(entities::document_job::Column::ContentRevision.eq(generation.content_revision))
+        .filter(entities::document_job::Column::RevisionToken.eq(generation.revision_token))
+        .filter(entities::document_job::Column::Kind.eq(DocumentJobKind::Index.as_str()))
+        .filter(entities::document_job::Column::PipelineFingerprint.eq(pipeline_fingerprint))
+        .one(conn)
+        .await
+        .map_err(store_err)
+}
+
+async fn clear_document_index_watermark_on<C>(
+    conn: &C,
+    document_id: DocumentId,
+    generation: DocumentGeneration,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let updated = entities::document::Entity::update_many()
+        .col_expr(
+            entities::document::Column::ProcessingStatus,
+            sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
+        )
+        .col_expr(
+            entities::document::Column::IndexedRevision,
+            sea_orm::sea_query::Expr::value(Option::<i64>::None),
+        )
+        .col_expr(
+            entities::document::Column::IndexFingerprint,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::document::Column::IndexedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .filter(entities::document::Column::Id.eq(document_id.0))
+        .filter(entities::document::Column::ContentRevision.eq(generation.content_revision))
+        .filter(entities::document::Column::RevisionToken.eq(generation.revision_token))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        return Err(AgentError::Store(format!(
+            "document {document_id} generation changed during index maintenance"
+        )));
+    }
+    Ok(())
+}
+
+async fn cancel_live_document_jobs_on<C>(
+    conn: &C,
+    document_id: DocumentId,
+    now: chrono::DateTime<Utc>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    entities::document_job::Entity::update_many()
+        .col_expr(
+            entities::document_job::Column::Status,
+            sea_orm::sea_query::Expr::value(DocumentJobStatus::Cancelled.as_str()),
+        )
+        .col_expr(
+            entities::document_job::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            entities::document_job::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::document_job::Column::DocumentId.eq(document_id.0))
+        .filter(entities::document_job::Column::Status.is_in([
+            DocumentJobStatus::Queued.as_str(),
+            DocumentJobStatus::Running.as_str(),
+            DocumentJobStatus::RetryWait.as_str(),
+        ]))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+async fn reset_document_index_job_on<C>(
+    conn: &C,
+    id: uuid::Uuid,
+    expected_status: &str,
+    max_attempts: i32,
+    now: chrono::DateTime<Utc>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let updated = entities::document_job::Entity::update_many()
+        .col_expr(
+            entities::document_job::Column::Status,
+            sea_orm::sea_query::Expr::value(DocumentJobStatus::Queued.as_str()),
+        )
+        .col_expr(
+            entities::document_job::Column::AttemptCount,
+            sea_orm::sea_query::Expr::value(0),
+        )
+        .col_expr(
+            entities::document_job::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(max_attempts),
+        )
+        .col_expr(
+            entities::document_job::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            entities::document_job::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::StartedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::document_job::Column::Id.eq(id))
+        .filter(entities::document_job::Column::Status.eq(expected_status))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        return Err(AgentError::Store(format!(
+            "document job {id} changed during index maintenance"
+        )));
+    }
+    Ok(())
+}
+
+fn new_document_index_job(
+    document_id: DocumentId,
+    generation: DocumentGeneration,
+    pipeline_fingerprint: &str,
+    max_attempts: i32,
+    now: chrono::DateTime<Utc>,
+) -> DocumentJob {
+    DocumentJob {
+        id: DocumentJobId::new(),
+        document_id,
+        content_revision: generation.content_revision,
+        revision_token: generation.revision_token,
+        kind: DocumentJobKind::Index,
+        status: DocumentJobStatus::Queued,
+        pipeline_fingerprint: pipeline_fingerprint.into(),
+        attempt_count: 0,
+        max_attempts,
+        available_at: now,
+        lease_token: None,
+        lease_expires_at: None,
+        started_at: None,
+        finished_at: None,
+        last_error_code: None,
+        last_error_detail: None,
+        created_at: now,
+        updated_at: now,
+    }
 }
 
 /// Start SQLite's write transaction before claim candidate reads.
@@ -3743,6 +4141,249 @@ mod tests {
         assert!(remaining.is_empty());
     }
 
+    async fn ready_document(store: &DbStore, source: &DocumentUpsert) -> DocumentRecord {
+        let (document, job) = store
+            .upsert_document_and_enqueue_index(source, "pipeline-v1", 3)
+            .await
+            .unwrap();
+        let claim_at = job.available_at + chrono::Duration::seconds(1);
+        let claimed = store
+            .claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .complete_document_index_job(
+                claimed.id,
+                claimed.lease_token.unwrap(),
+                claim_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap());
+        store.get_document(document.id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn missing_derived_state_requeues_succeeded_job_without_advancing_generation() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///missing-derived.txt".into()),
+            media_type: "text/plain".into(),
+            title: Some("missing derived".into()),
+            canonical_text: "same authoritative source".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(9_000, 0).unwrap(),
+        };
+        let ready = ready_document(&store, &source).await;
+        let original_job = store.list_document_jobs(source.id).await.unwrap().remove(0);
+
+        let outcome = store
+            .ensure_document_index_job(
+                source.id,
+                ready.generation(),
+                "pipeline-v1",
+                7,
+                DocumentIndexJobReason::DerivedStateMissing,
+            )
+            .await
+            .unwrap();
+        let EnsureDocumentIndexJobOutcome::Enqueued(job) = outcome else {
+            panic!("expected requeued job")
+        };
+        assert_eq!(job.id, original_job.id);
+        assert_eq!(job.generation(), ready.generation());
+        assert_eq!(job.status, DocumentJobStatus::Queued);
+        assert_eq!(job.max_attempts, 7);
+        let current = store.get_document(source.id).await.unwrap().unwrap();
+        assert_eq!(current.generation(), ready.generation());
+        assert_eq!(current.processing_status, DocumentProcessingStatus::Queued);
+        assert_eq!(current.indexed_revision, None);
+        assert_eq!(current.index_fingerprint, None);
+    }
+
+    #[tokio::test]
+    async fn index_maintenance_does_not_implicitly_revive_failed_job() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///failed-maintenance.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "requires an explicit retry".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(9_050, 0).unwrap(),
+        };
+        let (document, job) = store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 1)
+            .await
+            .unwrap();
+        let claim_at = job.available_at + chrono::Duration::seconds(1);
+        let claimed = store
+            .claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .record_document_job_failure(
+                    claimed.id,
+                    claimed.lease_token.unwrap(),
+                    claim_at + chrono::Duration::seconds(1),
+                    None,
+                    "embed_failed",
+                    None,
+                )
+                .await
+                .unwrap(),
+            Some(DocumentJobStatus::Failed)
+        );
+
+        let outcome = store
+            .ensure_document_index_job(
+                source.id,
+                document.generation(),
+                "pipeline-v1",
+                5,
+                DocumentIndexJobReason::DerivedStateMissing,
+            )
+            .await
+            .unwrap();
+        let EnsureDocumentIndexJobOutcome::Failed(failed) = outcome else {
+            panic!("failed maintenance job must remain a stable no-op")
+        };
+        assert_eq!(failed.id, job.id);
+        assert_eq!(failed.max_attempts, 1);
+        assert_eq!(
+            store
+                .get_document(source.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .processing_status,
+            DocumentProcessingStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_succeeded_generation_advances_once_and_reuses_the_new_job() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///incomplete-derived.txt".into()),
+            media_type: "text/plain".into(),
+            title: Some("incomplete derived".into()),
+            canonical_text: "source remains stable".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(9_075, 0).unwrap(),
+        };
+        let ready = ready_document(&store, &source).await;
+        let succeeded = store.list_document_jobs(source.id).await.unwrap().remove(0);
+        assert_eq!(succeeded.status, DocumentJobStatus::Succeeded);
+
+        let first = store
+            .ensure_document_index_job(
+                source.id,
+                ready.generation(),
+                "pipeline-v1",
+                4,
+                DocumentIndexJobReason::DerivedStateIncomplete,
+            )
+            .await
+            .unwrap();
+        let EnsureDocumentIndexJobOutcome::Enqueued(job) = first else {
+            panic!("incomplete succeeded state must advance and enqueue")
+        };
+        assert_ne!(job.id, succeeded.id);
+        assert_eq!(job.content_revision, ready.content_revision + 1);
+
+        assert_eq!(
+            store
+                .ensure_document_index_job(
+                    source.id,
+                    ready.generation(),
+                    "pipeline-v1",
+                    4,
+                    DocumentIndexJobReason::DerivedStateIncomplete,
+                )
+                .await
+                .unwrap(),
+            EnsureDocumentIndexJobOutcome::Existing(job.clone())
+        );
+        let current = store.get_document(source.id).await.unwrap().unwrap();
+        assert_eq!(current.generation(), job.generation());
+        assert_eq!(current.canonical_text, ready.canonical_text);
+        assert_eq!(current.created_at, ready.created_at);
+        assert_eq!(current.updated_at, ready.updated_at);
+        assert_eq!(store.list_document_jobs(source.id).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_pipeline_change_advances_once_and_preserves_source() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///pipeline-change.txt".into()),
+            media_type: "text/plain".into(),
+            title: Some("pipeline change".into()),
+            canonical_text: "same authoritative source".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(9_100, 0).unwrap(),
+        };
+        let ready = ready_document(&store, &source).await;
+        let document_id = source.id;
+        let store = std::sync::Arc::new(store);
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            let generation = ready.generation();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store
+                    .ensure_document_index_job(
+                        document_id,
+                        generation,
+                        "pipeline-v2",
+                        5,
+                        DocumentIndexJobReason::PipelineChanged,
+                    )
+                    .await
+                    .unwrap()
+            }));
+        }
+        let mut job_ids = std::collections::HashSet::new();
+        for task in tasks {
+            match task.await.unwrap() {
+                EnsureDocumentIndexJobOutcome::Enqueued(job)
+                | EnsureDocumentIndexJobOutcome::Existing(job) => {
+                    job_ids.insert(job.id);
+                }
+                outcome => panic!("unexpected outcome: {outcome:?}"),
+            }
+        }
+        assert_eq!(job_ids.len(), 1);
+
+        let current = store.get_document(document_id).await.unwrap().unwrap();
+        assert_eq!(current.content_revision, ready.content_revision + 1);
+        assert_ne!(current.revision_token, ready.revision_token);
+        assert_eq!(current.project_id, ready.project_id);
+        assert_eq!(current.source_uri, ready.source_uri);
+        assert_eq!(current.media_type, ready.media_type);
+        assert_eq!(current.title, ready.title);
+        assert_eq!(current.canonical_text, ready.canonical_text);
+        assert_eq!(current.created_at, ready.created_at);
+        assert_eq!(current.updated_at, ready.updated_at);
+        assert_eq!(current.processing_status, DocumentProcessingStatus::Queued);
+        assert_eq!(current.indexed_revision, None);
+        assert_eq!(current.index_fingerprint, None);
+        let jobs = store.list_document_jobs(document_id).await.unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].status, DocumentJobStatus::Succeeded);
+        assert_eq!(jobs[1].pipeline_fingerprint, "pipeline-v2");
+    }
+
     #[tokio::test]
     async fn source_revision_and_index_job_commit_and_supersede_together() {
         let (_dir, store) = temp_store().await;
@@ -5491,6 +6132,30 @@ mod tests {
             store.get_document_generation(source.id).await.unwrap(),
             Some(before.generation())
         );
+
+        assert!(store
+            .ensure_document_index_job(
+                source.id,
+                before.generation(),
+                "pipeline-v1",
+                3,
+                DocumentIndexJobReason::DerivedStateIncomplete,
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            store.get_document(source.id).await.unwrap(),
+            Some(before.clone())
+        );
+        assert_eq!(
+            store.get_document_generation(source.id).await.unwrap(),
+            Some(before.generation())
+        );
+        assert!(store
+            .list_document_jobs(source.id)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
