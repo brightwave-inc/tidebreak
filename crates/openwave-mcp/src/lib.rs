@@ -19,7 +19,7 @@
 //!
 //! # fn demo() {
 //! let tools = Arc::new(ToolRegistry::new());
-//! let ctx = ToolCtx { chat_id: ChatId::new(), workspace_dir: "/work".into() };
+//! let ctx = ToolCtx { chat_id: ChatId::new(), project_id: None, workspace_dir: "/work".into() };
 //! let server = McpServer::new(tools, ctx);
 //! // then: `openwave_mcp::serve_stdio(server).await` inside an async runtime.
 //! # let _ = server;

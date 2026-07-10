@@ -253,6 +253,7 @@ mod tests {
     fn ctx(dir: &std::path::Path) -> ToolCtx {
         ToolCtx {
             chat_id: ChatId::new(),
+            project_id: None,
             workspace_dir: dir.to_path_buf(),
         }
     }

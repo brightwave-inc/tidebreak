@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::Result;
-use crate::id::ChatId;
+use crate::id::{ChatId, ProjectId};
 
 /// The approval policy class a tool declares for itself.
 ///
@@ -96,6 +96,8 @@ impl ToolOutput {
 pub struct ToolCtx {
     /// The chat this call belongs to.
     pub chat_id: ChatId,
+    /// Project corpus inherited from the chat, or `None` for a loose chat.
+    pub project_id: Option<ProjectId>,
     /// Absolute path to the chat's workspace directory. Workspace-class
     /// tools stay within it without prompting.
     pub workspace_dir: PathBuf,
