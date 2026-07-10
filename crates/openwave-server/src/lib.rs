@@ -747,6 +747,24 @@ mod tests {
         ) -> Result<Vec<openwave_core::DocumentJob>> {
             self.inner.list_document_jobs(document_id).await
         }
+        async fn claim_document_job(
+            &self,
+            now: chrono::DateTime<chrono::Utc>,
+            lease_expires_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Option<openwave_core::DocumentJob>> {
+            self.inner.claim_document_job(now, lease_expires_at).await
+        }
+        async fn heartbeat_document_job(
+            &self,
+            id: openwave_core::DocumentJobId,
+            lease_token: uuid::Uuid,
+            now: chrono::DateTime<chrono::Utc>,
+            lease_expires_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<bool> {
+            self.inner
+                .heartbeat_document_job(id, lease_token, now, lease_expires_at)
+                .await
+        }
         async fn mark_document_indexed(
             &self,
             id: openwave_core::DocumentId,
