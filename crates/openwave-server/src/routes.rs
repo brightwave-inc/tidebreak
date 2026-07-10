@@ -4,7 +4,6 @@
 //! start a turn, and the WebSocket stream of a chat's turn events.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -15,13 +14,16 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
-    Agent, ApprovalDecision, CallId, Chat, ChatId, DocumentListCursor, DocumentRecord,
-    DocumentScope, DocumentSummaryRecord, DocumentUpsert, Project, ProjectId, SecretProvider,
-    SequencedEvent, Store,
+    Agent, ApprovalDecision, CallId, Chat, ChatId, DocumentGeneration, DocumentJobId,
+    DocumentListCursor, DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert,
+    Project, ProjectId, SecretProvider, SequencedEvent, Store,
 };
-use openwave_retrieval::{Citation, DocumentId, DocumentSource, RetrievalError, SearchTool};
+use openwave_retrieval::{
+    Citation, DocumentId, DocumentSource, GenerationStageOutcome, RetrievalError, SearchTool,
+};
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
+use crate::document_worker::MAX_INDEX_ATTEMPTS;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
@@ -29,35 +31,6 @@ use crate::state::AppState;
 
 /// The store-settings key for the selected model.
 const MODEL_SETTING: &str = "model";
-
-/// Notifies the reconciler if a source/index lifecycle exits before reaching a
-/// consistent terminal state. `Notify` retains a permit while the repair loop
-/// is busy, so failures cannot be lost between scans.
-struct RepairWake {
-    notify: Arc<tokio::sync::Notify>,
-    armed: bool,
-}
-
-impl RepairWake {
-    fn new(notify: Arc<tokio::sync::Notify>) -> Self {
-        Self {
-            notify,
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for RepairWake {
-    fn drop(&mut self) {
-        if self.armed {
-            self.notify.notify_one();
-        }
-    }
-}
 
 /// Runtime settings a client can read. The API key itself is never returned —
 /// it lives in the `SecretProvider`, not the store — only whether one is set.
@@ -342,8 +315,12 @@ pub struct IngestDocument {
 pub struct IngestResult {
     /// The ingested document's id (derived from the URI when one is given).
     pub document_id: DocumentId,
-    /// How many chunks were embedded and indexed.
-    pub chunks: usize,
+    /// Durable job that will index this exact source generation.
+    pub job_id: DocumentJobId,
+    /// Monotonic authoritative source revision accepted by the store.
+    pub content_revision: i64,
+    /// Current asynchronous processing state.
+    pub processing_status: openwave_core::DocumentProcessingStatus,
 }
 
 /// Catalog metadata returned by document listings.
@@ -487,11 +464,9 @@ fn retrieval_error(err: RetrievalError) -> ServerError {
     }
 }
 
-/// `POST /documents` — persist canonical source content, then ingest it into the
-/// shared retrieval index (`201 Created`). Source is committed before external
-/// embedding work; a failed index attempt remains cataloged without a watermark so
-/// it can be retried. Successful chunks are immediately searchable via `POST
-/// /search` and the agent's `search` tool.
+/// `POST /documents` — atomically persist canonical source content and enqueue an
+/// exact-generation index job. Parsing remains synchronous validation; embedding
+/// and vector publication run durably in the background.
 pub async fn ingest_document(
     State(state): State<AppState>,
     Json(body): Json<IngestDocument>,
@@ -513,79 +488,35 @@ pub async fn ingest_document(
         .retrieval
         .parse_document(source, media_type, body.content.as_bytes())
         .map_err(retrieval_error)?;
-    let _write = state.document_writes.acquire(document.id).await;
     let source_uri = match &document.source {
         DocumentSource::Uri { uri } => Some(uri.clone()),
         DocumentSource::Inline => None,
         _ => None,
     };
-    let mut repair_wake = None;
-    // Retire the prior revision before publishing a replacement. If either
-    // watermark clearing or vector deletion fails, the old source remains
-    // authoritative; after clearing, any interruption is visible to repair.
-    if let Some(current) = state.store.get_document(document.id).await? {
-        repair_wake = Some(RepairWake::new(state.index_repair_wake.clone()));
-        let cleared = state
-            .store
-            .clear_document_index(current.id, current.content_revision, current.revision_token)
-            .await?;
-        if !cleared {
-            return Err(ServerError::internal(format!(
-                "document {} changed while preparing its replacement",
-                document.id
-            )));
-        }
-        state
-            .retrieval
-            .delete(document.id)
-            .await
-            .map_err(retrieval_error)?;
-    }
-    let revision = state
+    let (revision, job) = state
         .store
-        .upsert_document(&DocumentUpsert {
-            id: document.id,
-            project_id: None,
-            source_uri,
-            media_type: document.media_type.clone(),
-            title: None,
-            canonical_text: document.text.clone(),
-            updated_at: Utc::now(),
-        })
-        .await?;
-    if repair_wake.is_none() {
-        repair_wake = Some(RepairWake::new(state.index_repair_wake.clone()));
-    }
-    let chunks = state
-        .retrieval
-        .index_document(&document)
-        .await
-        .map_err(retrieval_error)?;
-    let indexed = state
-        .store
-        .mark_document_indexed(
-            document.id,
-            revision.content_revision,
-            revision.revision_token,
+        .upsert_document_and_enqueue_index(
+            &DocumentUpsert {
+                id: document.id,
+                project_id: None,
+                source_uri,
+                media_type: document.media_type.clone(),
+                title: None,
+                canonical_text: document.text.clone(),
+                updated_at: Utc::now(),
+            },
             &index_fingerprint,
-            Utc::now(),
+            MAX_INDEX_ATTEMPTS,
         )
         .await?;
-    if !indexed {
-        return Err(ServerError::internal(format!(
-            "document {} changed while recording its index watermark",
-            document.id
-        )));
-    }
-    repair_wake
-        .as_mut()
-        .expect("a persisted document always arms repair")
-        .disarm();
+    state.document_job_wake.notify_one();
     Ok((
-        StatusCode::CREATED,
+        StatusCode::ACCEPTED,
         Json(IngestResult {
             document_id: document.id,
-            chunks,
+            job_id: job.id,
+            content_revision: revision.content_revision,
+            processing_status: revision.processing_status,
         }),
     ))
 }
@@ -644,36 +575,78 @@ pub async fn get_document(
         .ok_or_else(|| ServerError::not_found(format!("document {id} not found")))
 }
 
-/// `DELETE /documents/{id}` — remove a document's index rows and authoritative
-/// catalog record (`204 No Content`). The catalog watermark is cleared first,
-/// then index deletion happens before source deletion. Any interrupted/failed
-/// request therefore retains rebuildable source in an explicitly stale state.
-/// Idempotent: deleting an unknown or already-removed document still returns
-/// `204`. `id` is the `document_id` returned by `POST /documents`.
+/// `DELETE /documents/{id}` — delete authoritative source/jobs, then publish its
+/// durable empty tombstone generation. Idempotent for unknown/already-deleted ids.
 pub async fn delete_document(
     State(state): State<AppState>,
     Path(id): Path<DocumentId>,
 ) -> Result<StatusCode, ServerError> {
-    let _write = state.document_writes.acquire(id).await;
-    let mut repair_wake = None;
-    if let Some(document) = state.store.get_document(id).await? {
-        repair_wake = Some(RepairWake::new(state.index_repair_wake.clone()));
-        let cleared = state
-            .store
-            .clear_document_index(id, document.content_revision, document.revision_token)
-            .await?;
-        if !cleared {
-            return Err(ServerError::internal(format!(
-                "document {id} changed while preparing it for deletion"
-            )));
+    let tombstone = state.store.delete_document(id).await?;
+    match state
+        .retrieval
+        .stage_document_tombstone(id, tombstone)
+        .await
+        .map_err(retrieval_error)?
+    {
+        GenerationStageOutcome::Staged | GenerationStageOutcome::AlreadyPresent => {
+            if !state
+                .retrieval
+                .activate_document_generation(id, tombstone)
+                .await
+                .map_err(retrieval_error)?
+            {
+                ensure_delete_was_superseded(&state, id, tombstone).await?;
+            }
+        }
+        GenerationStageOutcome::Rejected { current } => {
+            ensure_generation_at_least(&state, id, current).await?;
         }
     }
-    state.retrieval.delete(id).await.map_err(retrieval_error)?;
-    state.store.delete_document(id).await?;
-    if let Some(wake) = repair_wake.as_mut() {
-        wake.disarm();
-    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn ensure_delete_was_superseded(
+    state: &AppState,
+    id: DocumentId,
+    tombstone: DocumentGeneration,
+) -> Result<(), ServerError> {
+    let vector_generation = state
+        .retrieval
+        .store()
+        .newest_document_generation(id)
+        .await
+        .map_err(retrieval_error)?
+        .ok_or_else(|| {
+            ServerError::internal(format!("document {id} lost its vector generation marker"))
+        })?
+        .generation();
+    if vector_generation.content_revision <= tombstone.content_revision {
+        return Err(ServerError::internal(format!(
+            "document {id} tombstone activation lost without a newer operational generation"
+        )));
+    }
+    ensure_generation_at_least(state, id, vector_generation).await
+}
+
+async fn ensure_generation_at_least(
+    state: &AppState,
+    id: DocumentId,
+    vector_generation: DocumentGeneration,
+) -> Result<(), ServerError> {
+    let operational = state
+        .store
+        .get_document_generation(id)
+        .await?
+        .ok_or_else(|| ServerError::internal(format!("document {id} lost its generation clock")))?;
+    if operational.content_revision > vector_generation.content_revision
+        || operational == vector_generation
+    {
+        Ok(())
+    } else {
+        Err(ServerError::internal(format!(
+            "document {id} vector generation is ahead of its operational clock"
+        )))
+    }
 }
 
 /// Body of `POST /search`.
