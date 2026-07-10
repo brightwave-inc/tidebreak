@@ -36,7 +36,7 @@ use crate::document::{ByteSpan, Chunk, ScoredChunk};
 use crate::embed::Embedding;
 use crate::error::{Result, RetrievalError};
 use crate::id::{ChunkId, DocumentId};
-use crate::vector::{GenerationStageOutcome, VectorRecord, VectorStore};
+use crate::vector::{DocumentGenerationState, GenerationStageOutcome, VectorRecord, VectorStore};
 use openwave_core::DocumentGeneration;
 
 /// The single table all chunks and publication markers are stored in.
@@ -587,6 +587,23 @@ impl VectorStore for LanceVectorStore {
         self.generation_marker(document_id, ACTIVE_MARKER).await
     }
 
+    async fn newest_document_generation(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Option<DocumentGenerationState>> {
+        let _read = self.write_lock.lock().await;
+        let active = self.generation_marker(document_id, ACTIVE_MARKER).await?;
+        let staged = self.generation_marker(document_id, STAGED_MARKER).await?;
+        let newest = newest_generation(document_id, active, staged)?;
+        Ok(match newest {
+            Some(generation) if staged == Some(generation) => {
+                Some(DocumentGenerationState::Staged(generation))
+            }
+            Some(generation) => Some(DocumentGenerationState::Active(generation)),
+            None => None,
+        })
+    }
+
     async fn document_len(&self, document_id: DocumentId) -> Result<Option<usize>> {
         self.table
             .count_rows(Some(format!(
@@ -1094,6 +1111,10 @@ mod tests {
         assert_eq!(store.table.version().await.unwrap(), before_stage + 1);
         assert_eq!(store.len().await.unwrap(), 1);
         assert_eq!(store.document_len(doc).await.unwrap(), Some(0));
+        assert_eq!(
+            store.newest_document_generation(doc).await.unwrap(),
+            Some(DocumentGenerationState::Staged(first))
+        );
         let hits = store.query(&Embedding(vec![1.0, 0.0]), 10).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.text, "other");
@@ -1123,6 +1144,10 @@ mod tests {
         assert_eq!(
             reopened.active_document_generation(doc).await.unwrap(),
             Some(first)
+        );
+        assert_eq!(
+            reopened.newest_document_generation(doc).await.unwrap(),
+            Some(DocumentGenerationState::Active(first))
         );
         let activated_version = reopened.table.version().await.unwrap();
         assert!(reopened

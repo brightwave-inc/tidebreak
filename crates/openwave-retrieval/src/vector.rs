@@ -42,6 +42,25 @@ pub enum GenerationStageOutcome {
     },
 }
 
+/// Newest durable publication state for one document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentGenerationState {
+    /// The generation is currently searchable.
+    Active(DocumentGeneration),
+    /// The generation is durably staged but still invisible to search.
+    Staged(DocumentGeneration),
+}
+
+impl DocumentGenerationState {
+    /// Exact generation carried by this state.
+    #[must_use]
+    pub fn generation(self) -> DocumentGeneration {
+        match self {
+            Self::Active(generation) | Self::Staged(generation) => generation,
+        }
+    }
+}
+
 /// Stores embedded chunks and retrieves them by vector similarity.
 ///
 /// Object-safe and async so backends can do I/O. Implementations are held behind
@@ -116,6 +135,20 @@ pub trait VectorStore: Send + Sync {
         &self,
         _document_id: DocumentId,
     ) -> Result<Option<DocumentGeneration>> {
+        Err(RetrievalError::vector_store(
+            "generation-aware publication is not implemented by this vector store",
+        ))
+    }
+
+    /// Return the newest staged-or-active generation for cheap retry preflight.
+    ///
+    /// This read is advisory: callers must still use
+    /// [`stage_document_generation`](Self::stage_document_generation) for the
+    /// mutation-time compare-and-set that closes races after preflight.
+    async fn newest_document_generation(
+        &self,
+        _document_id: DocumentId,
+    ) -> Result<Option<DocumentGenerationState>> {
         Err(RetrievalError::vector_store(
             "generation-aware publication is not implemented by this vector store",
         ))
@@ -404,6 +437,39 @@ impl VectorStore for InMemoryVectorStore {
             .map(|active| active.generation))
     }
 
+    async fn newest_document_generation(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Option<DocumentGenerationState>> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
+        let Some(publication) = state.publications.get(&document_id) else {
+            return Ok(None);
+        };
+        match (publication.active.as_ref(), publication.staged.as_ref()) {
+            (None, None) => Ok(None),
+            (Some(active), None) => Ok(Some(DocumentGenerationState::Active(active.generation))),
+            (None, Some(staged)) => Ok(Some(DocumentGenerationState::Staged(staged.generation))),
+            (Some(active), Some(staged)) => {
+                if active.generation.content_revision == staged.generation.content_revision
+                    && active.generation.revision_token != staged.generation.revision_token
+                {
+                    return Err(RetrievalError::vector_store(format!(
+                        "document {document_id} has conflicting generation markers at revision {}",
+                        active.generation.content_revision
+                    )));
+                }
+                if staged.generation.content_revision >= active.generation.content_revision {
+                    Ok(Some(DocumentGenerationState::Staged(staged.generation)))
+                } else {
+                    Ok(Some(DocumentGenerationState::Active(active.generation)))
+                }
+            }
+        }
+    }
+
     async fn document_len(&self, document_id: DocumentId) -> Result<Option<usize>> {
         let store = self
             .state
@@ -683,6 +749,10 @@ mod tests {
                 .unwrap(),
             GenerationStageOutcome::Staged
         );
+        assert_eq!(
+            store.newest_document_generation(doc).await.unwrap(),
+            Some(DocumentGenerationState::Staged(first))
+        );
         assert!(store
             .query(&Embedding(vec![1.0, 0.0]), 10)
             .await
@@ -695,6 +765,10 @@ mod tests {
         assert_eq!(
             store.active_document_generation(doc).await.unwrap(),
             Some(first)
+        );
+        assert_eq!(
+            store.newest_document_generation(doc).await.unwrap(),
+            Some(DocumentGenerationState::Active(first))
         );
 
         assert_eq!(
