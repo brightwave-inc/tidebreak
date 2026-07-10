@@ -37,7 +37,7 @@ use openwave_core::{
     Result, SecretProvider, Store, ToolRegistry, WriteFile,
 };
 use openwave_retrieval::{
-    Embedder, HashEmbedder, InMemoryVectorStore, OpenAiEmbedder, PlainTextParser, Retriever,
+    Embedder, HashEmbedder, LanceVectorStore, OpenAiEmbedder, PlainTextParser, Retriever,
     SearchTool, TextChunker, VectorStore,
 };
 
@@ -162,7 +162,8 @@ pub async fn bind(config: Config) -> Result<Server> {
     providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
     let resolver = Arc::new(KeyedResolver::new(store.clone(), secrets.clone()));
     let embedder = resolve_embedder(&*store, &*secrets).await;
-    let (retrieval, tools, agent_config) = agent_deps(embedder);
+    let vector_store = connect_vector_store(&config, embedder.dimensions()).await?;
+    let (retrieval, tools, agent_config) = agent_deps(embedder, vector_store);
     let state = AppState::new(
         config,
         store,
@@ -196,8 +197,11 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// providers; see [`resolver`]), so configuring a provider at runtime takes effect
 /// without a restart. The model *name* comes from `OPENWAVE_MODEL` (or the built-in
 /// default) and can be overridden at runtime via `PUT /settings` or per-chat.
-fn agent_deps(embedder: Arc<dyn Embedder>) -> (Arc<Retriever>, Arc<ToolRegistry>, AgentConfig) {
-    let (retrieval, search) = build_retrieval(embedder);
+fn agent_deps(
+    embedder: Arc<dyn Embedder>,
+    store: Arc<dyn VectorStore>,
+) -> (Arc<Retriever>, Arc<ToolRegistry>, AgentConfig) {
+    let (retrieval, search) = build_retrieval(embedder, store);
     let tools = Arc::new(
         ToolRegistry::new()
             .with(Box::new(ReadFile))
@@ -230,8 +234,9 @@ const EMBED_DIMS: usize = 1536;
 /// text egressed for embeddings. Otherwise fall back to the offline, lexical
 /// [`HashEmbedder`], so search works with no credentials (just less well).
 ///
-/// Chosen once at startup: the in-memory index is per-launch and dimension-bound to
-/// the embedder, so enabling OpenAI (or adding a key) takes effect on restart.
+/// Chosen once at startup: the vector index is dimension-bound to the embedder, so
+/// enabling OpenAI (or adding a key) takes effect on restart — where a change in
+/// embedding width rebuilds the persistent index (see [`LanceVectorStore::connect`]).
 async fn resolve_embedder(store: &dyn Store, secrets: &dyn SecretProvider) -> Arc<dyn Embedder> {
     let enabled = providers::read_config(store, providers::ProviderKind::Openai)
         .await
@@ -248,17 +253,18 @@ async fn resolve_embedder(store: &dyn Store, secrets: &dyn SecretProvider) -> Ar
     }
 }
 
-/// Build the retrieval pipeline and the `search` tool that shares its index, over
-/// the given `embedder`.
+/// Build the retrieval pipeline and the `search` tool over a shared embedder and
+/// vector store.
 ///
 /// The [`Retriever`] (used to ingest and to serve `POST /search`) and the returned
-/// [`SearchTool`] (registered for the agent) hold the **same** embedder and vector
-/// store, so a document ingested through the API is immediately visible to the
-/// agent's search. The store is sized to the embedder's dimensionality. It's
-/// in-memory today — durable/hybrid backends are a later slice — so an index does
-/// not survive a restart.
-fn build_retrieval(embedder: Arc<dyn Embedder>) -> (Arc<Retriever>, Box<SearchTool>) {
-    let store: Arc<dyn VectorStore> = Arc::new(InMemoryVectorStore::new(embedder.dimensions()));
+/// [`SearchTool`] (registered for the agent) hold the **same** embedder and store,
+/// so a document ingested through the API is immediately visible to the agent's
+/// search. The caller passes the store so production can persist to LanceDB while
+/// tests use an in-memory one; either way it must be sized to `embedder.dimensions()`.
+fn build_retrieval(
+    embedder: Arc<dyn Embedder>,
+    store: Arc<dyn VectorStore>,
+) -> (Arc<Retriever>, Box<SearchTool>) {
     let retrieval = Arc::new(Retriever::new(
         Box::new(PlainTextParser::new()),
         Box::new(TextChunker::default()),
@@ -267,6 +273,22 @@ fn build_retrieval(embedder: Arc<dyn Embedder>) -> (Arc<Retriever>, Box<SearchTo
     ));
     let search = Box::new(SearchTool::new(embedder, store));
     (retrieval, search)
+}
+
+/// Open the persistent vector store for this launch: a LanceDB dataset under
+/// `data_dir/vectors`, kept separate from the SQLite operational database (the
+/// index is derived, rebuildable data with a different lifecycle). Sized to the
+/// embedder's dimensionality; a change in that width rebuilds the index (see
+/// [`LanceVectorStore::connect`]).
+async fn connect_vector_store(config: &Config, dims: usize) -> Result<Arc<dyn VectorStore>> {
+    let dir = config.data_dir.join("vectors");
+    let uri = dir
+        .to_str()
+        .ok_or_else(|| AgentError::config("vector store path is not valid UTF-8"))?;
+    let store = LanceVectorStore::connect(uri, dims)
+        .await
+        .map_err(|e| AgentError::config(format!("failed to open vector store: {e}")))?;
+    Ok(Arc::new(store))
 }
 
 /// Open the durable store the profile selects.
@@ -298,11 +320,13 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Request, StatusCode};
     use futures::stream::{self, BoxStream, StreamExt};
+    // Tests use the in-memory store; production wires LanceDB in `bind`.
     use openwave_core::{
         AgentErrorInfo, AgentEvent, ApprovalClass, Chat, ChatId, ChatRequest, Message,
         ModelProvider, Project, ProjectId, ProviderEvent, ProviderId, SecretProvider,
         SequencedEvent, StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
     };
+    use openwave_retrieval::InMemoryVectorStore;
     use resolver::ProviderResolver;
     use serde::de::DeserializeOwned;
     use tokio::sync::Notify;
@@ -508,7 +532,10 @@ mod tests {
             .await
             .unwrap(),
         );
-        let (retrieval, _search) = build_retrieval(Arc::new(HashEmbedder::default()));
+        let (retrieval, _search) = build_retrieval(
+            Arc::new(HashEmbedder::default()),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        );
         let state = AppState::new(
             Config::desktop(dir.path()),
             store.clone(),
@@ -985,7 +1012,10 @@ mod tests {
 
     #[test]
     fn agent_deps_registers_the_search_tool_alongside_the_file_tools() {
-        let (_retrieval, tools, _config) = agent_deps(Arc::new(HashEmbedder::default()));
+        let (_retrieval, tools, _config) = agent_deps(
+            Arc::new(HashEmbedder::default()),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        );
         let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
         assert!(
             names.iter().any(|n| n == "search"),
@@ -1049,6 +1079,39 @@ mod tests {
         .unwrap();
         let offline = resolve_embedder(&*store, &secrets).await;
         assert_eq!(offline.dimensions(), HashEmbedder::default().dimensions());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_vector_store_opens_a_durable_lance_index_under_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::desktop(dir.path());
+
+        // Ingest into the store, then reopen from the same data_dir and confirm the
+        // chunk survived — i.e. bind()'s production path really persists to disk.
+        {
+            let store = connect_vector_store(&config, 2).await.unwrap();
+            let doc = openwave_retrieval::DocumentId::new();
+            let chunk = openwave_retrieval::Chunk::new(
+                doc,
+                0,
+                openwave_retrieval::ByteSpan::new(0, 4),
+                "note",
+            );
+            store
+                .upsert(vec![openwave_retrieval::VectorRecord {
+                    chunk,
+                    embedding: openwave_retrieval::Embedding(vec![1.0, 0.0]),
+                }])
+                .await
+                .unwrap();
+            assert_eq!(store.len().await.unwrap(), 1);
+        }
+        assert!(
+            dir.path().join("vectors").exists(),
+            "lance dir created under data_dir"
+        );
+        let reopened = connect_vector_store(&config, 2).await.unwrap();
+        assert_eq!(reopened.len().await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -2180,7 +2243,11 @@ mod tests {
             Arc::new(FixedResolver(Arc::new(FakeProvider))),
             Arc::new(MemSecrets::default()),
             Arc::new(ToolRegistry::new()),
-            build_retrieval(Arc::new(HashEmbedder::default())).0,
+            build_retrieval(
+                Arc::new(HashEmbedder::default()),
+                Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+            )
+            .0,
             AgentConfig {
                 model: "fake".into(),
                 ..AgentConfig::default()
@@ -2335,7 +2402,11 @@ mod tests {
             }))),
             Arc::new(MemSecrets::default()),
             tools,
-            build_retrieval(Arc::new(HashEmbedder::default())).0,
+            build_retrieval(
+                Arc::new(HashEmbedder::default()),
+                Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+            )
+            .0,
             AgentConfig {
                 model: "fake".into(),
                 ..AgentConfig::default()
