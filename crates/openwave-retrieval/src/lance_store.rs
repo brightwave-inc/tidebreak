@@ -5,54 +5,72 @@
 //! seam, but the index survives a restart and can grow past what fits in memory,
 //! with room for an ANN index and multimodal columns later.
 //!
-//! Chunks live in one table with a fixed-width vector column; scalar columns carry
-//! the citation data (ids, ordinal, text, byte span). Writes use Lance's
-//! transactional merge-insert operation, so replacing a document is published as
-//! one dataset version. Cosine distance; LanceDB does a flat (brute-force) scan
-//! until an index is built, which is fine for the corpus sizes this targets today.
+//! Chunks and generation markers live in one table with a fixed-width vector
+//! column; scalar columns carry citation data and publication identity. Writes use
+//! Lance's transactional merge-insert operation, so replacing or activating a
+//! document is published as one dataset version. Cosine distance; LanceDB does a
+//! flat (brute-force) scan until an index is built, which is fine for the corpus
+//! sizes this targets today.
 //!
 //! **Build note:** enabled by the non-default `vec-lance` feature. LanceDB pulls a
 //! large Arrow/DataFusion tree and needs `protoc` at build time — hence off by
 //! default for library consumers. OpenWave's workspace CI installs `protoc`.
 
+use std::fs::{File, OpenOptions};
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::types::Float32Type;
 use arrow_array::{
-    Array, ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
-    StringArray, UInt64Array,
+    Array, ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
+    RecordBatchIterator, StringArray, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::{DistanceType, Table};
+use tokio::sync::Mutex;
 
 use crate::document::{ByteSpan, Chunk, ScoredChunk};
 use crate::embed::Embedding;
 use crate::error::{Result, RetrievalError};
 use crate::id::{ChunkId, DocumentId};
-use crate::vector::{VectorRecord, VectorStore};
+use crate::vector::{GenerationStageOutcome, VectorRecord, VectorStore};
+use openwave_core::DocumentGeneration;
 
-/// The single table all chunks are stored in.
+/// The single table all chunks and publication markers are stored in.
 const TABLE: &str = "chunks";
 /// The vector column name.
 const VECTOR_COL: &str = "vector";
 /// LanceDB's distance column on query results.
 const DISTANCE_COL: &str = "_distance";
-/// Lance dataset configuration marker for the one-time legacy duplicate repair.
-const UNIQUE_CHUNK_IDS_V1: &str = "openwave.unique_chunk_ids_v1";
-/// Lance's version-relative row-id meta column, used only within one repair scan.
-const ROW_ID_COL: &str = "_rowid";
-/// Bound repair predicates so a badly duplicated legacy dataset does not produce
-/// one pathological SQL expression.
-const REPAIR_DELETE_BATCH: usize = 500;
+const UNVERSIONED_CHUNK: &str = "unversioned_chunk";
+const STAGED_CHUNK: &str = "staged_chunk";
+const ACTIVE_CHUNK: &str = "active_chunk";
+const STAGED_MARKER: &str = "staged_marker";
+const ACTIVE_MARKER: &str = "active_marker";
+const VISIBLE_CHUNKS: &str = "row_kind IN ('unversioned_chunk', 'active_chunk')";
 
 /// A persistent [`VectorStore`] backed by a local LanceDB dataset.
+///
+/// One instance serializes every mutation so marker reads and their following
+/// merge commit form one coordinator operation. An exclusive lock file enforces
+/// one writer instance per dataset across handles and processes.
 pub struct LanceVectorStore {
     table: Table,
     schema: SchemaRef,
     dims: usize,
+    write_lock: Mutex<()>,
+    _writer_lock: File,
+}
+
+struct StoredRow {
+    storage_id: String,
+    row_kind: &'static str,
+    record: Option<VectorRecord>,
+    document_id: DocumentId,
+    generation: Option<DocumentGeneration>,
 }
 
 impl LanceVectorStore {
@@ -61,29 +79,42 @@ impl LanceVectorStore {
     /// `uri` is a local directory path; it's created if missing, and an existing
     /// dataset there is reopened (that's what makes the index durable).
     ///
-    /// **Embedder-change guardrail:** if an existing table's vector width doesn't
-    /// match `dims` (e.g. the configured embedder changed — offline 256-dim vs
-    /// OpenAI 1536-dim), the old table is dropped and recreated empty. The index is
-    /// derived data (re-embeddable from source documents), so rebuilding is the
-    /// safe response to a dimensionality change rather than erroring every write.
+    /// **Schema guardrail:** if an existing table's complete schema does not match
+    /// the expected layout or vector width, the old table is dropped and recreated
+    /// empty. The index is derived data (re-embeddable from source documents), so
+    /// rebuilding is the safe pre-v1 response to an incompatible layout.
     pub async fn connect(uri: &str, dims: usize) -> Result<Self> {
+        std::fs::create_dir_all(uri).map_err(lance_err)?;
+        let writer_lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(Path::new(uri).join(".openwave-writer.lock"))
+            .map_err(lance_err)?;
+        writer_lock.try_lock().map_err(|error| {
+            RetrievalError::vector_store(format!(
+                "another Lance vector writer already owns {uri}: {error}"
+            ))
+        })?;
         let schema = build_schema(dims);
         let db = lancedb::connect(uri).execute().await.map_err(lance_err)?;
         let names = db.table_names().execute().await.map_err(lance_err)?;
 
-        let existing_dims = if names.iter().any(|n| n == TABLE) {
+        let existing_schema = if names.iter().any(|n| n == TABLE) {
             let table = db.open_table(TABLE).execute().await.map_err(lance_err)?;
-            vector_dim(&table.schema().await.map_err(lance_err)?)
+            Some(table.schema().await.map_err(lance_err)? as SchemaRef)
         } else {
             None
         };
 
-        let table = match existing_dims {
-            Some(existing) if existing == dims => {
+        let table = match existing_schema {
+            Some(existing) if existing.as_ref() == schema.as_ref() => {
                 db.open_table(TABLE).execute().await.map_err(lance_err)?
             }
             Some(_) => {
-                // Incompatible width: drop and start fresh.
+                // The index is derived and pre-v1, so any incompatible layout is
+                // reset rather than carrying an in-place data migration.
                 db.drop_table(TABLE, &[]).await.map_err(lance_err)?;
                 db.create_empty_table(TABLE, schema.clone())
                     .execute()
@@ -96,11 +127,12 @@ impl LanceVectorStore {
                 .await
                 .map_err(lance_err)?,
         };
-        ensure_unique_chunk_ids(&table).await?;
         Ok(Self {
             table,
             schema,
             dims,
+            write_lock: Mutex::new(()),
+            _writer_lock: writer_lock,
         })
     }
 
@@ -120,100 +152,254 @@ impl LanceVectorStore {
         Ok(())
     }
 
-    /// Build one Arrow `RecordBatch` from the records, matching the table schema.
-    fn to_batch(&self, records: &[VectorRecord]) -> Result<RecordBatch> {
-        let chunk_ids =
-            StringArray::from_iter_values(records.iter().map(|r| r.chunk.id.to_string()));
-        let doc_ids =
-            StringArray::from_iter_values(records.iter().map(|r| r.chunk.document_id.to_string()));
-        let ordinals =
-            UInt64Array::from_iter_values(records.iter().map(|r| r.chunk.ordinal as u64));
-        let texts = StringArray::from_iter_values(records.iter().map(|r| r.chunk.text.as_str()));
-        let starts =
-            UInt64Array::from_iter_values(records.iter().map(|r| r.chunk.span.start as u64));
-        let ends = UInt64Array::from_iter_values(records.iter().map(|r| r.chunk.span.end as u64));
+    fn rows_to_batch(&self, rows: &[StoredRow]) -> Result<RecordBatch> {
+        let storage_ids =
+            StringArray::from_iter_values(rows.iter().map(|row| row.storage_id.as_str()));
+        let row_kinds = StringArray::from_iter_values(rows.iter().map(|row| row.row_kind));
+        let chunk_id_values = rows
+            .iter()
+            .map(|row| {
+                row.record.as_ref().map_or_else(
+                    || row.storage_id.clone(),
+                    |record| record.chunk.id.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let chunk_ids = StringArray::from_iter_values(chunk_id_values.iter().map(String::as_str));
+        let doc_id_values = rows
+            .iter()
+            .map(|row| row.document_id.to_string())
+            .collect::<Vec<_>>();
+        let doc_ids = StringArray::from_iter_values(doc_id_values.iter().map(String::as_str));
+        let ordinals = UInt64Array::from_iter_values(rows.iter().map(|row| {
+            row.record
+                .as_ref()
+                .map_or(0, |record| record.chunk.ordinal as u64)
+        }));
+        let texts = StringArray::from_iter_values(rows.iter().map(|row| {
+            row.record
+                .as_ref()
+                .map_or("", |record| record.chunk.text.as_str())
+        }));
+        let starts = UInt64Array::from_iter_values(rows.iter().map(|row| {
+            row.record
+                .as_ref()
+                .map_or(0, |record| record.chunk.span.start as u64)
+        }));
+        let ends = UInt64Array::from_iter_values(rows.iter().map(|row| {
+            row.record
+                .as_ref()
+                .map_or(0, |record| record.chunk.span.end as u64)
+        }));
+        let revisions = Int64Array::from_iter_values(rows.iter().map(|row| {
+            row.generation
+                .map_or(0, |generation| generation.content_revision)
+        }));
+        let revision_token_values = rows
+            .iter()
+            .map(|row| {
+                row.generation.map_or_else(String::new, |generation| {
+                    generation.revision_token.to_string()
+                })
+            })
+            .collect::<Vec<_>>();
+        let revision_tokens =
+            StringArray::from_iter_values(revision_token_values.iter().map(String::as_str));
         let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-            records
-                .iter()
-                .map(|r| Some(r.embedding.0.iter().map(|&f| Some(f)).collect::<Vec<_>>())),
+            rows.iter().map(|row| {
+                Some(match row.record.as_ref() {
+                    Some(record) => record
+                        .embedding
+                        .0
+                        .iter()
+                        .map(|&value| Some(value))
+                        .collect::<Vec<_>>(),
+                    None => vec![Some(0.0); self.dims],
+                })
+            }),
             self.dims as i32,
         );
         let columns: Vec<ArrayRef> = vec![
+            Arc::new(storage_ids),
+            Arc::new(row_kinds),
             Arc::new(chunk_ids),
             Arc::new(doc_ids),
             Arc::new(ordinals),
             Arc::new(texts),
             Arc::new(starts),
             Arc::new(ends),
+            Arc::new(revisions),
+            Arc::new(revision_tokens),
             Arc::new(vectors),
         ];
         RecordBatch::try_new(self.schema.clone(), columns).map_err(lance_err)
     }
-}
 
-/// Repair duplicate chunk ids that an older delete-then-append writer could leave
-/// behind after concurrent writes.
-///
-/// Lance merge-insert treats multiple target matches as undefined, so the new
-/// transactional writer must establish uniqueness before using `chunk_id` as its
-/// merge key. This scans only ids and row ids once per existing dataset, keeps the
-/// newest physical row for each id, deletes older duplicates in bounded commits,
-/// and records a dataset marker so normal startups do not rescan the corpus.
-async fn ensure_unique_chunk_ids(table: &Table) -> Result<()> {
-    let native = table
-        .as_native()
-        .ok_or_else(|| RetrievalError::vector_store("Lance table is not a local dataset"))?;
-    let manifest = native.manifest().await.map_err(lance_err)?;
-    if manifest.config.get(UNIQUE_CHUNK_IDS_V1).map(String::as_str) == Some("1") {
-        return Ok(());
-    }
-
-    let mut stream = table
-        .query()
-        .select(Select::columns(&["chunk_id"]))
-        .with_row_id()
-        .execute()
-        .await
-        .map_err(lance_err)?;
-    let mut newest_by_id = std::collections::HashMap::<String, u64>::new();
-    let mut stale_row_ids = Vec::new();
-    while let Some(batch) = stream.try_next().await.map_err(lance_err)? {
-        let chunk_ids = str_col(&batch, "chunk_id")?;
-        let row_ids = u64_col(&batch, ROW_ID_COL)?;
-        for i in 0..batch.num_rows() {
-            let id = chunk_ids.value(i).to_string();
-            let row_id = row_ids.value(i);
-            if let Some(kept) = newest_by_id.get_mut(&id) {
-                // Query order is deliberately irrelevant: the highest physical
-                // row id is the last append from the legacy writer. Concurrent
-                // repair scans therefore choose the same survivor.
-                if row_id > *kept {
-                    stale_row_ids.push(*kept);
-                    *kept = row_id;
-                } else {
-                    stale_row_ids.push(row_id);
-                }
-            } else {
-                newest_by_id.insert(id, row_id);
-            }
+    async fn merge_rows(&self, rows: &[StoredRow], delete_filter: Option<String>) -> Result<()> {
+        let batch = self.rows_to_batch(rows)?;
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], self.schema.clone());
+        let mut merge = self.table.merge_insert(&["storage_id"]);
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
+        if let Some(filter) = delete_filter {
+            merge.when_not_matched_by_source_delete(Some(filter));
         }
+        merge.execute(Box::new(reader)).await.map_err(lance_err)?;
+        Ok(())
     }
 
-    for batch in stale_row_ids.chunks(REPAIR_DELETE_BATCH) {
-        let ids = batch
-            .iter()
-            .map(u64::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        table
-            .delete(&format!("{ROW_ID_COL} IN ({ids})"))
+    async fn generation_marker(
+        &self,
+        document_id: DocumentId,
+        row_kind: &str,
+    ) -> Result<Option<DocumentGeneration>> {
+        let mut stream = self
+            .table
+            .query()
+            .only_if(format!(
+                "document_id = '{document_id}' AND row_kind = '{row_kind}'"
+            ))
+            .select(Select::columns(&["content_revision", "revision_token"]))
+            .execute()
             .await
             .map_err(lance_err)?;
+        let mut found = None;
+        while let Some(batch) = stream.try_next().await.map_err(lance_err)? {
+            let revisions = i64_col(&batch, "content_revision")?;
+            let tokens = str_col(&batch, "revision_token")?;
+            for index in 0..batch.num_rows() {
+                if found.is_some() {
+                    return Err(RetrievalError::vector_store(format!(
+                        "document {document_id} has duplicate {row_kind} rows"
+                    )));
+                }
+                let content_revision = revisions.value(index);
+                if content_revision < 1 {
+                    return Err(RetrievalError::vector_store(format!(
+                        "document {document_id} has an invalid generation revision {content_revision}"
+                    )));
+                }
+                found = Some(DocumentGeneration {
+                    content_revision,
+                    revision_token: tokens.value(index).parse().map_err(|error| {
+                        RetrievalError::vector_store(format!(
+                            "document {document_id} has an invalid generation token: {error}"
+                        ))
+                    })?,
+                });
+            }
+        }
+        Ok(found)
     }
-    native
-        .update_config([(UNIQUE_CHUNK_IDS_V1.to_string(), "1".to_string())])
-        .await
-        .map_err(lance_err)
+
+    async fn generation_rows_exist(&self, document_id: DocumentId) -> Result<bool> {
+        self.table
+            .count_rows(Some(format!(
+                "document_id = '{document_id}' AND row_kind != '{UNVERSIONED_CHUNK}'"
+            )))
+            .await
+            .map(|count| count > 0)
+            .map_err(lance_err)
+    }
+
+    async fn read_records(&self, filter: String) -> Result<Vec<VectorRecord>> {
+        let mut stream = self
+            .table
+            .query()
+            .only_if(filter)
+            .select(Select::columns(&[
+                "chunk_id",
+                "document_id",
+                "ordinal",
+                "text",
+                "span_start",
+                "span_end",
+                VECTOR_COL,
+            ]))
+            .execute()
+            .await
+            .map_err(lance_err)?;
+        let mut records = Vec::new();
+        while let Some(batch) = stream.try_next().await.map_err(lance_err)? {
+            read_vector_records(&batch, &mut records)?;
+        }
+        Ok(records)
+    }
+}
+
+fn unversioned_row(record: VectorRecord) -> StoredRow {
+    StoredRow {
+        storage_id: format!("unversioned:{}", record.chunk.id),
+        row_kind: UNVERSIONED_CHUNK,
+        document_id: record.chunk.document_id,
+        record: Some(record),
+        generation: None,
+    }
+}
+
+fn generation_chunk_row(
+    record: VectorRecord,
+    generation: DocumentGeneration,
+    row_kind: &'static str,
+) -> StoredRow {
+    StoredRow {
+        storage_id: format!(
+            "generation:{}:{}:{}:{}",
+            record.chunk.document_id,
+            generation.content_revision,
+            generation.revision_token,
+            record.chunk.id
+        ),
+        row_kind,
+        document_id: record.chunk.document_id,
+        record: Some(record),
+        generation: Some(generation),
+    }
+}
+
+fn generation_marker_row(
+    document_id: DocumentId,
+    generation: DocumentGeneration,
+    row_kind: &'static str,
+) -> StoredRow {
+    let marker = match row_kind {
+        STAGED_MARKER => "staged-marker",
+        ACTIVE_MARKER => "active-marker",
+        _ => unreachable!("only generation marker kinds have marker rows"),
+    };
+    StoredRow {
+        storage_id: format!("{marker}:{document_id}"),
+        row_kind,
+        record: None,
+        document_id,
+        generation: Some(generation),
+    }
+}
+
+fn newest_generation(
+    document_id: DocumentId,
+    active: Option<DocumentGeneration>,
+    staged: Option<DocumentGeneration>,
+) -> Result<Option<DocumentGeneration>> {
+    if let (Some(active), Some(staged)) = (active, staged) {
+        if active.content_revision == staged.content_revision
+            && active.revision_token != staged.revision_token
+        {
+            return Err(RetrievalError::vector_store(format!(
+                "document {document_id} has conflicting generation markers at revision {}",
+                active.content_revision
+            )));
+        }
+        return Ok(Some(
+            if staged.content_revision >= active.content_revision {
+                staged
+            } else {
+                active
+            },
+        ));
+    }
+    Ok(staged.or(active))
 }
 
 #[async_trait]
@@ -222,21 +408,24 @@ impl VectorStore for LanceVectorStore {
         for record in &records {
             self.check_dims(&record.embedding)?;
         }
-        // Collapse duplicate chunk ids within the batch (last wins) so this backend
-        // matches InMemoryVectorStore's by-id dedupe. Merge-insert updates existing
-        // rows and inserts new rows in one Lance dataset version.
         let records = dedupe_by_chunk_id(records);
         if records.is_empty() {
             return Ok(());
         }
-        let batch = self.to_batch(&records)?;
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], self.schema.clone());
-        let mut merge = self.table.merge_insert(&["chunk_id"]);
-        merge
-            .when_matched_update_all(None)
-            .when_not_matched_insert_all();
-        merge.execute(Box::new(reader)).await.map_err(lance_err)?;
-        Ok(())
+        let _write = self.write_lock.lock().await;
+        let documents = records
+            .iter()
+            .map(|record| record.chunk.document_id)
+            .collect::<std::collections::HashSet<_>>();
+        for document_id in documents {
+            if self.generation_rows_exist(document_id).await? {
+                return Err(RetrievalError::vector_store(
+                    "legacy upsert cannot modify a generation-managed document",
+                ));
+            }
+        }
+        let rows = records.into_iter().map(unversioned_row).collect::<Vec<_>>();
+        self.merge_rows(&rows, None).await
     }
 
     async fn query(&self, query: &Embedding, k: usize) -> Result<Vec<ScoredChunk>> {
@@ -249,6 +438,7 @@ impl VectorStore for LanceVectorStore {
             .query()
             .nearest_to(query.0.as_slice())
             .map_err(lance_err)?
+            .only_if(VISIBLE_CHUNKS)
             .column(VECTOR_COL)
             .distance_type(DistanceType::Cosine)
             .limit(k)
@@ -278,34 +468,140 @@ impl VectorStore for LanceVectorStore {
             }
         }
         let records = dedupe_by_chunk_id(records);
-        let batch = self.to_batch(&records)?;
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], self.schema.clone());
+        let _write = self.write_lock.lock().await;
+        if self.generation_rows_exist(document_id).await? {
+            return Err(RetrievalError::vector_store(
+                "legacy replacement cannot modify a generation-managed document",
+            ));
+        }
+        let rows = records.into_iter().map(unversioned_row).collect::<Vec<_>>();
+        self.merge_rows(&rows, Some(format!("document_id = '{document_id}'")))
+            .await
+    }
 
-        // One merge transaction replaces matching chunk ids, inserts new chunks,
-        // and deletes stale chunks belonging to this document. Readers see either
-        // the previous dataset version or the committed replacement, never the
-        // delete half of a two-step write. The target filter prevents rows from
-        // other documents being deleted merely because they are absent from this
-        // replacement's source batch.
-        let mut merge = self.table.merge_insert(&["chunk_id"]);
-        merge
-            .when_matched_update_all(None)
-            .when_not_matched_insert_all()
-            .when_not_matched_by_source_delete(Some(format!("document_id = '{document_id}'")));
-        merge.execute(Box::new(reader)).await.map_err(lance_err)?;
-        Ok(())
+    async fn stage_document_generation(
+        &self,
+        document_id: DocumentId,
+        generation: DocumentGeneration,
+        records: Vec<VectorRecord>,
+    ) -> Result<GenerationStageOutcome> {
+        if generation.content_revision < 1 {
+            return Err(RetrievalError::vector_store(
+                "document generation revision must be at least one",
+            ));
+        }
+        for record in &records {
+            self.check_dims(&record.embedding)?;
+            if record.chunk.document_id != document_id {
+                return Err(RetrievalError::vector_store(format!(
+                    "staged record {} belongs to document {}, expected {document_id}",
+                    record.chunk.id, record.chunk.document_id
+                )));
+            }
+        }
+        let records = dedupe_by_chunk_id(records);
+        let _write = self.write_lock.lock().await;
+        let active = self.generation_marker(document_id, ACTIVE_MARKER).await?;
+        let staged = self.generation_marker(document_id, STAGED_MARKER).await?;
+        if let Some(current) = newest_generation(document_id, active, staged)? {
+            match generation.content_revision.cmp(&current.content_revision) {
+                std::cmp::Ordering::Less => {
+                    return Ok(GenerationStageOutcome::Rejected { current });
+                }
+                std::cmp::Ordering::Equal => {
+                    if generation.revision_token != current.revision_token {
+                        return Err(RetrievalError::vector_store(format!(
+                            "document {document_id} generation {} has conflicting revision tokens",
+                            generation.content_revision
+                        )));
+                    }
+                    return Ok(GenerationStageOutcome::AlreadyPresent);
+                }
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+
+        let mut rows = records
+            .into_iter()
+            .map(|record| generation_chunk_row(record, generation, STAGED_CHUNK))
+            .collect::<Vec<_>>();
+        rows.push(generation_marker_row(
+            document_id,
+            generation,
+            STAGED_MARKER,
+        ));
+        self.merge_rows(
+            &rows,
+            Some(format!(
+                "document_id = '{document_id}' AND row_kind IN ('{STAGED_CHUNK}', '{STAGED_MARKER}')"
+            )),
+        )
+        .await?;
+        Ok(GenerationStageOutcome::Staged)
+    }
+
+    async fn activate_document_generation(
+        &self,
+        document_id: DocumentId,
+        generation: DocumentGeneration,
+    ) -> Result<bool> {
+        let _write = self.write_lock.lock().await;
+        let staged = self.generation_marker(document_id, STAGED_MARKER).await?;
+        if let Some(staged) = staged {
+            if staged != generation {
+                return Ok(false);
+            }
+            let active = self.generation_marker(document_id, ACTIVE_MARKER).await?;
+            if newest_generation(document_id, active, Some(staged))? != Some(staged) {
+                return Ok(false);
+            }
+            let records = self
+                .read_records(format!(
+                    "document_id = '{document_id}' AND row_kind = '{STAGED_CHUNK}' AND content_revision = {} AND revision_token = '{}'",
+                    generation.content_revision, generation.revision_token
+                ))
+                .await?;
+            let mut rows = records
+                .into_iter()
+                .map(|record| generation_chunk_row(record, generation, ACTIVE_CHUNK))
+                .collect::<Vec<_>>();
+            rows.push(generation_marker_row(
+                document_id,
+                generation,
+                ACTIVE_MARKER,
+            ));
+            self.merge_rows(&rows, Some(format!("document_id = '{document_id}'")))
+                .await?;
+            return Ok(true);
+        }
+        Ok(self
+            .generation_marker(document_id, ACTIVE_MARKER)
+            .await?
+            .is_some_and(|active| active == generation))
+    }
+
+    async fn active_document_generation(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Option<DocumentGeneration>> {
+        self.generation_marker(document_id, ACTIVE_MARKER).await
     }
 
     async fn document_len(&self, document_id: DocumentId) -> Result<Option<usize>> {
         self.table
-            .count_rows(Some(format!("document_id = '{document_id}'")))
+            .count_rows(Some(format!(
+                "document_id = '{document_id}' AND {VISIBLE_CHUNKS}"
+            )))
             .await
             .map(Some)
             .map_err(lance_err)
     }
 
     async fn len(&self) -> Result<usize> {
-        self.table.count_rows(None).await.map_err(lance_err)
+        self.table
+            .count_rows(Some(VISIBLE_CHUNKS.to_string()))
+            .await
+            .map_err(lance_err)
     }
 }
 
@@ -325,26 +621,19 @@ fn dedupe_by_chunk_id(records: Vec<VectorRecord>) -> Vec<VectorRecord> {
     out
 }
 
-/// The vector column's fixed width in a table schema, if present.
-fn vector_dim(schema: &SchemaRef) -> Option<usize> {
-    schema
-        .field_with_name(VECTOR_COL)
-        .ok()
-        .and_then(|field| match field.data_type() {
-            DataType::FixedSizeList(_, size) => Some(*size as usize),
-            _ => None,
-        })
-}
-
 /// The table schema: scalar citation columns plus the fixed-width vector column.
 fn build_schema(dims: usize) -> SchemaRef {
     Arc::new(Schema::new(vec![
+        Field::new("storage_id", DataType::Utf8, false),
+        Field::new("row_kind", DataType::Utf8, false),
         Field::new("chunk_id", DataType::Utf8, false),
         Field::new("document_id", DataType::Utf8, false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("text", DataType::Utf8, false),
         Field::new("span_start", DataType::UInt64, false),
         Field::new("span_end", DataType::UInt64, false),
+        Field::new("content_revision", DataType::Int64, false),
+        Field::new("revision_token", DataType::Utf8, false),
         Field::new(
             VECTOR_COL,
             DataType::FixedSizeList(
@@ -354,6 +643,46 @@ fn build_schema(dims: usize) -> SchemaRef {
             false,
         ),
     ]))
+}
+
+fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Result<()> {
+    let chunk_ids = str_col(batch, "chunk_id")?;
+    let doc_ids = str_col(batch, "document_id")?;
+    let ordinals = u64_col(batch, "ordinal")?;
+    let texts = str_col(batch, "text")?;
+    let starts = u64_col(batch, "span_start")?;
+    let ends = u64_col(batch, "span_end")?;
+    let vectors = batch
+        .column_by_name(VECTOR_COL)
+        .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
+        .ok_or_else(|| RetrievalError::vector_store("missing/mistyped column `vector`"))?;
+
+    for index in 0..batch.num_rows() {
+        let chunk_id: ChunkId = chunk_ids
+            .value(index)
+            .parse()
+            .map_err(|error| RetrievalError::vector_store(format!("bad chunk_id: {error}")))?;
+        let document_id: DocumentId = doc_ids
+            .value(index)
+            .parse()
+            .map_err(|error| RetrievalError::vector_store(format!("bad document_id: {error}")))?;
+        let values = vectors.value(index);
+        let values = values
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .ok_or_else(|| RetrievalError::vector_store("vector values are not float32"))?;
+        out.push(VectorRecord {
+            chunk: Chunk {
+                id: chunk_id,
+                document_id,
+                ordinal: ordinals.value(index) as usize,
+                text: texts.value(index).to_string(),
+                span: ByteSpan::new(starts.value(index) as usize, ends.value(index) as usize),
+            },
+            embedding: Embedding(values.values().to_vec()),
+        });
+    }
+    Ok(())
 }
 
 /// Decode one result batch into [`ScoredChunk`]s, converting cosine distance to
@@ -408,6 +737,13 @@ fn u64_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt64Array> {
         .ok_or_else(|| RetrievalError::vector_store(format!("missing/mistyped column `{name}`")))
 }
 
+fn i64_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int64Array> {
+    batch
+        .column_by_name(name)
+        .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+        .ok_or_else(|| RetrievalError::vector_store(format!("missing/mistyped column `{name}`")))
+}
+
 fn lance_err(err: impl std::fmt::Display) -> RetrievalError {
     RetrievalError::vector_store(err.to_string())
 }
@@ -422,6 +758,29 @@ mod tests {
             chunk: Chunk::new(doc, ordinal, span, text),
             embedding: Embedding(vector),
         }
+    }
+
+    fn generation(revision: i64) -> DocumentGeneration {
+        DocumentGeneration {
+            content_revision: revision,
+            revision_token: uuid::Uuid::from_u128(revision as u128),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_enforces_one_writer_per_dataset() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().to_str().unwrap();
+        let first = LanceVectorStore::connect(uri, 2).await.unwrap();
+        let error = match LanceVectorStore::connect(uri, 2).await {
+            Ok(_) => panic!("a second writer unexpectedly acquired the dataset"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("already owns"));
+
+        drop(first);
+        let reopened = LanceVectorStore::connect(uri, 2).await.unwrap();
+        assert!(reopened.is_empty().await.unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -660,66 +1019,270 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn connect_repairs_duplicate_ids_from_the_legacy_writer_once() {
+    async fn connect_resets_the_same_dimension_legacy_schema() {
         let dir = tempfile::tempdir().unwrap();
         let uri = dir.path().to_str().unwrap();
-        let schema = build_schema(2);
+        let legacy_schema = Arc::new(Schema::new(vec![
+            Field::new("chunk_id", DataType::Utf8, false),
+            Field::new("document_id", DataType::Utf8, false),
+            Field::new("ordinal", DataType::UInt64, false),
+            Field::new("text", DataType::Utf8, false),
+            Field::new("span_start", DataType::UInt64, false),
+            Field::new("span_end", DataType::UInt64, false),
+            Field::new(
+                VECTOR_COL,
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 2),
+                false,
+            ),
+        ]));
         let db = lancedb::connect(uri).execute().await.unwrap();
-        let table = db
-            .create_empty_table(TABLE, schema.clone())
+        db.create_empty_table(TABLE, legacy_schema)
             .execute()
             .await
             .unwrap();
-        let legacy = LanceVectorStore {
-            table: table.clone(),
-            schema,
-            dims: 2,
-        };
-        let doc = DocumentId::new();
-        let old = record(doc, 0, "old", vec![1.0, 0.0]);
-        let new = record(doc, 0, "new", vec![0.0, 1.0]);
-        assert_eq!(old.chunk.id, new.chunk.id);
-        table
-            .add(legacy.to_batch(&[old]).unwrap())
-            .execute()
-            .await
-            .unwrap();
-        table
-            .add(legacy.to_batch(&[new]).unwrap())
-            .execute()
-            .await
-            .unwrap();
-        assert_eq!(table.count_rows(None).await.unwrap(), 2);
-        drop(legacy);
-        drop(table);
         drop(db);
 
-        let repaired = LanceVectorStore::connect(uri, 2).await.unwrap();
-        assert_eq!(repaired.len().await.unwrap(), 1);
-        let hits = repaired
-            .query(&Embedding(vec![0.0, 1.0]), 10)
+        let store = LanceVectorStore::connect(uri, 2).await.unwrap();
+        assert_eq!(
+            store.table.schema().await.unwrap().as_ref(),
+            build_schema(2).as_ref()
+        );
+        assert!(store.is_empty().await.unwrap());
+        let doc = DocumentId::new();
+        let first = generation(1);
+        assert_eq!(
+            store
+                .stage_document_generation(doc, first, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Staged
+        );
+        assert!(store
+            .activate_document_generation(doc, first)
+            .await
+            .unwrap());
+        assert_eq!(
+            store.active_document_generation(doc).await.unwrap(),
+            Some(first)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_generation_is_durable_invisible_and_atomically_activated() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().to_str().unwrap();
+        let doc = DocumentId::new();
+        let other = DocumentId::new();
+        let first = generation(1);
+        let store = LanceVectorStore::connect(uri, 2).await.unwrap();
+        store
+            .upsert(vec![record(other, 0, "other", vec![0.0, 1.0])])
             .await
             .unwrap();
+        let before_stage = store.table.version().await.unwrap();
+        assert_eq!(
+            store
+                .stage_document_generation(
+                    doc,
+                    first,
+                    vec![record(doc, 0, "first", vec![1.0, 0.0])],
+                )
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Staged
+        );
+        assert_eq!(store.table.version().await.unwrap(), before_stage + 1);
+        assert_eq!(store.len().await.unwrap(), 1);
+        assert_eq!(store.document_len(doc).await.unwrap(), Some(0));
+        let hits = store.query(&Embedding(vec![1.0, 0.0]), 10).await.unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].chunk.text, "new");
-        let version = repaired.table.version().await.unwrap();
+        assert_eq!(hits[0].chunk.text, "other");
+        drop(store);
 
-        // The migration marker prevents a second scan/write on reopen.
-        drop(repaired);
         let reopened = LanceVectorStore::connect(uri, 2).await.unwrap();
-        assert_eq!(reopened.table.version().await.unwrap(), version);
-
-        // With target uniqueness restored, merge-insert keeps it unique.
-        reopened
-            .replace_document(doc, vec![record(doc, 0, "final", vec![1.0, 0.0])])
+        assert_eq!(
+            reopened.active_document_generation(doc).await.unwrap(),
+            None
+        );
+        let before_activation = reopened.table.version().await.unwrap();
+        assert!(reopened
+            .activate_document_generation(doc, first)
             .await
-            .unwrap();
-        assert_eq!(reopened.len().await.unwrap(), 1);
+            .unwrap());
+        assert_eq!(
+            reopened.table.version().await.unwrap(),
+            before_activation + 1
+        );
+        assert_eq!(reopened.len().await.unwrap(), 2);
         let hits = reopened
             .query(&Embedding(vec![1.0, 0.0]), 10)
             .await
             .unwrap();
+        assert!(hits.iter().any(|hit| hit.chunk.text == "first"));
+        assert!(hits.iter().any(|hit| hit.chunk.text == "other"));
+        assert_eq!(
+            reopened.active_document_generation(doc).await.unwrap(),
+            Some(first)
+        );
+        let activated_version = reopened.table.version().await.unwrap();
+        assert!(reopened
+            .activate_document_generation(doc, first)
+            .await
+            .unwrap());
+        assert_eq!(reopened.table.version().await.unwrap(), activated_version);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn newer_stage_fences_stale_writers_and_empty_activation_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().to_str().unwrap();
+        let store = LanceVectorStore::connect(uri, 2).await.unwrap();
+        let doc = DocumentId::new();
+        let first = generation(1);
+        let second = generation(2);
+        let tombstone = generation(3);
+        store
+            .stage_document_generation(doc, first, vec![record(doc, 0, "live", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+        assert!(store
+            .activate_document_generation(doc, first)
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .stage_document_generation(doc, tombstone, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Staged
+        );
+        let version = store.table.version().await.unwrap();
+        assert_eq!(
+            store
+                .stage_document_generation(doc, second, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Rejected { current: tombstone }
+        );
+        assert_eq!(
+            store
+                .stage_document_generation(doc, tombstone, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::AlreadyPresent
+        );
+        let conflicting = DocumentGeneration {
+            revision_token: uuid::Uuid::from_u128(300),
+            ..tombstone
+        };
+        assert!(store
+            .stage_document_generation(doc, conflicting, Vec::new())
+            .await
+            .is_err());
+        assert_eq!(store.table.version().await.unwrap(), version);
+        assert!(!store
+            .activate_document_generation(doc, first)
+            .await
+            .unwrap());
+        assert!(store
+            .upsert(vec![record(doc, 0, "legacy", vec![0.0, 1.0])])
+            .await
+            .is_err());
+        assert!(store.replace_document(doc, Vec::new()).await.is_err());
+        drop(store);
+
+        let reopened = LanceVectorStore::connect(uri, 2).await.unwrap();
+        assert!(reopened
+            .activate_document_generation(doc, tombstone)
+            .await
+            .unwrap());
+        assert!(reopened.is_empty().await.unwrap());
+        assert_eq!(reopened.document_len(doc).await.unwrap(), Some(0));
+        assert_eq!(
+            reopened.active_document_generation(doc).await.unwrap(),
+            Some(tombstone)
+        );
+        drop(reopened);
+        let reopened = LanceVectorStore::connect(uri, 2).await.unwrap();
+        assert_eq!(
+            reopened.active_document_generation(doc).await.unwrap(),
+            Some(tombstone)
+        );
+        assert_eq!(reopened.table.count_rows(None).await.unwrap(), 1);
+        assert_eq!(
+            reopened
+                .stage_document_generation(doc, second, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Rejected { current: tombstone }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_stages_leave_only_the_highest_generation_activatable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let doc = DocumentId::new();
+        let second = generation(2);
+        let third = generation(3);
+        let (lower, higher) = tokio::join!(
+            store.stage_document_generation(
+                doc,
+                second,
+                vec![record(doc, 0, "second", vec![1.0, 0.0])],
+            ),
+            store.stage_document_generation(
+                doc,
+                third,
+                vec![record(doc, 0, "third", vec![0.0, 1.0])],
+            )
+        );
+        let lower = lower.unwrap();
+        assert!(
+            lower == GenerationStageOutcome::Staged
+                || lower == GenerationStageOutcome::Rejected { current: third }
+        );
+        assert_eq!(higher.unwrap(), GenerationStageOutcome::Staged);
+        assert!(!store
+            .activate_document_generation(doc, second)
+            .await
+            .unwrap());
+        assert!(store
+            .activate_document_generation(doc, third)
+            .await
+            .unwrap());
+        let hits = store.query(&Embedding(vec![0.0, 1.0]), 10).await.unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].chunk.text, "final");
+        assert_eq!(hits[0].chunk.text, "third");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stage_validation_fails_before_any_dataset_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let doc = DocumentId::new();
+        let version = store.table.version().await.unwrap();
+        assert!(store
+            .stage_document_generation(
+                doc,
+                generation(1),
+                vec![record(DocumentId::new(), 0, "wrong", vec![1.0, 0.0])],
+            )
+            .await
+            .is_err());
+        assert!(store
+            .stage_document_generation(
+                doc,
+                generation(1),
+                vec![record(doc, 0, "wrong dims", vec![1.0])],
+            )
+            .await
+            .is_err());
+        assert_eq!(store.table.version().await.unwrap(), version);
+        assert_eq!(store.table.count_rows(None).await.unwrap(), 0);
     }
 }
