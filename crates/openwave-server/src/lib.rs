@@ -62,6 +62,22 @@ pub fn app(state: AppState) -> Router {
             post(routes::create_project).get(routes::list_projects),
         )
         .route("/projects/{id}", get(routes::get_project))
+        .route(
+            "/projects/{project_id}/documents",
+            post(routes::ingest_project_document).get(routes::list_project_documents),
+        )
+        .route(
+            "/projects/{project_id}/documents/{document_id}",
+            get(routes::get_project_document).delete(routes::delete_project_document),
+        )
+        .route(
+            "/projects/{project_id}/documents/{document_id}/retry",
+            post(routes::retry_project_document),
+        )
+        .route(
+            "/projects/{project_id}/search",
+            post(routes::search_project_documents),
+        )
         .route("/models", get(routes::list_models))
         .route("/providers", get(routes::list_providers))
         .route(
@@ -1369,6 +1385,202 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_document_routes_enforce_corpus_identity_and_ownership() {
+        let (router, token, store, _dir, worker) = test_app_with_worker().await;
+        let bearer = format!("Bearer {token}");
+        let project_a = make_project(&router, &bearer).await;
+        let project_b = make_project(&router, &bearer).await;
+        let uri = "file:///shared-source.txt";
+
+        let root: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/documents",
+                serde_json::json!({"uri": uri, "content": "loose corpus zephyr"}),
+            )
+            .await,
+        )
+        .await;
+        let a: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                &format!("/projects/{}/documents", project_a.id),
+                serde_json::json!({"uri": uri, "content": "project alpha aurora"}),
+            )
+            .await,
+        )
+        .await;
+        let b: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                &format!("/projects/{}/documents", project_b.id),
+                serde_json::json!({"uri": uri, "content": "project beta nebula"}),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(
+            root["document_id"],
+            openwave_core::DocumentId::derive(uri).to_string()
+        );
+        assert_eq!(
+            a["document_id"],
+            openwave_core::DocumentId::derive_for_project(project_a.id, uri).to_string()
+        );
+        assert_eq!(
+            b["document_id"],
+            openwave_core::DocumentId::derive_for_project(project_b.id, uri).to_string()
+        );
+        assert_ne!(root["document_id"], a["document_id"]);
+        assert_ne!(a["document_id"], b["document_id"]);
+
+        for _ in 0..3 {
+            assert!(matches!(
+                worker.run_once().await.unwrap(),
+                document_worker::WorkerOutcome::Completed(_)
+            ));
+        }
+
+        let request = |method: axum::http::Method, uri: String| {
+            let router = router.clone();
+            let bearer = bearer.clone();
+            async move {
+                router
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header(header::AUTHORIZATION, bearer)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let a_id = a["document_id"].as_str().unwrap();
+        let b_id = b["document_id"].as_str().unwrap();
+        let listing: serde_json::Value = json_body(
+            request(
+                axum::http::Method::GET,
+                format!("/projects/{}/documents", project_a.id),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(listing["documents"].as_array().unwrap().len(), 1);
+        assert_eq!(listing["documents"][0]["document_id"], a["document_id"]);
+        assert_eq!(
+            listing["documents"][0]["project_id"],
+            project_a.id.to_string()
+        );
+
+        assert_eq!(
+            request(
+                axum::http::Method::GET,
+                format!("/projects/{}/documents/{b_id}", project_a.id),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                axum::http::Method::DELETE,
+                format!("/projects/{}/documents/{a_id}", project_b.id),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(axum::http::Method::DELETE, format!("/documents/{a_id}"),)
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(axum::http::Method::GET, format!("/documents/{a_id}"),)
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            post_json(
+                &router,
+                &bearer,
+                &format!("/documents/{a_id}/retry"),
+                serde_json::Value::Null,
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            store
+                .get_document(a_id.parse().unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+                .project_id,
+            Some(project_a.id)
+        );
+
+        let root_search: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/search",
+                serde_json::json!({"query": "project beta nebula", "k": 1}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            root_search["citations"][0]["document_id"],
+            root["document_id"]
+        );
+        let a_search: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                &format!("/projects/{}/search", project_a.id),
+                serde_json::json!({"query": "project beta nebula", "k": 1}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(a_search["citations"][0]["document_id"], a["document_id"]);
+
+        let unknown = ProjectId::new();
+        assert_eq!(
+            post_json(
+                &router,
+                &bearer,
+                &format!("/projects/{unknown}/documents"),
+                serde_json::json!({"uri": uri, "content": "orphan"}),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                axum::http::Method::DELETE,
+                format!("/projects/{}/documents/{a_id}", project_a.id),
+            )
+            .await
+            .status(),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[tokio::test]
     async fn failed_indexing_leaves_authoritative_source_stale_for_retry() {
         let retrieval = Arc::new(Retriever::new(
             Box::new(PlainTextParser::new()),
@@ -1469,6 +1681,100 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let retried = store.get_document_job(job_id).await.unwrap().unwrap();
+        assert_eq!(retried.status, openwave_core::DocumentJobStatus::Queued);
+        assert_eq!(retried.attempt_count, 0);
+        assert_eq!(retried.id, job_id);
+    }
+
+    #[tokio::test]
+    async fn project_retry_revives_only_the_owned_terminal_job() {
+        let (router, token, store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let project_a = make_project(&router, &bearer).await;
+        let project_b = make_project(&router, &bearer).await;
+        let ingested: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                &format!("/projects/{}/documents", project_a.id),
+                serde_json::json!({
+                    "uri": "file:///project-manual-retry.txt",
+                    "content": "retry only within the owning project"
+                }),
+            )
+            .await,
+        )
+        .await;
+        let document_id: openwave_core::DocumentId =
+            ingested["document_id"].as_str().unwrap().parse().unwrap();
+        let job_id: openwave_core::DocumentJobId =
+            ingested["job_id"].as_str().unwrap().parse().unwrap();
+        let now = chrono::Utc::now();
+        let claimed = store
+            .claim_document_job(now, now + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, job_id);
+        assert_eq!(
+            store
+                .record_document_job_failure(
+                    job_id,
+                    claimed.lease_token.unwrap(),
+                    chrono::Utc::now(),
+                    None,
+                    "project_manual_test_failure",
+                    None,
+                )
+                .await
+                .unwrap(),
+            Some(openwave_core::DocumentJobStatus::Failed)
+        );
+
+        assert_eq!(
+            post_json(
+                &router,
+                &bearer,
+                &format!("/documents/{document_id}/retry"),
+                serde_json::Value::Null,
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            post_json(
+                &router,
+                &bearer,
+                &format!("/projects/{}/documents/{document_id}/retry", project_b.id),
+                serde_json::Value::Null,
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            store
+                .get_document_job(job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            openwave_core::DocumentJobStatus::Failed
+        );
+
+        let response = post_json(
+            &router,
+            &bearer,
+            &format!("/projects/{}/documents/{document_id}/retry", project_a.id),
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let response: serde_json::Value = json_body(response).await;
+        assert_eq!(response["document_id"], document_id.to_string());
+        assert_eq!(response["job_id"], job_id.to_string());
         let retried = store.get_document_job(job_id).await.unwrap().unwrap();
         assert_eq!(retried.status, openwave_core::DocumentJobStatus::Queued);
         assert_eq!(retried.attempt_count, 0);
