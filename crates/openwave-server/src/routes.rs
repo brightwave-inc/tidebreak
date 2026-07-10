@@ -471,6 +471,24 @@ pub async fn ingest_document(
     State(state): State<AppState>,
     Json(body): Json<IngestDocument>,
 ) -> Result<impl IntoResponse, ServerError> {
+    ingest_document_in_scope(&state, None, body).await
+}
+
+/// `POST /projects/{project_id}/documents` — enqueue a document in one project corpus.
+pub async fn ingest_project_document(
+    State(state): State<AppState>,
+    Path(project_id): Path<ProjectId>,
+    Json(body): Json<IngestDocument>,
+) -> Result<impl IntoResponse, ServerError> {
+    require_project(&state, project_id).await?;
+    ingest_document_in_scope(&state, Some(project_id), body).await
+}
+
+async fn ingest_document_in_scope(
+    state: &AppState,
+    project_id: Option<ProjectId>,
+    body: IngestDocument,
+) -> Result<(StatusCode, Json<IngestResult>), ServerError> {
     if body.content.trim().is_empty() {
         return Err(ServerError::bad_request("content must not be empty"));
     }
@@ -484,7 +502,7 @@ pub async fn ingest_document(
     // Pipeline components promise a stable fingerprint for their lifetime. Take
     // one snapshot and use it for the exact parse/index operation below.
     let index_fingerprint = state.retrieval.index_fingerprint();
-    let document = state
+    let mut document = state
         .retrieval
         .parse_document(source, media_type, body.content.as_bytes())
         .map_err(retrieval_error)?;
@@ -493,13 +511,20 @@ pub async fn ingest_document(
         DocumentSource::Inline => None,
         _ => None,
     };
+    if let Some(project_id) = project_id {
+        document.id = source_uri
+            .as_deref()
+            .map(|uri| DocumentId::derive_for_project(project_id, uri))
+            .unwrap_or(document.id);
+        document.project_id = Some(project_id);
+    }
     let _document_write = state.document_writes.acquire(document.id).await;
     let (revision, job) = state
         .store
         .upsert_document_and_enqueue_index(
             &DocumentUpsert {
                 id: document.id,
-                project_id: None,
+                project_id,
                 source_uri,
                 media_type: document.media_type.clone(),
                 title: None,
@@ -528,8 +553,31 @@ pub async fn retry_document(
     State(state): State<AppState>,
     Path(id): Path<DocumentId>,
 ) -> Result<impl IntoResponse, ServerError> {
+    retry_document_in_scope(&state, id, None).await
+}
+
+/// `POST /projects/{project_id}/documents/{document_id}/retry` — revive an owned
+/// document's current exact failed index job.
+pub async fn retry_project_document(
+    State(state): State<AppState>,
+    Path((project_id, document_id)): Path<(ProjectId, DocumentId)>,
+) -> Result<impl IntoResponse, ServerError> {
+    require_project(&state, project_id).await?;
+    retry_document_in_scope(&state, document_id, Some(project_id)).await
+}
+
+async fn retry_document_in_scope(
+    state: &AppState,
+    id: DocumentId,
+    project_id: Option<ProjectId>,
+) -> Result<(StatusCode, Json<IngestResult>), ServerError> {
     let _document_write = state.document_writes.acquire(id).await;
-    if state.store.get_document(id).await?.is_none() {
+    if state
+        .store
+        .get_document(id)
+        .await?
+        .is_none_or(|document| document.project_id != project_id)
+    {
         return Err(ServerError::not_found(format!("document {id} not found")));
     }
     let fingerprint = state.retrieval.index_fingerprint();
@@ -546,7 +594,7 @@ pub async fn retry_document(
         .store
         .get_document(id)
         .await?
-        .filter(|record| record.generation() == job.generation())
+        .filter(|record| record.project_id == project_id && record.generation() == job.generation())
         .ok_or_else(|| {
             ServerError::internal(format!(
                 "retried job {} no longer matches document {id}",
@@ -572,6 +620,24 @@ pub async fn list_documents(
     State(state): State<AppState>,
     Query(query): Query<DocumentListQuery>,
 ) -> Result<Json<DocumentListPage>, ServerError> {
+    list_documents_in_scope(&state, DocumentScope::Unscoped, query).await
+}
+
+/// `GET /projects/{project_id}/documents` — list one project's document corpus.
+pub async fn list_project_documents(
+    State(state): State<AppState>,
+    Path(project_id): Path<ProjectId>,
+    Query(query): Query<DocumentListQuery>,
+) -> Result<Json<DocumentListPage>, ServerError> {
+    require_project(&state, project_id).await?;
+    list_documents_in_scope(&state, DocumentScope::Project(project_id), query).await
+}
+
+async fn list_documents_in_scope(
+    state: &AppState,
+    scope: DocumentScope,
+    query: DocumentListQuery,
+) -> Result<Json<DocumentListPage>, ServerError> {
     let limit = query.limit.unwrap_or(DEFAULT_DOCUMENT_PAGE_SIZE);
     if limit == 0 || limit > MAX_DOCUMENT_PAGE_SIZE {
         return Err(ServerError::bad_request(format!(
@@ -585,7 +651,7 @@ pub async fn list_documents(
         .transpose()?;
     let mut records = state
         .store
-        .list_document_summaries(DocumentScope::Unscoped, cursor, limit + 1)
+        .list_document_summaries(scope, cursor, limit + 1)
         .await?;
     let has_more = records.len() > limit as usize;
     records.truncate(limit as usize);
@@ -619,6 +685,22 @@ pub async fn get_document(
         .ok_or_else(|| ServerError::not_found(format!("document {id} not found")))
 }
 
+/// `GET /projects/{project_id}/documents/{document_id}` — fetch an owned document.
+pub async fn get_project_document(
+    State(state): State<AppState>,
+    Path((project_id, document_id)): Path<(ProjectId, DocumentId)>,
+) -> Result<Json<DocumentDetail>, ServerError> {
+    require_project(&state, project_id).await?;
+    state
+        .store
+        .get_document(document_id)
+        .await?
+        .filter(|document| document.project_id == Some(project_id))
+        .map(DocumentDetail::from)
+        .map(Json)
+        .ok_or_else(|| ServerError::not_found(format!("document {document_id} not found")))
+}
+
 /// `DELETE /documents/{id}` — atomically delete authoritative source/jobs and
 /// persist a pending empty tombstone. The durable worker publishes it.
 pub async fn delete_document(
@@ -626,7 +708,37 @@ pub async fn delete_document(
     Path(id): Path<DocumentId>,
 ) -> Result<StatusCode, ServerError> {
     let _document_write = state.document_writes.acquire(id).await;
+    if state
+        .store
+        .get_document(id)
+        .await?
+        .is_some_and(|document| document.project_id.is_some())
+    {
+        return Err(ServerError::not_found(format!("document {id} not found")));
+    }
     state.store.delete_document(id).await?;
+    state.document_job_wake.notify_one();
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// `DELETE /projects/{project_id}/documents/{document_id}` — retire an owned document.
+pub async fn delete_project_document(
+    State(state): State<AppState>,
+    Path((project_id, document_id)): Path<(ProjectId, DocumentId)>,
+) -> Result<StatusCode, ServerError> {
+    require_project(&state, project_id).await?;
+    let _document_write = state.document_writes.acquire(document_id).await;
+    if state
+        .store
+        .get_document(document_id)
+        .await?
+        .is_none_or(|document| document.project_id != Some(project_id))
+    {
+        return Err(ServerError::not_found(format!(
+            "document {document_id} not found"
+        )));
+    }
+    state.store.delete_document(document_id).await?;
     state.document_job_wake.notify_one();
     Ok(StatusCode::ACCEPTED)
 }
@@ -656,6 +768,24 @@ pub async fn search_documents(
     State(state): State<AppState>,
     Json(body): Json<SearchRequest>,
 ) -> Result<Json<SearchResults>, ServerError> {
+    search_documents_in_scope(&state, SearchScope::Unscoped, body).await
+}
+
+/// `POST /projects/{project_id}/search` — search exactly one project corpus.
+pub async fn search_project_documents(
+    State(state): State<AppState>,
+    Path(project_id): Path<ProjectId>,
+    Json(body): Json<SearchRequest>,
+) -> Result<Json<SearchResults>, ServerError> {
+    require_project(&state, project_id).await?;
+    search_documents_in_scope(&state, SearchScope::Project(project_id), body).await
+}
+
+async fn search_documents_in_scope(
+    state: &AppState,
+    scope: SearchScope,
+    body: SearchRequest,
+) -> Result<Json<SearchResults>, ServerError> {
     let query = body.query.trim();
     if query.is_empty() {
         return Err(ServerError::bad_request("query must not be empty"));
@@ -666,10 +796,19 @@ pub async fn search_documents(
         .clamp(1, SearchTool::MAX_K);
     let citations = state
         .retrieval
-        .search(SearchScope::Unscoped, query, k)
+        .search(scope, query, k)
         .await
         .map_err(retrieval_error)?;
     Ok(Json(SearchResults { citations }))
+}
+
+async fn require_project(state: &AppState, project_id: ProjectId) -> Result<(), ServerError> {
+    if state.store.get_project(project_id).await?.is_none() {
+        return Err(ServerError::not_found(format!(
+            "project {project_id} not found"
+        )));
+    }
+    Ok(())
 }
 
 /// Body of `POST /chats`.
