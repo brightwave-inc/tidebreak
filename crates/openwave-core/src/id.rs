@@ -63,6 +63,35 @@ id_type!(
     ProjectId
 );
 id_type!(
+    /// Identifies an authoritative source document.
+    ///
+    /// Usually minted fresh with [`DocumentId::new`], but [`DocumentId::derive`]
+    /// preserves the existing stable URI identity used by retrieval ingestion.
+    DocumentId
+);
+
+impl DocumentId {
+    /// Namespace UUID for URI-derived document ids. This value is part of the
+    /// persisted identity contract and must remain stable.
+    const NAMESPACE: Uuid = Uuid::from_u128(0x1d0c_7a44_9e21_4b83_bc55_6677_8899_aabb);
+
+    /// Derive a stable id from a source URI in the unscoped corpus.
+    ///
+    /// Project-owned documents must use [`DocumentId::derive_for_project`] so
+    /// the same URI can belong to more than one corpus without aliasing.
+    #[must_use]
+    pub fn derive(uri: &str) -> Self {
+        Self(Uuid::new_v5(&Self::NAMESPACE, uri.as_bytes()))
+    }
+
+    /// Derive a stable id from a project and source URI.
+    #[must_use]
+    pub fn derive_for_project(project_id: ProjectId, uri: &str) -> Self {
+        let project_namespace = Uuid::new_v5(&Self::NAMESPACE, project_id.as_uuid().as_bytes());
+        Self(Uuid::new_v5(&project_namespace, uri.as_bytes()))
+    }
+}
+id_type!(
     /// Identifies a persistent conversation (owns a workspace directory).
     ChatId
 );
@@ -103,5 +132,32 @@ mod tests {
         // Transparent: serializes as the bare quoted UUID, no wrapper.
         assert_eq!(json, format!("\"{id}\""));
         assert_eq!(serde_json::from_str::<ChatId>(&json).unwrap(), id);
+    }
+
+    #[test]
+    fn document_uri_derivation_is_stable() {
+        assert_eq!(
+            DocumentId::derive("file:///a.txt"),
+            DocumentId::derive("file:///a.txt")
+        );
+        assert_ne!(
+            DocumentId::derive("file:///a.txt"),
+            DocumentId::derive("file:///b.txt")
+        );
+
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        assert_eq!(
+            DocumentId::derive_for_project(project_a, "file:///a.txt"),
+            DocumentId::derive_for_project(project_a, "file:///a.txt")
+        );
+        assert_ne!(
+            DocumentId::derive_for_project(project_a, "file:///a.txt"),
+            DocumentId::derive_for_project(project_b, "file:///a.txt")
+        );
+        assert_ne!(
+            DocumentId::derive_for_project(project_a, "file:///a.txt"),
+            DocumentId::derive("file:///a.txt")
+        );
     }
 }

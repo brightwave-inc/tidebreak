@@ -20,8 +20,8 @@ use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{CallId, ChatId, MessageId, ProjectId, TurnId};
-use crate::model::{Chat, Message, Project, Role, ToolCallRecord};
+use crate::id::{CallId, ChatId, DocumentId, MessageId, ProjectId, TurnId};
+use crate::model::{Chat, DocumentRecord, DocumentScope, Message, Project, Role, ToolCallRecord};
 use crate::storage::Store;
 
 /// Map any SeaORM failure into an [`AgentError::Store`].
@@ -88,6 +88,65 @@ impl Store for DbStore {
             .into_iter()
             .map(project_from_model)
             .collect())
+    }
+
+    async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
+        entities::document::ActiveModel {
+            id: Set(document.id.0),
+            project_id: Set(document.project_id.map(|id| id.0)),
+            source_uri: Set(document.source_uri.clone()),
+            media_type: Set(document.media_type.clone()),
+            title: Set(document.title.clone()),
+            canonical_text: Set(document.canonical_text.clone()),
+            content_revision: Set(document.content_revision),
+            revision_token: Set(document.revision_token),
+            indexed_revision: Set(document.indexed_revision),
+            index_fingerprint: Set(document.index_fingerprint.clone()),
+            created_at: Set(document.created_at),
+            updated_at: Set(document.updated_at),
+            indexed_at: Set(document.indexed_at),
+        }
+        .insert(&self.conn)
+        .await
+        .map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn get_document(&self, id: DocumentId) -> Result<Option<DocumentRecord>> {
+        Ok(entities::document::Entity::find_by_id(id.0)
+            .one(&self.conn)
+            .await
+            .map_err(store_err)?
+            .map(document_from_model))
+    }
+
+    async fn list_documents(&self, scope: DocumentScope) -> Result<Vec<DocumentRecord>> {
+        let mut query = entities::document::Entity::find();
+        query = match scope {
+            DocumentScope::All => query,
+            DocumentScope::Unscoped => {
+                query.filter(entities::document::Column::ProjectId.is_null())
+            }
+            DocumentScope::Project(id) => {
+                query.filter(entities::document::Column::ProjectId.eq(id.0))
+            }
+        };
+        Ok(query
+            .order_by_desc(entities::document::Column::CreatedAt)
+            .all(&self.conn)
+            .await
+            .map_err(store_err)?
+            .into_iter()
+            .map(document_from_model)
+            .collect())
+    }
+
+    async fn delete_document(&self, id: DocumentId) -> Result<()> {
+        entities::document::Entity::delete_by_id(id.0)
+            .exec(&self.conn)
+            .await
+            .map_err(store_err)?;
+        Ok(())
     }
 
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
@@ -286,6 +345,24 @@ fn project_from_model(model: entities::project::Model) -> Project {
     }
 }
 
+fn document_from_model(model: entities::document::Model) -> DocumentRecord {
+    DocumentRecord {
+        id: DocumentId(model.id),
+        project_id: model.project_id.map(ProjectId),
+        source_uri: model.source_uri,
+        media_type: model.media_type,
+        title: model.title,
+        canonical_text: model.canonical_text,
+        content_revision: model.content_revision,
+        revision_token: model.revision_token,
+        indexed_revision: model.indexed_revision,
+        index_fingerprint: model.index_fingerprint,
+        created_at: model.created_at,
+        updated_at: model.updated_at,
+        indexed_at: model.indexed_at,
+    }
+}
+
 fn chat_from_model(model: entities::chat::Model) -> Chat {
     Chat {
         id: ChatId(model.id),
@@ -347,6 +424,35 @@ fn role_from_db(text: &str) -> Result<Role> {
 /// types (`Chat`, `Message`), never these, so the ORM never leaks into the
 /// crate's contract.
 mod entities {
+    pub mod document {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+        #[sea_orm(table_name = "document")]
+        pub struct Model {
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub id: Uuid,
+            pub project_id: Option<Uuid>,
+            pub source_uri: Option<String>,
+            pub media_type: String,
+            pub title: Option<String>,
+            #[sea_orm(column_type = "Text")]
+            pub canonical_text: String,
+            pub content_revision: i64,
+            pub revision_token: Uuid,
+            pub indexed_revision: Option<i64>,
+            pub index_fingerprint: Option<String>,
+            pub created_at: DateTimeUtc,
+            pub updated_at: DateTimeUtc,
+            pub indexed_at: Option<DateTimeUtc>,
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+
     pub mod project {
         use sea_orm::entity::prelude::*;
 
@@ -494,6 +600,7 @@ mod migration {
                 Box::new(AddProjects),
                 Box::new(AddChatModel),
                 Box::new(AddToolCalls),
+                Box::new(AddDocuments),
             ]
         }
     }
@@ -798,6 +905,105 @@ mod migration {
         }
     }
 
+    /// Adds the authoritative document catalog. The retrieval database remains a
+    /// derived index; this table retains enough canonical content and index
+    /// watermark state to rebuild it safely.
+    struct AddDocuments;
+
+    impl MigrationName for AddDocuments {
+        fn name(&self) -> &str {
+            "m0006_document_catalog"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for AddDocuments {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let valid_index_revision = Expr::col(Document::IndexedRevision).is_null().or(
+                Expr::col(Document::IndexedRevision).gte(1).and(
+                    Expr::col(Document::IndexedRevision).lte(Expr::col(Document::ContentRevision)),
+                ),
+            );
+            let watermark_absent = Expr::col(Document::IndexedRevision)
+                .is_null()
+                .and(Expr::col(Document::IndexFingerprint).is_null())
+                .and(Expr::col(Document::IndexedAt).is_null());
+            let watermark_present = Expr::col(Document::IndexedRevision)
+                .is_not_null()
+                .and(Expr::col(Document::IndexFingerprint).is_not_null())
+                .and(Expr::col(Document::IndexedAt).is_not_null());
+
+            manager
+                .create_table(
+                    Table::create()
+                        .table(Document::Table)
+                        .if_not_exists()
+                        .col(ColumnDef::new(Document::Id).uuid().not_null().primary_key())
+                        .col(ColumnDef::new(Document::ProjectId).uuid())
+                        .col(ColumnDef::new(Document::SourceUri).text())
+                        .col(ColumnDef::new(Document::MediaType).text().not_null())
+                        .col(ColumnDef::new(Document::Title).text())
+                        .col(ColumnDef::new(Document::CanonicalText).text().not_null())
+                        .col(
+                            ColumnDef::new(Document::ContentRevision)
+                                .big_integer()
+                                .not_null()
+                                .default(1),
+                        )
+                        .col(ColumnDef::new(Document::RevisionToken).uuid().not_null())
+                        .col(ColumnDef::new(Document::IndexedRevision).big_integer())
+                        .col(ColumnDef::new(Document::IndexFingerprint).text())
+                        .col(
+                            ColumnDef::new(Document::CreatedAt)
+                                .timestamp_with_time_zone()
+                                .not_null(),
+                        )
+                        .col(
+                            ColumnDef::new(Document::UpdatedAt)
+                                .timestamp_with_time_zone()
+                                .not_null(),
+                        )
+                        .col(ColumnDef::new(Document::IndexedAt).timestamp_with_time_zone())
+                        .foreign_key(
+                            ForeignKey::create()
+                                .name("fk_document_project")
+                                .from(Document::Table, Document::ProjectId)
+                                .to(Project::Table, Project::Id)
+                                .on_delete(ForeignKeyAction::Cascade),
+                        )
+                        .check(Expr::col(Document::MediaType).ne(""))
+                        .check(
+                            Expr::col(Document::SourceUri)
+                                .is_null()
+                                .or(Expr::col(Document::SourceUri).ne("")),
+                        )
+                        .check(Expr::col(Document::ContentRevision).gte(1))
+                        .check(valid_index_revision)
+                        .check(watermark_absent.or(watermark_present))
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_document_project_created")
+                        .table(Document::Table)
+                        .col(Document::ProjectId)
+                        .col(Document::CreatedAt)
+                        .to_owned(),
+                )
+                .await?;
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(Document::Table).to_owned())
+                .await?;
+            Ok(())
+        }
+    }
+
     #[derive(DeriveIden)]
     enum Project {
         Table,
@@ -805,6 +1011,24 @@ mod migration {
         Title,
         WorkspaceDir,
         CreatedAt,
+    }
+
+    #[derive(DeriveIden)]
+    enum Document {
+        Table,
+        Id,
+        ProjectId,
+        SourceUri,
+        MediaType,
+        Title,
+        CanonicalText,
+        ContentRevision,
+        RevisionToken,
+        IndexedRevision,
+        IndexFingerprint,
+        CreatedAt,
+        UpdatedAt,
+        IndexedAt,
     }
 
     #[derive(DeriveIden)]
@@ -893,6 +1117,25 @@ mod tests {
         }
     }
 
+    fn sample_document(project_id: Option<ProjectId>) -> DocumentRecord {
+        let created_at = DateTime::<Utc>::from_timestamp(1_700_000_100, 0).unwrap();
+        DocumentRecord {
+            id: DocumentId::new(),
+            project_id,
+            source_uri: Some("file:///資料/notes.md".into()),
+            media_type: "text/markdown".into(),
+            title: Some("Résumé 📈".into()),
+            canonical_text: "# Résumé\n\n売上 grew by 10%.".into(),
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+            indexed_revision: None,
+            index_fingerprint: None,
+            created_at,
+            updated_at: created_at,
+            indexed_at: None,
+        }
+    }
+
     #[tokio::test]
     async fn projects_roundtrip_and_a_chat_can_belong_to_one() {
         let (_dir, store) = temp_store().await;
@@ -975,6 +1218,133 @@ mod tests {
         store.create_project(&older).await.unwrap();
         store.create_project(&newer).await.unwrap();
         assert_eq!(store.list_projects().await.unwrap(), vec![newer, older]);
+    }
+
+    #[tokio::test]
+    async fn documents_roundtrip_and_list_by_corpus_scope() {
+        let (_dir, store) = temp_store().await;
+        let project_a = sample_project();
+        let mut project_b = sample_project();
+        project_b.id = ProjectId::new();
+        store.create_project(&project_a).await.unwrap();
+        store.create_project(&project_b).await.unwrap();
+
+        let mut unscoped = sample_document(None);
+        unscoped.created_at = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
+        let mut in_a = sample_document(Some(project_a.id));
+        in_a.created_at = DateTime::<Utc>::from_timestamp(2_000, 0).unwrap();
+        in_a.indexed_revision = Some(1);
+        in_a.index_fingerprint = Some("parser=v1;chunker=v1;embed=test".into());
+        in_a.indexed_at = Some(DateTime::<Utc>::from_timestamp(2_001, 0).unwrap());
+        let mut in_b = sample_document(Some(project_b.id));
+        in_b.created_at = DateTime::<Utc>::from_timestamp(3_000, 0).unwrap();
+
+        for document in [&unscoped, &in_a, &in_b] {
+            store.create_document(document).await.unwrap();
+        }
+
+        assert_eq!(
+            store.get_document(in_a.id).await.unwrap().as_ref(),
+            Some(&in_a)
+        );
+        assert_eq!(store.get_document(DocumentId::new()).await.unwrap(), None);
+        assert_eq!(
+            store
+                .list_documents(DocumentScope::Project(project_a.id))
+                .await
+                .unwrap(),
+            vec![in_a.clone()]
+        );
+        assert_eq!(
+            store
+                .list_documents(DocumentScope::Project(project_b.id))
+                .await
+                .unwrap(),
+            vec![in_b.clone()]
+        );
+        assert_eq!(
+            store.list_documents(DocumentScope::Unscoped).await.unwrap(),
+            vec![unscoped.clone()]
+        );
+        assert_eq!(
+            store.list_documents(DocumentScope::All).await.unwrap(),
+            vec![in_b, in_a, unscoped.clone()]
+        );
+
+        store.delete_document(unscoped.id).await.unwrap();
+        store.delete_document(unscoped.id).await.unwrap();
+        assert_eq!(store.get_document(unscoped.id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn document_project_fk_rejects_orphans_and_cascades_delete() {
+        let (_dir, store) = temp_store().await;
+        let orphan = sample_document(Some(ProjectId::new()));
+        assert!(store.create_document(&orphan).await.is_err());
+
+        let project = sample_project();
+        store.create_project(&project).await.unwrap();
+        let document = sample_document(Some(project.id));
+        store.create_document(&document).await.unwrap();
+        entities::project::Entity::delete_by_id(project.id.0)
+            .exec(&store.conn)
+            .await
+            .unwrap();
+        assert_eq!(store.get_document(document.id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn document_constraints_reject_invalid_catalog_state() {
+        let (_dir, store) = temp_store().await;
+
+        let mut empty_media_type = sample_document(None);
+        empty_media_type.media_type.clear();
+        assert!(store.create_document(&empty_media_type).await.is_err());
+
+        let mut empty_source_uri = sample_document(None);
+        empty_source_uri.source_uri = Some(String::new());
+        assert!(store.create_document(&empty_source_uri).await.is_err());
+
+        let mut invalid_revision = sample_document(None);
+        invalid_revision.content_revision = 0;
+        assert!(store.create_document(&invalid_revision).await.is_err());
+
+        let mut future_index = sample_document(None);
+        future_index.indexed_revision = Some(2);
+        future_index.index_fingerprint = Some("v1".into());
+        future_index.indexed_at = Some(Utc::now());
+        assert!(store.create_document(&future_index).await.is_err());
+
+        let mut partial_watermark = sample_document(None);
+        partial_watermark.indexed_revision = Some(1);
+        assert!(store.create_document(&partial_watermark).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn m0006_upgrades_an_existing_store_without_losing_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("upgrade.db").display()
+        );
+        let conn = Database::connect(&url).await.unwrap();
+        conn.execute_unprepared("PRAGMA foreign_keys=ON;")
+            .await
+            .unwrap();
+        migration::Migrator::up(&conn, Some(5)).await.unwrap();
+        let store = DbStore { conn: conn.clone() };
+        let chat = sample_chat();
+        store.create_chat(&chat).await.unwrap();
+
+        migration::Migrator::up(&conn, None).await.unwrap();
+
+        assert_eq!(store.get_chat(chat.id).await.unwrap().as_ref(), Some(&chat));
+        let document = sample_document(None);
+        store.create_document(&document).await.unwrap();
+        assert_eq!(
+            store.get_document(document.id).await.unwrap().as_ref(),
+            Some(&document)
+        );
     }
 
     #[tokio::test]

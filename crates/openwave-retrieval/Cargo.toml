@@ -12,11 +12,12 @@ workspace = true
 
 [features]
 # On by default (like openwave-router's adapters) so both are built and tested in
-# CI. Depend with `default-features = false` for the lean, offline pipeline: just
-# the seams plus HashEmbedder/InMemoryVectorStore, no openwave-core and no reqwest.
+# CI. Depend with `default-features = false` for the lean, offline pipeline: the
+# seams, core-owned IDs, and HashEmbedder/InMemoryVectorStore, with no reqwest.
 default = ["tool", "embed-openai"]
-# The agent-facing `search` Tool. Pulls in `openwave-core` for the `Tool` trait.
-tool = ["dep:openwave-core"]
+# The agent-facing `search` Tool implementation. Core is already a lean dependency
+# for DocumentId; this feature controls only the adapter module.
+tool = []
 # A real OpenAI-compatible embedding provider (network, via reqwest). The offline
 # HashEmbedder is always available regardless.
 embed-openai = ["dep:reqwest"]
@@ -34,9 +35,10 @@ thiserror = { workspace = true }
 # `v5` (name-based UUIDs) is additive over the workspace's `v4`/`serde`; it
 # backs the deterministic chunk ids derived from (document, byte span).
 uuid = { workspace = true, features = ["v5"] }
-# Only the trait contracts (Tool/ToolSpec/…), not the SQLite/keychain/file-tool
-# machinery — hence default-features = false.
-openwave-core = { path = "../openwave-core", default-features = false, optional = true }
+# Core owns DocumentId so the authoritative catalog and derived vector index use
+# one persisted identity. Default features stay off: no SQLite, keychain, or file
+# tools are pulled into this library.
+openwave-core = { path = "../openwave-core", default-features = false }
 # HTTP client for the OpenAI-compatible embedder (embed-openai feature only).
 reqwest = { workspace = true, optional = true }
 # The LanceDB vector backend (vec-lance feature only). arrow-array/-schema are

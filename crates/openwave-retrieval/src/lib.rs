@@ -49,16 +49,17 @@
 //!
 //! The agent-facing [`SearchTool`] (behind the default `tool` feature) adapts the
 //! query side to `openwave-core`'s `Tool` contract, so the agent loop can search a
-//! shared index. Turn the feature off to use the pipeline as a standalone library
-//! with no dependency on the core crate.
+//! shared index. Turn the feature off to omit that adapter. The crate retains a
+//! lean, default-feature-free dependency on `openwave-core` because core owns the
+//! persisted [`DocumentId`] shared by the catalog and index.
 //!
 //! For real semantic embeddings, the `embed-openai` feature adds [`OpenAiEmbedder`],
 //! an [`Embedder`] backed by the OpenAI-compatible `/embeddings` endpoint — a
 //! drop-in for [`HashEmbedder`] behind the same seam.
 //!
-//! Not yet wired: embedding reranking, persistent/hybrid vector backends,
-//! rich-format parsing, per-chat/project index scoping, and choosing the embedder
-//! from server configuration. Each lands as its own slice behind these seams.
+//! Not yet wired: embedding reranking, hybrid retrieval, rich-format parsing,
+//! per-chat/project index scoping, and ANN index management. Each lands as its own
+//! slice behind these seams.
 
 mod chunk;
 mod document;
