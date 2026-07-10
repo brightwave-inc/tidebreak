@@ -725,6 +725,28 @@ mod tests {
         ) -> Result<openwave_core::DocumentRecord> {
             self.inner.upsert_document(document).await
         }
+        async fn upsert_document_and_enqueue_index(
+            &self,
+            document: &openwave_core::DocumentUpsert,
+            pipeline_fingerprint: &str,
+            max_attempts: i32,
+        ) -> Result<(openwave_core::DocumentRecord, openwave_core::DocumentJob)> {
+            self.inner
+                .upsert_document_and_enqueue_index(document, pipeline_fingerprint, max_attempts)
+                .await
+        }
+        async fn get_document_job(
+            &self,
+            id: openwave_core::DocumentJobId,
+        ) -> Result<Option<openwave_core::DocumentJob>> {
+            self.inner.get_document_job(id).await
+        }
+        async fn list_document_jobs(
+            &self,
+            document_id: openwave_core::DocumentId,
+        ) -> Result<Vec<openwave_core::DocumentJob>> {
+            self.inner.list_document_jobs(document_id).await
+        }
         async fn mark_document_indexed(
             &self,
             id: openwave_core::DocumentId,

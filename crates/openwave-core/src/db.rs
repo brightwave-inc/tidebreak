@@ -13,18 +13,18 @@ use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
-    FromQueryResult, QueryFilter, QueryOrder, QuerySelect, Set, TryInsertResult,
+    FromQueryResult, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, TryInsertResult,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{CallId, ChatId, DocumentId, MessageId, ProjectId, TurnId};
+use crate::id::{CallId, ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, TurnId};
 use crate::model::{
-    Chat, DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentProcessingStatus,
-    DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert, Message, Project, Role,
-    ToolCallRecord,
+    Chat, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
+    DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert,
+    Message, Project, Role, ToolCallRecord,
 };
 use crate::storage::Store;
 
@@ -255,118 +255,153 @@ impl Store for DbStore {
     }
 
     async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
-        // Optimistic compare-and-set makes the allocated revision itself the
-        // result of this write. In particular, it avoids a write-then-select
-        // race on SQLite where two callers can both observe the later revision.
+        upsert_document_on(&self.conn, document).await
+    }
+
+    async fn upsert_document_and_enqueue_index(
+        &self,
+        document: &DocumentUpsert,
+        pipeline_fingerprint: &str,
+        max_attempts: i32,
+    ) -> Result<(DocumentRecord, DocumentJob)> {
+        if pipeline_fingerprint.is_empty()
+            || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
+        {
+            return Err(AgentError::Store(
+                "document job pipeline fingerprint must contain 1 to 512 characters".into(),
+            ));
+        }
+        if max_attempts < 1 {
+            return Err(AgentError::Store(
+                "document job max_attempts must be at least one".into(),
+            ));
+        }
+
         loop {
-            let current = entities::document::Entity::find_by_id(document.id.0)
-                .one(&self.conn)
+            let transaction = self.conn.begin().await.map_err(store_err)?;
+            acquire_document_write_lock(&transaction, document.id).await?;
+            if let Some(current) = entities::document::Entity::find_by_id(document.id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?
+                .filter(|current| document_upsert_matches(current, document))
+            {
+                if let Some(job) = entities::document_job::Entity::find()
+                    .filter(entities::document_job::Column::DocumentId.eq(current.id))
+                    .filter(
+                        entities::document_job::Column::ContentRevision
+                            .eq(current.content_revision),
+                    )
+                    .filter(
+                        entities::document_job::Column::RevisionToken.eq(current.revision_token),
+                    )
+                    .filter(
+                        entities::document_job::Column::Kind.eq(DocumentJobKind::Index.as_str()),
+                    )
+                    .filter(
+                        entities::document_job::Column::PipelineFingerprint
+                            .eq(pipeline_fingerprint),
+                    )
+                    .one(&transaction)
+                    .await
+                    .map_err(store_err)?
+                {
+                    let current = document_from_model(current)?;
+                    let job = document_job_from_model(job)?;
+                    transaction.commit().await.map_err(store_err)?;
+                    return Ok((current, job));
+                }
+            }
+
+            let record = match try_upsert_document_on(&transaction, document).await? {
+                Some(record) => record,
+                None => {
+                    transaction.rollback().await.map_err(store_err)?;
+                    continue;
+                }
+            };
+            let workflow_now = Utc::now();
+            entities::document_job::Entity::update_many()
+                .col_expr(
+                    entities::document_job::Column::Status,
+                    sea_orm::sea_query::Expr::value(DocumentJobStatus::Cancelled.as_str()),
+                )
+                .col_expr(
+                    entities::document_job::Column::LeaseToken,
+                    sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+                )
+                .col_expr(
+                    entities::document_job::Column::LeaseExpiresAt,
+                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
+                )
+                .col_expr(
+                    entities::document_job::Column::FinishedAt,
+                    sea_orm::sea_query::Expr::value(Some(workflow_now)),
+                )
+                .col_expr(
+                    entities::document_job::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(workflow_now),
+                )
+                .filter(entities::document_job::Column::DocumentId.eq(record.id.0))
+                .filter(entities::document_job::Column::Status.is_in([
+                    DocumentJobStatus::Queued.as_str(),
+                    DocumentJobStatus::Running.as_str(),
+                    DocumentJobStatus::RetryWait.as_str(),
+                ]))
+                .exec(&transaction)
                 .await
                 .map_err(store_err)?;
 
-            if let Some(current) = current {
-                let next_revision = current.content_revision.checked_add(1).ok_or_else(|| {
-                    AgentError::Store(format!("document {} revision overflow", document.id))
-                })?;
-                let revision_token = uuid::Uuid::new_v4();
-                let result = entities::document::Entity::update_many()
-                    .col_expr(
-                        entities::document::Column::ProjectId,
-                        sea_orm::sea_query::Expr::value(document.project_id.map(|id| id.0)),
-                    )
-                    .col_expr(
-                        entities::document::Column::SourceUri,
-                        sea_orm::sea_query::Expr::value(document.source_uri.clone()),
-                    )
-                    .col_expr(
-                        entities::document::Column::MediaType,
-                        sea_orm::sea_query::Expr::value(document.media_type.clone()),
-                    )
-                    .col_expr(
-                        entities::document::Column::Title,
-                        sea_orm::sea_query::Expr::value(document.title.clone()),
-                    )
-                    .col_expr(
-                        entities::document::Column::CanonicalText,
-                        sea_orm::sea_query::Expr::value(document.canonical_text.clone()),
-                    )
-                    .col_expr(
-                        entities::document::Column::ContentRevision,
-                        sea_orm::sea_query::Expr::value(next_revision),
-                    )
-                    .col_expr(
-                        entities::document::Column::RevisionToken,
-                        sea_orm::sea_query::Expr::value(revision_token),
-                    )
-                    .col_expr(
-                        entities::document::Column::ProcessingStatus,
-                        sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
-                    )
-                    .col_expr(
-                        entities::document::Column::IndexedRevision,
-                        sea_orm::sea_query::Expr::value(Option::<i64>::None),
-                    )
-                    .col_expr(
-                        entities::document::Column::IndexFingerprint,
-                        sea_orm::sea_query::Expr::value(Option::<String>::None),
-                    )
-                    .col_expr(
-                        entities::document::Column::UpdatedAt,
-                        sea_orm::sea_query::Expr::value(document.updated_at),
-                    )
-                    .col_expr(
-                        entities::document::Column::IndexedAt,
-                        sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-                    )
-                    .filter(entities::document::Column::Id.eq(document.id.0))
-                    .filter(
-                        entities::document::Column::ContentRevision.eq(current.content_revision),
-                    )
-                    .filter(entities::document::Column::RevisionToken.eq(current.revision_token))
-                    .exec(&self.conn)
-                    .await
-                    .map_err(store_err)?;
-                if result.rows_affected == 1 {
-                    return Ok(document_from_upsert(
-                        document,
-                        current.created_at,
-                        next_revision,
-                        revision_token,
-                    ));
-                }
-                continue;
-            }
-
-            let revision_token = uuid::Uuid::new_v4();
-            let inserted = entities::document::Entity::insert(entities::document::ActiveModel {
-                id: Set(document.id.0),
-                project_id: Set(document.project_id.map(|id| id.0)),
-                source_uri: Set(document.source_uri.clone()),
-                media_type: Set(document.media_type.clone()),
-                title: Set(document.title.clone()),
-                canonical_text: Set(document.canonical_text.clone()),
-                content_revision: Set(1),
-                revision_token: Set(revision_token),
-                processing_status: Set(DocumentProcessingStatus::Queued.as_str().into()),
-                indexed_revision: Set(None),
-                index_fingerprint: Set(None),
-                created_at: Set(document.updated_at),
-                updated_at: Set(document.updated_at),
-                indexed_at: Set(None),
-            })
-            .on_conflict_do_nothing()
-            .exec_without_returning(&self.conn)
-            .await
-            .map_err(store_err)?;
-            if matches!(inserted, TryInsertResult::Inserted(1)) {
-                return Ok(document_from_upsert(
-                    document,
-                    document.updated_at,
-                    1,
-                    revision_token,
-                ));
-            }
+            let job = DocumentJob {
+                id: DocumentJobId::new(),
+                document_id: record.id,
+                content_revision: record.content_revision,
+                revision_token: record.revision_token,
+                kind: DocumentJobKind::Index,
+                status: DocumentJobStatus::Queued,
+                pipeline_fingerprint: pipeline_fingerprint.into(),
+                attempt_count: 0,
+                max_attempts,
+                available_at: workflow_now,
+                lease_token: None,
+                lease_expires_at: None,
+                started_at: None,
+                finished_at: None,
+                last_error_code: None,
+                last_error_detail: None,
+                created_at: workflow_now,
+                updated_at: workflow_now,
+            };
+            document_job_active_model(&job)
+                .insert(&transaction)
+                .await
+                .map_err(store_err)?;
+            transaction.commit().await.map_err(store_err)?;
+            return Ok((record, job));
         }
+    }
+
+    async fn get_document_job(&self, id: DocumentJobId) -> Result<Option<DocumentJob>> {
+        entities::document_job::Entity::find_by_id(id.0)
+            .one(&self.conn)
+            .await
+            .map_err(store_err)?
+            .map(document_job_from_model)
+            .transpose()
+    }
+
+    async fn list_document_jobs(&self, document_id: DocumentId) -> Result<Vec<DocumentJob>> {
+        entities::document_job::Entity::find()
+            .filter(entities::document_job::Column::DocumentId.eq(document_id.0))
+            .order_by_asc(entities::document_job::Column::ContentRevision)
+            .order_by_asc(entities::document_job::Column::CreatedAt)
+            .order_by_asc(entities::document_job::Column::Id)
+            .all(&self.conn)
+            .await
+            .map_err(store_err)?
+            .into_iter()
+            .map(document_job_from_model)
+            .collect()
     }
 
     async fn mark_document_indexed(
@@ -629,6 +664,171 @@ impl Store for DbStore {
     }
 }
 
+/// Acquire the database writer/row lock before the enqueue transaction reads.
+///
+/// On SQLite, even a no-match UPDATE starts the transaction as a writer, so two
+/// enqueues cannot both establish read snapshots and later fail their read→write
+/// upgrade with `SQLITE_BUSY_SNAPSHOT`. On Postgres an existing document row is
+/// locked; first inserts remain protected by the unique-key/CAS loop.
+async fn acquire_document_write_lock<C>(conn: &C, id: DocumentId) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    entities::document::Entity::update_many()
+        .col_expr(
+            entities::document::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::col(entities::document::Column::UpdatedAt).into(),
+        )
+        .filter(entities::document::Column::Id.eq(id.0))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+fn document_upsert_matches(current: &entities::document::Model, document: &DocumentUpsert) -> bool {
+    current.project_id == document.project_id.map(|id| id.0)
+        && current.source_uri == document.source_uri
+        && current.media_type == document.media_type
+        && current.title == document.title
+        && current.canonical_text == document.canonical_text
+}
+
+/// Optimistic source upsert shared by ordinary writes and transactional enqueue.
+async fn upsert_document_on<C>(conn: &C, document: &DocumentUpsert) -> Result<DocumentRecord>
+where
+    C: ConnectionTrait,
+{
+    loop {
+        match try_upsert_document_on(conn, document).await? {
+            Some(record) => return Ok(record),
+            None => continue,
+        }
+    }
+}
+
+async fn try_upsert_document_on<C>(
+    conn: &C,
+    document: &DocumentUpsert,
+) -> Result<Option<DocumentRecord>>
+where
+    C: ConnectionTrait,
+{
+    // `None` means another transaction inserted this id after our absent-row
+    // read. Enqueue callers restart their outer transaction so they repeat the
+    // semantic-idempotency lookup before allocating another revision.
+    // Optimistic compare-and-set makes the allocated revision itself the result
+    // of this write, including under concurrent first insertions.
+    loop {
+        let current = entities::document::Entity::find_by_id(document.id.0)
+            .one(conn)
+            .await
+            .map_err(store_err)?;
+
+        if let Some(current) = current {
+            let next_revision = current.content_revision.checked_add(1).ok_or_else(|| {
+                AgentError::Store(format!("document {} revision overflow", document.id))
+            })?;
+            let revision_token = uuid::Uuid::new_v4();
+            let result = entities::document::Entity::update_many()
+                .col_expr(
+                    entities::document::Column::ProjectId,
+                    sea_orm::sea_query::Expr::value(document.project_id.map(|id| id.0)),
+                )
+                .col_expr(
+                    entities::document::Column::SourceUri,
+                    sea_orm::sea_query::Expr::value(document.source_uri.clone()),
+                )
+                .col_expr(
+                    entities::document::Column::MediaType,
+                    sea_orm::sea_query::Expr::value(document.media_type.clone()),
+                )
+                .col_expr(
+                    entities::document::Column::Title,
+                    sea_orm::sea_query::Expr::value(document.title.clone()),
+                )
+                .col_expr(
+                    entities::document::Column::CanonicalText,
+                    sea_orm::sea_query::Expr::value(document.canonical_text.clone()),
+                )
+                .col_expr(
+                    entities::document::Column::ContentRevision,
+                    sea_orm::sea_query::Expr::value(next_revision),
+                )
+                .col_expr(
+                    entities::document::Column::RevisionToken,
+                    sea_orm::sea_query::Expr::value(revision_token),
+                )
+                .col_expr(
+                    entities::document::Column::ProcessingStatus,
+                    sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
+                )
+                .col_expr(
+                    entities::document::Column::IndexedRevision,
+                    sea_orm::sea_query::Expr::value(Option::<i64>::None),
+                )
+                .col_expr(
+                    entities::document::Column::IndexFingerprint,
+                    sea_orm::sea_query::Expr::value(Option::<String>::None),
+                )
+                .col_expr(
+                    entities::document::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(document.updated_at),
+                )
+                .col_expr(
+                    entities::document::Column::IndexedAt,
+                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+                )
+                .filter(entities::document::Column::Id.eq(document.id.0))
+                .filter(entities::document::Column::ContentRevision.eq(current.content_revision))
+                .filter(entities::document::Column::RevisionToken.eq(current.revision_token))
+                .exec(conn)
+                .await
+                .map_err(store_err)?;
+            if result.rows_affected == 1 {
+                return Ok(Some(document_from_upsert(
+                    document,
+                    current.created_at,
+                    next_revision,
+                    revision_token,
+                )));
+            }
+            continue;
+        }
+
+        let revision_token = uuid::Uuid::new_v4();
+        let inserted = entities::document::Entity::insert(entities::document::ActiveModel {
+            id: Set(document.id.0),
+            project_id: Set(document.project_id.map(|id| id.0)),
+            source_uri: Set(document.source_uri.clone()),
+            media_type: Set(document.media_type.clone()),
+            title: Set(document.title.clone()),
+            canonical_text: Set(document.canonical_text.clone()),
+            content_revision: Set(1),
+            revision_token: Set(revision_token),
+            processing_status: Set(DocumentProcessingStatus::Queued.as_str().into()),
+            indexed_revision: Set(None),
+            index_fingerprint: Set(None),
+            created_at: Set(document.updated_at),
+            updated_at: Set(document.updated_at),
+            indexed_at: Set(None),
+        })
+        .on_conflict_do_nothing()
+        .exec_without_returning(conn)
+        .await
+        .map_err(store_err)?;
+        if matches!(inserted, TryInsertResult::Inserted(1)) {
+            return Ok(Some(document_from_upsert(
+                document,
+                document.updated_at,
+                1,
+                revision_token,
+            )));
+        }
+        return Ok(None);
+    }
+}
+
 fn project_from_model(model: entities::project::Model) -> Project {
     Project {
         id: ProjectId(model.id),
@@ -708,6 +908,71 @@ fn document_processing_status_from_db(text: &str) -> Result<DocumentProcessingSt
             "unknown document processing status: {other}"
         ))),
     }
+}
+
+fn document_job_active_model(job: &DocumentJob) -> entities::document_job::ActiveModel {
+    entities::document_job::ActiveModel {
+        id: Set(job.id.0),
+        document_id: Set(job.document_id.0),
+        content_revision: Set(job.content_revision),
+        revision_token: Set(job.revision_token),
+        kind: Set(job.kind.as_str().into()),
+        status: Set(job.status.as_str().into()),
+        pipeline_fingerprint: Set(job.pipeline_fingerprint.clone()),
+        attempt_count: Set(job.attempt_count),
+        max_attempts: Set(job.max_attempts),
+        available_at: Set(job.available_at),
+        lease_token: Set(job.lease_token),
+        lease_expires_at: Set(job.lease_expires_at),
+        started_at: Set(job.started_at),
+        finished_at: Set(job.finished_at),
+        last_error_code: Set(job.last_error_code.clone()),
+        last_error_detail: Set(job.last_error_detail.clone()),
+        created_at: Set(job.created_at),
+        updated_at: Set(job.updated_at),
+    }
+}
+
+fn document_job_from_model(model: entities::document_job::Model) -> Result<DocumentJob> {
+    Ok(DocumentJob {
+        id: DocumentJobId(model.id),
+        document_id: DocumentId(model.document_id),
+        content_revision: model.content_revision,
+        revision_token: model.revision_token,
+        kind: match model.kind.as_str() {
+            "index" => DocumentJobKind::Index,
+            other => {
+                return Err(AgentError::Store(format!(
+                    "unknown document job kind: {other}"
+                )))
+            }
+        },
+        status: match model.status.as_str() {
+            "queued" => DocumentJobStatus::Queued,
+            "running" => DocumentJobStatus::Running,
+            "retry_wait" => DocumentJobStatus::RetryWait,
+            "succeeded" => DocumentJobStatus::Succeeded,
+            "failed" => DocumentJobStatus::Failed,
+            "cancelled" => DocumentJobStatus::Cancelled,
+            other => {
+                return Err(AgentError::Store(format!(
+                    "unknown document job status: {other}"
+                )))
+            }
+        },
+        pipeline_fingerprint: model.pipeline_fingerprint,
+        attempt_count: model.attempt_count,
+        max_attempts: model.max_attempts,
+        available_at: model.available_at,
+        lease_token: model.lease_token,
+        lease_expires_at: model.lease_expires_at,
+        started_at: model.started_at,
+        finished_at: model.finished_at,
+        last_error_code: model.last_error_code,
+        last_error_detail: model.last_error_detail,
+        created_at: model.created_at,
+        updated_at: model.updated_at,
+    })
 }
 
 fn chat_from_model(model: entities::chat::Model) -> Chat {
@@ -801,7 +1066,6 @@ mod entities {
         impl ActiveModelBehavior for ActiveModel {}
     }
 
-    #[cfg(test)]
     pub mod document_job {
         use sea_orm::entity::prelude::*;
 
@@ -2249,6 +2513,353 @@ mod tests {
             .await
             .unwrap();
         assert!(remaining.is_empty());
+    }
+
+    #[tokio::test]
+    async fn source_revision_and_index_job_commit_and_supersede_together() {
+        let (_dir, store) = temp_store().await;
+        let document_id = DocumentId::new();
+        let first_at = DateTime::<Utc>::from_timestamp(10_000, 0).unwrap();
+        let first_source = DocumentUpsert {
+            id: document_id,
+            project_id: None,
+            source_uri: Some("file:///async.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "first".into(),
+            updated_at: first_at,
+        };
+
+        let (first_revision, first_job) = store
+            .upsert_document_and_enqueue_index(&first_source, "pipeline-v1", 5)
+            .await
+            .unwrap();
+        assert_eq!(first_revision.content_revision, 1);
+        assert_eq!(
+            first_revision.processing_status,
+            DocumentProcessingStatus::Queued
+        );
+        assert_eq!(first_job.document_id, first_revision.id);
+        assert_eq!(first_job.content_revision, first_revision.content_revision);
+        assert_eq!(first_job.revision_token, first_revision.revision_token);
+        assert_eq!(
+            store.get_document_job(first_job.id).await.unwrap(),
+            Some(first_job.clone())
+        );
+
+        // A request retry after an ambiguous response must return the exact
+        // committed revision/job even when the source timestamp was refreshed.
+        let retry_source = DocumentUpsert {
+            updated_at: first_at + chrono::Duration::seconds(1),
+            ..first_source.clone()
+        };
+        let retried = store
+            .upsert_document_and_enqueue_index(&retry_source, "pipeline-v1", 5)
+            .await
+            .unwrap();
+        assert_eq!(retried, (first_revision.clone(), first_job.clone()));
+        assert_eq!(
+            store.list_document_jobs(document_id).await.unwrap().len(),
+            1
+        );
+
+        // Simulate a claimed first job; a new source revision must fence and
+        // terminally cancel it before the replacement queued job is inserted.
+        let lease = uuid::Uuid::new_v4();
+        let claimed_at = first_job.created_at;
+        entities::document_job::Entity::update_many()
+            .col_expr(
+                entities::document_job::Column::Status,
+                sea_orm::sea_query::Expr::value(DocumentJobStatus::Running.as_str()),
+            )
+            .col_expr(
+                entities::document_job::Column::AttemptCount,
+                sea_orm::sea_query::Expr::value(1),
+            )
+            .col_expr(
+                entities::document_job::Column::LeaseToken,
+                sea_orm::sea_query::Expr::value(Some(lease)),
+            )
+            .col_expr(
+                entities::document_job::Column::LeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Some(claimed_at + chrono::Duration::minutes(5))),
+            )
+            .col_expr(
+                entities::document_job::Column::StartedAt,
+                sea_orm::sea_query::Expr::value(Some(claimed_at)),
+            )
+            .filter(entities::document_job::Column::Id.eq(first_job.id.0))
+            .exec(&store.conn)
+            .await
+            .unwrap();
+
+        let second_at = DateTime::<Utc>::from_timestamp(20_000, 0).unwrap();
+        let second_source = DocumentUpsert {
+            canonical_text: "second".into(),
+            updated_at: second_at,
+            ..first_source
+        };
+        let (second_revision, second_job) = store
+            .upsert_document_and_enqueue_index(&second_source, "pipeline-v1", 3)
+            .await
+            .unwrap();
+        assert_eq!(second_revision.content_revision, 2);
+        assert_eq!(second_job.content_revision, 2);
+        assert_eq!(second_job.max_attempts, 3);
+        assert_eq!(second_job.revision_token, second_revision.revision_token);
+
+        let jobs = store.list_document_jobs(document_id).await.unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].id, first_job.id);
+        assert_eq!(jobs[0].status, DocumentJobStatus::Cancelled);
+        assert_eq!(jobs[0].lease_token, None);
+        assert_eq!(jobs[0].lease_expires_at, None);
+        assert!(jobs[0].finished_at.is_some_and(|at| at >= claimed_at));
+        assert_eq!(jobs[0].finished_at, Some(second_job.created_at));
+        assert_eq!(jobs[1], second_job);
+
+        let unknown = DocumentUpsert {
+            id: DocumentId::new(),
+            ..second_source
+        };
+        assert!(store
+            .upsert_document_and_enqueue_index(&unknown, "", 5)
+            .await
+            .is_err());
+        assert_eq!(store.get_document(unknown.id).await.unwrap(), None);
+        assert!(store
+            .upsert_document_and_enqueue_index(&unknown, "pipeline-v1", 0)
+            .await
+            .is_err());
+        assert_eq!(store.list_document_jobs(unknown.id).await.unwrap(), vec![]);
+
+        let orphan = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: Some(ProjectId::new()),
+            ..unknown
+        };
+        assert!(store
+            .upsert_document_and_enqueue_index(&orphan, "pipeline-v1", 5)
+            .await
+            .is_err());
+        assert_eq!(store.get_document(orphan.id).await.unwrap(), None);
+        assert_eq!(store.list_document_jobs(orphan.id).await.unwrap(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn enqueue_rolls_back_source_when_job_insert_fails() {
+        let (_dir, store) = temp_store().await;
+        store
+            .conn
+            .execute_unprepared(
+                "CREATE TRIGGER fail_document_job_insert
+                 BEFORE INSERT ON document_job
+                 BEGIN
+                     SELECT RAISE(FAIL, 'injected document job failure');
+                 END;",
+            )
+            .await
+            .unwrap();
+
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///rollback.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "must roll back".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(30_000, 0).unwrap(),
+        };
+        assert!(store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 5)
+            .await
+            .is_err());
+        assert_eq!(store.get_document(source.id).await.unwrap(), None);
+        assert_eq!(store.list_document_jobs(source.id).await.unwrap(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn replacement_enqueue_failure_restores_source_and_live_job() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///replacement-rollback.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "original".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(40_000, 0).unwrap(),
+        };
+        let (_, job) = store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 5)
+            .await
+            .unwrap();
+        let claimed_at = job.created_at;
+        let lease_token = uuid::Uuid::new_v4();
+        entities::document_job::Entity::update_many()
+            .col_expr(
+                entities::document_job::Column::Status,
+                sea_orm::sea_query::Expr::value(DocumentJobStatus::Running.as_str()),
+            )
+            .col_expr(
+                entities::document_job::Column::AttemptCount,
+                sea_orm::sea_query::Expr::value(1),
+            )
+            .col_expr(
+                entities::document_job::Column::LeaseToken,
+                sea_orm::sea_query::Expr::value(Some(lease_token)),
+            )
+            .col_expr(
+                entities::document_job::Column::LeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Some(claimed_at + chrono::Duration::minutes(5))),
+            )
+            .col_expr(
+                entities::document_job::Column::StartedAt,
+                sea_orm::sea_query::Expr::value(Some(claimed_at)),
+            )
+            .filter(entities::document_job::Column::Id.eq(job.id.0))
+            .exec(&store.conn)
+            .await
+            .unwrap();
+        entities::document::Entity::update_many()
+            .col_expr(
+                entities::document::Column::ProcessingStatus,
+                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Processing.as_str()),
+            )
+            .filter(entities::document::Column::Id.eq(source.id.0))
+            .exec(&store.conn)
+            .await
+            .unwrap();
+        let original_document = store.get_document(source.id).await.unwrap().unwrap();
+        let original_job = store.get_document_job(job.id).await.unwrap().unwrap();
+
+        store
+            .conn
+            .execute_unprepared(
+                "CREATE TRIGGER fail_replacement_document_job_insert
+                 BEFORE INSERT ON document_job
+                 BEGIN
+                     SELECT RAISE(FAIL, 'injected replacement job failure');
+                 END;",
+            )
+            .await
+            .unwrap();
+        let replacement = DocumentUpsert {
+            canonical_text: "replacement".into(),
+            updated_at: source.updated_at + chrono::Duration::seconds(1),
+            ..source
+        };
+        assert!(store
+            .upsert_document_and_enqueue_index(&replacement, "pipeline-v1", 5)
+            .await
+            .is_err());
+
+        assert_eq!(
+            store.get_document(replacement.id).await.unwrap(),
+            Some(original_document)
+        );
+        assert_eq!(
+            store.get_document_job(job.id).await.unwrap(),
+            Some(original_job.clone())
+        );
+        assert_eq!(
+            store.list_document_jobs(replacement.id).await.unwrap(),
+            vec![original_job]
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_source_enqueues_leave_one_current_revision_and_job() {
+        let (_dir, store) = temp_store().await;
+        let store = std::sync::Arc::new(store);
+        let document_id = DocumentId::new();
+        let writes = (1..=8).map(|revision| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                store
+                    .upsert_document_and_enqueue_index(
+                        &DocumentUpsert {
+                            id: document_id,
+                            project_id: None,
+                            source_uri: Some("file:///concurrent-async.txt".into()),
+                            media_type: "text/plain".into(),
+                            title: None,
+                            canonical_text: format!("writer {revision}"),
+                            updated_at: DateTime::<Utc>::from_timestamp(revision, 0).unwrap(),
+                        },
+                        "pipeline-v1",
+                        5,
+                    )
+                    .await
+            })
+        });
+
+        let mut revisions = Vec::new();
+        for result in futures::future::join_all(writes).await {
+            let (document, job) = result.unwrap().unwrap();
+            assert_eq!(job.content_revision, document.content_revision);
+            assert_eq!(job.revision_token, document.revision_token);
+            revisions.push(document.content_revision);
+        }
+        revisions.sort_unstable();
+        assert_eq!(revisions, (1..=8).collect::<Vec<_>>());
+
+        let current = store.get_document(document_id).await.unwrap().unwrap();
+        let jobs = store.list_document_jobs(document_id).await.unwrap();
+        assert_eq!(jobs.len(), 8);
+        let active: Vec<_> = jobs
+            .iter()
+            .filter(|job| job.status == DocumentJobStatus::Queued)
+            .collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].content_revision, current.content_revision);
+        assert_eq!(active[0].revision_token, current.revision_token);
+        assert_eq!(
+            jobs.iter()
+                .filter(|job| job.status == DocumentJobStatus::Cancelled)
+                .count(),
+            7
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_identical_first_enqueues_reuse_one_revision_and_job() {
+        let (_dir, store) = temp_store().await;
+        let store = std::sync::Arc::new(store);
+        let document_id = DocumentId::new();
+        let writes = (1..=8).map(|request| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                store
+                    .upsert_document_and_enqueue_index(
+                        &DocumentUpsert {
+                            id: document_id,
+                            project_id: None,
+                            source_uri: Some("file:///identical-concurrent.txt".into()),
+                            media_type: "text/plain".into(),
+                            title: None,
+                            canonical_text: "same source".into(),
+                            // Source observation time is deliberately not part of
+                            // semantic request identity.
+                            updated_at: DateTime::<Utc>::from_timestamp(request, 0).unwrap(),
+                        },
+                        "pipeline-v1",
+                        5,
+                    )
+                    .await
+            })
+        });
+
+        let results = futures::future::join_all(writes).await;
+        let first = results[0].as_ref().unwrap().as_ref().unwrap().clone();
+        for result in results {
+            assert_eq!(result.unwrap().unwrap(), first);
+        }
+        assert_eq!(first.0.content_revision, 1);
+        assert_eq!(
+            store.list_document_jobs(document_id).await.unwrap(),
+            vec![first.1]
+        );
     }
 
     #[tokio::test]
