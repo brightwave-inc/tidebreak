@@ -13,7 +13,7 @@ use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
-    QueryFilter, QueryOrder, Set,
+    QueryFilter, QueryOrder, Set, TryInsertResult,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
@@ -21,7 +21,9 @@ use serde_json::Value;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, ChatId, DocumentId, MessageId, ProjectId, TurnId};
-use crate::model::{Chat, DocumentRecord, DocumentScope, Message, Project, Role, ToolCallRecord};
+use crate::model::{
+    Chat, DocumentRecord, DocumentScope, DocumentUpsert, Message, Project, Role, ToolCallRecord,
+};
 use crate::storage::Store;
 
 /// Map any SeaORM failure into an [`AgentError::Store`].
@@ -99,7 +101,7 @@ impl Store for DbStore {
             title: Set(document.title.clone()),
             canonical_text: Set(document.canonical_text.clone()),
             content_revision: Set(document.content_revision),
-            revision_token: Set(document.revision_token),
+            revision_token: Set(uuid::Uuid::new_v4()),
             indexed_revision: Set(document.indexed_revision),
             index_fingerprint: Set(document.index_fingerprint.clone()),
             created_at: Set(document.created_at),
@@ -147,6 +149,146 @@ impl Store for DbStore {
             .await
             .map_err(store_err)?;
         Ok(())
+    }
+
+    async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
+        // Optimistic compare-and-set makes the allocated revision itself the
+        // result of this write. In particular, it avoids a write-then-select
+        // race on SQLite where two callers can both observe the later revision.
+        loop {
+            let current = entities::document::Entity::find_by_id(document.id.0)
+                .one(&self.conn)
+                .await
+                .map_err(store_err)?;
+
+            if let Some(current) = current {
+                let next_revision = current.content_revision.checked_add(1).ok_or_else(|| {
+                    AgentError::Store(format!("document {} revision overflow", document.id))
+                })?;
+                let revision_token = uuid::Uuid::new_v4();
+                let result = entities::document::Entity::update_many()
+                    .col_expr(
+                        entities::document::Column::ProjectId,
+                        sea_orm::sea_query::Expr::value(document.project_id.map(|id| id.0)),
+                    )
+                    .col_expr(
+                        entities::document::Column::SourceUri,
+                        sea_orm::sea_query::Expr::value(document.source_uri.clone()),
+                    )
+                    .col_expr(
+                        entities::document::Column::MediaType,
+                        sea_orm::sea_query::Expr::value(document.media_type.clone()),
+                    )
+                    .col_expr(
+                        entities::document::Column::Title,
+                        sea_orm::sea_query::Expr::value(document.title.clone()),
+                    )
+                    .col_expr(
+                        entities::document::Column::CanonicalText,
+                        sea_orm::sea_query::Expr::value(document.canonical_text.clone()),
+                    )
+                    .col_expr(
+                        entities::document::Column::ContentRevision,
+                        sea_orm::sea_query::Expr::value(next_revision),
+                    )
+                    .col_expr(
+                        entities::document::Column::RevisionToken,
+                        sea_orm::sea_query::Expr::value(revision_token),
+                    )
+                    .col_expr(
+                        entities::document::Column::IndexedRevision,
+                        sea_orm::sea_query::Expr::value(Option::<i64>::None),
+                    )
+                    .col_expr(
+                        entities::document::Column::IndexFingerprint,
+                        sea_orm::sea_query::Expr::value(Option::<String>::None),
+                    )
+                    .col_expr(
+                        entities::document::Column::UpdatedAt,
+                        sea_orm::sea_query::Expr::value(document.updated_at),
+                    )
+                    .col_expr(
+                        entities::document::Column::IndexedAt,
+                        sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+                    )
+                    .filter(entities::document::Column::Id.eq(document.id.0))
+                    .filter(
+                        entities::document::Column::ContentRevision.eq(current.content_revision),
+                    )
+                    .filter(entities::document::Column::RevisionToken.eq(current.revision_token))
+                    .exec(&self.conn)
+                    .await
+                    .map_err(store_err)?;
+                if result.rows_affected == 1 {
+                    return Ok(document_from_upsert(
+                        document,
+                        current.created_at,
+                        next_revision,
+                        revision_token,
+                    ));
+                }
+                continue;
+            }
+
+            let revision_token = uuid::Uuid::new_v4();
+            let inserted = entities::document::Entity::insert(entities::document::ActiveModel {
+                id: Set(document.id.0),
+                project_id: Set(document.project_id.map(|id| id.0)),
+                source_uri: Set(document.source_uri.clone()),
+                media_type: Set(document.media_type.clone()),
+                title: Set(document.title.clone()),
+                canonical_text: Set(document.canonical_text.clone()),
+                content_revision: Set(1),
+                revision_token: Set(revision_token),
+                indexed_revision: Set(None),
+                index_fingerprint: Set(None),
+                created_at: Set(document.updated_at),
+                updated_at: Set(document.updated_at),
+                indexed_at: Set(None),
+            })
+            .on_conflict_do_nothing()
+            .exec_without_returning(&self.conn)
+            .await
+            .map_err(store_err)?;
+            if matches!(inserted, TryInsertResult::Inserted(1)) {
+                return Ok(document_from_upsert(
+                    document,
+                    document.updated_at,
+                    1,
+                    revision_token,
+                ));
+            }
+        }
+    }
+
+    async fn mark_document_indexed(
+        &self,
+        id: DocumentId,
+        revision: i64,
+        revision_token: uuid::Uuid,
+        fingerprint: &str,
+        indexed_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        let result = entities::document::Entity::update_many()
+            .col_expr(
+                entities::document::Column::IndexedRevision,
+                sea_orm::sea_query::Expr::value(Some(revision)),
+            )
+            .col_expr(
+                entities::document::Column::IndexFingerprint,
+                sea_orm::sea_query::Expr::value(Some(fingerprint.to_string())),
+            )
+            .col_expr(
+                entities::document::Column::IndexedAt,
+                sea_orm::sea_query::Expr::value(Some(indexed_at)),
+            )
+            .filter(entities::document::Column::Id.eq(id.0))
+            .filter(entities::document::Column::ContentRevision.eq(revision))
+            .filter(entities::document::Column::RevisionToken.eq(revision_token))
+            .exec(&self.conn)
+            .await
+            .map_err(store_err)?;
+        Ok(result.rows_affected == 1)
     }
 
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
@@ -360,6 +502,29 @@ fn document_from_model(model: entities::document::Model) -> DocumentRecord {
         created_at: model.created_at,
         updated_at: model.updated_at,
         indexed_at: model.indexed_at,
+    }
+}
+
+fn document_from_upsert(
+    document: &DocumentUpsert,
+    created_at: chrono::DateTime<Utc>,
+    content_revision: i64,
+    revision_token: uuid::Uuid,
+) -> DocumentRecord {
+    DocumentRecord {
+        id: document.id,
+        project_id: document.project_id,
+        source_uri: document.source_uri.clone(),
+        media_type: document.media_type.clone(),
+        title: document.title.clone(),
+        canonical_text: document.canonical_text.clone(),
+        content_revision,
+        revision_token,
+        indexed_revision: None,
+        index_fingerprint: None,
+        created_at,
+        updated_at: document.updated_at,
+        indexed_at: None,
     }
 }
 
@@ -1242,6 +1407,9 @@ mod tests {
         for document in [&unscoped, &in_a, &in_b] {
             store.create_document(document).await.unwrap();
         }
+        unscoped = store.get_document(unscoped.id).await.unwrap().unwrap();
+        in_a = store.get_document(in_a.id).await.unwrap().unwrap();
+        in_b = store.get_document(in_b.id).await.unwrap().unwrap();
 
         assert_eq!(
             store.get_document(in_a.id).await.unwrap().as_ref(),
@@ -1321,6 +1489,241 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn document_upsert_revisions_and_index_watermark_are_compare_and_set() {
+        let (_dir, store) = temp_store().await;
+        let id = DocumentId::derive("file:///report.txt");
+        let first_at = DateTime::<Utc>::from_timestamp(10_000, 0).unwrap();
+        let first = DocumentUpsert {
+            id,
+            project_id: None,
+            source_uri: Some("file:///report.txt".into()),
+            media_type: "text/plain".into(),
+            title: Some("Report".into()),
+            canonical_text: "first version".into(),
+            updated_at: first_at,
+        };
+
+        let revision_one = store.upsert_document(&first).await.unwrap();
+        assert_eq!(revision_one.content_revision, 1);
+        assert_eq!(revision_one.created_at, first_at);
+        assert_eq!(revision_one.indexed_revision, None);
+        assert!(store
+            .mark_document_indexed(id, 1, revision_one.revision_token, "index-v1", first_at,)
+            .await
+            .unwrap());
+
+        let second_at = DateTime::<Utc>::from_timestamp(20_000, 0).unwrap();
+        let second = DocumentUpsert {
+            canonical_text: "second version".into(),
+            updated_at: second_at,
+            ..first
+        };
+        let revision_two = store.upsert_document(&second).await.unwrap();
+        assert_eq!(revision_two.content_revision, 2);
+        assert_eq!(revision_two.created_at, first_at);
+        assert_eq!(revision_two.updated_at, second_at);
+        assert_ne!(revision_two.revision_token, revision_one.revision_token);
+        assert_eq!(revision_two.indexed_revision, None);
+        assert_eq!(revision_two.index_fingerprint, None);
+        assert_eq!(revision_two.indexed_at, None);
+
+        // A late indexer for revision one cannot mark revision two current.
+        assert!(!store
+            .mark_document_indexed(id, 1, revision_one.revision_token, "stale", second_at)
+            .await
+            .unwrap());
+        assert!(store
+            .mark_document_indexed(id, 2, revision_two.revision_token, "index-v2", second_at,)
+            .await
+            .unwrap());
+        let indexed = store.get_document(id).await.unwrap().unwrap();
+        assert_eq!(indexed.indexed_revision, Some(2));
+        assert_eq!(indexed.index_fingerprint.as_deref(), Some("index-v2"));
+        assert_eq!(indexed.indexed_at, Some(second_at));
+
+        assert!(!store
+            .mark_document_indexed(
+                DocumentId::new(),
+                1,
+                uuid::Uuid::new_v4(),
+                "missing",
+                second_at,
+            )
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn stale_revision_token_cannot_mark_a_recreated_document_indexed() {
+        let (_dir, store) = temp_store().await;
+        let first = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "old lifecycle".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
+        };
+        let old = store.upsert_document(&first).await.unwrap();
+        store.delete_document(first.id).await.unwrap();
+        let recreated_at = DateTime::<Utc>::from_timestamp(2, 0).unwrap();
+        store
+            .create_document(&DocumentRecord {
+                canonical_text: "new lifecycle".into(),
+                created_at: recreated_at,
+                updated_at: recreated_at,
+                ..old.clone()
+            })
+            .await
+            .unwrap();
+        let recreated = store.get_document(first.id).await.unwrap().unwrap();
+
+        assert_eq!(recreated.content_revision, 1);
+        assert_ne!(recreated.revision_token, old.revision_token);
+        assert!(!store
+            .mark_document_indexed(
+                recreated.id,
+                old.content_revision,
+                old.revision_token,
+                "stale",
+                recreated.updated_at,
+            )
+            .await
+            .unwrap());
+        assert!(store
+            .mark_document_indexed(
+                recreated.id,
+                recreated.content_revision,
+                recreated.revision_token,
+                "current",
+                recreated.updated_at,
+            )
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_document_upserts_allocate_distinct_revisions() {
+        let (_dir, store) = temp_store().await;
+        let first = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "a".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
+        };
+        let second = DocumentUpsert {
+            canonical_text: "b".into(),
+            ..first.clone()
+        };
+
+        let (first, second) = tokio::join!(
+            store.upsert_document(&first),
+            store.upsert_document(&second)
+        );
+        let mut revisions = [
+            first.unwrap().content_revision,
+            second.unwrap().content_revision,
+        ];
+        revisions.sort_unstable();
+        assert_eq!(revisions, [1, 2]);
+    }
+
+    #[tokio::test]
+    async fn document_upsert_rolls_back_when_project_is_unknown() {
+        let (_dir, store) = temp_store().await;
+        let upsert = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: Some(ProjectId::new()),
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "content".into(),
+            updated_at: Utc::now(),
+        };
+        assert!(store.upsert_document(&upsert).await.is_err());
+        assert_eq!(store.get_document(upsert.id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn concurrent_document_upserts_allocate_distinct_revisions() {
+        let (_dir, store) = temp_store().await;
+        let base = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "base".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
+        };
+        let id = base.id;
+        assert_eq!(
+            store.upsert_document(&base).await.unwrap().content_revision,
+            1
+        );
+        let a = DocumentUpsert {
+            canonical_text: "a".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(2, 0).unwrap(),
+            ..base.clone()
+        };
+        let b = DocumentUpsert {
+            canonical_text: "b".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(3, 0).unwrap(),
+            ..base
+        };
+
+        let (a, b) = tokio::join!(store.upsert_document(&a), store.upsert_document(&b));
+        let mut revisions = [a.unwrap().content_revision, b.unwrap().content_revision];
+        revisions.sort_unstable();
+        assert_eq!(revisions, [2, 3]);
+        let current = store.get_document(id).await.unwrap().unwrap();
+        assert_eq!(current.content_revision, 3);
+        assert!(matches!(current.canonical_text.as_str(), "a" | "b"));
+        assert_eq!(current.indexed_revision, None);
+    }
+
+    #[tokio::test]
+    async fn high_contention_document_upserts_do_not_drop_writers() {
+        let (_dir, store) = temp_store().await;
+        let id = DocumentId::new();
+        let writes = (0..64).map(|i| {
+            let store = store.clone();
+            async move {
+                store
+                    .upsert_document(&DocumentUpsert {
+                        id,
+                        project_id: None,
+                        source_uri: None,
+                        media_type: "text/plain".into(),
+                        title: None,
+                        canonical_text: format!("writer {i}"),
+                        updated_at: DateTime::<Utc>::from_timestamp(i, 0).unwrap(),
+                    })
+                    .await
+                    .unwrap()
+                    .content_revision
+            }
+        });
+
+        let mut revisions = futures::future::join_all(writes).await;
+        revisions.sort_unstable();
+        assert_eq!(revisions, (1..=64).collect::<Vec<_>>());
+        assert_eq!(
+            store
+                .get_document(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .content_revision,
+            64
+        );
+    }
+
+    #[tokio::test]
     async fn m0006_upgrades_an_existing_store_without_losing_records() {
         let dir = tempfile::tempdir().unwrap();
         let url = format!(
@@ -1339,12 +1742,13 @@ mod tests {
         migration::Migrator::up(&conn, None).await.unwrap();
 
         assert_eq!(store.get_chat(chat.id).await.unwrap().as_ref(), Some(&chat));
-        let document = sample_document(None);
+        let mut document = sample_document(None);
+        let supplied_token = document.revision_token;
         store.create_document(&document).await.unwrap();
-        assert_eq!(
-            store.get_document(document.id).await.unwrap().as_ref(),
-            Some(&document)
-        );
+        let stored = store.get_document(document.id).await.unwrap().unwrap();
+        assert_ne!(stored.revision_token, supplied_token);
+        document.revision_token = stored.revision_token;
+        assert_eq!(stored, document);
     }
 
     #[tokio::test]

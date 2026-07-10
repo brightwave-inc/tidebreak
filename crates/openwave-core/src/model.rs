@@ -69,6 +69,28 @@ pub struct DocumentRecord {
     pub indexed_at: Option<DateTime<Utc>>,
 }
 
+/// Authoritative content to create or replace for a document.
+///
+/// The store owns revision and index-watermark transitions: the first upsert is
+/// revision one; each replacement increments it and clears the prior watermark.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentUpsert {
+    /// Stable identifier shared with the retrieval index.
+    pub id: DocumentId,
+    /// Owning project, or `None` for an explicitly unscoped document.
+    pub project_id: Option<ProjectId>,
+    /// Source path or URL, or `None` for content supplied inline.
+    pub source_uri: Option<String>,
+    /// Media type of the canonical content.
+    pub media_type: String,
+    /// Optional human-facing title.
+    pub title: Option<String>,
+    /// Parsed text-of-record.
+    pub canonical_text: String,
+    /// Time of this authoritative write.
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Corpus ownership filter for document listings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

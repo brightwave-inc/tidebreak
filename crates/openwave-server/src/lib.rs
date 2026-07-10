@@ -486,6 +486,24 @@ mod tests {
         async fn delete_document(&self, id: openwave_core::DocumentId) -> Result<()> {
             self.inner.delete_document(id).await
         }
+        async fn upsert_document(
+            &self,
+            document: &openwave_core::DocumentUpsert,
+        ) -> Result<openwave_core::DocumentRecord> {
+            self.inner.upsert_document(document).await
+        }
+        async fn mark_document_indexed(
+            &self,
+            id: openwave_core::DocumentId,
+            revision: i64,
+            revision_token: uuid::Uuid,
+            fingerprint: &str,
+            indexed_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<bool> {
+            self.inner
+                .mark_document_indexed(id, revision, revision_token, fingerprint, indexed_at)
+                .await
+        }
         async fn create_chat(&self, chat: &Chat) -> Result<()> {
             self.inner.create_chat(chat).await
         }
