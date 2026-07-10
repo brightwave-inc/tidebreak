@@ -8,6 +8,7 @@
 //! and hybrid dense+sparse search, arrive as feature-gated backends behind this
 //! trait later.
 
+use std::collections::HashMap;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
@@ -16,6 +17,7 @@ use crate::document::{Chunk, ScoredChunk};
 use crate::embed::Embedding;
 use crate::error::{Result, RetrievalError};
 use crate::id::DocumentId;
+use openwave_core::DocumentGeneration;
 
 /// A chunk together with its embedding, ready to store.
 #[derive(Debug, Clone)]
@@ -24,6 +26,20 @@ pub struct VectorRecord {
     pub chunk: Chunk,
     /// Its embedding. Must match the store's dimensionality.
     pub embedding: Embedding,
+}
+
+/// Result of conditionally staging one derived document generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationStageOutcome {
+    /// The requested generation was durably staged but is not searchable yet.
+    Staged,
+    /// The exact generation was already staged or active.
+    AlreadyPresent,
+    /// A newer generation fence already exists, so this writer is stale.
+    Rejected {
+        /// Newest staged or active generation that fenced the request.
+        current: DocumentGeneration,
+    },
 }
 
 /// Stores embedded chunks and retrieves them by vector similarity.
@@ -36,7 +52,10 @@ pub trait VectorStore: Send + Sync {
     ///
     /// Re-upserting a chunk with the same id overwrites it, so re-ingesting a
     /// document (which yields the same derived chunk ids) is idempotent rather
-    /// than duplicating vectors.
+    /// than duplicating vectors. Implementations that support generation-aware
+    /// publication reject this legacy path after a document has entered that
+    /// protocol, because an unversioned write cannot preserve its generation
+    /// fence.
     async fn upsert(&self, records: Vec<VectorRecord>) -> Result<()>;
 
     /// Return the `k` chunks most similar to `query`, highest score first.
@@ -54,12 +73,53 @@ pub trait VectorStore: Send + Sync {
     /// insert and leave a mix of versions. Passing an empty `records` clears the
     /// document. Every record must belong to `document_id`; implementations reject
     /// cross-document records and validate each embedding's dimensionality, as
-    /// [`VectorStore::upsert`] does, before mutating the store.
+    /// [`VectorStore::upsert`] does, before mutating the store. Like `upsert`,
+    /// this legacy path is rejected once the document is generation-managed.
     async fn replace_document(
         &self,
         document_id: DocumentId,
         records: Vec<VectorRecord>,
     ) -> Result<()>;
+
+    /// Stage a complete derived generation without making it searchable.
+    ///
+    /// Implementations retain a generation marker even when `records` is empty.
+    /// Lower revisions are rejected, equal revisions require the exact token,
+    /// and staging a newer generation fences activation of every older writer.
+    async fn stage_document_generation(
+        &self,
+        _document_id: DocumentId,
+        _generation: DocumentGeneration,
+        _records: Vec<VectorRecord>,
+    ) -> Result<GenerationStageOutcome> {
+        Err(RetrievalError::vector_store(
+            "generation-aware staging is not implemented by this vector store",
+        ))
+    }
+
+    /// Atomically make the exact staged generation searchable.
+    ///
+    /// Returns `false` when the requested generation is neither the newest exact
+    /// stage nor the already-active generation.
+    async fn activate_document_generation(
+        &self,
+        _document_id: DocumentId,
+        _generation: DocumentGeneration,
+    ) -> Result<bool> {
+        Err(RetrievalError::vector_store(
+            "generation-aware activation is not implemented by this vector store",
+        ))
+    }
+
+    /// Return the active searchable generation, including an empty tombstone.
+    async fn active_document_generation(
+        &self,
+        _document_id: DocumentId,
+    ) -> Result<Option<DocumentGeneration>> {
+        Err(RetrievalError::vector_store(
+            "generation-aware publication is not implemented by this vector store",
+        ))
+    }
 
     /// Count physically stored chunks for one document when the backend can do
     /// so efficiently.
@@ -83,7 +143,24 @@ pub trait VectorStore: Send + Sync {
 /// A brute-force, in-memory [`VectorStore`] using cosine similarity.
 pub struct InMemoryVectorStore {
     dims: usize,
-    records: RwLock<Vec<VectorRecord>>,
+    state: RwLock<InMemoryVectorState>,
+}
+
+#[derive(Default)]
+struct InMemoryVectorState {
+    unversioned_records: Vec<VectorRecord>,
+    publications: HashMap<DocumentId, DocumentPublication>,
+}
+
+#[derive(Default)]
+struct DocumentPublication {
+    active: Option<GenerationRecords>,
+    staged: Option<GenerationRecords>,
+}
+
+struct GenerationRecords {
+    generation: DocumentGeneration,
+    records: Vec<VectorRecord>,
 }
 
 impl InMemoryVectorStore {
@@ -92,7 +169,7 @@ impl InMemoryVectorStore {
     pub fn new(dims: usize) -> Self {
         Self {
             dims,
-            records: RwLock::new(Vec::new()),
+            state: RwLock::new(InMemoryVectorState::default()),
         }
     }
 
@@ -111,6 +188,23 @@ impl InMemoryVectorStore {
         }
         Ok(())
     }
+
+    fn validate_document_records(
+        &self,
+        document_id: DocumentId,
+        records: &[VectorRecord],
+    ) -> Result<()> {
+        for record in records {
+            self.check_dims(&record.embedding)?;
+            if record.chunk.document_id != document_id {
+                return Err(RetrievalError::vector_store(format!(
+                    "replacement record {} belongs to document {}, expected {document_id}",
+                    record.chunk.id, record.chunk.document_id
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -120,15 +214,19 @@ impl VectorStore for InMemoryVectorStore {
             self.check_dims(&record.embedding)?;
         }
         let mut store = self
-            .records
+            .state
             .write()
             .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
+        if records
+            .iter()
+            .any(|record| store.publications.contains_key(&record.chunk.document_id))
+        {
+            return Err(RetrievalError::vector_store(
+                "legacy upsert cannot modify a generation-managed document",
+            ));
+        }
         for record in records {
-            if let Some(existing) = store.iter_mut().find(|r| r.chunk.id == record.chunk.id) {
-                *existing = record;
-            } else {
-                store.push(record);
-            }
+            upsert_unversioned(&mut store.unversioned_records, record);
         }
         Ok(())
     }
@@ -139,12 +237,18 @@ impl VectorStore for InMemoryVectorStore {
             return Ok(Vec::new());
         }
         let store = self
-            .records
+            .state
             .read()
             .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
 
-        let mut scored: Vec<ScoredChunk> = store
-            .iter()
+        let visible = store.unversioned_records.iter().chain(
+            store
+                .publications
+                .values()
+                .filter_map(|publication| publication.active.as_ref())
+                .flat_map(|active| active.records.iter()),
+        );
+        let mut scored: Vec<ScoredChunk> = visible
             .map(|r| ScoredChunk {
                 chunk: r.chunk.clone(),
                 score: query.cosine_similarity(&r.embedding),
@@ -167,43 +271,154 @@ impl VectorStore for InMemoryVectorStore {
         document_id: DocumentId,
         records: Vec<VectorRecord>,
     ) -> Result<()> {
-        for record in &records {
-            self.check_dims(&record.embedding)?;
-            if record.chunk.document_id != document_id {
-                return Err(RetrievalError::vector_store(format!(
-                    "replacement record {} belongs to document {}, expected {document_id}",
-                    record.chunk.id, record.chunk.document_id
-                )));
-            }
-        }
+        self.validate_document_records(document_id, &records)?;
         // Delete + insert under a single write lock, so a concurrent ingest can't
         // observe or race a half-applied replacement.
         let mut store = self
-            .records
+            .state
             .write()
             .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
-        store.retain(|r| r.chunk.document_id != document_id);
+        if store.publications.contains_key(&document_id) {
+            return Err(RetrievalError::vector_store(
+                "legacy replacement cannot modify a generation-managed document",
+            ));
+        }
+        store
+            .unversioned_records
+            .retain(|r| r.chunk.document_id != document_id);
         // Insert with the same by-chunk-id dedupe `upsert` uses, so the two write
         // paths give symmetric guarantees: if a chunker ever emits two records with
         // the same derived id (identical span), the last wins rather than both
         // landing and producing duplicate citations.
         for record in records {
-            if let Some(existing) = store.iter_mut().find(|r| r.chunk.id == record.chunk.id) {
+            if let Some(existing) = store
+                .unversioned_records
+                .iter_mut()
+                .find(|r| r.chunk.id == record.chunk.id)
+            {
                 *existing = record;
             } else {
-                store.push(record);
+                store.unversioned_records.push(record);
             }
         }
         Ok(())
     }
 
-    async fn document_len(&self, document_id: DocumentId) -> Result<Option<usize>> {
-        let store = self
-            .records
+    async fn stage_document_generation(
+        &self,
+        document_id: DocumentId,
+        generation: DocumentGeneration,
+        records: Vec<VectorRecord>,
+    ) -> Result<GenerationStageOutcome> {
+        if generation.content_revision < 1 {
+            return Err(RetrievalError::vector_store(
+                "document generation revision must be at least one",
+            ));
+        }
+        self.validate_document_records(document_id, &records)?;
+        let records = dedupe_records(records);
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
+        let publication = state.publications.entry(document_id).or_default();
+        let newest = publication
+            .active
+            .as_ref()
+            .into_iter()
+            .chain(publication.staged.as_ref())
+            .max_by_key(|records| records.generation.content_revision);
+        if let Some(newest) = newest {
+            match generation
+                .content_revision
+                .cmp(&newest.generation.content_revision)
+            {
+                std::cmp::Ordering::Less => {
+                    return Ok(GenerationStageOutcome::Rejected {
+                        current: newest.generation,
+                    });
+                }
+                std::cmp::Ordering::Equal => {
+                    if generation.revision_token != newest.generation.revision_token {
+                        return Err(RetrievalError::vector_store(format!(
+                            "document {document_id} generation {} has conflicting revision tokens",
+                            generation.content_revision
+                        )));
+                    }
+                    return Ok(GenerationStageOutcome::AlreadyPresent);
+                }
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+        publication.staged = Some(GenerationRecords {
+            generation,
+            records,
+        });
+        Ok(GenerationStageOutcome::Staged)
+    }
+
+    async fn activate_document_generation(
+        &self,
+        document_id: DocumentId,
+        generation: DocumentGeneration,
+    ) -> Result<bool> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
+        let Some(publication) = state.publications.get_mut(&document_id) else {
+            return Ok(false);
+        };
+        if let Some(staged) = publication.staged.as_ref() {
+            if staged.generation != generation {
+                return Ok(false);
+            }
+            let staged = publication
+                .staged
+                .take()
+                .expect("the exact staged generation was just checked");
+            publication.active = Some(staged);
+            state
+                .unversioned_records
+                .retain(|record| record.chunk.document_id != document_id);
+            return Ok(true);
+        }
+        Ok(publication
+            .active
+            .as_ref()
+            .is_some_and(|active| active.generation == generation))
+    }
+
+    async fn active_document_generation(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Option<DocumentGeneration>> {
+        let state = self
+            .state
             .read()
             .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
+        Ok(state
+            .publications
+            .get(&document_id)
+            .and_then(|publication| publication.active.as_ref())
+            .map(|active| active.generation))
+    }
+
+    async fn document_len(&self, document_id: DocumentId) -> Result<Option<usize>> {
+        let store = self
+            .state
+            .read()
+            .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
+        if let Some(active) = store
+            .publications
+            .get(&document_id)
+            .and_then(|publication| publication.active.as_ref())
+        {
+            return Ok(Some(active.records.len()));
+        }
         Ok(Some(
             store
+                .unversioned_records
                 .iter()
                 .filter(|record| record.chunk.document_id == document_id)
                 .count(),
@@ -212,10 +427,41 @@ impl VectorStore for InMemoryVectorStore {
 
     async fn len(&self) -> Result<usize> {
         let store = self
-            .records
+            .state
             .read()
             .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
-        Ok(store.len())
+        Ok(store.unversioned_records.len()
+            + store
+                .publications
+                .values()
+                .filter_map(|publication| publication.active.as_ref())
+                .map(|active| active.records.len())
+                .sum::<usize>())
+    }
+}
+
+fn dedupe_records(records: Vec<VectorRecord>) -> Vec<VectorRecord> {
+    let mut by_id = HashMap::new();
+    let mut deduped = Vec::with_capacity(records.len());
+    for record in records {
+        if let Some(&index) = by_id.get(&record.chunk.id) {
+            deduped[index] = record;
+        } else {
+            by_id.insert(record.chunk.id, deduped.len());
+            deduped.push(record);
+        }
+    }
+    deduped
+}
+
+fn upsert_unversioned(records: &mut Vec<VectorRecord>, record: VectorRecord) {
+    if let Some(existing) = records
+        .iter_mut()
+        .find(|existing| existing.chunk.id == record.chunk.id)
+    {
+        *existing = record;
+    } else {
+        records.push(record);
     }
 }
 
@@ -230,6 +476,13 @@ mod tests {
         VectorRecord {
             chunk: Chunk::new(doc, ordinal, span, text),
             embedding: Embedding(vector),
+        }
+    }
+
+    fn generation(revision: i64) -> DocumentGeneration {
+        DocumentGeneration {
+            content_revision: revision,
+            revision_token: uuid::Uuid::from_u128(revision as u128),
         }
     }
 
@@ -410,5 +663,239 @@ mod tests {
         let hits = store.query(&Embedding(vec![1.0, 0.0]), 10).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.text, "original");
+    }
+
+    #[tokio::test]
+    async fn staged_generation_is_invisible_and_newer_stage_fences_activation() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let first = generation(1);
+        let third = generation(3);
+
+        assert_eq!(
+            store
+                .stage_document_generation(
+                    doc,
+                    first,
+                    vec![record(doc, 0, "first", vec![1.0, 0.0])],
+                )
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Staged
+        );
+        assert!(store
+            .query(&Embedding(vec![1.0, 0.0]), 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .activate_document_generation(doc, first)
+            .await
+            .unwrap());
+        assert_eq!(
+            store.active_document_generation(doc).await.unwrap(),
+            Some(first)
+        );
+
+        assert_eq!(
+            store
+                .stage_document_generation(
+                    doc,
+                    third,
+                    vec![record(doc, 0, "third", vec![0.0, 1.0])],
+                )
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Staged
+        );
+        let before_activation = store.query(&Embedding(vec![1.0, 0.0]), 10).await.unwrap();
+        assert_eq!(before_activation.len(), 1);
+        assert_eq!(before_activation[0].chunk.text, "first");
+        assert!(!store
+            .activate_document_generation(doc, first)
+            .await
+            .unwrap());
+        assert!(store
+            .activate_document_generation(doc, third)
+            .await
+            .unwrap());
+        assert!(store
+            .activate_document_generation(doc, third)
+            .await
+            .unwrap());
+
+        let after_activation = store.query(&Embedding(vec![0.0, 1.0]), 10).await.unwrap();
+        assert_eq!(after_activation.len(), 1);
+        assert_eq!(after_activation[0].chunk.text, "third");
+        assert_eq!(
+            store.active_document_generation(doc).await.unwrap(),
+            Some(third)
+        );
+    }
+
+    #[tokio::test]
+    async fn staging_is_monotonic_idempotent_and_token_exact() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let second = generation(2);
+        let third = generation(3);
+
+        assert_eq!(
+            store
+                .stage_document_generation(doc, third, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Staged
+        );
+        assert_eq!(
+            store
+                .stage_document_generation(doc, third, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            store
+                .stage_document_generation(doc, second, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Rejected { current: third }
+        );
+        let conflicting = DocumentGeneration {
+            revision_token: uuid::Uuid::from_u128(300),
+            ..third
+        };
+        assert!(store
+            .stage_document_generation(doc, conflicting, Vec::new())
+            .await
+            .is_err());
+        assert!(!store
+            .activate_document_generation(doc, second)
+            .await
+            .unwrap());
+        assert!(store
+            .activate_document_generation(doc, third)
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .stage_document_generation(doc, second, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Rejected { current: third }
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_generation_clears_chunks_and_retains_the_fence() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let live = generation(1);
+        let tombstone = generation(2);
+        store
+            .stage_document_generation(doc, live, vec![record(doc, 0, "live", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+        assert!(store.activate_document_generation(doc, live).await.unwrap());
+
+        store
+            .stage_document_generation(doc, tombstone, Vec::new())
+            .await
+            .unwrap();
+        assert!(store
+            .activate_document_generation(doc, tombstone)
+            .await
+            .unwrap());
+        assert!(store.is_empty().await.unwrap());
+        assert_eq!(store.document_len(doc).await.unwrap(), Some(0));
+        assert_eq!(
+            store.active_document_generation(doc).await.unwrap(),
+            Some(tombstone)
+        );
+        assert_eq!(
+            store
+                .stage_document_generation(doc, live, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Rejected { current: tombstone }
+        );
+    }
+
+    #[tokio::test]
+    async fn staging_validation_does_not_mutate_publication_state() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let wrong = DocumentId::new();
+        assert!(store
+            .stage_document_generation(
+                doc,
+                generation(1),
+                vec![record(wrong, 0, "wrong document", vec![1.0, 0.0])],
+            )
+            .await
+            .is_err());
+        assert!(store
+            .stage_document_generation(
+                doc,
+                generation(1),
+                vec![record(doc, 0, "wrong dimensions", vec![1.0])],
+            )
+            .await
+            .is_err());
+        assert_eq!(store.active_document_generation(doc).await.unwrap(), None);
+        assert!(!store
+            .activate_document_generation(doc, generation(1))
+            .await
+            .unwrap());
+        assert!(store.is_empty().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn legacy_writes_cannot_erase_active_or_staged_generation_fences() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let first = generation(1);
+        let second = generation(2);
+        let tombstone = generation(3);
+        store
+            .stage_document_generation(doc, first, vec![record(doc, 0, "active", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+        assert!(store
+            .activate_document_generation(doc, first)
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .stage_document_generation(doc, tombstone, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Staged
+        );
+
+        assert!(store
+            .upsert(vec![record(doc, 0, "legacy", vec![1.0, 1.0])])
+            .await
+            .is_err());
+        assert!(store
+            .replace_document(doc, vec![record(doc, 0, "legacy", vec![1.0, 1.0])])
+            .await
+            .is_err());
+        let hits = store.query(&Embedding(vec![1.0, 0.0]), 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.text, "active");
+        assert!(store
+            .activate_document_generation(doc, tombstone)
+            .await
+            .unwrap());
+        assert!(store.is_empty().await.unwrap());
+        assert!(store.replace_document(doc, Vec::new()).await.is_err());
+        assert_eq!(
+            store
+                .stage_document_generation(doc, second, Vec::new())
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Rejected { current: tombstone }
+        );
     }
 }

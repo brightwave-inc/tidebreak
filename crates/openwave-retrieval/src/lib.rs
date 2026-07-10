@@ -85,8 +85,9 @@ pub use id::{ChunkId, DocumentId};
 pub use lance_store::LanceVectorStore;
 #[cfg(feature = "embed-openai")]
 pub use openai_embed::OpenAiEmbedder;
+pub use openwave_core::DocumentGeneration;
 pub use parse::{DocumentParser, ParsedDocument, PlainTextParser};
 pub use retriever::{IngestOutcome, Retriever};
 #[cfg(feature = "tool")]
 pub use search::SearchTool;
-pub use vector::{InMemoryVectorStore, VectorRecord, VectorStore};
+pub use vector::{GenerationStageOutcome, InMemoryVectorStore, VectorRecord, VectorStore};
