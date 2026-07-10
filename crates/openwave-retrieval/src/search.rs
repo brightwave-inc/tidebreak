@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 
 use crate::document::Citation;
 use crate::embed::Embedder;
-use crate::vector::VectorStore;
+use crate::vector::{SearchScope, VectorStore};
 
 /// A `Tool` that searches an embedded index and returns grounded citations.
 pub struct SearchTool {
@@ -126,7 +126,7 @@ impl Tool for SearchTool {
             Ok(embedding) => embedding,
             Err(err) => return Ok(ToolOutput::error(format!("embedding failed: {err}"))),
         };
-        let hits = match self.store.query(&embedding, k).await {
+        let hits = match self.store.query(&embedding, k, SearchScope::Unscoped).await {
             Ok(hits) => hits,
             Err(err) => return Ok(ToolOutput::error(format!("search failed: {err}"))),
         };
@@ -171,7 +171,11 @@ mod tests {
         let records: Vec<VectorRecord> = chunks
             .into_iter()
             .zip(embeddings)
-            .map(|(chunk, embedding)| VectorRecord { chunk, embedding })
+            .map(|(chunk, embedding)| VectorRecord {
+                project_id: None,
+                chunk,
+                embedding,
+            })
             .collect();
         store.upsert(records).await.unwrap();
 

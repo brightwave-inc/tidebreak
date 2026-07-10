@@ -13,7 +13,7 @@ use crate::embed::Embedder;
 use crate::error::{Result, RetrievalError};
 use crate::id::DocumentId;
 use crate::parse::DocumentParser;
-use crate::vector::{GenerationStageOutcome, VectorRecord, VectorStore};
+use crate::vector::{GenerationStageOutcome, SearchScope, VectorRecord, VectorStore};
 use openwave_core::DocumentGeneration;
 
 /// The outcome of ingesting one document.
@@ -211,7 +211,11 @@ impl Retriever {
             chunks
                 .into_iter()
                 .zip(embeddings)
-                .map(|(chunk, embedding)| VectorRecord { chunk, embedding })
+                .map(|(chunk, embedding)| VectorRecord {
+                    project_id: document.project_id,
+                    chunk,
+                    embedding,
+                })
                 .collect()
         };
         Ok(records)
@@ -245,9 +249,9 @@ impl Retriever {
     }
 
     /// Search the index for the `k` chunks most relevant to `query`, as citations.
-    pub async fn search(&self, query: &str, k: usize) -> Result<Vec<Citation>> {
+    pub async fn search(&self, scope: SearchScope, query: &str, k: usize) -> Result<Vec<Citation>> {
         let embedding = self.embedder.embed_query(query).await?;
-        let hits = self.store.query(&embedding, k).await?;
+        let hits = self.store.query(&embedding, k, scope).await?;
         Ok(hits.into_iter().map(Citation::from).collect())
     }
 
@@ -324,7 +328,11 @@ The Great Barrier Reef is the world's largest coral reef system.";
         assert!(outcome.chunks >= 3);
 
         let hits = r
-            .search("which planet is the largest gas giant", 1)
+            .search(
+                SearchScope::Unscoped,
+                "which planet is the largest gas giant",
+                1,
+            )
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -352,7 +360,35 @@ The Great Barrier Reef is the world's largest coral reef system.";
         assert_eq!(document.text, "persist this before embedding");
 
         assert_eq!(r.index_document(&document).await.unwrap(), 1);
-        let hits = r.search("persist embedding", 1).await.unwrap();
+        let hits = r
+            .search(SearchScope::Unscoped, "persist embedding", 1)
+            .await
+            .unwrap();
+        assert_eq!(hits[0].document_id, document.id);
+    }
+
+    #[tokio::test]
+    async fn indexing_preserves_the_documents_project_scope() {
+        let r = retriever();
+        let project_id = openwave_core::ProjectId::new();
+        let document = Document::new_scoped(
+            project_id,
+            DocumentSource::Inline,
+            "text/plain",
+            "project-only retrieval content",
+        );
+        assert_eq!(r.index_document(&document).await.unwrap(), 1);
+
+        assert!(r
+            .search(SearchScope::Unscoped, "retrieval content", 1)
+            .await
+            .unwrap()
+            .is_empty());
+        let hits = r
+            .search(SearchScope::Project(project_id), "retrieval content", 1)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].document_id, document.id);
     }
 
@@ -376,12 +412,22 @@ The Great Barrier Reef is the world's largest coral reef system.";
         let staged = r.stage_document_generation(&document, first).await.unwrap();
         assert_eq!(staged.chunks, Some(1));
         assert_eq!(staged.stage, GenerationStageOutcome::Staged);
-        assert!(r.search("indexing", 5).await.unwrap().is_empty());
+        assert!(r
+            .search(SearchScope::Unscoped, "indexing", 5)
+            .await
+            .unwrap()
+            .is_empty());
         assert!(r
             .activate_document_generation(document.id, first)
             .await
             .unwrap());
-        assert_eq!(r.search("indexing", 5).await.unwrap().len(), 1);
+        assert_eq!(
+            r.search(SearchScope::Unscoped, "indexing", 5)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
 
         assert_eq!(
             r.stage_document_tombstone(document.id, tombstone)
@@ -389,12 +435,22 @@ The Great Barrier Reef is the world's largest coral reef system.";
                 .unwrap(),
             GenerationStageOutcome::Staged
         );
-        assert_eq!(r.search("indexing", 5).await.unwrap().len(), 1);
+        assert_eq!(
+            r.search(SearchScope::Unscoped, "indexing", 5)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(r
             .activate_document_generation(document.id, tombstone)
             .await
             .unwrap());
-        assert!(r.search("indexing", 5).await.unwrap().is_empty());
+        assert!(r
+            .search(SearchScope::Unscoped, "indexing", 5)
+            .await
+            .unwrap()
+            .is_empty());
         assert_eq!(
             r.stage_document_generation(&document, first)
                 .await
@@ -486,7 +542,11 @@ The Great Barrier Reef is the world's largest coral reef system.";
             .unwrap();
         assert_eq!(outcome.chunks, 0);
         assert!(r.store().is_empty().await.unwrap());
-        assert!(r.search("anything", 5).await.unwrap().is_empty());
+        assert!(r
+            .search(SearchScope::Unscoped, "anything", 5)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -506,7 +566,11 @@ The Great Barrier Reef is the world's largest coral reef system.";
         let records: Vec<VectorRecord> = chunks
             .into_iter()
             .zip(embeddings)
-            .map(|(chunk, embedding)| VectorRecord { chunk, embedding })
+            .map(|(chunk, embedding)| VectorRecord {
+                project_id: None,
+                chunk,
+                embedding,
+            })
             .collect();
 
         // Upsert the same derived-id records twice; the store must not grow.
@@ -539,7 +603,10 @@ The Great Barrier Reef is the world's largest coral reef system.";
         assert_eq!(r.store().len().await.unwrap(), after_first);
 
         // And a single search returns each chunk once, not doubled.
-        let hits = r.search("three four five", 10).await.unwrap();
+        let hits = r
+            .search(SearchScope::Unscoped, "three four five", 10)
+            .await
+            .unwrap();
         let unique: std::collections::HashSet<_> = hits.iter().map(|h| h.chunk_id).collect();
         assert_eq!(unique.len(), hits.len());
     }
@@ -566,7 +633,7 @@ The Great Barrier Reef is the world's largest coral reef system.";
         assert_eq!(second.document.id, first.document.id);
         // The store holds only the new chunks — the old beta/gamma ones are pruned.
         assert_eq!(r.store().len().await.unwrap(), second.chunks);
-        let hits = r.search("gamma", 10).await.unwrap();
+        let hits = r.search(SearchScope::Unscoped, "gamma", 10).await.unwrap();
         assert!(
             hits.iter().all(|h| !h.snippet.contains("gamma")),
             "stale chunks from the longer version must be gone"

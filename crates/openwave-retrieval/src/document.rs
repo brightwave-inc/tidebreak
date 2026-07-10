@@ -6,6 +6,7 @@
 //! from the vector index (offsets in the store, text rehydrated from the source),
 //! and it gives every answer a precise, verifiable pointer back into the source.
 
+use openwave_core::ProjectId;
 use serde::{Deserialize, Serialize};
 
 use crate::id::{ChunkId, DocumentId};
@@ -72,6 +73,8 @@ impl DocumentSource {
 pub struct Document {
     /// Stable identifier for this document.
     pub id: DocumentId,
+    /// Project corpus this document belongs to, or `None` for the unscoped corpus.
+    pub project_id: Option<ProjectId>,
     /// Where the document came from.
     pub source: DocumentSource,
     /// The document's media (MIME) type, e.g. `text/plain` or `text/markdown`.
@@ -104,6 +107,36 @@ impl Document {
     ) -> Self {
         Self {
             id,
+            project_id: None,
+            source,
+            media_type: media_type.into(),
+            text: text.into(),
+        }
+    }
+
+    /// Assemble a project-scoped document from freshly parsed text.
+    #[must_use]
+    pub fn new_scoped(
+        project_id: ProjectId,
+        source: DocumentSource,
+        media_type: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self::with_id_scoped(DocumentId::new(), project_id, source, media_type, text)
+    }
+
+    /// Assemble a project-scoped document with a caller-supplied id.
+    #[must_use]
+    pub fn with_id_scoped(
+        id: DocumentId,
+        project_id: ProjectId,
+        source: DocumentSource,
+        media_type: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            project_id: Some(project_id),
             source,
             media_type: media_type.into(),
             text: text.into(),

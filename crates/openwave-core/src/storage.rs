@@ -38,6 +38,9 @@ pub enum DocumentIndexJobReason {
 }
 
 impl DocumentIndexJobReason {
+    /// Whether this repair must publish under a fresh generation fence.
+    #[must_use]
+    #[allow(dead_code)]
     pub(crate) const fn advances_generation(self) -> bool {
         matches!(self, Self::DerivedStateIncomplete | Self::PipelineChanged)
     }
@@ -85,7 +88,9 @@ pub trait Store: Send + Sync {
     /// database store enforces this with a restricting foreign key, so projects
     /// cannot be deleted while they still own documents. The store replaces the
     /// supplied `revision_token` with a fresh token so a deleted document
-    /// lifecycle cannot be recreated with stale identity.
+    /// lifecycle cannot be recreated with stale identity. A live document's
+    /// ownership is immutable: callers must delete it before recreating the same
+    /// id in another corpus.
     async fn create_document(&self, _document: &DocumentRecord) -> Result<()> {
         document_storage_unavailable()
     }
@@ -132,7 +137,7 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
-    /// List durable source-free tombstones whose retrieval retirement is unfinished.
+    /// List durable tombstone watermarks whose retrieval retirement is unfinished.
     ///
     /// Results are ordered by document id, strictly after `after` when present,
     /// and bounded by `limit`. A worker can advance past a poison entry and wrap
@@ -145,10 +150,18 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
+    /// Read the exact retirement watermark currently pending for one document.
+    async fn get_pending_document_retirement(
+        &self,
+        _id: DocumentId,
+    ) -> Result<Option<DocumentGeneration>> {
+        document_storage_unavailable()
+    }
+
     /// Mark one exact tombstone generation's retrieval retirement complete.
     ///
-    /// Returns `false` when the generation is no longer pending, including when
-    /// the document was recreated or advanced since the caller observed it.
+    /// Returns `false` when that exact generation is no longer pending. A live
+    /// recreation may coexist with an older pending retirement watermark.
     async fn complete_document_retirement(
         &self,
         _id: DocumentId,
@@ -169,7 +182,10 @@ pub trait Store: Send + Sync {
     ///
     /// A never-seen id starts at revision one. Replacing or recreating an id
     /// increments its retained generation atomically, preserves `created_at` only
-    /// for a live replacement, and clears the index watermark.
+    /// for a live replacement, and clears the index watermark. `project_id`, when
+    /// present, must identify an existing project. A live document cannot move
+    /// between the unscoped and project corpora, or between projects; direct
+    /// upserts enforce the same ownership rules as the enqueueing write path.
     async fn upsert_document(&self, _document: &DocumentUpsert) -> Result<DocumentRecord> {
         document_storage_unavailable()
     }
@@ -184,7 +200,9 @@ pub trait Store: Send + Sync {
     /// status. Intentional reprocessing/retry is an explicit job-state transition,
     /// not another source write. `DocumentUpsert::updated_at` is source metadata
     /// and is deliberately excluded from retry identity. Workflow timestamps are
-    /// owned by the store rather than copied from source metadata.
+    /// owned by the store rather than copied from source metadata. `project_id`
+    /// must identify an existing project when present, and ownership of a live
+    /// document is immutable until that document is deleted.
     async fn upsert_document_and_enqueue_index(
         &self,
         _document: &DocumentUpsert,
@@ -425,7 +443,7 @@ mod tests {
         documents: HashMap<DocumentId, DocumentRecord>,
         generations: HashMap<DocumentId, DocumentGeneration>,
         tombstones: HashSet<DocumentId>,
-        pending_retirements: HashSet<DocumentId>,
+        pending_retirements: HashMap<DocumentId, DocumentGeneration>,
         jobs: HashMap<DocumentJobId, DocumentJob>,
     }
 
@@ -456,7 +474,6 @@ mod tests {
         };
         state.generations.insert(id, generation);
         state.tombstones.remove(&id);
-        state.pending_retirements.remove(&id);
         Ok(generation)
     }
 
@@ -494,6 +511,14 @@ mod tests {
             Ok(self.projects.lock().unwrap().values().cloned().collect())
         }
         async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
+            if document
+                .project_id
+                .is_some_and(|id| !self.projects.lock().unwrap().contains_key(&id))
+            {
+                return Err(AgentError::Store(
+                    "document references an unknown project".into(),
+                ));
+            }
             let mut state = self.document_state.lock().unwrap();
             if state.generations.contains_key(&document.id) {
                 return Err(AgentError::Store("document already exists".into()));
@@ -502,7 +527,6 @@ mod tests {
             document.revision_token = uuid::Uuid::new_v4();
             state.generations.insert(document.id, document.generation());
             state.tombstones.remove(&document.id);
-            state.pending_retirements.remove(&document.id);
             state.documents.insert(document.id, document);
             Ok(())
         }
@@ -584,7 +608,7 @@ mod tests {
                 let generation = allocate_mem_generation(&mut state, id)?;
                 state.documents.remove(&id);
                 state.tombstones.insert(id);
-                state.pending_retirements.insert(id);
+                state.pending_retirements.insert(id, generation);
                 generation
             } else if let Some(generation) = state.generations.get(&id) {
                 *generation
@@ -604,13 +628,25 @@ mod tests {
             let mut retirements: Vec<_> = state
                 .pending_retirements
                 .iter()
-                .filter(|id| after.is_none_or(|after| id.0 > after.0))
-                .filter(|id| !state.documents.contains_key(id) && state.tombstones.contains(id))
-                .map(|id| (*id, state.generations[id]))
+                .filter(|(id, _)| after.is_none_or(|after| id.0 > after.0))
+                .map(|(id, generation)| (*id, *generation))
                 .collect();
             retirements.sort_unstable_by_key(|(id, _)| id.0);
             retirements.truncate(limit.try_into().unwrap_or(usize::MAX));
             Ok(retirements)
+        }
+
+        async fn get_pending_document_retirement(
+            &self,
+            id: DocumentId,
+        ) -> Result<Option<DocumentGeneration>> {
+            Ok(self
+                .document_state
+                .lock()
+                .unwrap()
+                .pending_retirements
+                .get(&id)
+                .copied())
         }
 
         async fn complete_document_retirement(
@@ -619,11 +655,7 @@ mod tests {
             generation: DocumentGeneration,
         ) -> Result<bool> {
             let mut state = self.document_state.lock().unwrap();
-            if !state.pending_retirements.contains(&id)
-                || !state.tombstones.contains(&id)
-                || state.documents.contains_key(&id)
-                || state.generations.get(&id) != Some(&generation)
-            {
+            if state.pending_retirements.get(&id) != Some(&generation) {
                 return Ok(false);
             }
             state.pending_retirements.remove(&id);
@@ -639,6 +671,16 @@ mod tests {
                 return Err(AgentError::Store("invalid document upsert".into()));
             }
             let mut state = self.document_state.lock().unwrap();
+            if state
+                .documents
+                .get(&document.id)
+                .is_some_and(|existing| existing.project_id != document.project_id)
+            {
+                return Err(AgentError::Store(format!(
+                    "document {} cannot move between project corpora",
+                    document.id
+                )));
+            }
             let created_at = state
                 .documents
                 .get(&document.id)
@@ -682,6 +724,16 @@ mod tests {
             }
 
             let mut state = self.document_state.lock().unwrap();
+            if state
+                .documents
+                .get(&document.id)
+                .is_some_and(|existing| existing.project_id != document.project_id)
+            {
+                return Err(AgentError::Store(format!(
+                    "document {} cannot move between project corpora",
+                    document.id
+                )));
+            }
             if let Some(existing) = state.documents.get(&document.id).filter(|existing| {
                 existing.project_id == document.project_id
                     && existing.source_uri == document.source_uri
@@ -1417,6 +1469,35 @@ mod tests {
     }
 
     #[test]
+    fn mem_store_create_document_rejects_an_unknown_project() {
+        let store = MemStore::default();
+        let now = chrono::Utc::now();
+        let document = DocumentRecord {
+            id: DocumentId::new(),
+            project_id: Some(ProjectId::new()),
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "orphan".into(),
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+            processing_status: DocumentProcessingStatus::Queued,
+            indexed_revision: None,
+            index_fingerprint: None,
+            created_at: now,
+            updated_at: now,
+            indexed_at: None,
+        };
+
+        assert!(block_on(store.create_document(&document)).is_err());
+        assert_eq!(block_on(store.get_document(document.id)).unwrap(), None);
+        assert_eq!(
+            block_on(store.get_document_generation(document.id)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn store_is_object_safe_and_roundtrips() {
         let store: Arc<dyn Store> = Arc::new(MemStore::default());
         let chat = Chat {
@@ -1521,6 +1602,47 @@ mod tests {
             ))
             .unwrap(),
             Some(DocumentJobStatus::RetryWait)
+        );
+    }
+
+    #[test]
+    fn mem_store_rejects_moving_a_live_document_between_corpora() {
+        let store: Arc<dyn Store> = Arc::new(MemStore::default());
+        let project_a = Project {
+            id: ProjectId::new(),
+            title: None,
+            workspace_dir: "/tmp/a".into(),
+            created_at: chrono::Utc::now(),
+        };
+        let project_b = Project {
+            id: ProjectId::new(),
+            workspace_dir: "/tmp/b".into(),
+            ..project_a.clone()
+        };
+        block_on(store.create_project(&project_a)).unwrap();
+        block_on(store.create_project(&project_b)).unwrap();
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: Some(project_a.id),
+            source_uri: Some("file:///scoped.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "project A source".into(),
+            updated_at: chrono::Utc::now(),
+        };
+        let first =
+            block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)).unwrap();
+        let moved = DocumentUpsert {
+            project_id: Some(project_b.id),
+            canonical_text: "must not move".into(),
+            ..source
+        };
+        assert!(
+            block_on(store.upsert_document_and_enqueue_index(&moved, "pipeline-v1", 3)).is_err()
+        );
+        assert_eq!(
+            block_on(store.get_document(moved.id)).unwrap(),
+            Some(first.0)
         );
     }
 
@@ -1733,9 +1855,15 @@ mod tests {
             ..source.clone()
         }))
         .unwrap();
-        assert!(block_on(store.list_pending_document_retirements(None, 10))
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            block_on(store.list_pending_document_retirements(None, 10)).unwrap(),
+            vec![(source.id, tombstone)]
+        );
+        assert_eq!(
+            block_on(store.get_pending_document_retirement(source.id)).unwrap(),
+            Some(tombstone)
+        );
+        assert!(block_on(store.complete_document_retirement(source.id, tombstone)).unwrap());
         assert!(!block_on(store.complete_document_retirement(source.id, tombstone)).unwrap());
 
         let current_tombstone = block_on(store.delete_document(source.id)).unwrap();

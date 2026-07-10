@@ -123,6 +123,8 @@ impl Store for DbStore {
             revision_token: Set(revision_token),
             tombstone: Set(false),
             retirement_pending: Set(false),
+            retirement_content_revision: Set(None),
+            retirement_revision_token: Set(None),
         }
         .insert(&transaction)
         .await
@@ -282,9 +284,8 @@ impl Store for DbStore {
         let mut query = entities::document_generation::Entity::find()
             .select_only()
             .column(entities::document_generation::Column::DocumentId)
-            .column(entities::document_generation::Column::ContentRevision)
-            .column(entities::document_generation::Column::RevisionToken)
-            .filter(entities::document_generation::Column::Tombstone.eq(true))
+            .column(entities::document_generation::Column::RetirementContentRevision)
+            .column(entities::document_generation::Column::RetirementRevisionToken)
             .filter(entities::document_generation::Column::RetirementPending.eq(true));
         if let Some(after) = after {
             query = query.filter(entities::document_generation::Column::DocumentId.gt(after.0));
@@ -319,20 +320,56 @@ impl Store for DbStore {
                 entities::document_generation::Column::RetirementPending,
                 sea_orm::sea_query::Expr::value(false),
             )
+            .col_expr(
+                entities::document_generation::Column::RetirementContentRevision,
+                sea_orm::sea_query::Expr::value(Option::<i64>::None),
+            )
+            .col_expr(
+                entities::document_generation::Column::RetirementRevisionToken,
+                sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+            )
             .filter(entities::document_generation::Column::DocumentId.eq(id.0))
             .filter(
-                entities::document_generation::Column::ContentRevision
+                entities::document_generation::Column::RetirementContentRevision
                     .eq(generation.content_revision),
             )
             .filter(
-                entities::document_generation::Column::RevisionToken.eq(generation.revision_token),
+                entities::document_generation::Column::RetirementRevisionToken
+                    .eq(generation.revision_token),
             )
-            .filter(entities::document_generation::Column::Tombstone.eq(true))
             .filter(entities::document_generation::Column::RetirementPending.eq(true))
             .exec(&self.conn)
             .await
             .map_err(store_err)?;
         Ok(updated.rows_affected == 1)
+    }
+
+    async fn get_pending_document_retirement(
+        &self,
+        id: DocumentId,
+    ) -> Result<Option<DocumentGeneration>> {
+        let Some(generation) = entities::document_generation::Entity::find_by_id(id.0)
+            .one(&self.conn)
+            .await
+            .map_err(store_err)?
+        else {
+            return Ok(None);
+        };
+        if !generation.retirement_pending {
+            return Ok(None);
+        }
+        let (Some(content_revision), Some(revision_token)) = (
+            generation.retirement_content_revision,
+            generation.retirement_revision_token,
+        ) else {
+            return Err(AgentError::Store(format!(
+                "document {id} has an incomplete pending retirement watermark"
+            )));
+        };
+        Ok(Some(DocumentGeneration {
+            content_revision,
+            revision_token,
+        }))
     }
 
     async fn delete_document(&self, id: DocumentId) -> Result<DocumentGeneration> {
@@ -2118,7 +2155,7 @@ where
             .checked_add(1)
             .ok_or_else(|| AgentError::Store(format!("document {id} revision overflow")))?;
         let revision_token = uuid::Uuid::new_v4();
-        let updated = entities::document_generation::Entity::update_many()
+        let mut update = entities::document_generation::Entity::update_many()
             .col_expr(
                 entities::document_generation::Column::ContentRevision,
                 sea_orm::sea_query::Expr::value(next_revision),
@@ -2130,11 +2167,23 @@ where
             .col_expr(
                 entities::document_generation::Column::Tombstone,
                 sea_orm::sea_query::Expr::value(tombstone),
-            )
-            .col_expr(
-                entities::document_generation::Column::RetirementPending,
-                sea_orm::sea_query::Expr::value(tombstone),
-            )
+            );
+        if tombstone {
+            update = update
+                .col_expr(
+                    entities::document_generation::Column::RetirementPending,
+                    sea_orm::sea_query::Expr::value(true),
+                )
+                .col_expr(
+                    entities::document_generation::Column::RetirementContentRevision,
+                    sea_orm::sea_query::Expr::value(next_revision),
+                )
+                .col_expr(
+                    entities::document_generation::Column::RetirementRevisionToken,
+                    sea_orm::sea_query::Expr::value(revision_token),
+                );
+        }
+        let updated = update
             .filter(entities::document_generation::Column::DocumentId.eq(id.0))
             .filter(
                 entities::document_generation::Column::ContentRevision
@@ -2172,6 +2221,8 @@ where
             revision_token: Set(current.revision_token),
             tombstone: Set(tombstone),
             retirement_pending: Set(tombstone),
+            retirement_content_revision: Set(tombstone.then_some(current.content_revision)),
+            retirement_revision_token: Set(tombstone.then_some(current.revision_token)),
         })
         .on_conflict_do_nothing()
         .exec_without_returning(conn)
@@ -2200,6 +2251,12 @@ where
         .await
         .map_err(store_err)?;
     if let Some(existing) = existing.as_ref() {
+        if existing.project_id != document.project_id.map(|id| id.0) {
+            return Err(AgentError::Store(format!(
+                "document {} cannot move between project corpora",
+                document.id
+            )));
+        }
         ensure_live_document_generation_on(conn, existing).await?;
     }
     let Some(advanced) = try_advance_document_generation_on(conn, document.id, false).await? else {
@@ -2571,6 +2628,8 @@ mod entities {
             pub revision_token: Uuid,
             pub tombstone: bool,
             pub retirement_pending: bool,
+            pub retirement_content_revision: Option<i64>,
+            pub retirement_revision_token: Option<Uuid>,
         }
 
         #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -3169,11 +3228,37 @@ mod migration {
                                 .not_null()
                                 .default(false),
                         )
+                        .col(
+                            ColumnDef::new(DocumentGeneration::RetirementContentRevision)
+                                .big_integer(),
+                        )
+                        .col(ColumnDef::new(DocumentGeneration::RetirementRevisionToken).uuid())
                         .check(Expr::col(DocumentGeneration::ContentRevision).gte(1))
                         .check(
                             Expr::col(DocumentGeneration::RetirementPending)
                                 .eq(false)
-                                .or(Expr::col(DocumentGeneration::Tombstone).eq(true)),
+                                .and(
+                                    Expr::col(DocumentGeneration::RetirementContentRevision)
+                                        .is_null(),
+                                )
+                                .and(
+                                    Expr::col(DocumentGeneration::RetirementRevisionToken)
+                                        .is_null(),
+                                )
+                                .or(Expr::col(DocumentGeneration::RetirementPending)
+                                    .eq(true)
+                                    .and(
+                                        Expr::col(DocumentGeneration::RetirementContentRevision)
+                                            .is_not_null(),
+                                    )
+                                    .and(
+                                        Expr::col(DocumentGeneration::RetirementContentRevision)
+                                            .gte(1),
+                                    )
+                                    .and(
+                                        Expr::col(DocumentGeneration::RetirementRevisionToken)
+                                            .is_not_null(),
+                                    )),
                         )
                         .to_owned(),
                 )
@@ -3559,6 +3644,8 @@ mod migration {
         RevisionToken,
         Tombstone,
         RetirementPending,
+        RetirementContentRevision,
+        RetirementRevisionToken,
     }
 
     #[derive(DeriveIden)]

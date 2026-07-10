@@ -18,7 +18,9 @@ use openwave_core::{
     DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert, Project, ProjectId,
     SecretProvider, SequencedEvent, Store,
 };
-use openwave_retrieval::{Citation, DocumentId, DocumentSource, RetrievalError, SearchTool};
+use openwave_retrieval::{
+    Citation, DocumentId, DocumentSource, RetrievalError, SearchScope, SearchTool,
+};
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::document_worker::MAX_INDEX_ATTEMPTS;
@@ -664,7 +666,7 @@ pub async fn search_documents(
         .clamp(1, SearchTool::MAX_K);
     let citations = state
         .retrieval
-        .search(query, k)
+        .search(SearchScope::Unscoped, query, k)
         .await
         .map_err(retrieval_error)?;
     Ok(Json(SearchResults { citations }))

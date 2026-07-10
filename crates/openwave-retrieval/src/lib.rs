@@ -24,7 +24,7 @@
 //! use std::sync::Arc;
 //! use openwave_retrieval::{
 //!     Retriever, PlainTextParser, TextChunker, HashEmbedder, InMemoryVectorStore,
-//!     DocumentSource,
+//!     DocumentSource, SearchScope,
 //! };
 //!
 //! # async fn demo() -> openwave_retrieval::Result<()> {
@@ -39,7 +39,9 @@
 //! retriever
 //!     .ingest(DocumentSource::uri("notes.txt"), "text/plain", b"Jupiter is a gas giant.")
 //!     .await?;
-//! let hits = retriever.search("largest planet", 3).await?;
+//! let hits = retriever
+//!     .search(SearchScope::Unscoped, "largest planet", 3)
+//!     .await?;
 //! for hit in hits {
 //!     println!("[{:.3}] {}", hit.score, hit.snippet);
 //! }
@@ -58,7 +60,7 @@
 //! drop-in for [`HashEmbedder`] behind the same seam.
 //!
 //! Not yet wired: embedding reranking, hybrid retrieval, rich-format parsing,
-//! per-chat/project index scoping, and ANN index management. Each lands as its own
+//! chat-to-project scope binding, and ANN index management. Each lands as its own
 //! slice behind these seams.
 
 mod chunk;
@@ -85,11 +87,12 @@ pub use id::{ChunkId, DocumentId};
 pub use lance_store::LanceVectorStore;
 #[cfg(feature = "embed-openai")]
 pub use openai_embed::OpenAiEmbedder;
-pub use openwave_core::DocumentGeneration;
+pub use openwave_core::{DocumentGeneration, ProjectId};
 pub use parse::{DocumentParser, ParsedDocument, PlainTextParser};
 pub use retriever::{GenerationIndexOutcome, IngestOutcome, Retriever};
 #[cfg(feature = "tool")]
 pub use search::SearchTool;
 pub use vector::{
-    DocumentGenerationState, GenerationStageOutcome, InMemoryVectorStore, VectorRecord, VectorStore,
+    DocumentGenerationState, GenerationStageOutcome, InMemoryVectorStore, SearchScope,
+    VectorRecord, VectorStore,
 };
