@@ -138,6 +138,38 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
+    /// Atomically claim the oldest due document job and its exact source revision.
+    ///
+    /// A successful claim increments `attempt_count`, installs a fresh lease,
+    /// moves the matching document to `processing`, and returns the running job.
+    /// Expired running leases are reclaimed while attempts remain; an expired
+    /// final attempt atomically fails the exact current job/document and scanning
+    /// continues. Superseded candidates are terminally cancelled rather than
+    /// left to block the active-job slot. An exact-identity document with an
+    /// impossible lifecycle status is reported as corruption, never cancelled.
+    /// `retry_wait` remains user-visible as `queued` during backoff.
+    async fn claim_document_job(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+        _lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<DocumentJob>> {
+        document_storage_unavailable()
+    }
+
+    /// Extend a live lease owned by `lease_token` without resurrecting expiry.
+    ///
+    /// Returns `false` if the job is not running, the token differs, the lease
+    /// already expired, or the proposed expiry does not extend the current one.
+    async fn heartbeat_document_job(
+        &self,
+        _id: DocumentJobId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+        _lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        document_storage_unavailable()
+    }
+
     /// Mark an exact `(revision, revision_token)` as indexed with `fingerprint`.
     ///
     /// `fingerprint` must not be empty.
@@ -550,6 +582,151 @@ mod tests {
             });
             Ok(jobs)
         }
+        async fn claim_document_job(
+            &self,
+            now: chrono::DateTime<chrono::Utc>,
+            lease_expires_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Option<DocumentJob>> {
+            if lease_expires_at <= now {
+                return Err(AgentError::Store(
+                    "document job lease expiry must be after claim time".into(),
+                ));
+            }
+            let mut state = self.document_state.lock().unwrap();
+            loop {
+                let candidate_id = state
+                    .jobs
+                    .values()
+                    .filter(|job| {
+                        (matches!(
+                            job.status,
+                            DocumentJobStatus::Queued | DocumentJobStatus::RetryWait
+                        ) && job.available_at <= now
+                            && job.attempt_count < job.max_attempts)
+                            || (job.status == DocumentJobStatus::Running
+                                && job.lease_expires_at.is_some_and(|expiry| expiry <= now))
+                    })
+                    .min_by(|left, right| {
+                        let left_due = left.lease_expires_at.unwrap_or(left.available_at);
+                        let right_due = right.lease_expires_at.unwrap_or(right.available_at);
+                        left_due
+                            .cmp(&right_due)
+                            .then_with(|| left.created_at.cmp(&right.created_at))
+                            .then_with(|| left.id.0.cmp(&right.id.0))
+                    })
+                    .map(|job| job.id);
+                let Some(candidate_id) = candidate_id else {
+                    return Ok(None);
+                };
+                let candidate = state.jobs.get(&candidate_id).unwrap().clone();
+                let expected_document_status = if candidate.status == DocumentJobStatus::Running {
+                    DocumentProcessingStatus::Processing
+                } else {
+                    DocumentProcessingStatus::Queued
+                };
+                let identity_matches =
+                    state
+                        .documents
+                        .get(&candidate.document_id)
+                        .is_some_and(|document| {
+                            document.content_revision == candidate.content_revision
+                                && document.revision_token == candidate.revision_token
+                        });
+                if !identity_matches {
+                    let job = state.jobs.get_mut(&candidate_id).unwrap();
+                    job.status = DocumentJobStatus::Cancelled;
+                    job.lease_token = None;
+                    job.lease_expires_at = None;
+                    job.finished_at = Some(now);
+                    job.updated_at = now;
+                    continue;
+                }
+                let current_status = state
+                    .documents
+                    .get(&candidate.document_id)
+                    .unwrap()
+                    .processing_status;
+                if current_status != expected_document_status {
+                    return Err(AgentError::Store(format!(
+                        "document job {} is {} but exact document {} is unexpectedly {}",
+                        candidate.id,
+                        candidate.status.as_str(),
+                        candidate.document_id,
+                        current_status.as_str()
+                    )));
+                }
+
+                if candidate.status == DocumentJobStatus::Running
+                    && candidate.attempt_count >= candidate.max_attempts
+                {
+                    let job = state.jobs.get_mut(&candidate_id).unwrap();
+                    job.status = DocumentJobStatus::Failed;
+                    job.lease_token = None;
+                    job.lease_expires_at = None;
+                    job.finished_at = Some(now);
+                    job.last_error_code = Some("lease_expired".into());
+                    job.last_error_detail = Some("final worker lease expired".into());
+                    job.updated_at = now;
+                    state
+                        .documents
+                        .get_mut(&candidate.document_id)
+                        .unwrap()
+                        .processing_status = DocumentProcessingStatus::Failed;
+                    continue;
+                }
+
+                let job = state.jobs.get_mut(&candidate_id).unwrap();
+                job.status = DocumentJobStatus::Running;
+                job.attempt_count = job.attempt_count.checked_add(1).ok_or_else(|| {
+                    AgentError::Store(format!("document job {} attempt overflow", job.id))
+                })?;
+                job.lease_token = Some(uuid::Uuid::new_v4());
+                job.lease_expires_at = Some(lease_expires_at);
+                job.started_at.get_or_insert(now);
+                if candidate.status == DocumentJobStatus::Running {
+                    job.last_error_code = Some("lease_expired".into());
+                    job.last_error_detail = Some("previous worker lease expired".into());
+                }
+                job.updated_at = now;
+                let job = job.clone();
+                state
+                    .documents
+                    .get_mut(&candidate.document_id)
+                    .unwrap()
+                    .processing_status = DocumentProcessingStatus::Processing;
+                return Ok(Some(job));
+            }
+        }
+        async fn heartbeat_document_job(
+            &self,
+            id: DocumentJobId,
+            lease_token: uuid::Uuid,
+            now: chrono::DateTime<chrono::Utc>,
+            lease_expires_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<bool> {
+            if lease_expires_at <= now {
+                return Err(AgentError::Store(
+                    "document job lease expiry must be after heartbeat time".into(),
+                ));
+            }
+            let mut state = self.document_state.lock().unwrap();
+            let Some(job) = state.jobs.get_mut(&id) else {
+                return Ok(false);
+            };
+            if job.status != DocumentJobStatus::Running
+                || job.lease_token != Some(lease_token)
+                || job.lease_expires_at.is_none_or(|expiry| expiry <= now)
+                || job.updated_at > now
+                || job
+                    .lease_expires_at
+                    .is_some_and(|expiry| expiry >= lease_expires_at)
+            {
+                return Ok(false);
+            }
+            job.lease_expires_at = Some(lease_expires_at);
+            job.updated_at = now;
+            Ok(true)
+        }
         async fn mark_document_indexed(
             &self,
             id: DocumentId,
@@ -739,6 +916,21 @@ mod tests {
             block_on(store.list_document_jobs(source.id)).unwrap(),
             vec![first.1.clone()]
         );
+
+        let claim_at = first.1.available_at + chrono::Duration::seconds(1);
+        let lease_expires_at = claim_at + chrono::Duration::minutes(5);
+        let claimed = block_on(store.claim_document_job(claim_at, lease_expires_at))
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, first.1.id);
+        let extended = lease_expires_at + chrono::Duration::minutes(5);
+        assert!(block_on(store.heartbeat_document_job(
+            claimed.id,
+            claimed.lease_token.unwrap(),
+            claim_at + chrono::Duration::minutes(1),
+            extended,
+        ))
+        .unwrap());
 
         block_on(store.delete_document(source.id)).unwrap();
         assert_eq!(block_on(store.get_document(source.id)).unwrap(), None);

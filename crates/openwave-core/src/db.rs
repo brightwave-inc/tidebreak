@@ -404,6 +404,302 @@ impl Store for DbStore {
             .collect()
     }
 
+    async fn claim_document_job(
+        &self,
+        now: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<Option<DocumentJob>> {
+        if lease_expires_at <= now {
+            return Err(AgentError::Store(
+                "document job lease expiry must be after claim time".into(),
+            ));
+        }
+
+        loop {
+            let transaction = self.conn.begin().await.map_err(store_err)?;
+            acquire_document_job_write_lock(&transaction).await?;
+            let due = entities::document_job::Entity::find()
+                .filter(entities::document_job::Column::Status.is_in([
+                    DocumentJobStatus::Queued.as_str(),
+                    DocumentJobStatus::RetryWait.as_str(),
+                ]))
+                .filter(entities::document_job::Column::AvailableAt.lte(now))
+                .filter(
+                    sea_orm::sea_query::Expr::col(entities::document_job::Column::AttemptCount).lt(
+                        sea_orm::sea_query::Expr::col(entities::document_job::Column::MaxAttempts),
+                    ),
+                )
+                .order_by_asc(entities::document_job::Column::AvailableAt)
+                .order_by_asc(entities::document_job::Column::CreatedAt)
+                .order_by_asc(entities::document_job::Column::Id)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            let expired = entities::document_job::Entity::find()
+                .filter(
+                    entities::document_job::Column::Status.eq(DocumentJobStatus::Running.as_str()),
+                )
+                .filter(entities::document_job::Column::LeaseExpiresAt.lte(now))
+                .order_by_asc(entities::document_job::Column::LeaseExpiresAt)
+                .order_by_asc(entities::document_job::Column::CreatedAt)
+                .order_by_asc(entities::document_job::Column::Id)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            let candidate = match (due, expired) {
+                (Some(due), Some(expired)) => {
+                    if document_job_due_order(&due, &expired).is_le() {
+                        Some(due)
+                    } else {
+                        Some(expired)
+                    }
+                }
+                (candidate @ Some(_), None) | (None, candidate @ Some(_)) => candidate,
+                (None, None) => None,
+            };
+            let Some(candidate) = candidate else {
+                transaction.commit().await.map_err(store_err)?;
+                return Ok(None);
+            };
+
+            // Enqueue takes the document lock before mutating jobs. Claims use
+            // the same order to avoid a Postgres doc↔job deadlock, then reload
+            // the candidate because it may have changed while this lock waited.
+            acquire_document_write_lock(&transaction, DocumentId(candidate.document_id)).await?;
+            let candidate = entities::document_job::Entity::find_by_id(candidate.id)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            let Some(candidate) = candidate.filter(|candidate| document_job_is_due(candidate, now))
+            else {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            };
+
+            let reclaiming = candidate.status == DocumentJobStatus::Running.as_str();
+            let expected_document_status = if reclaiming {
+                DocumentProcessingStatus::Processing
+            } else {
+                DocumentProcessingStatus::Queued
+            };
+            let current = entities::document::Entity::find_by_id(candidate.document_id)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            let identity_matches = current.as_ref().is_some_and(|document| {
+                document.content_revision == candidate.content_revision
+                    && document.revision_token == candidate.revision_token
+            });
+            if !identity_matches {
+                cancel_document_job_on(&transaction, candidate.id, &candidate.status, now).await?;
+                transaction.commit().await.map_err(store_err)?;
+                continue;
+            }
+            let current_status = &current.as_ref().unwrap().processing_status;
+            if current_status != expected_document_status.as_str() {
+                return Err(AgentError::Store(format!(
+                    "document job {} is {} but exact document {} is unexpectedly {}",
+                    candidate.id, candidate.status, candidate.document_id, current_status
+                )));
+            }
+
+            if reclaiming && candidate.attempt_count >= candidate.max_attempts {
+                let failed = entities::document_job::Entity::update_many()
+                    .col_expr(
+                        entities::document_job::Column::Status,
+                        sea_orm::sea_query::Expr::value(DocumentJobStatus::Failed.as_str()),
+                    )
+                    .col_expr(
+                        entities::document_job::Column::LeaseToken,
+                        sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+                    )
+                    .col_expr(
+                        entities::document_job::Column::LeaseExpiresAt,
+                        sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+                    )
+                    .col_expr(
+                        entities::document_job::Column::FinishedAt,
+                        sea_orm::sea_query::Expr::value(Some(now)),
+                    )
+                    .col_expr(
+                        entities::document_job::Column::LastErrorCode,
+                        sea_orm::sea_query::Expr::value(Some("lease_expired".to_owned())),
+                    )
+                    .col_expr(
+                        entities::document_job::Column::LastErrorDetail,
+                        sea_orm::sea_query::Expr::value(Some(
+                            "final worker lease expired".to_owned(),
+                        )),
+                    )
+                    .col_expr(
+                        entities::document_job::Column::UpdatedAt,
+                        sea_orm::sea_query::Expr::value(now),
+                    )
+                    .filter(entities::document_job::Column::Id.eq(candidate.id))
+                    .filter(
+                        entities::document_job::Column::Status
+                            .eq(DocumentJobStatus::Running.as_str()),
+                    )
+                    .filter(
+                        entities::document_job::Column::AttemptCount.eq(candidate.attempt_count),
+                    )
+                    .filter(entities::document_job::Column::LeaseToken.eq(candidate.lease_token))
+                    .filter(
+                        entities::document_job::Column::LeaseExpiresAt
+                            .eq(candidate.lease_expires_at),
+                    )
+                    .exec(&transaction)
+                    .await
+                    .map_err(store_err)?;
+                let document_failed = entities::document::Entity::update_many()
+                    .col_expr(
+                        entities::document::Column::ProcessingStatus,
+                        sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Failed.as_str()),
+                    )
+                    .filter(entities::document::Column::Id.eq(candidate.document_id))
+                    .filter(
+                        entities::document::Column::ContentRevision.eq(candidate.content_revision),
+                    )
+                    .filter(entities::document::Column::RevisionToken.eq(candidate.revision_token))
+                    .filter(
+                        entities::document::Column::ProcessingStatus
+                            .eq(DocumentProcessingStatus::Processing.as_str()),
+                    )
+                    .exec(&transaction)
+                    .await
+                    .map_err(store_err)?;
+                if failed.rows_affected != 1 || document_failed.rows_affected != 1 {
+                    transaction.rollback().await.map_err(store_err)?;
+                    continue;
+                }
+                transaction.commit().await.map_err(store_err)?;
+                continue;
+            }
+
+            let lease_token = uuid::Uuid::new_v4();
+            let next_attempt = candidate.attempt_count.checked_add(1).ok_or_else(|| {
+                AgentError::Store(format!("document job {} attempt overflow", candidate.id))
+            })?;
+            let claim = entities::document_job::Entity::update_many()
+                .col_expr(
+                    entities::document_job::Column::Status,
+                    sea_orm::sea_query::Expr::value(DocumentJobStatus::Running.as_str()),
+                )
+                .col_expr(
+                    entities::document_job::Column::AttemptCount,
+                    sea_orm::sea_query::Expr::value(next_attempt),
+                )
+                .col_expr(
+                    entities::document_job::Column::LeaseToken,
+                    sea_orm::sea_query::Expr::value(Some(lease_token)),
+                )
+                .col_expr(
+                    entities::document_job::Column::LeaseExpiresAt,
+                    sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
+                )
+                .col_expr(
+                    entities::document_job::Column::StartedAt,
+                    sea_orm::sea_query::Expr::value(Some(candidate.started_at.unwrap_or(now))),
+                )
+                .col_expr(
+                    entities::document_job::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(now),
+                )
+                .filter(entities::document_job::Column::Id.eq(candidate.id))
+                .filter(entities::document_job::Column::Status.eq(&candidate.status))
+                .filter(entities::document_job::Column::AttemptCount.eq(candidate.attempt_count));
+            let claim = if reclaiming {
+                claim
+                    .col_expr(
+                        entities::document_job::Column::LastErrorCode,
+                        sea_orm::sea_query::Expr::value(Some("lease_expired".to_owned())),
+                    )
+                    .col_expr(
+                        entities::document_job::Column::LastErrorDetail,
+                        sea_orm::sea_query::Expr::value(Some(
+                            "previous worker lease expired".to_owned(),
+                        )),
+                    )
+                    .filter(entities::document_job::Column::LeaseToken.eq(candidate.lease_token))
+                    .filter(
+                        entities::document_job::Column::LeaseExpiresAt
+                            .eq(candidate.lease_expires_at),
+                    )
+            } else {
+                claim.filter(entities::document_job::Column::AvailableAt.lte(now))
+            };
+            let claimed = claim.exec(&transaction).await.map_err(store_err)?;
+            if claimed.rows_affected != 1 {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            }
+
+            let document_claimed = entities::document::Entity::update_many()
+                .col_expr(
+                    entities::document::Column::ProcessingStatus,
+                    sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Processing.as_str()),
+                )
+                .filter(entities::document::Column::Id.eq(candidate.document_id))
+                .filter(entities::document::Column::ContentRevision.eq(candidate.content_revision))
+                .filter(entities::document::Column::RevisionToken.eq(candidate.revision_token))
+                .filter(
+                    entities::document::Column::ProcessingStatus
+                        .eq(expected_document_status.as_str()),
+                )
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+            if document_claimed.rows_affected != 1 {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            }
+
+            let job = entities::document_job::Entity::find_by_id(candidate.id)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?
+                .ok_or_else(|| {
+                    AgentError::Store(format!("claimed job {} disappeared", candidate.id))
+                })
+                .and_then(document_job_from_model)?;
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(job));
+        }
+    }
+
+    async fn heartbeat_document_job(
+        &self,
+        id: DocumentJobId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        if lease_expires_at <= now {
+            return Err(AgentError::Store(
+                "document job lease expiry must be after heartbeat time".into(),
+            ));
+        }
+        let result = entities::document_job::Entity::update_many()
+            .col_expr(
+                entities::document_job::Column::LeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
+            )
+            .col_expr(
+                entities::document_job::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(entities::document_job::Column::Id.eq(id.0))
+            .filter(entities::document_job::Column::Status.eq(DocumentJobStatus::Running.as_str()))
+            .filter(entities::document_job::Column::LeaseToken.eq(lease_token))
+            .filter(entities::document_job::Column::LeaseExpiresAt.gt(now))
+            .filter(entities::document_job::Column::LeaseExpiresAt.lt(lease_expires_at))
+            .filter(entities::document_job::Column::UpdatedAt.lte(now))
+            .exec(&self.conn)
+            .await
+            .map_err(store_err)?;
+        Ok(result.rows_affected == 1)
+    }
+
     async fn mark_document_indexed(
         &self,
         id: DocumentId,
@@ -686,6 +982,58 @@ where
     Ok(())
 }
 
+/// Start SQLite's write transaction before claim candidate reads.
+///
+/// The impossible primary-key predicate deliberately locks no Postgres row;
+/// Postgres claims serialize on the selected document row instead.
+async fn acquire_document_job_write_lock<C>(conn: &C) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    entities::document_job::Entity::update_many()
+        .col_expr(
+            entities::document_job::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::col(entities::document_job::Column::UpdatedAt).into(),
+        )
+        .filter(entities::document_job::Column::Id.is_null())
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+fn document_job_is_due(job: &entities::document_job::Model, now: chrono::DateTime<Utc>) -> bool {
+    match job.status.as_str() {
+        status
+            if status == DocumentJobStatus::Queued.as_str()
+                || status == DocumentJobStatus::RetryWait.as_str() =>
+        {
+            job.available_at <= now && job.attempt_count < job.max_attempts
+        }
+        status if status == DocumentJobStatus::Running.as_str() => {
+            job.lease_expires_at.is_some_and(|expiry| expiry <= now)
+        }
+        _ => false,
+    }
+}
+
+fn document_job_due_order(
+    left: &entities::document_job::Model,
+    right: &entities::document_job::Model,
+) -> std::cmp::Ordering {
+    let effective_due = |job: &entities::document_job::Model| {
+        if job.status == DocumentJobStatus::Running.as_str() {
+            job.lease_expires_at.unwrap_or(job.available_at)
+        } else {
+            job.available_at
+        }
+    };
+    effective_due(left)
+        .cmp(&effective_due(right))
+        .then_with(|| left.created_at.cmp(&right.created_at))
+        .then_with(|| left.id.cmp(&right.id))
+}
+
 fn document_upsert_matches(current: &entities::document::Model, document: &DocumentUpsert) -> bool {
     current.project_id == document.project_id.map(|id| id.0)
         && current.source_uri == document.source_uri
@@ -827,6 +1175,44 @@ where
         }
         return Ok(None);
     }
+}
+
+async fn cancel_document_job_on<C>(
+    conn: &C,
+    id: uuid::Uuid,
+    expected_status: &str,
+    finished_at: chrono::DateTime<Utc>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    entities::document_job::Entity::update_many()
+        .col_expr(
+            entities::document_job::Column::Status,
+            sea_orm::sea_query::Expr::value(DocumentJobStatus::Cancelled.as_str()),
+        )
+        .col_expr(
+            entities::document_job::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(finished_at)),
+        )
+        .col_expr(
+            entities::document_job::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(finished_at),
+        )
+        .filter(entities::document_job::Column::Id.eq(id))
+        .filter(entities::document_job::Column::Status.eq(expected_status))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
 }
 
 fn project_from_model(model: entities::project::Model) -> Project {
@@ -2860,6 +3246,461 @@ mod tests {
             store.list_document_jobs(document_id).await.unwrap(),
             vec![first.1]
         );
+    }
+
+    #[tokio::test]
+    async fn document_job_claim_and_heartbeat_require_the_live_lease() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///claim.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "claim me".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(50_000, 0).unwrap(),
+        };
+        let (_, queued) = store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)
+            .await
+            .unwrap();
+        let now = queued.available_at + chrono::Duration::seconds(1);
+        assert!(store.claim_document_job(now, now).await.is_err());
+
+        let lease_expires_at = now + chrono::Duration::minutes(5);
+        let claimed = store
+            .claim_document_job(now, lease_expires_at)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, queued.id);
+        assert_eq!(claimed.status, DocumentJobStatus::Running);
+        assert_eq!(claimed.attempt_count, 1);
+        assert_eq!(claimed.started_at, Some(now));
+        assert_eq!(claimed.lease_expires_at, Some(lease_expires_at));
+        let lease_token = claimed.lease_token.unwrap();
+        assert_eq!(
+            store
+                .get_document(source.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .processing_status,
+            DocumentProcessingStatus::Processing
+        );
+        assert_eq!(
+            store
+                .claim_document_job(now, lease_expires_at)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let heartbeat_at = now + chrono::Duration::minutes(1);
+        assert!(!store
+            .heartbeat_document_job(
+                claimed.id,
+                uuid::Uuid::new_v4(),
+                heartbeat_at,
+                lease_expires_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap());
+        assert!(!store
+            .heartbeat_document_job(claimed.id, lease_token, heartbeat_at, lease_expires_at)
+            .await
+            .unwrap());
+        assert!(!store
+            .heartbeat_document_job(
+                claimed.id,
+                lease_token,
+                now - chrono::Duration::seconds(1),
+                lease_expires_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap());
+        assert!(store
+            .heartbeat_document_job(claimed.id, lease_token, heartbeat_at, heartbeat_at)
+            .await
+            .is_err());
+
+        let extended = lease_expires_at + chrono::Duration::minutes(5);
+        assert!(store
+            .heartbeat_document_job(claimed.id, lease_token, heartbeat_at, extended)
+            .await
+            .unwrap());
+        let heartbeated = store.get_document_job(claimed.id).await.unwrap().unwrap();
+        assert_eq!(heartbeated.lease_expires_at, Some(extended));
+        assert_eq!(heartbeated.updated_at, heartbeat_at);
+        assert!(!store
+            .heartbeat_document_job(
+                claimed.id,
+                lease_token,
+                extended,
+                extended + chrono::Duration::minutes(5),
+            )
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn expired_document_job_leases_are_reclaimed_then_fail_at_the_attempt_limit() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///lease-recovery.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "recover me".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(60_000, 0).unwrap(),
+        };
+        let (_, queued) = store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 2)
+            .await
+            .unwrap();
+        let first_at = queued.available_at + chrono::Duration::seconds(1);
+        let first_expiry = first_at + chrono::Duration::minutes(1);
+        let first = store
+            .claim_document_job(first_at, first_expiry)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let second_expiry = first_expiry + chrono::Duration::minutes(1);
+        let second = store
+            .claim_document_job(first_expiry, second_expiry)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.attempt_count, 2);
+        assert_eq!(second.started_at, first.started_at);
+        assert_ne!(second.lease_token, first.lease_token);
+        assert_eq!(second.lease_expires_at, Some(second_expiry));
+        assert!(!store
+            .heartbeat_document_job(
+                first.id,
+                first.lease_token.unwrap(),
+                first_expiry,
+                second_expiry + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap());
+
+        let fallback_source = DocumentUpsert {
+            id: DocumentId::new(),
+            source_uri: Some("file:///after-exhausted-lease.txt".into()),
+            canonical_text: "claim after cleanup".into(),
+            ..source.clone()
+        };
+        let (_, fallback) = store
+            .upsert_document_and_enqueue_index(&fallback_source, "pipeline-v1", 2)
+            .await
+            .unwrap();
+        let fallback_due = second_expiry + chrono::Duration::seconds(1);
+        entities::document_job::Entity::update_many()
+            .col_expr(
+                entities::document_job::Column::AvailableAt,
+                sea_orm::sea_query::Expr::value(fallback_due),
+            )
+            .filter(entities::document_job::Column::Id.eq(fallback.id.0))
+            .exec(&store.conn)
+            .await
+            .unwrap();
+        let final_claim_at = fallback_due + chrono::Duration::seconds(1);
+        let claimed_after_cleanup = store
+            .claim_document_job(
+                final_claim_at,
+                final_claim_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed_after_cleanup.id, fallback.id);
+
+        let failed = store.get_document_job(first.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, DocumentJobStatus::Failed);
+        assert_eq!(failed.attempt_count, 2);
+        assert_eq!(failed.lease_token, None);
+        assert_eq!(failed.lease_expires_at, None);
+        assert_eq!(failed.finished_at, Some(final_claim_at));
+        assert_eq!(failed.last_error_code.as_deref(), Some("lease_expired"));
+        assert_eq!(
+            store
+                .get_document(source.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .processing_status,
+            DocumentProcessingStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_cancels_a_superseded_candidate_then_claims_the_next_job() {
+        let (_dir, store) = temp_store().await;
+        let first_source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///stale-claim.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "stale".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(70_000, 0).unwrap(),
+        };
+        let (_, stale_job) = store
+            .upsert_document_and_enqueue_index(&first_source, "pipeline-v1", 3)
+            .await
+            .unwrap();
+        let second_source = DocumentUpsert {
+            id: DocumentId::new(),
+            source_uri: Some("file:///next-claim.txt".into()),
+            canonical_text: "next".into(),
+            ..first_source.clone()
+        };
+        let (_, next_job) = store
+            .upsert_document_and_enqueue_index(&second_source, "pipeline-v1", 3)
+            .await
+            .unwrap();
+
+        entities::document::Entity::update_many()
+            .col_expr(
+                entities::document::Column::ContentRevision,
+                sea_orm::sea_query::Expr::value(2_i64),
+            )
+            .col_expr(
+                entities::document::Column::RevisionToken,
+                sea_orm::sea_query::Expr::value(uuid::Uuid::new_v4()),
+            )
+            .filter(entities::document::Column::Id.eq(first_source.id.0))
+            .exec(&store.conn)
+            .await
+            .unwrap();
+
+        let now = next_job.available_at + chrono::Duration::seconds(1);
+        let claimed = store
+            .claim_document_job(now, now + chrono::Duration::minutes(5))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, next_job.id);
+        assert_eq!(
+            store
+                .get_document_job(stale_job.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            DocumentJobStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_reports_exact_identity_status_corruption_without_cancelling() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///claim-corruption.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "exact but inconsistent".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(75_000, 0).unwrap(),
+        };
+        let (_, queued) = store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)
+            .await
+            .unwrap();
+        entities::document::Entity::update_many()
+            .col_expr(
+                entities::document::Column::ProcessingStatus,
+                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Processing.as_str()),
+            )
+            .filter(entities::document::Column::Id.eq(source.id.0))
+            .exec(&store.conn)
+            .await
+            .unwrap();
+
+        let now = queued.available_at + chrono::Duration::seconds(1);
+        assert!(store
+            .claim_document_job(now, now + chrono::Duration::minutes(5))
+            .await
+            .is_err());
+        assert_eq!(
+            store.get_document_job(queued.id).await.unwrap(),
+            Some(queued)
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_orders_expired_and_queued_jobs_by_effective_due_time() {
+        let (_dir, store) = temp_store().await;
+        let running_source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///expired-first.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "expired first".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(76_000, 0).unwrap(),
+        };
+        let (_, running_queued) = store
+            .upsert_document_and_enqueue_index(&running_source, "pipeline-v1", 3)
+            .await
+            .unwrap();
+        let first_claim_at = running_queued.available_at + chrono::Duration::seconds(1);
+        let first_expiry = first_claim_at + chrono::Duration::minutes(1);
+        let running = store
+            .claim_document_job(first_claim_at, first_expiry)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let queued_source = DocumentUpsert {
+            id: DocumentId::new(),
+            source_uri: Some("file:///queued-second.txt".into()),
+            canonical_text: "queued second".into(),
+            ..running_source
+        };
+        let (_, queued) = store
+            .upsert_document_and_enqueue_index(&queued_source, "pipeline-v1", 3)
+            .await
+            .unwrap();
+        // The running job's original `available_at` is older, but its effective
+        // due time is the later lease expiry. The queued job must win.
+        let queued_due = first_expiry - chrono::Duration::seconds(30);
+        entities::document_job::Entity::update_many()
+            .col_expr(
+                entities::document_job::Column::AvailableAt,
+                sea_orm::sea_query::Expr::value(queued_due),
+            )
+            .filter(entities::document_job::Column::Id.eq(queued.id.0))
+            .exec(&store.conn)
+            .await
+            .unwrap();
+
+        let now = first_expiry + chrono::Duration::minutes(1);
+        let claimed = store
+            .claim_document_job(now, now + chrono::Duration::minutes(5))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, queued.id);
+        assert_eq!(claimed.attempt_count, 1);
+        assert_eq!(
+            store
+                .get_document_job(running.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt_count,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_document_job_claimers_never_share_a_job() {
+        let (_dir, store) = temp_store().await;
+        let store = std::sync::Arc::new(store);
+        let mut latest_available_at = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        for index in 0..6 {
+            let (_, job) = store
+                .upsert_document_and_enqueue_index(
+                    &DocumentUpsert {
+                        id: DocumentId::new(),
+                        project_id: None,
+                        source_uri: Some(format!("file:///claim-{index}.txt")),
+                        media_type: "text/plain".into(),
+                        title: None,
+                        canonical_text: format!("document {index}"),
+                        updated_at: DateTime::<Utc>::from_timestamp(80_000 + index, 0).unwrap(),
+                    },
+                    "pipeline-v1",
+                    3,
+                )
+                .await
+                .unwrap();
+            latest_available_at = latest_available_at.max(job.available_at);
+        }
+        let now = latest_available_at + chrono::Duration::seconds(1);
+        let claims = (0..12).map(|_| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                store
+                    .claim_document_job(now, now + chrono::Duration::minutes(5))
+                    .await
+            })
+        });
+
+        let mut claimed_ids = Vec::new();
+        for result in futures::future::join_all(claims).await {
+            if let Some(job) = result.unwrap().unwrap() {
+                claimed_ids.push(job.id);
+            }
+        }
+        assert_eq!(claimed_ids.len(), 6);
+        claimed_ids.sort_by_key(|id| id.0);
+        claimed_ids.dedup();
+        assert_eq!(claimed_ids.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn concurrent_claim_and_replacement_enqueue_preserve_one_current_job() {
+        let (_dir, store) = temp_store().await;
+        let store = std::sync::Arc::new(store);
+        for iteration in 0..8 {
+            let source = DocumentUpsert {
+                id: DocumentId::new(),
+                project_id: None,
+                source_uri: Some(format!("file:///claim-enqueue-{iteration}.txt")),
+                media_type: "text/plain".into(),
+                title: None,
+                canonical_text: "first".into(),
+                updated_at: DateTime::<Utc>::from_timestamp(90_000 + iteration * 2, 0).unwrap(),
+            };
+            let (_, queued) = store
+                .upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)
+                .await
+                .unwrap();
+            let now = queued.available_at + chrono::Duration::minutes(1);
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+
+            let claim_store = store.clone();
+            let claim_barrier = barrier.clone();
+            let claim = tokio::spawn(async move {
+                claim_barrier.wait().await;
+                claim_store
+                    .claim_document_job(now, now + chrono::Duration::minutes(5))
+                    .await
+            });
+            let enqueue_store = store.clone();
+            let enqueue_barrier = barrier.clone();
+            let replacement = DocumentUpsert {
+                canonical_text: "replacement".into(),
+                updated_at: source.updated_at + chrono::Duration::seconds(1),
+                ..source.clone()
+            };
+            let enqueue = tokio::spawn(async move {
+                enqueue_barrier.wait().await;
+                enqueue_store
+                    .upsert_document_and_enqueue_index(&replacement, "pipeline-v1", 3)
+                    .await
+            });
+            barrier.wait().await;
+
+            claim.await.unwrap().unwrap().unwrap();
+            enqueue.await.unwrap().unwrap();
+            let current = store.get_document(source.id).await.unwrap().unwrap();
+            let jobs = store.list_document_jobs(source.id).await.unwrap();
+            let active: Vec<_> = jobs
+                .iter()
+                .filter(|job| !job.status.is_terminal())
+                .collect();
+            assert_eq!(active.len(), 1);
+            assert_eq!(active[0].content_revision, current.content_revision);
+            assert_eq!(active[0].revision_token, current.revision_token);
+        }
     }
 
     #[tokio::test]
