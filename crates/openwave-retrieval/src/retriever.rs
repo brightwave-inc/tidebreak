@@ -56,41 +56,43 @@ impl Retriever {
         &self.store
     }
 
-    /// Ingest one document: parse its bytes, chunk, embed, and store.
+    /// Stable identity for the parser, chunker, and embedder configuration that
+    /// produced this retriever's index rows.
+    #[must_use]
+    pub fn index_fingerprint(&self) -> String {
+        format!(
+            "parser={};chunker={};embedder={}",
+            self.parser.fingerprint(),
+            self.chunker.fingerprint(),
+            self.embedder.fingerprint()
+        )
+    }
+
+    /// Parse source bytes into the canonical document persisted by callers.
     ///
-    /// A full, **atomic replace** for [`DocumentSource::Uri`] sources: the document
-    /// id is derived from the URI, so re-ingesting the same URI targets the same
-    /// document, and the store swaps its chunks in one operation (see
-    /// [`VectorStore::replace_document`]). Re-ingesting identical content is
-    /// idempotent; re-ingesting *changed* (even shorter, or now-empty) content
-    /// leaves no stale chunks behind; and two concurrent re-ingests of the same URI
-    /// resolve to one version rather than a mix. [`DocumentSource::Inline`] sources
-    /// get a fresh id every call, so they never collide with a prior ingest. A
-    /// document that chunks to nothing (empty or whitespace-only) stores nothing and
-    /// reports zero chunks — after clearing any prior version.
-    pub async fn ingest(
+    /// URI sources receive a stable derived id; inline sources receive a fresh
+    /// id for each parse.
+    pub fn parse_document(
         &self,
         source: DocumentSource,
         media_type: &str,
         raw: &[u8],
-    ) -> Result<IngestOutcome> {
+    ) -> Result<Document> {
         let parsed = self.parser.parse(raw, media_type)?;
-        // Stable id per URI so re-ingesting a file is idempotent; inline content
-        // has no external identity, so it gets a fresh id each time.
         let id = match &source {
             DocumentSource::Uri { uri } => DocumentId::derive(uri),
             _ => DocumentId::new(),
         };
-        let document = Document::with_id(id, source, media_type, parsed.text);
+        Ok(Document::with_id(id, source, media_type, parsed.text))
+    }
 
-        let chunks = self.chunker.chunk(&document)?;
+    /// Chunk, embed, and atomically replace one already-parsed document's index.
+    ///
+    /// Callers can persist `document` before awaiting external embedding I/O,
+    /// then record an index watermark only after this succeeds.
+    pub async fn index_document(&self, document: &Document) -> Result<usize> {
+        let chunks = self.chunker.chunk(document)?;
 
-        // Embed first (the slow, awaited step), then hand the store a single
-        // atomic replace. Doing the delete+insert as one store operation — rather
-        // than a separate prune then upsert with an embed await in between — is
-        // what keeps two concurrent re-ingests of the same document from
-        // interleaving and leaving a mix of versions. Empty content yields an
-        // empty record set, which clears any prior version of the document.
         let records: Vec<VectorRecord> = if chunks.is_empty() {
             Vec::new()
         } else {
@@ -112,6 +114,29 @@ impl Retriever {
 
         let count = records.len();
         self.store.replace_document(document.id, records).await?;
+        Ok(count)
+    }
+
+    /// Ingest one document: parse its bytes, chunk, embed, and store.
+    ///
+    /// A full, **atomic replace** for [`DocumentSource::Uri`] sources: the document
+    /// id is derived from the URI, so re-ingesting the same URI targets the same
+    /// document, and the store swaps its chunks in one operation (see
+    /// [`VectorStore::replace_document`]). Re-ingesting identical content is
+    /// idempotent; re-ingesting *changed* (even shorter, or now-empty) content
+    /// leaves no stale chunks behind; and two concurrent re-ingests of the same URI
+    /// resolve to one version rather than a mix. [`DocumentSource::Inline`] sources
+    /// get a fresh id every call, so they never collide with a prior ingest. A
+    /// document that chunks to nothing (empty or whitespace-only) stores nothing and
+    /// reports zero chunks — after clearing any prior version.
+    pub async fn ingest(
+        &self,
+        source: DocumentSource,
+        media_type: &str,
+        raw: &[u8],
+    ) -> Result<IngestOutcome> {
+        let document = self.parse_document(source, media_type, raw)?;
+        let count = self.index_document(&document).await?;
 
         Ok(IngestOutcome {
             document,
@@ -184,6 +209,33 @@ The Great Barrier Reef is the world's largest coral reef system.";
             Some(hits[0].snippet.as_str())
         );
         assert_eq!(hits[0].document_id, outcome.document.id);
+    }
+
+    #[tokio::test]
+    async fn parse_and_index_can_be_orchestrated_separately() {
+        let r = retriever();
+        let document = r
+            .parse_document(
+                DocumentSource::uri("file:///separate.txt"),
+                "text/plain",
+                b"persist this before embedding",
+            )
+            .unwrap();
+        assert_eq!(document.id, DocumentId::derive("file:///separate.txt"));
+        assert_eq!(document.text, "persist this before embedding");
+
+        assert_eq!(r.index_document(&document).await.unwrap(), 1);
+        let hits = r.search("persist embedding", 1).await.unwrap();
+        assert_eq!(hits[0].document_id, document.id);
+    }
+
+    #[test]
+    fn index_fingerprint_captures_the_pipeline_configuration() {
+        let r = retriever();
+        assert_eq!(
+            r.index_fingerprint(),
+            "parser=plain-text-lossy-v1;chunker=text-window-v1:max_chars=90:overlap=0;embedder=hash-fnv1a-v1:512d"
+        );
     }
 
     #[tokio::test]

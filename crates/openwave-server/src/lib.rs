@@ -330,7 +330,9 @@ mod tests {
         ModelProvider, Project, ProjectId, ProviderEvent, ProviderId, SecretProvider,
         SequencedEvent, StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
     };
-    use openwave_retrieval::InMemoryVectorStore;
+    use openwave_retrieval::{
+        Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
+    };
     use resolver::ProviderResolver;
     use serde::de::DeserializeOwned;
     use tokio::sync::Notify;
@@ -404,6 +406,135 @@ mod tests {
         }
     }
 
+    /// An embedder that pauses its first document batch, exposing same-document
+    /// ingest interleavings to the route tests.
+    struct FirstBatchGatedEmbedder {
+        inner: HashEmbedder,
+        calls: AtomicUsize,
+        entered: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl Embedder for FirstBatchGatedEmbedder {
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+
+        fn fingerprint(&self) -> String {
+            "test-gated-hash-v1".into()
+        }
+
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+        ) -> openwave_retrieval::Result<Vec<Embedding>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.embed_documents(texts).await
+        }
+
+        async fn embed_query(&self, text: &str) -> openwave_retrieval::Result<Embedding> {
+            self.inner.embed_query(text).await
+        }
+    }
+
+    struct FailingEmbedder;
+
+    #[async_trait]
+    impl Embedder for FailingEmbedder {
+        fn dimensions(&self) -> usize {
+            8
+        }
+
+        async fn embed_documents(
+            &self,
+            _texts: &[String],
+        ) -> openwave_retrieval::Result<Vec<Embedding>> {
+            Err(RetrievalError::embed("injected embedding failure"))
+        }
+    }
+
+    struct FailAfterFirstBatchEmbedder {
+        inner: HashEmbedder,
+        calls: AtomicUsize,
+    }
+
+    struct FailNextDeleteVectorStore {
+        inner: InMemoryVectorStore,
+        fail_delete: std::sync::atomic::AtomicBool,
+    }
+
+    impl FailNextDeleteVectorStore {
+        fn new(dimensions: usize) -> Self {
+            Self {
+                inner: InMemoryVectorStore::new(dimensions),
+                fail_delete: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn fail_next_delete(&self) {
+            self.fail_delete.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl VectorStore for FailNextDeleteVectorStore {
+        async fn upsert(&self, records: Vec<VectorRecord>) -> openwave_retrieval::Result<()> {
+            self.inner.upsert(records).await
+        }
+
+        async fn query(
+            &self,
+            query: &Embedding,
+            k: usize,
+        ) -> openwave_retrieval::Result<Vec<ScoredChunk>> {
+            self.inner.query(query, k).await
+        }
+
+        async fn replace_document(
+            &self,
+            document_id: openwave_core::DocumentId,
+            records: Vec<VectorRecord>,
+        ) -> openwave_retrieval::Result<()> {
+            if records.is_empty() && self.fail_delete.swap(false, Ordering::SeqCst) {
+                return Err(RetrievalError::vector_store("injected delete failure"));
+            }
+            self.inner.replace_document(document_id, records).await
+        }
+
+        async fn len(&self) -> openwave_retrieval::Result<usize> {
+            self.inner.len().await
+        }
+    }
+
+    #[async_trait]
+    impl Embedder for FailAfterFirstBatchEmbedder {
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+
+        fn fingerprint(&self) -> String {
+            "test-fail-after-first-v1".into()
+        }
+
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+        ) -> openwave_retrieval::Result<Vec<Embedding>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                return Err(RetrievalError::embed("injected update failure"));
+            }
+            self.inner.embed_documents(texts).await
+        }
+
+        async fn embed_query(&self, text: &str) -> openwave_retrieval::Result<Embedding> {
+            self.inner.embed_query(text).await
+        }
+    }
+
     /// A resolver that always hands back a fixed provider — lets a test inject a
     /// fake in place of the real credential-driven resolution.
     struct FixedResolver(Arc<dyn ModelProvider>);
@@ -444,6 +575,7 @@ mod tests {
         entered: Arc<Notify>,
         release: Arc<Notify>,
         blocked: std::sync::atomic::AtomicBool,
+        fail_document_delete: std::sync::atomic::AtomicBool,
     }
 
     impl PauseTerminalStore {
@@ -453,7 +585,12 @@ mod tests {
                 entered,
                 release,
                 blocked: std::sync::atomic::AtomicBool::new(false),
+                fail_document_delete: std::sync::atomic::AtomicBool::new(false),
             }
+        }
+
+        fn fail_next_document_delete(&self) {
+            self.fail_document_delete.store(true, Ordering::SeqCst);
         }
     }
 
@@ -484,6 +621,11 @@ mod tests {
             self.inner.list_documents(scope).await
         }
         async fn delete_document(&self, id: openwave_core::DocumentId) -> Result<()> {
+            if self.fail_document_delete.swap(false, Ordering::SeqCst) {
+                return Err(AgentError::Store(
+                    "injected document catalog delete failure".into(),
+                ));
+            }
             self.inner.delete_document(id).await
         }
         async fn upsert_document(
@@ -502,6 +644,16 @@ mod tests {
         ) -> Result<bool> {
             self.inner
                 .mark_document_indexed(id, revision, revision_token, fingerprint, indexed_at)
+                .await
+        }
+        async fn clear_document_index(
+            &self,
+            id: openwave_core::DocumentId,
+            revision: i64,
+            revision_token: uuid::Uuid,
+        ) -> Result<bool> {
+            self.inner
+                .clear_document_index(id, revision, revision_token)
                 .await
         }
         async fn create_chat(&self, chat: &Chat) -> Result<()> {
@@ -563,6 +715,17 @@ mod tests {
     async fn test_app_with(
         provider: Arc<dyn ModelProvider>,
     ) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
+        let (retrieval, _search) = build_retrieval(
+            Arc::new(HashEmbedder::default()),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        );
+        test_app_with_retrieval(provider, retrieval).await
+    }
+
+    async fn test_app_with_retrieval(
+        provider: Arc<dyn ModelProvider>,
+        retrieval: Arc<Retriever>,
+    ) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -572,10 +735,15 @@ mod tests {
             .await
             .unwrap(),
         );
-        let (retrieval, _search) = build_retrieval(
-            Arc::new(HashEmbedder::default()),
-            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-        );
+        test_app_from_parts(provider, retrieval, store, dir)
+    }
+
+    fn test_app_from_parts(
+        provider: Arc<dyn ModelProvider>,
+        retrieval: Arc<Retriever>,
+        store: Arc<dyn Store>,
+        dir: tempfile::TempDir,
+    ) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
         let state = AppState::new(
             Config::desktop(dir.path()),
             store.clone(),
@@ -890,7 +1058,7 @@ mod tests {
 
     #[tokio::test]
     async fn ingest_then_search_finds_the_passage() {
-        let (router, token, _store, _dir) = test_app().await;
+        let (router, token, store, _dir) = test_app().await;
         let bearer = format!("Bearer {token}");
 
         let ingest = post_json(
@@ -907,6 +1075,20 @@ mod tests {
         let ingest: serde_json::Value = json_body(ingest).await;
         assert!(ingest["chunks"].as_u64().unwrap() >= 1);
         assert!(ingest["document_id"].is_string());
+        let document_id = ingest["document_id"].as_str().unwrap().parse().unwrap();
+        let record = store
+            .get_document(document_id)
+            .await
+            .unwrap()
+            .expect("source record should be durable before the response");
+        assert_eq!(
+            record.canonical_text,
+            "Jupiter is the largest planet in the Solar System, a gas giant."
+        );
+        assert_eq!(record.content_revision, 1);
+        assert_eq!(record.indexed_revision, Some(1));
+        assert!(record.index_fingerprint.is_some());
+        assert!(record.indexed_at.is_some());
 
         // The ingested chunk is immediately searchable over the shared index.
         let search = post_json(
@@ -928,8 +1110,266 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_indexing_leaves_authoritative_source_stale_for_retry() {
+        let retrieval = Arc::new(Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::default()),
+            Arc::new(FailingEmbedder),
+            Arc::new(InMemoryVectorStore::new(8)),
+        ));
+        let (router, token, store, _dir) =
+            test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
+        let bearer = format!("Bearer {token}");
+
+        let response = post_json(
+            &router,
+            &bearer,
+            "/documents",
+            serde_json::json!({
+                "uri": "file:///retry.txt",
+                "content": "authoritative even when embedding fails",
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let record = store
+            .get_document(openwave_core::DocumentId::derive("file:///retry.txt"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.canonical_text,
+            "authoritative even when embedding fails"
+        );
+        assert_eq!(record.content_revision, 1);
+        assert_eq!(record.indexed_revision, None);
+        assert_eq!(record.index_fingerprint, None);
+    }
+
+    #[tokio::test]
+    async fn failed_update_does_not_leave_the_prior_revision_searchable() {
+        let embedder = Arc::new(FailAfterFirstBatchEmbedder {
+            inner: HashEmbedder::default(),
+            calls: AtomicUsize::new(0),
+        });
+        let retrieval = Arc::new(Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::default()),
+            embedder,
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        ));
+        let (router, token, store, _dir) =
+            test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
+        let bearer = format!("Bearer {token}");
+        let uri = "file:///updated.txt";
+
+        assert_eq!(
+            post_json(
+                &router,
+                &bearer,
+                "/documents",
+                serde_json::json!({"uri": uri, "content": "obsolete searchable phrase"}),
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            post_json(
+                &router,
+                &bearer,
+                "/documents",
+                serde_json::json!({"uri": uri, "content": "replacement failed to embed"}),
+            )
+            .await
+            .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let search: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/search",
+                serde_json::json!({"query": "obsolete searchable phrase"}),
+            )
+            .await,
+        )
+        .await;
+        assert!(search["citations"].as_array().unwrap().is_empty());
+        let record = store
+            .get_document(openwave_core::DocumentId::derive(uri))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.canonical_text, "replacement failed to embed");
+        assert_eq!(record.content_revision, 2);
+        assert_eq!(record.indexed_revision, None);
+    }
+
+    #[tokio::test]
+    async fn failed_vector_retirement_does_not_publish_the_new_source_revision() {
+        let vector_store = Arc::new(FailNextDeleteVectorStore::new(HashEmbedder::DEFAULT_DIMS));
+        let retrieval = Arc::new(Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::default()),
+            Arc::new(HashEmbedder::default()),
+            vector_store.clone(),
+        ));
+        let (router, token, store, _dir) =
+            test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
+        let bearer = format!("Bearer {token}");
+        let uri = "file:///retirement.txt";
+
+        assert_eq!(
+            post_json(
+                &router,
+                &bearer,
+                "/documents",
+                serde_json::json!({"uri": uri, "content": "still authoritative"}),
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+        vector_store.fail_next_delete();
+        assert_eq!(
+            post_json(
+                &router,
+                &bearer,
+                "/documents",
+                serde_json::json!({"uri": uri, "content": "must not publish"}),
+            )
+            .await
+            .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let record = store
+            .get_document(openwave_core::DocumentId::derive(uri))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.canonical_text, "still authoritative");
+        assert_eq!(record.content_revision, 1);
+        assert_eq!(record.indexed_revision, None);
+        assert_eq!(record.index_fingerprint, None);
+        assert_eq!(record.indexed_at, None);
+    }
+
+    #[tokio::test]
+    async fn first_ingest_persists_source_without_attempting_vector_retirement() {
+        let vector_store = Arc::new(FailNextDeleteVectorStore::new(HashEmbedder::DEFAULT_DIMS));
+        vector_store.fail_next_delete();
+        let retrieval = Arc::new(Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::default()),
+            Arc::new(HashEmbedder::default()),
+            vector_store,
+        ));
+        let (router, token, store, _dir) =
+            test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
+        let bearer = format!("Bearer {token}");
+        let uri = "file:///first-source.txt";
+
+        assert_eq!(
+            post_json(
+                &router,
+                &bearer,
+                "/documents",
+                serde_json::json!({"uri": uri, "content": "source comes first"}),
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+        let record = store
+            .get_document(openwave_core::DocumentId::derive(uri))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.canonical_text, "source comes first");
+        assert_eq!(record.indexed_revision, Some(1));
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_document_ingests_publish_in_request_order() {
+        let embedder = Arc::new(FirstBatchGatedEmbedder {
+            inner: HashEmbedder::default(),
+            calls: AtomicUsize::new(0),
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let retrieval = Arc::new(Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::default()),
+            embedder.clone(),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        ));
+        let (router, token, store, _dir) =
+            test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
+        let bearer = format!("Bearer {token}");
+
+        let first = tokio::spawn({
+            let router = router.clone();
+            let bearer = bearer.clone();
+            async move {
+                post_json(
+                    &router,
+                    &bearer,
+                    "/documents",
+                    serde_json::json!({
+                        "uri": "file:///concurrent.txt",
+                        "content": "first version",
+                    }),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), embedder.entered.notified())
+            .await
+            .expect("first ingest did not reach embedding");
+
+        let second = tokio::spawn({
+            let router = router.clone();
+            let bearer = bearer.clone();
+            async move {
+                post_json(
+                    &router,
+                    &bearer,
+                    "/documents",
+                    serde_json::json!({
+                        "uri": "file:///concurrent.txt",
+                        "content": "second version",
+                    }),
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            embedder.calls.load(Ordering::SeqCst),
+            1,
+            "second request must wait before indexing the same document"
+        );
+        embedder.release.notify_one();
+
+        assert_eq!(first.await.unwrap().status(), StatusCode::CREATED);
+        assert_eq!(second.await.unwrap().status(), StatusCode::CREATED);
+        let record = store
+            .get_document(openwave_core::DocumentId::derive("file:///concurrent.txt"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.canonical_text, "second version");
+        assert_eq!(record.content_revision, 2);
+        assert_eq!(record.indexed_revision, Some(2));
+    }
+
+    #[tokio::test]
     async fn deleting_a_document_removes_it_from_the_index() {
-        let (router, token, _store, _dir) = test_app().await;
+        let (router, token, store, _dir) = test_app().await;
         let bearer = format!("Bearer {token}");
         let ingest: serde_json::Value = json_body(
             post_json(
@@ -976,7 +1416,8 @@ mod tests {
         .await;
         assert!(results["citations"].as_array().unwrap().is_empty());
         // Idempotent: deleting again is still 204.
-        assert_eq!(delete(id).await, StatusCode::NO_CONTENT);
+        assert_eq!(delete(id.clone()).await, StatusCode::NO_CONTENT);
+        assert_eq!(store.get_document(id.parse().unwrap()).await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -1117,6 +1558,90 @@ mod tests {
             names.iter().any(|n| n == "read_file"),
             "file tools still present"
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_delete_failure_leaves_source_stale_and_repairable() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("delete-failure.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let store = Arc::new(PauseTerminalStore::new(
+            inner,
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+        ));
+        let retrieval = Arc::new(Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::default()),
+            Arc::new(HashEmbedder::default()),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        ));
+        let (router, token, store_view, _dir) =
+            test_app_from_parts(Arc::new(FakeProvider), retrieval, store.clone(), dir);
+        let bearer = format!("Bearer {token}");
+        let uri = "file:///delete-failure.txt";
+        let ingested: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/documents",
+                serde_json::json!({"uri": uri, "content": "rebuildable source"}),
+            )
+            .await,
+        )
+        .await;
+        let id = ingested["document_id"].as_str().unwrap().to_string();
+
+        store.fail_next_document_delete();
+        let delete = |id: String| {
+            let router = router.clone();
+            let bearer = bearer.clone();
+            async move {
+                router
+                    .oneshot(
+                        Request::builder()
+                            .method("DELETE")
+                            .uri(format!("/documents/{id}"))
+                            .header(header::AUTHORIZATION, bearer)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(
+            delete(id.clone()).await.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let record = store_view
+            .get_document(id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.canonical_text, "rebuildable source");
+        assert_eq!(record.indexed_revision, None);
+        assert_eq!(record.index_fingerprint, None);
+        assert_eq!(record.indexed_at, None);
+
+        let search: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/search",
+                serde_json::json!({"query": "rebuildable source"}),
+            )
+            .await,
+        )
+        .await;
+        assert!(search["citations"].as_array().unwrap().is_empty());
+        assert_eq!(delete(id).await.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

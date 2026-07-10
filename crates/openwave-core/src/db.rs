@@ -291,6 +291,34 @@ impl Store for DbStore {
         Ok(result.rows_affected == 1)
     }
 
+    async fn clear_document_index(
+        &self,
+        id: DocumentId,
+        revision: i64,
+        revision_token: uuid::Uuid,
+    ) -> Result<bool> {
+        let result = entities::document::Entity::update_many()
+            .col_expr(
+                entities::document::Column::IndexedRevision,
+                sea_orm::sea_query::Expr::value(Option::<i64>::None),
+            )
+            .col_expr(
+                entities::document::Column::IndexFingerprint,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                entities::document::Column::IndexedAt,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .filter(entities::document::Column::Id.eq(id.0))
+            .filter(entities::document::Column::ContentRevision.eq(revision))
+            .filter(entities::document::Column::RevisionToken.eq(revision_token))
+            .exec(&self.conn)
+            .await
+            .map_err(store_err)?;
+        Ok(result.rows_affected == 1)
+    }
+
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
         entities::chat::ActiveModel {
             id: Set(chat.id.0),
@@ -1540,6 +1568,18 @@ mod tests {
         assert_eq!(indexed.indexed_revision, Some(2));
         assert_eq!(indexed.index_fingerprint.as_deref(), Some("index-v2"));
         assert_eq!(indexed.indexed_at, Some(second_at));
+        assert!(!store
+            .clear_document_index(id, 2, revision_one.revision_token)
+            .await
+            .unwrap());
+        assert!(store
+            .clear_document_index(id, 2, revision_two.revision_token)
+            .await
+            .unwrap());
+        let cleared = store.get_document(id).await.unwrap().unwrap();
+        assert_eq!(cleared.indexed_revision, None);
+        assert_eq!(cleared.index_fingerprint, None);
+        assert_eq!(cleared.indexed_at, None);
 
         assert!(!store
             .mark_document_indexed(

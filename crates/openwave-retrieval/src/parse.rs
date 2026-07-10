@@ -33,6 +33,15 @@ impl ParsedDocument {
 /// Object-safe so parsers can be held as `Box<dyn DocumentParser>` and swapped by
 /// configuration (naive today, liteparse-backed later).
 pub trait DocumentParser: Send + Sync {
+    /// Stable identity for canonical-text behavior used in index watermarks.
+    ///
+    /// Custom parsers should override this whenever an implementation change can
+    /// alter canonical text. The value must remain stable for this parser
+    /// instance's lifetime; runtime reconfiguration requires a new instance.
+    fn fingerprint(&self) -> String {
+        format!("custom-parser:type={}", std::any::type_name::<Self>())
+    }
+
     /// Whether this parser can handle the given media (MIME) type.
     fn supports(&self, media_type: &str) -> bool;
 
@@ -58,6 +67,10 @@ impl PlainTextParser {
 }
 
 impl DocumentParser for PlainTextParser {
+    fn fingerprint(&self) -> String {
+        "plain-text-lossy-v1".to_string()
+    }
+
     fn supports(&self, media_type: &str) -> bool {
         // Match the top-level `text` type, ignoring any `; charset=...` suffix.
         // MIME types are case-insensitive (RFC 6838), so compare in lowercase.
