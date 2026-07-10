@@ -21,7 +21,9 @@ use serde_json::Value;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, DocumentId, ProjectId};
-use crate::model::{Chat, DocumentRecord, DocumentScope, Message, Project, ToolCallRecord};
+use crate::model::{
+    Chat, DocumentRecord, DocumentScope, DocumentUpsert, Message, Project, ToolCallRecord,
+};
 
 fn document_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
@@ -47,7 +49,9 @@ pub trait Store: Send + Sync {
     /// Persist a new authoritative document record.
     ///
     /// `project_id`, when present, must identify an existing project. The default
-    /// database store enforces this with a cascading foreign key.
+    /// database store enforces this with a cascading foreign key. The store
+    /// replaces the supplied `revision_token` with a fresh token so a deleted
+    /// document lifecycle cannot be recreated with stale identity.
     async fn create_document(&self, _document: &DocumentRecord) -> Result<()> {
         document_storage_unavailable()
     }
@@ -64,6 +68,30 @@ pub trait Store: Send + Sync {
 
     /// Delete an authoritative document record. Idempotent for unknown ids.
     async fn delete_document(&self, _id: DocumentId) -> Result<()> {
+        document_storage_unavailable()
+    }
+
+    /// Create or replace authoritative document content.
+    ///
+    /// A new record starts at revision one. Replacing an existing record increments
+    /// its revision atomically, preserves `created_at`, and clears the index
+    /// watermark. Returns the committed record.
+    async fn upsert_document(&self, _document: &DocumentUpsert) -> Result<DocumentRecord> {
+        document_storage_unavailable()
+    }
+
+    /// Mark an exact `(revision, revision_token)` as indexed with `fingerprint`.
+    ///
+    /// Returns `false` without modifying the row when the document is missing,
+    /// the lifecycle token differs, or a newer content revision won the race.
+    async fn mark_document_indexed(
+        &self,
+        _id: DocumentId,
+        _revision: i64,
+        _revision_token: uuid::Uuid,
+        _fingerprint: &str,
+        _indexed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
         document_storage_unavailable()
     }
 
@@ -180,10 +208,9 @@ mod tests {
             Ok(self.projects.lock().unwrap().values().cloned().collect())
         }
         async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
-            self.documents
-                .lock()
-                .unwrap()
-                .insert(document.id, document.clone());
+            let mut document = document.clone();
+            document.revision_token = uuid::Uuid::new_v4();
+            self.documents.lock().unwrap().insert(document.id, document);
             Ok(())
         }
         async fn get_document(&self, id: DocumentId) -> Result<Option<DocumentRecord>> {
@@ -206,6 +233,77 @@ mod tests {
         async fn delete_document(&self, id: DocumentId) -> Result<()> {
             self.documents.lock().unwrap().remove(&id);
             Ok(())
+        }
+        async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
+            if document.media_type.is_empty()
+                || document.source_uri.as_deref() == Some("")
+                || document
+                    .project_id
+                    .is_some_and(|id| !self.projects.lock().unwrap().contains_key(&id))
+            {
+                return Err(AgentError::Store("invalid document upsert".into()));
+            }
+            let mut documents = self.documents.lock().unwrap();
+            let record = match documents.get(&document.id) {
+                Some(existing) => {
+                    let content_revision =
+                        existing.content_revision.checked_add(1).ok_or_else(|| {
+                            AgentError::Store(format!("document {} revision overflow", document.id))
+                        })?;
+                    DocumentRecord {
+                        id: document.id,
+                        project_id: document.project_id,
+                        source_uri: document.source_uri.clone(),
+                        media_type: document.media_type.clone(),
+                        title: document.title.clone(),
+                        canonical_text: document.canonical_text.clone(),
+                        content_revision,
+                        revision_token: uuid::Uuid::new_v4(),
+                        indexed_revision: None,
+                        index_fingerprint: None,
+                        created_at: existing.created_at,
+                        updated_at: document.updated_at,
+                        indexed_at: None,
+                    }
+                }
+                None => DocumentRecord {
+                    id: document.id,
+                    project_id: document.project_id,
+                    source_uri: document.source_uri.clone(),
+                    media_type: document.media_type.clone(),
+                    title: document.title.clone(),
+                    canonical_text: document.canonical_text.clone(),
+                    content_revision: 1,
+                    revision_token: uuid::Uuid::new_v4(),
+                    indexed_revision: None,
+                    index_fingerprint: None,
+                    created_at: document.updated_at,
+                    updated_at: document.updated_at,
+                    indexed_at: None,
+                },
+            };
+            documents.insert(record.id, record.clone());
+            Ok(record)
+        }
+        async fn mark_document_indexed(
+            &self,
+            id: DocumentId,
+            revision: i64,
+            revision_token: uuid::Uuid,
+            fingerprint: &str,
+            indexed_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<bool> {
+            let mut documents = self.documents.lock().unwrap();
+            let Some(document) = documents.get_mut(&id) else {
+                return Ok(false);
+            };
+            if document.content_revision != revision || document.revision_token != revision_token {
+                return Ok(false);
+            }
+            document.indexed_revision = Some(revision);
+            document.index_fingerprint = Some(fingerprint.to_string());
+            document.indexed_at = Some(indexed_at);
+            Ok(true)
         }
         async fn create_chat(&self, chat: &Chat) -> Result<()> {
             self.chats.lock().unwrap().insert(chat.id, chat.clone());
