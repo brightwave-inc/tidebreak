@@ -4,6 +4,7 @@
 //! start a turn, and the WebSocket stream of a chat's turn events.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -28,6 +29,35 @@ use crate::state::AppState;
 
 /// The store-settings key for the selected model.
 const MODEL_SETTING: &str = "model";
+
+/// Notifies the reconciler if a source/index lifecycle exits before reaching a
+/// consistent terminal state. `Notify` retains a permit while the repair loop
+/// is busy, so failures cannot be lost between scans.
+struct RepairWake {
+    notify: Arc<tokio::sync::Notify>,
+    armed: bool,
+}
+
+impl RepairWake {
+    fn new(notify: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            notify,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RepairWake {
+    fn drop(&mut self) {
+        if self.armed {
+            self.notify.notify_one();
+        }
+    }
+}
 
 /// Runtime settings a client can read. The API key itself is never returned —
 /// it lives in the `SecretProvider`, not the store — only whether one is set.
@@ -485,10 +515,12 @@ pub async fn ingest_document(
         DocumentSource::Inline => None,
         _ => None,
     };
+    let mut repair_wake = None;
     // Retire the prior revision before publishing a replacement. If either
     // watermark clearing or vector deletion fails, the old source remains
     // authoritative; after clearing, any interruption is visible to repair.
     if let Some(current) = state.store.get_document(document.id).await? {
+        repair_wake = Some(RepairWake::new(state.index_repair_wake.clone()));
         let cleared = state
             .store
             .clear_document_index(current.id, current.content_revision, current.revision_token)
@@ -517,6 +549,9 @@ pub async fn ingest_document(
             updated_at: Utc::now(),
         })
         .await?;
+    if repair_wake.is_none() {
+        repair_wake = Some(RepairWake::new(state.index_repair_wake.clone()));
+    }
     let chunks = state
         .retrieval
         .index_document(&document)
@@ -538,6 +573,10 @@ pub async fn ingest_document(
             document.id
         )));
     }
+    repair_wake
+        .as_mut()
+        .expect("a persisted document always arms repair")
+        .disarm();
     Ok((
         StatusCode::CREATED,
         Json(IngestResult {
@@ -612,7 +651,9 @@ pub async fn delete_document(
     Path(id): Path<DocumentId>,
 ) -> Result<StatusCode, ServerError> {
     let _write = state.document_writes.acquire(id).await;
+    let mut repair_wake = None;
     if let Some(document) = state.store.get_document(id).await? {
+        repair_wake = Some(RepairWake::new(state.index_repair_wake.clone()));
         let cleared = state
             .store
             .clear_document_index(id, document.content_revision, document.revision_token)
@@ -625,6 +666,9 @@ pub async fn delete_document(
     }
     state.retrieval.delete(id).await.map_err(retrieval_error)?;
     state.store.delete_document(id).await?;
+    if let Some(wake) = repair_wake.as_mut() {
+        wake.disarm();
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

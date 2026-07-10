@@ -56,16 +56,31 @@ impl Retriever {
         &self.store
     }
 
-    /// Stable identity for the parser, chunker, and embedder configuration that
-    /// produced this retriever's index rows.
+    /// Stable identity for canonical parsing behavior.
+    ///
+    /// Canonical text cannot be regenerated from this identity alone; parser
+    /// upgrades require retained original bytes.
+    #[must_use]
+    pub fn canonical_fingerprint(&self) -> String {
+        self.parser.fingerprint()
+    }
+
+    /// Stable identity for the chunker and embedder configuration that produced
+    /// this retriever's derived index rows.
     #[must_use]
     pub fn index_fingerprint(&self) -> String {
         format!(
-            "parser={};chunker={};embedder={}",
-            self.parser.fingerprint(),
+            "chunker={};embedder={}",
             self.chunker.fingerprint(),
             self.embedder.fingerprint()
         )
+    }
+
+    /// Verify that the vector backend contains the expected number of chunks for
+    /// this canonical document under the active chunker.
+    pub async fn index_is_complete(&self, document: &Document) -> Result<bool> {
+        let expected = self.chunker.chunk(document)?.len();
+        Ok(self.store.document_len(document.id).await? == Some(expected))
     }
 
     /// Parse source bytes into the canonical document persisted by callers.
@@ -232,9 +247,10 @@ The Great Barrier Reef is the world's largest coral reef system.";
     #[test]
     fn index_fingerprint_captures_the_pipeline_configuration() {
         let r = retriever();
+        assert_eq!(r.canonical_fingerprint(), "plain-text-lossy-v1");
         assert_eq!(
             r.index_fingerprint(),
-            "parser=plain-text-lossy-v1;chunker=text-window-v1:max_chars=90:overlap=0;embedder=hash-fnv1a-v1:512d"
+            "chunker=text-window-v1:max_chars=90:overlap=0;embedder=hash-fnv1a-v1:512d"
         );
     }
 

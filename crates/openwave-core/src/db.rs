@@ -217,6 +217,30 @@ impl Store for DbStore {
             .collect())
     }
 
+    async fn list_document_ids(&self, scope: DocumentScope) -> Result<Vec<DocumentId>> {
+        let mut query = entities::document::Entity::find()
+            .select_only()
+            .column(entities::document::Column::Id);
+        query = match scope {
+            DocumentScope::All => query,
+            DocumentScope::Unscoped => {
+                query.filter(entities::document::Column::ProjectId.is_null())
+            }
+            DocumentScope::Project(id) => {
+                query.filter(entities::document::Column::ProjectId.eq(id.0))
+            }
+        };
+        Ok(query
+            .order_by_desc(entities::document::Column::CreatedAt)
+            .into_tuple::<uuid::Uuid>()
+            .all(&self.conn)
+            .await
+            .map_err(store_err)?
+            .into_iter()
+            .map(DocumentId)
+            .collect())
+    }
+
     async fn delete_document(&self, id: DocumentId) -> Result<()> {
         entities::document::Entity::delete_by_id(id.0)
             .exec(&self.conn)
