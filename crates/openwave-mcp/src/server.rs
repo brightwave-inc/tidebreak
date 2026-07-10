@@ -193,6 +193,7 @@ mod tests {
         let tools = Arc::new(ToolRegistry::new().with(Box::new(EchoTool)));
         let ctx = ToolCtx {
             chat_id: ChatId::new(),
+            project_id: None,
             workspace_dir: PathBuf::from("/tmp/ws"),
         };
         McpServer::new(tools, ctx)

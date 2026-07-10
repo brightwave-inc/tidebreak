@@ -574,6 +574,7 @@ impl Agent {
         }
         let ctx = ToolCtx {
             chat_id: chat.id,
+            project_id: chat.project_id,
             workspace_dir: chat.workspace_dir.clone(),
         };
         let mut output = match tool.execute(&ctx, parse_args(&call.args)).await {
@@ -817,13 +818,38 @@ mod tests {
 
     use super::*;
     use crate::db::DbStore;
-    use crate::id::ChatId;
+    use crate::id::{ChatId, ProjectId};
+    use crate::model::Project;
     use crate::provider::ProviderId;
     use crate::tools::ReadFile;
 
     /// A scripted provider: step 0 calls `read_file`, step 1 gives a final answer.
     struct FakeProvider {
         calls: AtomicUsize,
+    }
+
+    struct ContextRecordingTool {
+        observed_project: Arc<Mutex<Option<Option<ProjectId>>>>,
+    }
+
+    #[async_trait]
+    impl Tool for ContextRecordingTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "read_file".into(),
+                description: "record invocation context".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::ReadOnly
+        }
+
+        async fn execute(&self, ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            *self.observed_project.lock().unwrap() = Some(ctx.project_id);
+            Ok(ToolOutput::text("recorded"))
+        }
     }
 
     #[async_trait]
@@ -951,6 +977,55 @@ mod tests {
         assert_eq!(calls[0].result.as_deref(), Some("hello from disk"));
         assert!(!calls[0].is_error);
         assert!(calls[0].completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn tool_context_inherits_the_chats_project_scope() {
+        let workspace = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let project = Project {
+            id: ProjectId::new(),
+            title: None,
+            workspace_dir: workspace.path().to_path_buf(),
+            created_at: Utc::now(),
+        };
+        store.create_project(&project).await.unwrap();
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: Some(project.id),
+            title: None,
+            model: None,
+            workspace_dir: workspace.path().to_path_buf(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let observed_project = Arc::new(Mutex::new(None));
+        let tools = Arc::new(ToolRegistry::new().with(Box::new(ContextRecordingTool {
+            observed_project: observed_project.clone(),
+        })));
+        let agent = Agent::new(
+            Arc::new(FakeProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            tools,
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        );
+
+        let (tx, _rx) = unbounded();
+        agent.run_turn(&chat, "inspect context", &tx).await.unwrap();
+        assert_eq!(*observed_project.lock().unwrap(), Some(Some(project.id)));
     }
 
     #[tokio::test]

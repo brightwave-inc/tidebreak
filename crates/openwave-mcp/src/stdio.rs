@@ -79,6 +79,7 @@ mod tests {
     fn empty_server() -> McpServer {
         let ctx = ToolCtx {
             chat_id: ChatId::new(),
+            project_id: None,
             workspace_dir: PathBuf::from("/tmp/ws"),
         };
         McpServer::new(Arc::new(ToolRegistry::new()), ctx)

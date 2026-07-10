@@ -108,7 +108,7 @@ impl Tool for SearchTool {
         ApprovalClass::ReadOnly
     }
 
-    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+    async fn execute(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
         let args: SearchArgs = match parse_args(args) {
             Ok(args) => args,
             Err(output) => return Ok(output),
@@ -126,7 +126,11 @@ impl Tool for SearchTool {
             Ok(embedding) => embedding,
             Err(err) => return Ok(ToolOutput::error(format!("embedding failed: {err}"))),
         };
-        let hits = match self.store.query(&embedding, k, SearchScope::Unscoped).await {
+        let scope = match ctx.project_id {
+            Some(project_id) => SearchScope::Project(project_id),
+            None => SearchScope::Unscoped,
+        };
+        let hits = match self.store.query(&embedding, k, scope).await {
             Ok(hits) => hits,
             Err(err) => return Ok(ToolOutput::error(format!("search failed: {err}"))),
         };
@@ -146,7 +150,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use openwave_core::ChatId;
+    use openwave_core::{ChatId, ProjectId};
 
     use crate::chunk::{Chunker, TextChunker};
     use crate::document::{Document, DocumentSource};
@@ -183,8 +187,13 @@ mod tests {
     }
 
     fn ctx() -> ToolCtx {
+        ctx_for(None)
+    }
+
+    fn ctx_for(project_id: Option<ProjectId>) -> ToolCtx {
         ToolCtx {
             chat_id: ChatId::new(),
+            project_id,
             workspace_dir: PathBuf::from("/tmp/unused"),
         }
     }
@@ -232,6 +241,72 @@ mod tests {
         assert!(arr[0]["snippet"].as_str().unwrap().contains("Jupiter"));
         assert!(arr[0]["document_id"].is_string());
         assert!(arr[0]["span"]["start"].is_number());
+    }
+
+    #[tokio::test]
+    async fn search_scope_is_inherited_from_tool_context_not_model_arguments() {
+        let embedder = Arc::new(HashEmbedder::new(DIMS));
+        let store = Arc::new(InMemoryVectorStore::new(DIMS));
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        let documents = [
+            Document::new(
+                DocumentSource::Inline,
+                "text/plain",
+                "unscoped lighthouse fact",
+            ),
+            Document::new_scoped(
+                project_a,
+                DocumentSource::Inline,
+                "text/plain",
+                "project alpha lighthouse fact",
+            ),
+            Document::new_scoped(
+                project_b,
+                DocumentSource::Inline,
+                "text/plain",
+                "project beta lighthouse fact",
+            ),
+        ];
+        for document in documents {
+            let chunks = TextChunker::new(90, 0).chunk(&document).unwrap();
+            let texts: Vec<_> = chunks.iter().map(|chunk| chunk.text.clone()).collect();
+            let embeddings = embedder.embed_documents(&texts).await.unwrap();
+            store
+                .upsert(
+                    chunks
+                        .into_iter()
+                        .zip(embeddings)
+                        .map(|(chunk, embedding)| VectorRecord {
+                            project_id: document.project_id,
+                            chunk,
+                            embedding,
+                        })
+                        .collect(),
+                )
+                .await
+                .unwrap();
+        }
+        let tool = SearchTool::new(embedder, store);
+
+        let loose = tool
+            .execute(&ctx_for(None), json!({"query": "lighthouse fact", "k": 10}))
+            .await
+            .unwrap();
+        assert!(loose.content.contains("unscoped lighthouse"));
+        assert!(!loose.content.contains("project alpha"));
+        assert!(!loose.content.contains("project beta"));
+
+        let alpha = tool
+            .execute(
+                &ctx_for(Some(project_a)),
+                json!({"query": "lighthouse fact", "k": 10}),
+            )
+            .await
+            .unwrap();
+        assert!(alpha.content.contains("project alpha"));
+        assert!(!alpha.content.contains("unscoped lighthouse"));
+        assert!(!alpha.content.contains("project beta"));
     }
 
     #[tokio::test]
