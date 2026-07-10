@@ -87,7 +87,9 @@ pub use lance_store::LanceVectorStore;
 pub use openai_embed::OpenAiEmbedder;
 pub use openwave_core::DocumentGeneration;
 pub use parse::{DocumentParser, ParsedDocument, PlainTextParser};
-pub use retriever::{IngestOutcome, Retriever};
+pub use retriever::{GenerationIndexOutcome, IngestOutcome, Retriever};
 #[cfg(feature = "tool")]
 pub use search::SearchTool;
-pub use vector::{GenerationStageOutcome, InMemoryVectorStore, VectorRecord, VectorStore};
+pub use vector::{
+    DocumentGenerationState, GenerationStageOutcome, InMemoryVectorStore, VectorRecord, VectorStore,
+};

@@ -13,7 +13,8 @@ use crate::embed::Embedder;
 use crate::error::{Result, RetrievalError};
 use crate::id::DocumentId;
 use crate::parse::DocumentParser;
-use crate::vector::{VectorRecord, VectorStore};
+use crate::vector::{GenerationStageOutcome, VectorRecord, VectorStore};
+use openwave_core::DocumentGeneration;
 
 /// The outcome of ingesting one document.
 #[derive(Debug, Clone)]
@@ -23,6 +24,15 @@ pub struct IngestOutcome {
     pub document: Document,
     /// How many chunks were embedded and stored.
     pub chunks: usize,
+}
+
+/// Outcome of preparing and conditionally staging one exact document generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerationIndexOutcome {
+    /// Number of newly prepared chunks, or `None` when preflight avoided work.
+    pub chunks: Option<usize>,
+    /// Whether the generation was staged, already present, or fenced as stale.
+    pub stage: GenerationStageOutcome,
 }
 
 /// Ties parsing, chunking, embedding, and vector storage into one pipeline.
@@ -106,6 +116,84 @@ impl Retriever {
     /// Callers can persist `document` before awaiting external embedding I/O,
     /// then record an index watermark only after this succeeds.
     pub async fn index_document(&self, document: &Document) -> Result<usize> {
+        let records = self.prepare_document_index(document).await?;
+        let count = records.len();
+        self.store.replace_document(document.id, records).await?;
+        Ok(count)
+    }
+
+    /// Prepare and invisibly stage an exact authoritative document generation.
+    ///
+    /// Search continues to see the prior active generation until
+    /// [`activate_document_generation`](Self::activate_document_generation)
+    /// succeeds. Staging is safe to retry and may be rejected when a newer
+    /// generation already fences this work.
+    pub async fn stage_document_generation(
+        &self,
+        document: &Document,
+        generation: DocumentGeneration,
+    ) -> Result<GenerationIndexOutcome> {
+        if let Some(current) = self.store.newest_document_generation(document.id).await? {
+            let current = current.generation();
+            match generation.content_revision.cmp(&current.content_revision) {
+                std::cmp::Ordering::Less => {
+                    return Ok(GenerationIndexOutcome {
+                        chunks: None,
+                        stage: GenerationStageOutcome::Rejected { current },
+                    });
+                }
+                std::cmp::Ordering::Equal => {
+                    if generation.revision_token != current.revision_token {
+                        return Err(RetrievalError::vector_store(format!(
+                            "document {} generation {} has conflicting revision tokens",
+                            document.id, generation.content_revision
+                        )));
+                    }
+                    return Ok(GenerationIndexOutcome {
+                        chunks: None,
+                        stage: GenerationStageOutcome::AlreadyPresent,
+                    });
+                }
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+        let records = self.prepare_document_index(document).await?;
+        let chunks = records.len();
+        let stage = self
+            .store
+            .stage_document_generation(document.id, generation, records)
+            .await?;
+        Ok(GenerationIndexOutcome {
+            chunks: Some(chunks),
+            stage,
+        })
+    }
+
+    /// Stage an empty generation marker used to retire a deleted document.
+    pub async fn stage_document_tombstone(
+        &self,
+        document_id: DocumentId,
+        generation: DocumentGeneration,
+    ) -> Result<GenerationStageOutcome> {
+        self.store
+            .stage_document_generation(document_id, generation, Vec::new())
+            .await
+    }
+
+    /// Atomically make one exact staged generation searchable.
+    ///
+    /// Empty staged generations remain durable fences while exposing no chunks.
+    pub async fn activate_document_generation(
+        &self,
+        document_id: DocumentId,
+        generation: DocumentGeneration,
+    ) -> Result<bool> {
+        self.store
+            .activate_document_generation(document_id, generation)
+            .await
+    }
+
+    async fn prepare_document_index(&self, document: &Document) -> Result<Vec<VectorRecord>> {
         let chunks = self.chunker.chunk(document)?;
 
         let records: Vec<VectorRecord> = if chunks.is_empty() {
@@ -126,10 +214,7 @@ impl Retriever {
                 .map(|(chunk, embedding)| VectorRecord { chunk, embedding })
                 .collect()
         };
-
-        let count = records.len();
-        self.store.replace_document(document.id, records).await?;
-        Ok(count)
+        Ok(records)
     }
 
     /// Ingest one document: parse its bytes, chunk, embed, and store.
@@ -175,11 +260,38 @@ impl Retriever {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     use super::*;
     use crate::chunk::TextChunker;
     use crate::embed::HashEmbedder;
     use crate::parse::PlainTextParser;
     use crate::vector::InMemoryVectorStore;
+
+    struct ControlledEmbedder {
+        inner: HashEmbedder,
+        calls: AtomicUsize,
+        fail: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for ControlledEmbedder {
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+
+        async fn embed_documents(&self, texts: &[String]) -> Result<Vec<crate::Embedding>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(RetrievalError::embed("injected embedding failure"));
+            }
+            self.inner.embed_documents(texts).await
+        }
+
+        async fn embed_query(&self, text: &str) -> Result<crate::Embedding> {
+            self.inner.embed_query(text).await
+        }
+    }
 
     fn retriever() -> Retriever {
         let dims = 512;
@@ -242,6 +354,117 @@ The Great Barrier Reef is the world's largest coral reef system.";
         assert_eq!(r.index_document(&document).await.unwrap(), 1);
         let hits = r.search("persist embedding", 1).await.unwrap();
         assert_eq!(hits[0].document_id, document.id);
+    }
+
+    #[tokio::test]
+    async fn generation_indexing_stages_activates_and_retires_atomically() {
+        let r = retriever();
+        let document = Document::new(
+            DocumentSource::Inline,
+            "text/plain",
+            "generation-aware indexing",
+        );
+        let first = DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::from_u128(1),
+        };
+        let tombstone = DocumentGeneration {
+            content_revision: 2,
+            revision_token: uuid::Uuid::from_u128(2),
+        };
+
+        let staged = r.stage_document_generation(&document, first).await.unwrap();
+        assert_eq!(staged.chunks, Some(1));
+        assert_eq!(staged.stage, GenerationStageOutcome::Staged);
+        assert!(r.search("indexing", 5).await.unwrap().is_empty());
+        assert!(r
+            .activate_document_generation(document.id, first)
+            .await
+            .unwrap());
+        assert_eq!(r.search("indexing", 5).await.unwrap().len(), 1);
+
+        assert_eq!(
+            r.stage_document_tombstone(document.id, tombstone)
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Staged
+        );
+        assert_eq!(r.search("indexing", 5).await.unwrap().len(), 1);
+        assert!(r
+            .activate_document_generation(document.id, tombstone)
+            .await
+            .unwrap());
+        assert!(r.search("indexing", 5).await.unwrap().is_empty());
+        assert_eq!(
+            r.stage_document_generation(&document, first)
+                .await
+                .unwrap()
+                .stage,
+            GenerationStageOutcome::Rejected { current: tombstone }
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_preflight_skips_embedding_for_resolved_or_fenced_work() {
+        let embedder = Arc::new(ControlledEmbedder {
+            inner: HashEmbedder::new(32),
+            calls: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
+        });
+        let r = Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::new(90, 0)),
+            embedder.clone(),
+            Arc::new(InMemoryVectorStore::new(32)),
+        );
+        let document = Document::new(DocumentSource::Inline, "text/plain", "preflight once");
+        let current = DocumentGeneration {
+            content_revision: 2,
+            revision_token: uuid::Uuid::from_u128(2),
+        };
+        let stale = DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::from_u128(1),
+        };
+        r.stage_document_generation(&document, current)
+            .await
+            .unwrap();
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
+        embedder.fail.store(true, Ordering::SeqCst);
+
+        let exact_staged = r
+            .stage_document_generation(&document, current)
+            .await
+            .unwrap();
+        assert_eq!(exact_staged.chunks, None);
+        assert_eq!(exact_staged.stage, GenerationStageOutcome::AlreadyPresent);
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
+
+        assert!(r
+            .activate_document_generation(document.id, current)
+            .await
+            .unwrap());
+        let exact_active = r
+            .stage_document_generation(&document, current)
+            .await
+            .unwrap();
+        assert_eq!(exact_active.stage, GenerationStageOutcome::AlreadyPresent);
+        assert_eq!(
+            r.stage_document_generation(&document, stale)
+                .await
+                .unwrap()
+                .stage,
+            GenerationStageOutcome::Rejected { current }
+        );
+        let conflicting = DocumentGeneration {
+            revision_token: uuid::Uuid::from_u128(200),
+            ..current
+        };
+        assert!(r
+            .stage_document_generation(&document, conflicting)
+            .await
+            .is_err());
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
