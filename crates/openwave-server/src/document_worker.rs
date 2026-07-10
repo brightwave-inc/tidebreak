@@ -180,8 +180,11 @@ impl DocumentWorker {
         // operational tombstone cannot be replaced between vector activation
         // and the completion CAS below.
         let _document_write = self.document_writes.acquire(document_id).await;
-        if self.store.get_document(document_id).await?.is_some()
-            || self.store.get_document_generation(document_id).await? != Some(generation)
+        if self
+            .store
+            .get_pending_document_retirement(document_id)
+            .await?
+            != Some(generation)
         {
             return Ok(WorkerOutcome::Idle);
         }
@@ -234,6 +237,18 @@ impl DocumentWorker {
                 job.id
             ))
         })?;
+        // A recreated source can have a newer live generation while an older
+        // tombstone still has to retire the prior corpus publication. Retire
+        // that exact watermark before attempting to stage the recreated job;
+        // otherwise corpus validation correctly fences the new records behind
+        // the still-active old scope.
+        if let Some(retirement) = self
+            .store
+            .get_pending_document_retirement(job.document_id)
+            .await?
+        {
+            self.retire(job.document_id, retirement).await?;
+        }
         let Some(source) = self.store.get_document(job.document_id).await? else {
             return Ok(WorkerOutcome::Superseded(job.id));
         };
@@ -424,12 +439,21 @@ fn canonical_document(record: &openwave_core::DocumentRecord) -> Document {
         Some(uri) => DocumentSource::uri(uri),
         None => DocumentSource::Inline,
     };
-    Document::with_id(
-        record.id,
-        source,
-        record.media_type.clone(),
-        record.canonical_text.clone(),
-    )
+    match record.project_id {
+        Some(project_id) => Document::with_id_scoped(
+            record.id,
+            project_id,
+            source,
+            record.media_type.clone(),
+            record.canonical_text.clone(),
+        ),
+        None => Document::with_id(
+            record.id,
+            source,
+            record.media_type.clone(),
+            record.canonical_text.clone(),
+        ),
+    }
 }
 
 fn classify_retrieval_error(error: &RetrievalError) -> (bool, &'static str) {
@@ -462,7 +486,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use async_trait::async_trait;
-    use openwave_core::{DbStore, DocumentId, DocumentProcessingStatus, DocumentUpsert};
+    use openwave_core::{
+        DbStore, DocumentId, DocumentProcessingStatus, DocumentUpsert, Project, ProjectId,
+    };
     use openwave_retrieval::{
         Embedder, Embedding, HashEmbedder, InMemoryVectorStore, PlainTextParser, ScoredChunk,
         TextChunker, VectorRecord, VectorStore,
@@ -512,8 +538,9 @@ mod tests {
             &self,
             query: &Embedding,
             k: usize,
+            scope: openwave_retrieval::SearchScope,
         ) -> openwave_retrieval::Result<Vec<ScoredChunk>> {
-            self.inner.query(query, k).await
+            self.inner.query(query, k, scope).await
         }
 
         async fn replace_document(
@@ -730,7 +757,105 @@ mod tests {
             Some(document.generation())
         );
         assert_eq!(
-            retrieval.search("worker indexing", 5).await.unwrap().len(),
+            retrieval
+                .search(
+                    openwave_retrieval::SearchScope::Unscoped,
+                    "worker indexing",
+                    5,
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn recreation_in_a_new_corpus_retires_before_publishing() {
+        let (_dir, store, retrieval, _embedder, worker) = harness().await;
+        let id = DocumentId::new();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        for project_id in [project_a, project_b] {
+            store
+                .create_project(&Project {
+                    id: project_id,
+                    title: None,
+                    workspace_dir: std::path::PathBuf::from(format!("/{project_id}")),
+                    created_at: Utc::now(),
+                })
+                .await
+                .unwrap();
+        }
+        let mut first = source(id, "first project corpus");
+        first.project_id = Some(project_a);
+        let (first_record, first_job) = store
+            .upsert_document_and_enqueue_index(&first, &retrieval.index_fingerprint(), 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            WorkerOutcome::Completed(first_job.id)
+        );
+
+        let tombstone = store.delete_document(id).await.unwrap();
+        let mut recreated = source(id, "second project corpus");
+        recreated.project_id = Some(project_b);
+        let (recreated_record, recreated_job) = store
+            .upsert_document_and_enqueue_index(&recreated, &retrieval.index_fingerprint(), 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            tombstone.content_revision,
+            first_record.content_revision + 1
+        );
+        assert_eq!(
+            recreated_record.content_revision,
+            tombstone.content_revision + 1
+        );
+        assert_eq!(
+            store.get_pending_document_retirement(id).await.unwrap(),
+            Some(tombstone)
+        );
+
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            WorkerOutcome::Completed(recreated_job.id)
+        );
+        assert_eq!(
+            store.get_pending_document_retirement(id).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            retrieval
+                .store()
+                .active_document_generation(id)
+                .await
+                .unwrap(),
+            Some(recreated_record.generation())
+        );
+        assert_eq!(
+            retrieval
+                .search(
+                    openwave_retrieval::SearchScope::Project(project_a),
+                    "project corpus",
+                    5,
+                )
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            retrieval
+                .search(
+                    openwave_retrieval::SearchScope::Project(project_b),
+                    "project corpus",
+                    5,
+                )
+                .await
+                .unwrap()
+                .len(),
             1
         );
     }

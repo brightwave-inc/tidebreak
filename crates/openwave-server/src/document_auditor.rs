@@ -253,12 +253,21 @@ fn canonical_document(record: &openwave_core::DocumentRecord) -> Document {
         Some(uri) => DocumentSource::uri(uri),
         None => DocumentSource::Inline,
     };
-    Document::with_id(
-        record.id,
-        source,
-        record.media_type.clone(),
-        record.canonical_text.clone(),
-    )
+    match record.project_id {
+        Some(project_id) => Document::with_id_scoped(
+            record.id,
+            project_id,
+            source,
+            record.media_type.clone(),
+            record.canonical_text.clone(),
+        ),
+        None => Document::with_id(
+            record.id,
+            source,
+            record.media_type.clone(),
+            record.canonical_text.clone(),
+        ),
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,4 @@
 use super::*;
-use crate::model::DocumentJobKind;
 use chrono::{DateTime, Utc};
 
 async fn temp_store() -> (tempfile::TempDir, DbStore) {
@@ -299,6 +298,39 @@ async fn document_project_fk_rejects_orphans_and_direct_project_deletion() {
             .unwrap()
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn live_document_cannot_move_between_project_corpora() {
+    let (_dir, store) = temp_store().await;
+    let project_a = sample_project();
+    let mut project_b = sample_project();
+    project_b.id = ProjectId::new();
+    store.create_project(&project_a).await.unwrap();
+    store.create_project(&project_b).await.unwrap();
+    let source = DocumentUpsert {
+        id: DocumentId::new(),
+        project_id: Some(project_a.id),
+        source_uri: Some("file:///scoped.txt".into()),
+        media_type: "text/plain".into(),
+        title: None,
+        canonical_text: "project A source".into(),
+        updated_at: Utc::now(),
+    };
+    let first = store
+        .upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)
+        .await
+        .unwrap();
+    let moved = DocumentUpsert {
+        project_id: Some(project_b.id),
+        canonical_text: "must not move".into(),
+        ..source
+    };
+    assert!(store
+        .upsert_document_and_enqueue_index(&moved, "pipeline-v1", 3)
+        .await
+        .is_err());
+    assert_eq!(store.get_document(moved.id).await.unwrap(), Some(first.0));
 }
 
 #[tokio::test]
@@ -2375,11 +2407,21 @@ async fn pending_document_retirement_survives_reopen_and_uses_exact_cas() {
         })
         .await
         .unwrap();
+    assert_eq!(
+        store
+            .list_pending_document_retirements(None, 10)
+            .await
+            .unwrap(),
+        vec![(id, tombstone)]
+    );
+    assert_eq!(
+        store.get_pending_document_retirement(id).await.unwrap(),
+        Some(tombstone)
+    );
     assert!(store
-        .list_pending_document_retirements(None, 10)
+        .complete_document_retirement(id, tombstone)
         .await
-        .unwrap()
-        .is_empty());
+        .unwrap());
     assert!(!store
         .complete_document_retirement(id, tombstone)
         .await

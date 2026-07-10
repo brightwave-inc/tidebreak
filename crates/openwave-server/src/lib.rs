@@ -525,8 +525,9 @@ mod tests {
             &self,
             query: &Embedding,
             k: usize,
+            scope: openwave_retrieval::SearchScope,
         ) -> openwave_retrieval::Result<Vec<ScoredChunk>> {
-            self.inner.query(query, k).await
+            self.inner.query(query, k, scope).await
         }
 
         async fn replace_document(
@@ -725,6 +726,12 @@ mod tests {
             self.inner
                 .list_pending_document_retirements(after, limit)
                 .await
+        }
+        async fn get_pending_document_retirement(
+            &self,
+            id: openwave_core::DocumentId,
+        ) -> Result<Option<openwave_core::DocumentGeneration>> {
+            self.inner.get_pending_document_retirement(id).await
         }
         async fn complete_document_retirement(
             &self,
@@ -2173,6 +2180,38 @@ mod tests {
         assert!(results["citations"].as_array().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn root_search_never_returns_project_owned_vectors() {
+        let vectors = Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS));
+        vectors
+            .upsert(vec![VectorRecord {
+                project_id: Some(ProjectId::new()),
+                chunk: openwave_retrieval::Chunk::new(
+                    openwave_core::DocumentId::new(),
+                    0,
+                    openwave_retrieval::ByteSpan::new(0, 14),
+                    "project secret",
+                ),
+                embedding: Embedding(vec![0.0; HashEmbedder::DEFAULT_DIMS]),
+            }])
+            .await
+            .unwrap();
+        let (retrieval, _search) = build_retrieval(Arc::new(HashEmbedder::default()), vectors);
+        let (router, token, _store, _dir) =
+            test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
+        let results: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &format!("Bearer {token}"),
+                "/search",
+                serde_json::json!({"query": "project secret"}),
+            )
+            .await,
+        )
+        .await;
+        assert!(results["citations"].as_array().unwrap().is_empty());
+    }
+
     #[test]
     fn agent_deps_registers_the_search_tool_alongside_the_file_tools() {
         let (_retrieval, tools, _config) = agent_deps(
@@ -2346,6 +2385,7 @@ mod tests {
             );
             store
                 .upsert(vec![openwave_retrieval::VectorRecord {
+                    project_id: None,
                     chunk,
                     embedding: openwave_retrieval::Embedding(vec![1.0, 0.0]),
                 }])

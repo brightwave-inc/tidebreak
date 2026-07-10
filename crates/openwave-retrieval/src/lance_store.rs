@@ -36,8 +36,10 @@ use crate::document::{ByteSpan, Chunk, ScoredChunk};
 use crate::embed::Embedding;
 use crate::error::{Result, RetrievalError};
 use crate::id::{ChunkId, DocumentId};
-use crate::vector::{DocumentGenerationState, GenerationStageOutcome, VectorRecord, VectorStore};
-use openwave_core::DocumentGeneration;
+use crate::vector::{
+    DocumentGenerationState, GenerationStageOutcome, SearchScope, VectorRecord, VectorStore,
+};
+use openwave_core::{DocumentGeneration, ProjectId};
 
 /// The single table all chunks and publication markers are stored in.
 const TABLE: &str = "chunks";
@@ -152,6 +154,114 @@ impl LanceVectorStore {
         Ok(())
     }
 
+    fn validate_document_records(
+        &self,
+        document_id: DocumentId,
+        records: &[VectorRecord],
+    ) -> Result<()> {
+        let project_id = records.first().map(|record| record.project_id);
+        for record in records {
+            self.check_dims(&record.embedding)?;
+            if record.chunk.document_id != document_id {
+                return Err(RetrievalError::vector_store(format!(
+                    "replacement record {} belongs to document {}, expected {document_id}",
+                    record.chunk.id, record.chunk.document_id
+                )));
+            }
+            if Some(record.project_id) != project_id {
+                return Err(RetrievalError::vector_store(format!(
+                    "records for document {document_id} span multiple project corpora"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_upsert_records(&self, records: &[VectorRecord]) -> Result<()> {
+        let mut projects = std::collections::HashMap::new();
+        for record in records {
+            self.check_dims(&record.embedding)?;
+            match projects.entry(record.chunk.document_id) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(record.project_id);
+                }
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if *entry.get() != record.project_id =>
+                {
+                    return Err(RetrievalError::vector_store(format!(
+                        "records for document {} span multiple project corpora",
+                        record.chunk.document_id
+                    )));
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn live_document_project_id(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Option<Option<ProjectId>>> {
+        let mut stream = self
+            .table
+            .query()
+            .only_if(format!(
+                "document_id = '{document_id}' AND row_kind IN ('{UNVERSIONED_CHUNK}', '{ACTIVE_CHUNK}', '{STAGED_CHUNK}')"
+            ))
+            .select(Select::columns(&["project_id"]))
+            .execute()
+            .await
+            .map_err(lance_err)?;
+        let mut found = None;
+        while let Some(batch) = stream.try_next().await.map_err(lance_err)? {
+            let project_ids = str_col(&batch, "project_id")?;
+            for index in 0..batch.num_rows() {
+                let project_id = if project_ids.is_null(index) {
+                    None
+                } else {
+                    Some(
+                        project_ids
+                            .value(index)
+                            .parse::<ProjectId>()
+                            .map_err(|error| {
+                                RetrievalError::vector_store(format!(
+                                    "document {document_id} has an invalid project_id: {error}"
+                                ))
+                            })?,
+                    )
+                };
+                if found.is_some_and(|existing| existing != project_id) {
+                    return Err(RetrievalError::vector_store(format!(
+                        "stored records for document {document_id} span multiple project corpora"
+                    )));
+                }
+                found = Some(project_id);
+            }
+        }
+        Ok(found)
+    }
+
+    async fn validate_live_document_scope(
+        &self,
+        document_id: DocumentId,
+        records: &[VectorRecord],
+    ) -> Result<()> {
+        let Some(requested) = records.first().map(|record| record.project_id) else {
+            return Ok(());
+        };
+        if self
+            .live_document_project_id(document_id)
+            .await?
+            .is_some_and(|existing| existing != requested)
+        {
+            return Err(RetrievalError::vector_store(format!(
+                "document {document_id} cannot move between project corpora while it has live chunks"
+            )));
+        }
+        Ok(())
+    }
+
     fn rows_to_batch(&self, rows: &[StoredRow]) -> Result<RecordBatch> {
         let storage_ids =
             StringArray::from_iter_values(rows.iter().map(|row| row.storage_id.as_str()));
@@ -171,6 +281,20 @@ impl LanceVectorStore {
             .map(|row| row.document_id.to_string())
             .collect::<Vec<_>>();
         let doc_ids = StringArray::from_iter_values(doc_id_values.iter().map(String::as_str));
+        let project_id_values = rows
+            .iter()
+            .map(|row| {
+                row.record
+                    .as_ref()
+                    .and_then(|record| record.project_id)
+                    .map(|project_id| project_id.to_string())
+            })
+            .collect::<Vec<_>>();
+        let project_ids = StringArray::from_iter(
+            project_id_values
+                .iter()
+                .map(|project_id| project_id.as_deref()),
+        );
         let ordinals = UInt64Array::from_iter_values(rows.iter().map(|row| {
             row.record
                 .as_ref()
@@ -224,6 +348,7 @@ impl LanceVectorStore {
             Arc::new(row_kinds),
             Arc::new(chunk_ids),
             Arc::new(doc_ids),
+            Arc::new(project_ids),
             Arc::new(ordinals),
             Arc::new(texts),
             Arc::new(starts),
@@ -311,6 +436,7 @@ impl LanceVectorStore {
             .select(Select::columns(&[
                 "chunk_id",
                 "document_id",
+                "project_id",
                 "ordinal",
                 "text",
                 "span_start",
@@ -405,19 +531,22 @@ fn newest_generation(
 #[async_trait]
 impl VectorStore for LanceVectorStore {
     async fn upsert(&self, records: Vec<VectorRecord>) -> Result<()> {
-        for record in &records {
-            self.check_dims(&record.embedding)?;
-        }
+        self.validate_upsert_records(&records)?;
         let records = dedupe_by_chunk_id(records);
         if records.is_empty() {
             return Ok(());
         }
         let _write = self.write_lock.lock().await;
-        let documents = records
-            .iter()
-            .map(|record| record.chunk.document_id)
-            .collect::<std::collections::HashSet<_>>();
-        for document_id in documents {
+        let mut documents = std::collections::HashMap::new();
+        for record in &records {
+            documents
+                .entry(record.chunk.document_id)
+                .or_insert_with(Vec::new)
+                .push(record.clone());
+        }
+        for (document_id, document_records) in documents {
+            self.validate_live_document_scope(document_id, &document_records)
+                .await?;
             if self.generation_rows_exist(document_id).await? {
                 return Err(RetrievalError::vector_store(
                     "legacy upsert cannot modify a generation-managed document",
@@ -428,17 +557,29 @@ impl VectorStore for LanceVectorStore {
         self.merge_rows(&rows, None).await
     }
 
-    async fn query(&self, query: &Embedding, k: usize) -> Result<Vec<ScoredChunk>> {
+    async fn query(
+        &self,
+        query: &Embedding,
+        k: usize,
+        scope: SearchScope,
+    ) -> Result<Vec<ScoredChunk>> {
         self.check_dims(query)?;
         if k == 0 {
             return Ok(Vec::new());
         }
+        // Lance applies this predicate before the vector limit, so a closer row
+        // in another corpus cannot consume one of this scope's top-k slots.
+        // ProjectId is a parsed UUID newtype, not caller-provided query text.
+        let scope_filter = match scope {
+            SearchScope::Unscoped => "project_id IS NULL".to_string(),
+            SearchScope::Project(project_id) => format!("project_id = '{project_id}'"),
+        };
         let mut stream = self
             .table
             .query()
             .nearest_to(query.0.as_slice())
             .map_err(lance_err)?
-            .only_if(VISIBLE_CHUNKS)
+            .only_if(format!("({VISIBLE_CHUNKS}) AND ({scope_filter})"))
             .column(VECTOR_COL)
             .distance_type(DistanceType::Cosine)
             .limit(k)
@@ -458,17 +599,11 @@ impl VectorStore for LanceVectorStore {
         document_id: DocumentId,
         records: Vec<VectorRecord>,
     ) -> Result<()> {
-        for record in &records {
-            self.check_dims(&record.embedding)?;
-            if record.chunk.document_id != document_id {
-                return Err(RetrievalError::vector_store(format!(
-                    "replacement record {} belongs to document {}, expected {document_id}",
-                    record.chunk.id, record.chunk.document_id
-                )));
-            }
-        }
+        self.validate_document_records(document_id, &records)?;
         let records = dedupe_by_chunk_id(records);
         let _write = self.write_lock.lock().await;
+        self.validate_live_document_scope(document_id, &records)
+            .await?;
         if self.generation_rows_exist(document_id).await? {
             return Err(RetrievalError::vector_store(
                 "legacy replacement cannot modify a generation-managed document",
@@ -490,17 +625,13 @@ impl VectorStore for LanceVectorStore {
                 "document generation revision must be at least one",
             ));
         }
-        for record in &records {
-            self.check_dims(&record.embedding)?;
-            if record.chunk.document_id != document_id {
-                return Err(RetrievalError::vector_store(format!(
-                    "staged record {} belongs to document {}, expected {document_id}",
-                    record.chunk.id, record.chunk.document_id
-                )));
-            }
-        }
+        self.validate_document_records(document_id, &records)?;
         let records = dedupe_by_chunk_id(records);
         let _write = self.write_lock.lock().await;
+        if !records.is_empty() {
+            self.validate_live_document_scope(document_id, &records)
+                .await?;
+        }
         let active = self.generation_marker(document_id, ACTIVE_MARKER).await?;
         let staged = self.generation_marker(document_id, STAGED_MARKER).await?;
         if let Some(current) = newest_generation(document_id, active, staged)? {
@@ -645,6 +776,7 @@ fn build_schema(dims: usize) -> SchemaRef {
         Field::new("row_kind", DataType::Utf8, false),
         Field::new("chunk_id", DataType::Utf8, false),
         Field::new("document_id", DataType::Utf8, false),
+        Field::new("project_id", DataType::Utf8, true),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("text", DataType::Utf8, false),
         Field::new("span_start", DataType::UInt64, false),
@@ -665,6 +797,7 @@ fn build_schema(dims: usize) -> SchemaRef {
 fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Result<()> {
     let chunk_ids = str_col(batch, "chunk_id")?;
     let doc_ids = str_col(batch, "document_id")?;
+    let project_ids = str_col(batch, "project_id")?;
     let ordinals = u64_col(batch, "ordinal")?;
     let texts = str_col(batch, "text")?;
     let starts = u64_col(batch, "span_start")?;
@@ -683,12 +816,25 @@ fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Resu
             .value(index)
             .parse()
             .map_err(|error| RetrievalError::vector_store(format!("bad document_id: {error}")))?;
+        let project_id = if project_ids.is_null(index) {
+            None
+        } else {
+            Some(
+                project_ids
+                    .value(index)
+                    .parse::<ProjectId>()
+                    .map_err(|error| {
+                        RetrievalError::vector_store(format!("bad project_id: {error}"))
+                    })?,
+            )
+        };
         let values = vectors.value(index);
         let values = values
             .as_any()
             .downcast_ref::<Float32Array>()
             .ok_or_else(|| RetrievalError::vector_store("vector values are not float32"))?;
         out.push(VectorRecord {
+            project_id,
             chunk: Chunk {
                 id: chunk_id,
                 document_id,
@@ -772,8 +918,22 @@ mod tests {
     fn record(doc: DocumentId, ordinal: usize, text: &str, vector: Vec<f32>) -> VectorRecord {
         let span = ByteSpan::new(ordinal * 100, ordinal * 100 + text.len());
         VectorRecord {
+            project_id: None,
             chunk: Chunk::new(doc, ordinal, span, text),
             embedding: Embedding(vector),
+        }
+    }
+
+    fn project_record(
+        project_id: ProjectId,
+        doc: DocumentId,
+        ordinal: usize,
+        text: &str,
+        vector: Vec<f32>,
+    ) -> VectorRecord {
+        VectorRecord {
+            project_id: Some(project_id),
+            ..record(doc, ordinal, text, vector)
         }
     }
 
@@ -824,7 +984,10 @@ mod tests {
             );
 
             // Nearest to "east" is the east vector, with its span/text intact.
-            let hits = store.query(&Embedding(vec![1.0, 0.0]), 1).await.unwrap();
+            let hits = store
+                .query(&Embedding(vec![1.0, 0.0]), 1, SearchScope::Unscoped)
+                .await
+                .unwrap();
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].chunk.text, "east");
             assert_eq!(hits[0].chunk.document_id, doc);
@@ -841,15 +1004,156 @@ mod tests {
                 version_before_replace + 1
             );
             assert_eq!(store.len().await.unwrap(), 1);
-            let hits = store.query(&Embedding(vec![1.0, 0.0]), 5).await.unwrap();
+            let hits = store
+                .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
+                .await
+                .unwrap();
             assert_eq!(hits[0].chunk.text, "south");
         }
 
         // Reopen the same directory: the data is still there — that's durability.
         let reopened = LanceVectorStore::connect(uri, 2).await.unwrap();
         assert_eq!(reopened.len().await.unwrap(), 1);
-        let hits = reopened.query(&Embedding(vec![1.0, 0.0]), 5).await.unwrap();
+        let hits = reopened
+            .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(hits[0].chunk.text, "south");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn query_filters_corpus_before_top_k_and_scope_persists_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().to_str().unwrap();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        let unscoped_doc = DocumentId::new();
+        let a_doc = DocumentId::new();
+        let b_doc = DocumentId::new();
+
+        {
+            let store = LanceVectorStore::connect(uri, 2).await.unwrap();
+            store
+                .upsert(vec![
+                    record(unscoped_doc, 0, "unscoped", vec![0.8, 0.2]),
+                    project_record(project_a, a_doc, 0, "project-a", vec![0.9, 0.1]),
+                    // Globally closest, but it must not consume project A's k=1.
+                    project_record(project_b, b_doc, 0, "project-b", vec![1.0, 0.0]),
+                ])
+                .await
+                .unwrap();
+
+            let query = Embedding(vec![1.0, 0.0]);
+            let unscoped = store.query(&query, 1, SearchScope::Unscoped).await.unwrap();
+            let a = store
+                .query(&query, 1, SearchScope::Project(project_a))
+                .await
+                .unwrap();
+            let b = store
+                .query(&query, 1, SearchScope::Project(project_b))
+                .await
+                .unwrap();
+            assert_eq!(unscoped[0].chunk.text, "unscoped");
+            assert_eq!(a[0].chunk.text, "project-a");
+            assert_eq!(b[0].chunk.text, "project-b");
+        }
+
+        let reopened = LanceVectorStore::connect(uri, 2).await.unwrap();
+        let query = Embedding(vec![1.0, 0.0]);
+        assert_eq!(
+            reopened
+                .query(&query, 1, SearchScope::Unscoped)
+                .await
+                .unwrap()[0]
+                .chunk
+                .text,
+            "unscoped"
+        );
+        assert_eq!(
+            reopened
+                .query(&query, 1, SearchScope::Project(project_a))
+                .await
+                .unwrap()[0]
+                .chunk
+                .text,
+            "project-a"
+        );
+        assert_eq!(
+            reopened
+                .query(&query, 1, SearchScope::Project(project_b))
+                .await
+                .unwrap()[0]
+                .chunk
+                .text,
+            "project-b"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn generation_activation_preserves_project_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        let a_doc = DocumentId::new();
+        let b_doc = DocumentId::new();
+        let first = generation(1);
+
+        store
+            .upsert(vec![project_record(
+                project_b,
+                b_doc,
+                0,
+                "project-b",
+                vec![1.0, 0.0],
+            )])
+            .await
+            .unwrap();
+        store
+            .stage_document_generation(
+                a_doc,
+                first,
+                vec![project_record(
+                    project_a,
+                    a_doc,
+                    0,
+                    "project-a-active",
+                    vec![0.9, 0.1],
+                )],
+            )
+            .await
+            .unwrap();
+
+        let query = Embedding(vec![1.0, 0.0]);
+        assert!(store
+            .query(&query, 1, SearchScope::Project(project_a))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .activate_document_generation(a_doc, first)
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .query(&query, 1, SearchScope::Project(project_a))
+                .await
+                .unwrap()[0]
+                .chunk
+                .text,
+            "project-a-active"
+        );
+        assert_eq!(
+            store
+                .query(&query, 1, SearchScope::Project(project_b))
+                .await
+                .unwrap()[0]
+                .chunk
+                .text,
+            "project-b"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -871,7 +1175,10 @@ mod tests {
 
         store.replace_document(doc, vec![a, b]).await.unwrap();
         assert_eq!(store.len().await.unwrap(), 1);
-        let hits = store.query(&Embedding(vec![0.0, 1.0]), 5).await.unwrap();
+        let hits = store
+            .query(&Embedding(vec![0.0, 1.0]), 5, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.text, "new");
     }
@@ -928,7 +1235,7 @@ mod tests {
             .await
             .unwrap();
         assert!(store
-            .query(&Embedding(vec![1.0, 0.0]), 5)
+            .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
             .await
             .unwrap()
             .is_empty());
@@ -937,7 +1244,7 @@ mod tests {
             .await
             .unwrap();
         assert!(store
-            .query(&Embedding(vec![1.0, 0.0]), 0)
+            .query(&Embedding(vec![1.0, 0.0]), 0, SearchScope::Unscoped)
             .await
             .unwrap()
             .is_empty());
@@ -964,7 +1271,10 @@ mod tests {
 
         assert_eq!(store.table.version().await.unwrap(), version + 1);
         assert_eq!(store.len().await.unwrap(), 1);
-        let hits = store.query(&Embedding(vec![0.0, 1.0]), 10).await.unwrap();
+        let hits = store
+            .query(&Embedding(vec![0.0, 1.0]), 10, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.document_id, kept);
     }
@@ -998,7 +1308,7 @@ mod tests {
         b.unwrap();
 
         let texts: std::collections::BTreeSet<_> = store
-            .query(&Embedding(vec![1.0, 0.0]), 10)
+            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap()
             .into_iter()
@@ -1030,9 +1340,259 @@ mod tests {
 
         assert!(err.to_string().contains("belongs to document"));
         assert_eq!(store.table.version().await.unwrap(), version);
-        let hits = store.query(&Embedding(vec![1.0, 0.0]), 10).await.unwrap();
+        let hits = store
+            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.text, "original");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn document_writes_reject_mixed_project_metadata_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        let legacy_doc = DocumentId::new();
+        let generation_doc = DocumentId::new();
+        store
+            .upsert(vec![record(legacy_doc, 0, "original", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+
+        let version = store.table.version().await.unwrap();
+        let mixed_legacy = [
+            vec![
+                record(legacy_doc, 1, "unscoped", vec![1.0, 0.0]),
+                project_record(project_a, legacy_doc, 2, "project-a", vec![1.0, 0.0]),
+            ],
+            vec![
+                project_record(project_a, legacy_doc, 1, "project-a", vec![1.0, 0.0]),
+                project_record(project_b, legacy_doc, 2, "project-b", vec![1.0, 0.0]),
+            ],
+        ];
+        for records in mixed_legacy {
+            let error = store
+                .replace_document(legacy_doc, records)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("multiple project corpora"));
+            assert_eq!(store.table.version().await.unwrap(), version);
+        }
+        let hits = store
+            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.text, "original");
+
+        let mixed_generation = [
+            vec![
+                record(generation_doc, 0, "unscoped", vec![1.0, 0.0]),
+                project_record(project_a, generation_doc, 1, "project-a", vec![1.0, 0.0]),
+            ],
+            vec![
+                project_record(project_a, generation_doc, 0, "project-a", vec![1.0, 0.0]),
+                project_record(project_b, generation_doc, 1, "project-b", vec![1.0, 0.0]),
+            ],
+        ];
+        for records in mixed_generation {
+            let error = store
+                .stage_document_generation(generation_doc, generation(1), records)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("multiple project corpora"));
+            assert_eq!(store.table.version().await.unwrap(), version);
+            assert_eq!(
+                store
+                    .newest_document_generation(generation_doc)
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_documents_cannot_move_between_project_corpora() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+
+        let batch_doc = DocumentId::new();
+        let empty_version = store.table.version().await.unwrap();
+        let error = store
+            .upsert(vec![
+                project_record(project_a, batch_doc, 0, "batch-a", vec![1.0, 0.0]),
+                project_record(project_b, batch_doc, 1, "batch-b", vec![1.0, 0.0]),
+            ])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("multiple project corpora"));
+        assert_eq!(store.table.version().await.unwrap(), empty_version);
+        assert_eq!(store.document_len(batch_doc).await.unwrap(), Some(0));
+
+        let legacy_doc = DocumentId::new();
+        store
+            .upsert(vec![project_record(
+                project_a,
+                legacy_doc,
+                0,
+                "legacy-a",
+                vec![1.0, 0.0],
+            )])
+            .await
+            .unwrap();
+        let legacy_version = store.table.version().await.unwrap();
+        let error = store
+            .upsert(vec![project_record(
+                project_b,
+                legacy_doc,
+                1,
+                "sequential-b",
+                vec![1.0, 0.0],
+            )])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot move"));
+        assert_eq!(store.table.version().await.unwrap(), legacy_version);
+        let error = store
+            .replace_document(
+                legacy_doc,
+                vec![project_record(
+                    project_b,
+                    legacy_doc,
+                    0,
+                    "replacement-b",
+                    vec![1.0, 0.0],
+                )],
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot move"));
+        assert_eq!(store.table.version().await.unwrap(), legacy_version);
+        assert_eq!(
+            store
+                .query(
+                    &Embedding(vec![1.0, 0.0]),
+                    10,
+                    SearchScope::Project(project_a),
+                )
+                .await
+                .unwrap()[0]
+                .chunk
+                .text,
+            "legacy-a"
+        );
+        assert!(store
+            .query(
+                &Embedding(vec![1.0, 0.0]),
+                10,
+                SearchScope::Project(project_b),
+            )
+            .await
+            .unwrap()
+            .is_empty());
+
+        let generation_doc = DocumentId::new();
+        let first = generation(1);
+        store
+            .stage_document_generation(
+                generation_doc,
+                first,
+                vec![project_record(
+                    project_a,
+                    generation_doc,
+                    0,
+                    "generation-a",
+                    vec![1.0, 0.0],
+                )],
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .activate_document_generation(generation_doc, first)
+            .await
+            .unwrap());
+        let active_version = store.table.version().await.unwrap();
+        let error = store
+            .stage_document_generation(
+                generation_doc,
+                generation(2),
+                vec![project_record(
+                    project_b,
+                    generation_doc,
+                    0,
+                    "generation-b",
+                    vec![1.0, 0.0],
+                )],
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot move"));
+        assert_eq!(store.table.version().await.unwrap(), active_version);
+        assert_eq!(
+            store
+                .newest_document_generation(generation_doc)
+                .await
+                .unwrap(),
+            Some(DocumentGenerationState::Active(first))
+        );
+        let project_a_hits = store
+            .query(
+                &Embedding(vec![1.0, 0.0]),
+                10,
+                SearchScope::Project(project_a),
+            )
+            .await
+            .unwrap();
+        assert!(project_a_hits.iter().any(|hit| {
+            hit.chunk.document_id == generation_doc && hit.chunk.text == "generation-a"
+        }));
+        assert!(store
+            .query(
+                &Embedding(vec![1.0, 0.0]),
+                10,
+                SearchScope::Project(project_b),
+            )
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Once an empty generation removes all live chunks, a recreated
+        // document may choose a new corpus.
+        let tombstone = generation(2);
+        store
+            .stage_document_generation(generation_doc, tombstone, Vec::new())
+            .await
+            .unwrap();
+        assert!(store
+            .activate_document_generation(generation_doc, tombstone)
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .stage_document_generation(
+                    generation_doc,
+                    generation(3),
+                    vec![project_record(
+                        project_b,
+                        generation_doc,
+                        0,
+                        "recreated-b",
+                        vec![1.0, 0.0],
+                    )],
+                )
+                .await
+                .unwrap(),
+            GenerationStageOutcome::Staged
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1115,7 +1675,10 @@ mod tests {
             store.newest_document_generation(doc).await.unwrap(),
             Some(DocumentGenerationState::Staged(first))
         );
-        let hits = store.query(&Embedding(vec![1.0, 0.0]), 10).await.unwrap();
+        let hits = store
+            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.text, "other");
         drop(store);
@@ -1136,7 +1699,7 @@ mod tests {
         );
         assert_eq!(reopened.len().await.unwrap(), 2);
         let hits = reopened
-            .query(&Embedding(vec![1.0, 0.0]), 10)
+            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
         assert!(hits.iter().any(|hit| hit.chunk.text == "first"));
@@ -1244,6 +1807,76 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn tombstone_allows_a_later_generation_to_change_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let doc = DocumentId::new();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        for (generation, records) in [
+            (
+                generation(1),
+                vec![project_record(
+                    project_a,
+                    doc,
+                    0,
+                    "old corpus",
+                    vec![1.0, 0.0],
+                )],
+            ),
+            (generation(2), Vec::new()),
+            (
+                generation(3),
+                vec![project_record(
+                    project_b,
+                    doc,
+                    0,
+                    "new corpus",
+                    vec![0.0, 1.0],
+                )],
+            ),
+        ] {
+            assert_eq!(
+                store
+                    .stage_document_generation(doc, generation, records)
+                    .await
+                    .unwrap(),
+                GenerationStageOutcome::Staged
+            );
+            assert!(store
+                .activate_document_generation(doc, generation)
+                .await
+                .unwrap());
+        }
+        assert_eq!(
+            store
+                .query(
+                    &Embedding(vec![0.0, 1.0]),
+                    5,
+                    SearchScope::Project(project_a)
+                )
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            store
+                .query(
+                    &Embedding(vec![0.0, 1.0]),
+                    5,
+                    SearchScope::Project(project_b)
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_stages_leave_only_the_highest_generation_activatable() {
         let dir = tempfile::tempdir().unwrap();
         let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
@@ -1278,7 +1911,10 @@ mod tests {
             .activate_document_generation(doc, third)
             .await
             .unwrap());
-        let hits = store.query(&Embedding(vec![0.0, 1.0]), 10).await.unwrap();
+        let hits = store
+            .query(&Embedding(vec![0.0, 1.0]), 10, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.text, "third");
     }

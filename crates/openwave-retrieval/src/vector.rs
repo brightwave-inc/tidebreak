@@ -4,9 +4,8 @@
 //! is the reference backend — a brute-force cosine scan behind a lock. It has no
 //! persistence and is O(n) per query, which is exactly right for tests, small
 //! local corpora, and pinning down the semantics that persistent backends
-//! (sqlite-vec, pgvector, Qdrant) must reproduce. Those, plus metadata filtering
-//! and hybrid dense+sparse search, arrive as feature-gated backends behind this
-//! trait later.
+//! (sqlite-vec, pgvector, Qdrant) must reproduce. Those, plus hybrid dense+sparse
+//! search, arrive as feature-gated backends behind this trait later.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -18,10 +17,31 @@ use crate::embed::Embedding;
 use crate::error::{Result, RetrievalError};
 use crate::id::DocumentId;
 use openwave_core::DocumentGeneration;
+use openwave_core::ProjectId;
+
+/// Corpus boundary applied to every retrieval query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchScope {
+    /// Only documents not assigned to a project.
+    Unscoped,
+    /// Only documents assigned to this project.
+    Project(ProjectId),
+}
+
+impl SearchScope {
+    fn includes(self, project_id: Option<ProjectId>) -> bool {
+        match self {
+            Self::Unscoped => project_id.is_none(),
+            Self::Project(expected) => project_id == Some(expected),
+        }
+    }
+}
 
 /// A chunk together with its embedding, ready to store.
 #[derive(Debug, Clone)]
 pub struct VectorRecord {
+    /// Project corpus this vector belongs to, or `None` for the unscoped corpus.
+    pub project_id: Option<ProjectId>,
     /// The chunk being indexed.
     pub chunk: Chunk,
     /// Its embedding. Must match the store's dimensionality.
@@ -81,7 +101,12 @@ pub trait VectorStore: Send + Sync {
     ///
     /// Fewer than `k` come back when the store holds fewer records. `k == 0`
     /// yields an empty result.
-    async fn query(&self, query: &Embedding, k: usize) -> Result<Vec<ScoredChunk>>;
+    async fn query(
+        &self,
+        query: &Embedding,
+        k: usize,
+        scope: SearchScope,
+    ) -> Result<Vec<ScoredChunk>>;
 
     /// Atomically replace every chunk of `document_id` with `records`: remove the
     /// document's existing chunks and store the new ones as one operation.
@@ -226,7 +251,8 @@ impl InMemoryVectorStore {
         &self,
         document_id: DocumentId,
         records: &[VectorRecord],
-    ) -> Result<()> {
+    ) -> Result<Option<Option<ProjectId>>> {
+        let project_id = records.first().map(|record| record.project_id);
         for record in records {
             self.check_dims(&record.embedding)?;
             if record.chunk.document_id != document_id {
@@ -235,6 +261,30 @@ impl InMemoryVectorStore {
                     record.chunk.id, record.chunk.document_id
                 )));
             }
+            if Some(record.project_id) != project_id {
+                return Err(RetrievalError::vector_store(format!(
+                    "records for document {document_id} span multiple project corpora"
+                )));
+            }
+        }
+        Ok(project_id)
+    }
+
+    fn ensure_scope_unchanged<'a>(
+        document_id: DocumentId,
+        requested: Option<Option<ProjectId>>,
+        existing: impl Iterator<Item = &'a VectorRecord>,
+    ) -> Result<()> {
+        let Some(requested) = requested else {
+            return Ok(());
+        };
+        if existing
+            .filter(|record| record.chunk.document_id == document_id)
+            .any(|record| record.project_id != requested)
+        {
+            return Err(RetrievalError::vector_store(format!(
+                "document {document_id} cannot move between project corpora while it has indexed records"
+            )));
         }
         Ok(())
     }
@@ -243,8 +293,23 @@ impl InMemoryVectorStore {
 #[async_trait]
 impl VectorStore for InMemoryVectorStore {
     async fn upsert(&self, records: Vec<VectorRecord>) -> Result<()> {
+        let mut scopes = HashMap::new();
         for record in &records {
             self.check_dims(&record.embedding)?;
+            match scopes.entry(record.chunk.document_id) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(record.project_id);
+                }
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if *entry.get() != record.project_id =>
+                {
+                    return Err(RetrievalError::vector_store(format!(
+                        "records for document {} span multiple project corpora",
+                        record.chunk.document_id
+                    )));
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {}
+            }
         }
         let mut store = self
             .state
@@ -258,13 +323,25 @@ impl VectorStore for InMemoryVectorStore {
                 "legacy upsert cannot modify a generation-managed document",
             ));
         }
+        for (document_id, project_id) in scopes {
+            Self::ensure_scope_unchanged(
+                document_id,
+                Some(project_id),
+                store.unversioned_records.iter(),
+            )?;
+        }
         for record in records {
             upsert_unversioned(&mut store.unversioned_records, record);
         }
         Ok(())
     }
 
-    async fn query(&self, query: &Embedding, k: usize) -> Result<Vec<ScoredChunk>> {
+    async fn query(
+        &self,
+        query: &Embedding,
+        k: usize,
+        scope: SearchScope,
+    ) -> Result<Vec<ScoredChunk>> {
         self.check_dims(query)?;
         if k == 0 {
             return Ok(Vec::new());
@@ -282,6 +359,7 @@ impl VectorStore for InMemoryVectorStore {
                 .flat_map(|active| active.records.iter()),
         );
         let mut scored: Vec<ScoredChunk> = visible
+            .filter(|record| scope.includes(record.project_id))
             .map(|r| ScoredChunk {
                 chunk: r.chunk.clone(),
                 score: query.cosine_similarity(&r.embedding),
@@ -304,7 +382,7 @@ impl VectorStore for InMemoryVectorStore {
         document_id: DocumentId,
         records: Vec<VectorRecord>,
     ) -> Result<()> {
-        self.validate_document_records(document_id, &records)?;
+        let project_id = self.validate_document_records(document_id, &records)?;
         // Delete + insert under a single write lock, so a concurrent ingest can't
         // observe or race a half-applied replacement.
         let mut store = self
@@ -316,6 +394,7 @@ impl VectorStore for InMemoryVectorStore {
                 "legacy replacement cannot modify a generation-managed document",
             ));
         }
+        Self::ensure_scope_unchanged(document_id, project_id, store.unversioned_records.iter())?;
         store
             .unversioned_records
             .retain(|r| r.chunk.document_id != document_id);
@@ -348,12 +427,36 @@ impl VectorStore for InMemoryVectorStore {
                 "document generation revision must be at least one",
             ));
         }
-        self.validate_document_records(document_id, &records)?;
+        let project_id = self.validate_document_records(document_id, &records)?;
         let records = dedupe_records(records);
         let mut state = self
             .state
             .write()
             .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
+        if !records.is_empty() {
+            if let Some(publication) = state.publications.get(&document_id) {
+                let existing = publication
+                    .active
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|generation| generation.records.iter())
+                    .chain(
+                        publication
+                            .staged
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|generation| generation.records.iter()),
+                    );
+                Self::ensure_scope_unchanged(document_id, project_id, existing)?;
+            }
+        }
+        if !records.is_empty() {
+            Self::ensure_scope_unchanged(
+                document_id,
+                project_id,
+                state.unversioned_records.iter(),
+            )?;
+        }
         let publication = state.publications.entry(document_id).or_default();
         let newest = publication
             .active
@@ -540,8 +643,22 @@ mod tests {
     fn record(doc: DocumentId, ordinal: usize, text: &str, vector: Vec<f32>) -> VectorRecord {
         let span = ByteSpan::new(ordinal * 100, ordinal * 100 + text.len());
         VectorRecord {
+            project_id: None,
             chunk: Chunk::new(doc, ordinal, span, text),
             embedding: Embedding(vector),
+        }
+    }
+
+    fn scoped_record(
+        doc: DocumentId,
+        project_id: ProjectId,
+        ordinal: usize,
+        text: &str,
+        vector: Vec<f32>,
+    ) -> VectorRecord {
+        VectorRecord {
+            project_id: Some(project_id),
+            ..record(doc, ordinal, text, vector)
         }
     }
 
@@ -567,7 +684,10 @@ mod tests {
                 actual: 2
             }
         ));
-        assert!(store.query(&Embedding(vec![1.0, 0.0]), 5).await.is_err());
+        assert!(store
+            .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -584,7 +704,10 @@ mod tests {
             .unwrap();
 
         // A query pointing east should rank "east" first, then the diagonal.
-        let hits = store.query(&Embedding(vec![1.0, 0.0]), 2).await.unwrap();
+        let hits = store
+            .query(&Embedding(vec![1.0, 0.0]), 2, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].chunk.text, "east");
         assert_eq!(hits[1].chunk.text, "north-east");
@@ -592,16 +715,318 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_filters_by_corpus_before_scoring_and_top_k() {
+        let store = InMemoryVectorStore::new(2);
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        store
+            .upsert(vec![
+                scoped_record(
+                    DocumentId::new(),
+                    project_a,
+                    0,
+                    "weaker right-project hit",
+                    vec![0.8, 0.6],
+                ),
+                scoped_record(
+                    DocumentId::new(),
+                    project_b,
+                    0,
+                    "stronger wrong-project hit",
+                    vec![1.0, 0.0],
+                ),
+                record(
+                    DocumentId::new(),
+                    0,
+                    "stronger unscoped hit",
+                    vec![1.0, 0.0],
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let project_hits = store
+            .query(
+                &Embedding(vec![1.0, 0.0]),
+                1,
+                SearchScope::Project(project_a),
+            )
+            .await
+            .unwrap();
+        assert_eq!(project_hits.len(), 1);
+        assert_eq!(project_hits[0].chunk.text, "weaker right-project hit");
+
+        let unscoped_hits = store
+            .query(&Embedding(vec![1.0, 0.0]), 1, SearchScope::Unscoped)
+            .await
+            .unwrap();
+        assert_eq!(unscoped_hits.len(), 1);
+        assert_eq!(unscoped_hits[0].chunk.text, "stronger unscoped hit");
+    }
+
+    #[tokio::test]
+    async fn document_writes_reject_mixed_project_metadata() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        let records = vec![
+            scoped_record(doc, project_a, 0, "a", vec![1.0, 0.0]),
+            scoped_record(doc, project_b, 1, "b", vec![0.0, 1.0]),
+        ];
+
+        let replacement_error = store
+            .replace_document(doc, records.clone())
+            .await
+            .unwrap_err();
+        assert!(replacement_error
+            .to_string()
+            .contains("multiple project corpora"));
+        let stage_error = store
+            .stage_document_generation(doc, generation(1), records)
+            .await
+            .unwrap_err();
+        assert!(stage_error.to_string().contains("multiple project corpora"));
+        assert!(store.is_empty().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn upsert_rejects_mixed_or_incrementally_changed_project_metadata_atomically() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+
+        let mixed_error = store
+            .upsert(vec![
+                scoped_record(doc, project_a, 0, "a", vec![1.0, 0.0]),
+                scoped_record(doc, project_b, 1, "b", vec![0.0, 1.0]),
+            ])
+            .await
+            .unwrap_err();
+        assert!(mixed_error.to_string().contains("multiple project corpora"));
+        assert!(store.is_empty().await.unwrap());
+
+        store
+            .upsert(vec![scoped_record(
+                doc,
+                project_a,
+                0,
+                "original",
+                vec![1.0, 0.0],
+            )])
+            .await
+            .unwrap();
+        let move_error = store
+            .upsert(vec![scoped_record(
+                doc,
+                project_b,
+                1,
+                "must not land",
+                vec![0.0, 1.0],
+            )])
+            .await
+            .unwrap_err();
+        assert!(move_error.to_string().contains("cannot move"));
+        assert_eq!(store.len().await.unwrap(), 1);
+        let hits = store
+            .query(
+                &Embedding(vec![1.0, 0.0]),
+                10,
+                SearchScope::Project(project_a),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.text, "original");
+        assert!(store
+            .query(
+                &Embedding(vec![0.0, 1.0]),
+                10,
+                SearchScope::Project(project_b),
+            )
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn replacement_allows_scope_change_only_after_clearing_live_records() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        store
+            .replace_document(
+                doc,
+                vec![scoped_record(
+                    doc,
+                    project_a,
+                    0,
+                    "project a",
+                    vec![1.0, 0.0],
+                )],
+            )
+            .await
+            .unwrap();
+
+        assert!(store
+            .replace_document(
+                doc,
+                vec![scoped_record(
+                    doc,
+                    project_b,
+                    0,
+                    "blocked move",
+                    vec![0.0, 1.0],
+                )],
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cannot move"));
+        assert_eq!(store.len().await.unwrap(), 1);
+
+        store.replace_document(doc, Vec::new()).await.unwrap();
+        store
+            .replace_document(
+                doc,
+                vec![scoped_record(
+                    doc,
+                    project_b,
+                    0,
+                    "project b",
+                    vec![0.0, 1.0],
+                )],
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .query(
+                &Embedding(vec![0.0, 1.0]),
+                1,
+                SearchScope::Project(project_b),
+            )
+            .await
+            .unwrap()[0]
+            .chunk
+            .text
+            .contains("project b"));
+    }
+
+    #[tokio::test]
+    async fn staging_allows_scope_change_only_after_an_active_empty_tombstone() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        let first = generation(1);
+        let tombstone = generation(2);
+        let recreated = generation(3);
+        store
+            .stage_document_generation(
+                doc,
+                first,
+                vec![scoped_record(
+                    doc,
+                    project_a,
+                    0,
+                    "project a",
+                    vec![1.0, 0.0],
+                )],
+            )
+            .await
+            .unwrap();
+
+        assert!(store
+            .stage_document_generation(
+                doc,
+                tombstone,
+                vec![scoped_record(
+                    doc,
+                    project_b,
+                    0,
+                    "blocked while staged",
+                    vec![0.0, 1.0],
+                )],
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cannot move"));
+        assert!(store
+            .activate_document_generation(doc, first)
+            .await
+            .unwrap());
+        assert!(store
+            .stage_document_generation(
+                doc,
+                tombstone,
+                vec![scoped_record(
+                    doc,
+                    project_b,
+                    0,
+                    "blocked while active",
+                    vec![0.0, 1.0],
+                )],
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cannot move"));
+
+        store
+            .stage_document_generation(doc, tombstone, Vec::new())
+            .await
+            .unwrap();
+        assert!(store
+            .activate_document_generation(doc, tombstone)
+            .await
+            .unwrap());
+        store
+            .stage_document_generation(
+                doc,
+                recreated,
+                vec![scoped_record(
+                    doc,
+                    project_b,
+                    0,
+                    "project b",
+                    vec![0.0, 1.0],
+                )],
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .activate_document_generation(doc, recreated)
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .query(
+                    &Embedding(vec![0.0, 1.0]),
+                    1,
+                    SearchScope::Project(project_b),
+                )
+                .await
+                .unwrap()[0]
+                .chunk
+                .text,
+            "project b"
+        );
+    }
+
+    #[tokio::test]
     async fn k_zero_and_empty_store_return_nothing() {
         let store = InMemoryVectorStore::new(2);
         assert!(store.is_empty().await.unwrap());
         assert!(store
-            .query(&Embedding(vec![1.0, 0.0]), 0)
+            .query(&Embedding(vec![1.0, 0.0]), 0, SearchScope::Unscoped)
             .await
             .unwrap()
             .is_empty());
         assert!(store
-            .query(&Embedding(vec![1.0, 0.0]), 5)
+            .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
             .await
             .unwrap()
             .is_empty());
@@ -627,7 +1052,10 @@ mod tests {
             Some(0)
         );
         // The second upsert's vector won.
-        let hits = store.query(&Embedding(vec![0.0, 1.0]), 1).await.unwrap();
+        let hits = store
+            .query(&Embedding(vec![0.0, 1.0]), 1, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert!((hits[0].score - 1.0).abs() < 1e-6);
     }
 
@@ -651,7 +1079,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.len().await.unwrap(), 2); // one a, one b
-        let hits = store.query(&Embedding(vec![1.0, 0.0]), 5).await.unwrap();
+        let hits = store
+            .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert!(hits.iter().any(|h| h.chunk.text == "a-new"));
         assert!(
             !hits.iter().any(|h| h.chunk.text == "a1"),
@@ -676,7 +1107,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.len().await.unwrap(), 1);
-        let hits = store.query(&Embedding(vec![0.0, 1.0]), 5).await.unwrap();
+        let hits = store
+            .query(&Embedding(vec![0.0, 1.0]), 5, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.text, "new");
     }
@@ -726,7 +1160,10 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("belongs to document"));
-        let hits = store.query(&Embedding(vec![1.0, 0.0]), 10).await.unwrap();
+        let hits = store
+            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.text, "original");
     }
@@ -754,7 +1191,7 @@ mod tests {
             Some(DocumentGenerationState::Staged(first))
         );
         assert!(store
-            .query(&Embedding(vec![1.0, 0.0]), 10)
+            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap()
             .is_empty());
@@ -782,7 +1219,10 @@ mod tests {
                 .unwrap(),
             GenerationStageOutcome::Staged
         );
-        let before_activation = store.query(&Embedding(vec![1.0, 0.0]), 10).await.unwrap();
+        let before_activation = store
+            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(before_activation.len(), 1);
         assert_eq!(before_activation[0].chunk.text, "first");
         assert!(!store
@@ -798,7 +1238,10 @@ mod tests {
             .await
             .unwrap());
 
-        let after_activation = store.query(&Embedding(vec![0.0, 1.0]), 10).await.unwrap();
+        let after_activation = store
+            .query(&Embedding(vec![0.0, 1.0]), 10, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(after_activation.len(), 1);
         assert_eq!(after_activation[0].chunk.text, "third");
         assert_eq!(
@@ -896,6 +1339,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tombstone_allows_a_later_generation_to_change_corpus() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+        for (generation, records) in [
+            (
+                generation(1),
+                vec![scoped_record(
+                    doc,
+                    project_a,
+                    0,
+                    "old corpus",
+                    vec![1.0, 0.0],
+                )],
+            ),
+            (generation(2), Vec::new()),
+            (
+                generation(3),
+                vec![scoped_record(
+                    doc,
+                    project_b,
+                    0,
+                    "new corpus",
+                    vec![0.0, 1.0],
+                )],
+            ),
+        ] {
+            assert_eq!(
+                store
+                    .stage_document_generation(doc, generation, records)
+                    .await
+                    .unwrap(),
+                GenerationStageOutcome::Staged
+            );
+            assert!(store
+                .activate_document_generation(doc, generation)
+                .await
+                .unwrap());
+        }
+        assert_eq!(
+            store
+                .query(
+                    &Embedding(vec![0.0, 1.0]),
+                    5,
+                    SearchScope::Project(project_a)
+                )
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            store
+                .query(
+                    &Embedding(vec![0.0, 1.0]),
+                    5,
+                    SearchScope::Project(project_b)
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn staging_validation_does_not_mutate_publication_state() {
         let store = InMemoryVectorStore::new(2);
         let doc = DocumentId::new();
@@ -955,7 +1465,10 @@ mod tests {
             .replace_document(doc, vec![record(doc, 0, "legacy", vec![1.0, 1.0])])
             .await
             .is_err());
-        let hits = store.query(&Embedding(vec![1.0, 0.0]), 10).await.unwrap();
+        let hits = store
+            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.text, "active");
         assert!(store
