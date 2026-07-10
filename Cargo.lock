@@ -5696,6 +5696,7 @@ version = "0.0.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "arrow-select",
  "async-trait",
  "futures",
  "lancedb",

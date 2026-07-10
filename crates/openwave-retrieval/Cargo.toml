@@ -25,7 +25,7 @@ embed-openai = ["dep:reqwest", "dep:sha2"]
 # default feature for library consumers because it pulls a large dependency tree
 # and needs `protoc` at build time. OpenWave's workspace CI installs `protoc`, and
 # the server enables this feature explicitly.
-vec-lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:futures", "dep:tokio"]
+vec-lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-select", "dep:futures", "dep:tokio"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -47,6 +47,7 @@ sha2 = { workspace = true, optional = true }
 lancedb = { version = "0.31", optional = true }
 arrow-array = { version = "58", optional = true }
 arrow-schema = { version = "58", optional = true }
+arrow-select = { version = "58", optional = true }
 futures = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync"], optional = true }
 

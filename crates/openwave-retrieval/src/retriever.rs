@@ -251,7 +251,7 @@ impl Retriever {
     /// Search the index for the `k` chunks most relevant to `query`, as citations.
     pub async fn search(&self, scope: SearchScope, query: &str, k: usize) -> Result<Vec<Citation>> {
         let embedding = self.embedder.embed_query(query).await?;
-        let hits = self.store.query(&embedding, k, scope).await?;
+        let hits = self.store.query(query, &embedding, k, scope).await?;
         Ok(hits.into_iter().map(Citation::from).collect())
     }
 

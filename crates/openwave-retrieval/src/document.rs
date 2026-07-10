@@ -192,7 +192,7 @@ impl Chunk {
 pub struct ScoredChunk {
     /// The matched chunk.
     pub chunk: Chunk,
-    /// Similarity score; higher is more relevant. For cosine, in `[-1, 1]`.
+    /// Backend relevance score; higher is more relevant.
     pub score: f32,
 }
 

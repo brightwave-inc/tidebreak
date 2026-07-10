@@ -12,9 +12,10 @@
 //! - [`Embedder`] — text → dense vectors, with separate document/query encodings.
 //!   Default: [`HashEmbedder`], a deterministic offline hashing encoder for tests
 //!   and local use; real providers (OpenAI/Cohere/ONNX) slot in behind the trait.
-//! - [`VectorStore`] — store embedded chunks, query by similarity. Default:
-//!   [`InMemoryVectorStore`], a brute-force cosine scan. Persistent, filtered, and
-//!   hybrid backends (sqlite-vec, pgvector, Qdrant) land later behind the trait.
+//! - [`VectorStore`] — store embedded chunks, query by lexical and dense relevance.
+//!   Default: [`InMemoryVectorStore`], dependency-free BM25 plus a brute-force
+//!   cosine scan, fused with reciprocal rank fusion. [`LanceVectorStore`] adds
+//!   the durable embedded implementation behind the `vec-lance` feature.
 //!
 //! [`Retriever`] wires all four into `ingest` and `search`. Everything a chunk or
 //! citation carries a [`ByteSpan`] — a precise byte range into the source text —
@@ -59,14 +60,14 @@
 //! an [`Embedder`] backed by the OpenAI-compatible `/embeddings` endpoint — a
 //! drop-in for [`HashEmbedder`] behind the same seam.
 //!
-//! Not yet wired: embedding reranking, hybrid retrieval, rich-format parsing,
-//! chat-to-project scope binding, and ANN index management. Each lands as its own
-//! slice behind these seams.
+//! Not yet wired: model reranking, rich-format parsing, and ANN index management.
+//! Each lands as its own slice behind these seams.
 
 mod chunk;
 mod document;
 mod embed;
 mod error;
+mod hybrid;
 mod id;
 #[cfg(feature = "vec-lance")]
 mod lance_store;
