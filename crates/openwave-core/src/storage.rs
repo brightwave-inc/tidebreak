@@ -22,8 +22,8 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
 use crate::model::{
-    Chat, DocumentJob, DocumentJobStatus, DocumentListCursor, DocumentRecord, DocumentScope,
-    DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
+    Chat, DocumentGeneration, DocumentJob, DocumentJobStatus, DocumentListCursor, DocumentRecord,
+    DocumentScope, DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
 };
 
 fn document_storage_unavailable<T>() -> Result<T> {
@@ -50,9 +50,10 @@ pub trait Store: Send + Sync {
     /// Persist a new authoritative document record.
     ///
     /// `project_id`, when present, must identify an existing project. The default
-    /// database store enforces this with a cascading foreign key. The store
-    /// replaces the supplied `revision_token` with a fresh token so a deleted
-    /// document lifecycle cannot be recreated with stale identity.
+    /// database store enforces this with a restricting foreign key, so projects
+    /// cannot be deleted while they still own documents. The store replaces the
+    /// supplied `revision_token` with a fresh token so a deleted document
+    /// lifecycle cannot be recreated with stale identity.
     async fn create_document(&self, _document: &DocumentRecord) -> Result<()> {
         document_storage_unavailable()
     }
@@ -94,16 +95,24 @@ pub trait Store: Send + Sync {
             .collect())
     }
 
-    /// Delete an authoritative document record. Idempotent for unknown ids.
-    async fn delete_document(&self, _id: DocumentId) -> Result<()> {
+    /// Read the newest durable generation, including a hard-delete tombstone.
+    async fn get_document_generation(&self, _id: DocumentId) -> Result<Option<DocumentGeneration>> {
+        document_storage_unavailable()
+    }
+
+    /// Hard-delete source content and return its durable tombstone generation.
+    ///
+    /// The generation clock is retained without source content. Repeated deletion
+    /// returns the same tombstone; deleting a never-seen id creates revision one.
+    async fn delete_document(&self, _id: DocumentId) -> Result<DocumentGeneration> {
         document_storage_unavailable()
     }
 
     /// Create or replace authoritative document content.
     ///
-    /// A new record starts at revision one. Replacing an existing record increments
-    /// its revision atomically, preserves `created_at`, and clears the index
-    /// watermark. Returns the committed record.
+    /// A never-seen id starts at revision one. Replacing or recreating an id
+    /// increments its retained generation atomically, preserves `created_at` only
+    /// for a live replacement, and clears the index watermark.
     async fn upsert_document(&self, _document: &DocumentUpsert) -> Result<DocumentRecord> {
         document_storage_unavailable()
     }
@@ -309,7 +318,7 @@ pub trait BlobStore: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -323,6 +332,8 @@ mod tests {
     #[derive(Default)]
     struct MemDocumentState {
         documents: HashMap<DocumentId, DocumentRecord>,
+        generations: HashMap<DocumentId, DocumentGeneration>,
+        tombstones: HashSet<DocumentId>,
         jobs: HashMap<DocumentJobId, DocumentJob>,
     }
 
@@ -334,6 +345,26 @@ mod tests {
         settings: Mutex<HashMap<String, Value>>,
         events: Mutex<Vec<(ChatId, SequencedEvent)>>,
         tool_calls: Mutex<HashMap<crate::id::CallId, ToolCallRecord>>,
+    }
+
+    fn allocate_mem_generation(
+        state: &mut MemDocumentState,
+        id: DocumentId,
+    ) -> Result<DocumentGeneration> {
+        let content_revision = match state.generations.get(&id) {
+            Some(current) => current
+                .content_revision
+                .checked_add(1)
+                .ok_or_else(|| AgentError::Store(format!("document {id} revision overflow")))?,
+            None => 1,
+        };
+        let generation = DocumentGeneration {
+            content_revision,
+            revision_token: uuid::Uuid::new_v4(),
+        };
+        state.generations.insert(id, generation);
+        state.tombstones.remove(&id);
+        Ok(generation)
     }
 
     #[async_trait]
@@ -352,13 +383,15 @@ mod tests {
             Ok(self.projects.lock().unwrap().values().cloned().collect())
         }
         async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
+            let mut state = self.document_state.lock().unwrap();
+            if state.generations.contains_key(&document.id) {
+                return Err(AgentError::Store("document already exists".into()));
+            }
             let mut document = document.clone();
             document.revision_token = uuid::Uuid::new_v4();
-            self.document_state
-                .lock()
-                .unwrap()
-                .documents
-                .insert(document.id, document);
+            state.generations.insert(document.id, document.generation());
+            state.tombstones.remove(&document.id);
+            state.documents.insert(document.id, document);
             Ok(())
         }
         async fn get_document(&self, id: DocumentId) -> Result<Option<DocumentRecord>> {
@@ -420,11 +453,33 @@ mod tests {
             documents.truncate(limit.try_into().unwrap_or(usize::MAX));
             Ok(documents)
         }
-        async fn delete_document(&self, id: DocumentId) -> Result<()> {
+        async fn get_document_generation(
+            &self,
+            id: DocumentId,
+        ) -> Result<Option<DocumentGeneration>> {
+            Ok(self
+                .document_state
+                .lock()
+                .unwrap()
+                .generations
+                .get(&id)
+                .copied())
+        }
+        async fn delete_document(&self, id: DocumentId) -> Result<DocumentGeneration> {
             let mut state = self.document_state.lock().unwrap();
-            state.documents.remove(&id);
+            let generation = if state.documents.contains_key(&id) || !state.tombstones.contains(&id)
+            {
+                let generation = allocate_mem_generation(&mut state, id)?;
+                state.documents.remove(&id);
+                state.tombstones.insert(id);
+                generation
+            } else if let Some(generation) = state.generations.get(&id) {
+                *generation
+            } else {
+                unreachable!("a tombstone always retains its generation")
+            };
             state.jobs.retain(|_, job| job.document_id != id);
-            Ok(())
+            Ok(generation)
         }
         async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
             if document.media_type.is_empty()
@@ -436,45 +491,26 @@ mod tests {
                 return Err(AgentError::Store("invalid document upsert".into()));
             }
             let mut state = self.document_state.lock().unwrap();
-            let record = match state.documents.get(&document.id) {
-                Some(existing) => {
-                    let content_revision =
-                        existing.content_revision.checked_add(1).ok_or_else(|| {
-                            AgentError::Store(format!("document {} revision overflow", document.id))
-                        })?;
-                    DocumentRecord {
-                        id: document.id,
-                        project_id: document.project_id,
-                        source_uri: document.source_uri.clone(),
-                        media_type: document.media_type.clone(),
-                        title: document.title.clone(),
-                        canonical_text: document.canonical_text.clone(),
-                        content_revision,
-                        revision_token: uuid::Uuid::new_v4(),
-                        processing_status: DocumentProcessingStatus::Queued,
-                        indexed_revision: None,
-                        index_fingerprint: None,
-                        created_at: existing.created_at,
-                        updated_at: document.updated_at,
-                        indexed_at: None,
-                    }
-                }
-                None => DocumentRecord {
-                    id: document.id,
-                    project_id: document.project_id,
-                    source_uri: document.source_uri.clone(),
-                    media_type: document.media_type.clone(),
-                    title: document.title.clone(),
-                    canonical_text: document.canonical_text.clone(),
-                    content_revision: 1,
-                    revision_token: uuid::Uuid::new_v4(),
-                    processing_status: DocumentProcessingStatus::Queued,
-                    indexed_revision: None,
-                    index_fingerprint: None,
-                    created_at: document.updated_at,
-                    updated_at: document.updated_at,
-                    indexed_at: None,
-                },
+            let created_at = state
+                .documents
+                .get(&document.id)
+                .map_or(document.updated_at, |existing| existing.created_at);
+            let generation = allocate_mem_generation(&mut state, document.id)?;
+            let record = DocumentRecord {
+                id: document.id,
+                project_id: document.project_id,
+                source_uri: document.source_uri.clone(),
+                media_type: document.media_type.clone(),
+                title: document.title.clone(),
+                canonical_text: document.canonical_text.clone(),
+                content_revision: generation.content_revision,
+                revision_token: generation.revision_token,
+                processing_status: DocumentProcessingStatus::Queued,
+                indexed_revision: None,
+                index_fingerprint: None,
+                created_at,
+                updated_at: document.updated_at,
+                indexed_at: None,
             };
             state.documents.insert(record.id, record.clone());
             Ok(record)
@@ -517,41 +553,26 @@ mod tests {
             }
 
             let workflow_now = chrono::Utc::now();
-            let record = match state.documents.get(&document.id) {
-                Some(existing) => DocumentRecord {
-                    id: document.id,
-                    project_id: document.project_id,
-                    source_uri: document.source_uri.clone(),
-                    media_type: document.media_type.clone(),
-                    title: document.title.clone(),
-                    canonical_text: document.canonical_text.clone(),
-                    content_revision: existing.content_revision.checked_add(1).ok_or_else(
-                        || AgentError::Store(format!("document {} revision overflow", document.id)),
-                    )?,
-                    revision_token: uuid::Uuid::new_v4(),
-                    processing_status: DocumentProcessingStatus::Queued,
-                    indexed_revision: None,
-                    index_fingerprint: None,
-                    created_at: existing.created_at,
-                    updated_at: document.updated_at,
-                    indexed_at: None,
-                },
-                None => DocumentRecord {
-                    id: document.id,
-                    project_id: document.project_id,
-                    source_uri: document.source_uri.clone(),
-                    media_type: document.media_type.clone(),
-                    title: document.title.clone(),
-                    canonical_text: document.canonical_text.clone(),
-                    content_revision: 1,
-                    revision_token: uuid::Uuid::new_v4(),
-                    processing_status: DocumentProcessingStatus::Queued,
-                    indexed_revision: None,
-                    index_fingerprint: None,
-                    created_at: document.updated_at,
-                    updated_at: document.updated_at,
-                    indexed_at: None,
-                },
+            let created_at = state
+                .documents
+                .get(&document.id)
+                .map_or(document.updated_at, |existing| existing.created_at);
+            let generation = allocate_mem_generation(&mut state, document.id)?;
+            let record = DocumentRecord {
+                id: document.id,
+                project_id: document.project_id,
+                source_uri: document.source_uri.clone(),
+                media_type: document.media_type.clone(),
+                title: document.title.clone(),
+                canonical_text: document.canonical_text.clone(),
+                content_revision: generation.content_revision,
+                revision_token: generation.revision_token,
+                processing_status: DocumentProcessingStatus::Queued,
+                indexed_revision: None,
+                index_fingerprint: None,
+                created_at,
+                updated_at: document.updated_at,
+                indexed_at: None,
             };
             state.documents.insert(record.id, record.clone());
 
@@ -1096,18 +1117,27 @@ mod tests {
         ))
         .unwrap());
 
-        block_on(store.delete_document(source.id)).unwrap();
+        let tombstone = block_on(store.delete_document(source.id)).unwrap();
+        assert_eq!(tombstone.content_revision, 2);
+        assert_eq!(
+            block_on(store.delete_document(source.id)).unwrap(),
+            tombstone
+        );
+        assert_eq!(
+            block_on(store.get_document_generation(source.id)).unwrap(),
+            Some(tombstone)
+        );
         assert_eq!(block_on(store.get_document(source.id)).unwrap(), None);
         assert_eq!(block_on(store.get_document_job(first.1.id)).unwrap(), None);
 
         let retry_source = DocumentUpsert {
-            id: DocumentId::new(),
             canonical_text: "retry state".into(),
             ..source
         };
-        let (_, retry_job) =
+        let (recreated, retry_job) =
             block_on(store.upsert_document_and_enqueue_index(&retry_source, "pipeline-v1", 2))
                 .unwrap();
+        assert_eq!(recreated.content_revision, 3);
         let retry_claim_at = retry_job.available_at + chrono::Duration::seconds(1);
         let retry_claim = block_on(store.claim_document_job(
             retry_claim_at,
@@ -1127,5 +1157,43 @@ mod tests {
             .unwrap(),
             Some(DocumentJobStatus::RetryWait)
         );
+    }
+
+    #[test]
+    fn mem_store_delete_overflow_leaves_source_job_and_clock_unchanged() {
+        let store = MemStore::default();
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "maximum generation".into(),
+            updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
+        };
+        let (record, job) =
+            block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)).unwrap();
+        let maximum = DocumentGeneration {
+            content_revision: i64::MAX,
+            revision_token: record.revision_token,
+        };
+        {
+            let mut state = store.document_state.lock().unwrap();
+            state.generations.insert(source.id, maximum);
+            state
+                .documents
+                .get_mut(&source.id)
+                .unwrap()
+                .content_revision = i64::MAX;
+        }
+
+        assert!(block_on(store.delete_document(source.id)).is_err());
+        let retained = block_on(store.get_document(source.id)).unwrap().unwrap();
+        assert_eq!(retained.generation(), maximum);
+        assert_eq!(
+            block_on(store.get_document_generation(source.id)).unwrap(),
+            Some(maximum)
+        );
+        assert_eq!(block_on(store.get_document_job(job.id)).unwrap(), Some(job));
     }
 }
