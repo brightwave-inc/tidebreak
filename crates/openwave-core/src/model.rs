@@ -212,6 +212,10 @@ pub struct DocumentJob {
 impl DocumentJob {
     /// Maximum persisted parser/chunker/embedder fingerprint length.
     pub const MAX_PIPELINE_FINGERPRINT_LEN: usize = 512;
+    /// Maximum persisted stable failure-code length.
+    pub const MAX_ERROR_CODE_LEN: usize = 128;
+    /// Maximum persisted local diagnostic-detail length.
+    pub const MAX_ERROR_DETAIL_LEN: usize = 4096;
 }
 
 /// Metadata returned by bounded document listings.

@@ -700,6 +700,252 @@ impl Store for DbStore {
         Ok(result.rows_affected == 1)
     }
 
+    async fn complete_document_index_job(
+        &self,
+        id: DocumentJobId,
+        lease_token: uuid::Uuid,
+        completed_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        loop {
+            let transaction = self.conn.begin().await.map_err(store_err)?;
+            acquire_document_job_write_lock(&transaction).await?;
+            let candidate = entities::document_job::Entity::find_by_id(id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            let Some(candidate) = candidate else {
+                transaction.rollback().await.map_err(store_err)?;
+                return Ok(false);
+            };
+            acquire_document_write_lock(&transaction, DocumentId(candidate.document_id)).await?;
+            let candidate = entities::document_job::Entity::find_by_id(id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            let Some(candidate) =
+                candidate.filter(|job| document_job_lease_is_live(job, lease_token, completed_at))
+            else {
+                transaction.rollback().await.map_err(store_err)?;
+                return Ok(false);
+            };
+            ensure_resolution_document_matches(&transaction, &candidate).await?;
+
+            let resolved = entities::document_job::Entity::update_many()
+                .col_expr(
+                    entities::document_job::Column::Status,
+                    sea_orm::sea_query::Expr::value(DocumentJobStatus::Succeeded.as_str()),
+                )
+                .col_expr(
+                    entities::document_job::Column::LeaseToken,
+                    sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+                )
+                .col_expr(
+                    entities::document_job::Column::LeaseExpiresAt,
+                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+                )
+                .col_expr(
+                    entities::document_job::Column::FinishedAt,
+                    sea_orm::sea_query::Expr::value(Some(completed_at)),
+                )
+                .col_expr(
+                    entities::document_job::Column::LastErrorCode,
+                    sea_orm::sea_query::Expr::value(Option::<String>::None),
+                )
+                .col_expr(
+                    entities::document_job::Column::LastErrorDetail,
+                    sea_orm::sea_query::Expr::value(Option::<String>::None),
+                )
+                .col_expr(
+                    entities::document_job::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(completed_at),
+                )
+                .filter(entities::document_job::Column::Id.eq(candidate.id))
+                .filter(
+                    entities::document_job::Column::Status.eq(DocumentJobStatus::Running.as_str()),
+                )
+                .filter(entities::document_job::Column::LeaseToken.eq(Some(lease_token)))
+                .filter(
+                    entities::document_job::Column::LeaseExpiresAt.eq(candidate.lease_expires_at),
+                )
+                .filter(entities::document_job::Column::UpdatedAt.eq(candidate.updated_at))
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+            if resolved.rows_affected != 1 {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            }
+            let document_resolved = entities::document::Entity::update_many()
+                .col_expr(
+                    entities::document::Column::ProcessingStatus,
+                    sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Ready.as_str()),
+                )
+                .col_expr(
+                    entities::document::Column::IndexedRevision,
+                    sea_orm::sea_query::Expr::value(Some(candidate.content_revision)),
+                )
+                .col_expr(
+                    entities::document::Column::IndexFingerprint,
+                    sea_orm::sea_query::Expr::value(Some(candidate.pipeline_fingerprint.clone())),
+                )
+                .col_expr(
+                    entities::document::Column::IndexedAt,
+                    sea_orm::sea_query::Expr::value(Some(completed_at)),
+                )
+                .filter(entities::document::Column::Id.eq(candidate.document_id))
+                .filter(entities::document::Column::ContentRevision.eq(candidate.content_revision))
+                .filter(entities::document::Column::RevisionToken.eq(candidate.revision_token))
+                .filter(
+                    entities::document::Column::ProcessingStatus
+                        .eq(DocumentProcessingStatus::Processing.as_str()),
+                )
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+            if document_resolved.rows_affected != 1 {
+                transaction.rollback().await.map_err(store_err)?;
+                return Err(AgentError::Store(format!(
+                    "document job {} lost its exact processing document during completion",
+                    candidate.id
+                )));
+            }
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(true);
+        }
+    }
+
+    async fn record_document_job_failure(
+        &self,
+        id: DocumentJobId,
+        lease_token: uuid::Uuid,
+        failed_at: chrono::DateTime<Utc>,
+        retry_at: Option<chrono::DateTime<Utc>>,
+        error_code: &str,
+        error_detail: Option<&str>,
+    ) -> Result<Option<DocumentJobStatus>> {
+        validate_document_job_error(error_code, error_detail)?;
+        if retry_at.is_some_and(|retry_at| retry_at <= failed_at) {
+            return Err(AgentError::Store(
+                "document job retry time must be after failure time".into(),
+            ));
+        }
+
+        loop {
+            let transaction = self.conn.begin().await.map_err(store_err)?;
+            acquire_document_job_write_lock(&transaction).await?;
+            let candidate = entities::document_job::Entity::find_by_id(id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            let Some(candidate) = candidate else {
+                transaction.rollback().await.map_err(store_err)?;
+                return Ok(None);
+            };
+            acquire_document_write_lock(&transaction, DocumentId(candidate.document_id)).await?;
+            let candidate = entities::document_job::Entity::find_by_id(id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            let Some(candidate) =
+                candidate.filter(|job| document_job_lease_is_live(job, lease_token, failed_at))
+            else {
+                transaction.rollback().await.map_err(store_err)?;
+                return Ok(None);
+            };
+            ensure_resolution_document_matches(&transaction, &candidate).await?;
+
+            let will_retry = retry_at.is_some() && candidate.attempt_count < candidate.max_attempts;
+            let next_status = if will_retry {
+                DocumentJobStatus::RetryWait
+            } else {
+                DocumentJobStatus::Failed
+            };
+            let update = entities::document_job::Entity::update_many()
+                .col_expr(
+                    entities::document_job::Column::Status,
+                    sea_orm::sea_query::Expr::value(next_status.as_str()),
+                )
+                .col_expr(
+                    entities::document_job::Column::LeaseToken,
+                    sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+                )
+                .col_expr(
+                    entities::document_job::Column::LeaseExpiresAt,
+                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+                )
+                .col_expr(
+                    entities::document_job::Column::LastErrorCode,
+                    sea_orm::sea_query::Expr::value(Some(error_code.to_owned())),
+                )
+                .col_expr(
+                    entities::document_job::Column::LastErrorDetail,
+                    sea_orm::sea_query::Expr::value(error_detail.map(str::to_owned)),
+                )
+                .col_expr(
+                    entities::document_job::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(failed_at),
+                );
+            let update = if let Some(retry_at) = retry_at.filter(|_| will_retry) {
+                update.col_expr(
+                    entities::document_job::Column::AvailableAt,
+                    sea_orm::sea_query::Expr::value(retry_at),
+                )
+            } else {
+                update.col_expr(
+                    entities::document_job::Column::FinishedAt,
+                    sea_orm::sea_query::Expr::value(Some(failed_at)),
+                )
+            };
+            let resolved = update
+                .filter(entities::document_job::Column::Id.eq(candidate.id))
+                .filter(
+                    entities::document_job::Column::Status.eq(DocumentJobStatus::Running.as_str()),
+                )
+                .filter(entities::document_job::Column::LeaseToken.eq(Some(lease_token)))
+                .filter(
+                    entities::document_job::Column::LeaseExpiresAt.eq(candidate.lease_expires_at),
+                )
+                .filter(entities::document_job::Column::UpdatedAt.eq(candidate.updated_at))
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+            if resolved.rows_affected != 1 {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            }
+
+            let next_document_status = if will_retry {
+                DocumentProcessingStatus::Queued
+            } else {
+                DocumentProcessingStatus::Failed
+            };
+            let document_resolved = entities::document::Entity::update_many()
+                .col_expr(
+                    entities::document::Column::ProcessingStatus,
+                    sea_orm::sea_query::Expr::value(next_document_status.as_str()),
+                )
+                .filter(entities::document::Column::Id.eq(candidate.document_id))
+                .filter(entities::document::Column::ContentRevision.eq(candidate.content_revision))
+                .filter(entities::document::Column::RevisionToken.eq(candidate.revision_token))
+                .filter(
+                    entities::document::Column::ProcessingStatus
+                        .eq(DocumentProcessingStatus::Processing.as_str()),
+                )
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+            if document_resolved.rows_affected != 1 {
+                transaction.rollback().await.map_err(store_err)?;
+                return Err(AgentError::Store(format!(
+                    "document job {} lost its exact processing document during failure",
+                    candidate.id
+                )));
+            }
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(next_status));
+        }
+    }
+
     async fn mark_document_indexed(
         &self,
         id: DocumentId,
@@ -1032,6 +1278,63 @@ fn document_job_due_order(
         .cmp(&effective_due(right))
         .then_with(|| left.created_at.cmp(&right.created_at))
         .then_with(|| left.id.cmp(&right.id))
+}
+
+fn document_job_lease_is_live(
+    job: &entities::document_job::Model,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    job.status == DocumentJobStatus::Running.as_str()
+        && job.lease_token == Some(lease_token)
+        && job.lease_expires_at.is_some_and(|expiry| expiry > now)
+        && job.updated_at <= now
+}
+
+async fn ensure_resolution_document_matches<C>(
+    conn: &C,
+    job: &entities::document_job::Model,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let document = entities::document::Entity::find_by_id(job.document_id)
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    let Some(document) = document else {
+        return Err(AgentError::Store(format!(
+            "running document job {} has no source document",
+            job.id
+        )));
+    };
+    if document.content_revision != job.content_revision
+        || document.revision_token != job.revision_token
+        || document.processing_status != DocumentProcessingStatus::Processing.as_str()
+    {
+        return Err(AgentError::Store(format!(
+            "running document job {} does not match its exact processing document {}",
+            job.id, job.document_id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_document_job_error(error_code: &str, error_detail: Option<&str>) -> Result<()> {
+    let code_len = error_code.chars().count();
+    if !(1..=DocumentJob::MAX_ERROR_CODE_LEN).contains(&code_len) {
+        return Err(AgentError::Store(
+            "document job error code must contain 1 to 128 characters".into(),
+        ));
+    }
+    if error_detail.is_some_and(|detail| {
+        !(1..=DocumentJob::MAX_ERROR_DETAIL_LEN).contains(&detail.chars().count())
+    }) {
+        return Err(AgentError::Store(
+            "document job error detail must contain 1 to 4096 characters".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn document_upsert_matches(current: &entities::document::Model, document: &DocumentUpsert) -> bool {
@@ -2164,8 +2467,14 @@ mod migration {
                         .col(ColumnDef::new(DocumentJob::LeaseExpiresAt).timestamp_with_time_zone())
                         .col(ColumnDef::new(DocumentJob::StartedAt).timestamp_with_time_zone())
                         .col(ColumnDef::new(DocumentJob::FinishedAt).timestamp_with_time_zone())
-                        .col(ColumnDef::new(DocumentJob::LastErrorCode).string_len(128))
-                        .col(ColumnDef::new(DocumentJob::LastErrorDetail).string_len(4096))
+                        .col(
+                            ColumnDef::new(DocumentJob::LastErrorCode)
+                                .string_len(crate::model::DocumentJob::MAX_ERROR_CODE_LEN as u32),
+                        )
+                        .col(
+                            ColumnDef::new(DocumentJob::LastErrorDetail)
+                                .string_len(crate::model::DocumentJob::MAX_ERROR_DETAIL_LEN as u32),
+                        )
                         .col(
                             ColumnDef::new(DocumentJob::CreatedAt)
                                 .timestamp_with_time_zone()
@@ -2201,13 +2510,21 @@ mod migration {
                                 .and(
                                     Expr::col(DocumentJob::LastErrorCode).is_null().or(
                                         Func::char_length(Expr::col(DocumentJob::LastErrorCode))
-                                            .between(1, 128),
+                                            .between(
+                                                1,
+                                                crate::model::DocumentJob::MAX_ERROR_CODE_LEN
+                                                    as i32,
+                                            ),
                                     ),
                                 )
                                 .and(
                                     Expr::col(DocumentJob::LastErrorDetail).is_null().or(
                                         Func::char_length(Expr::col(DocumentJob::LastErrorDetail))
-                                            .between(1, 4096),
+                                            .between(
+                                                1,
+                                                crate::model::DocumentJob::MAX_ERROR_DETAIL_LEN
+                                                    as i32,
+                                            ),
                                     ),
                                 ),
                         )
@@ -3341,6 +3658,305 @@ mod tests {
             )
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn live_document_job_completion_atomically_publishes_ready_watermark() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///complete-job.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "complete me".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(55_000, 0).unwrap(),
+        };
+        let (revision, queued) = store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)
+            .await
+            .unwrap();
+        let claimed_at = queued.available_at + chrono::Duration::seconds(1);
+        let lease_expires_at = claimed_at + chrono::Duration::minutes(5);
+        let claimed = store
+            .claim_document_job(claimed_at, lease_expires_at)
+            .await
+            .unwrap()
+            .unwrap();
+        let completed_at = claimed_at + chrono::Duration::minutes(1);
+        assert!(!store
+            .complete_document_index_job(claimed.id, uuid::Uuid::new_v4(), completed_at)
+            .await
+            .unwrap());
+        assert!(!store
+            .complete_document_index_job(
+                claimed.id,
+                claimed.lease_token.unwrap(),
+                claimed_at - chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap());
+        assert!(store
+            .complete_document_index_job(claimed.id, claimed.lease_token.unwrap(), completed_at,)
+            .await
+            .unwrap());
+        assert!(!store
+            .complete_document_index_job(claimed.id, claimed.lease_token.unwrap(), completed_at,)
+            .await
+            .unwrap());
+
+        let succeeded = store.get_document_job(claimed.id).await.unwrap().unwrap();
+        assert_eq!(succeeded.status, DocumentJobStatus::Succeeded);
+        assert_eq!(succeeded.lease_token, None);
+        assert_eq!(succeeded.lease_expires_at, None);
+        assert_eq!(succeeded.finished_at, Some(completed_at));
+        assert_eq!(succeeded.last_error_code, None);
+        assert_eq!(succeeded.last_error_detail, None);
+        let ready = store.get_document(source.id).await.unwrap().unwrap();
+        assert_eq!(ready.processing_status, DocumentProcessingStatus::Ready);
+        assert_eq!(ready.indexed_revision, Some(revision.content_revision));
+        assert_eq!(ready.index_fingerprint.as_deref(), Some("pipeline-v1"));
+        assert_eq!(ready.indexed_at, Some(completed_at));
+    }
+
+    #[tokio::test]
+    async fn live_document_job_failure_retries_then_fails_permanently() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///fail-job.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "fail and retry".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(56_000, 0).unwrap(),
+        };
+        let (_, queued) = store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)
+            .await
+            .unwrap();
+        let first_at = queued.available_at + chrono::Duration::seconds(1);
+        let first = store
+            .claim_document_job(first_at, first_at + chrono::Duration::minutes(5))
+            .await
+            .unwrap()
+            .unwrap();
+        let failed_at = first_at + chrono::Duration::minutes(1);
+        let retry_at = failed_at + chrono::Duration::minutes(2);
+        assert_eq!(
+            store
+                .record_document_job_failure(
+                    first.id,
+                    first.lease_token.unwrap(),
+                    failed_at,
+                    Some(retry_at),
+                    "embed_timeout",
+                    Some("provider timed out"),
+                )
+                .await
+                .unwrap(),
+            Some(DocumentJobStatus::RetryWait)
+        );
+        let waiting = store.get_document_job(first.id).await.unwrap().unwrap();
+        assert_eq!(waiting.status, DocumentJobStatus::RetryWait);
+        assert_eq!(waiting.attempt_count, 1);
+        assert_eq!(waiting.available_at, retry_at);
+        assert_eq!(waiting.finished_at, None);
+        assert_eq!(waiting.lease_token, None);
+        assert_eq!(waiting.last_error_code.as_deref(), Some("embed_timeout"));
+        assert_eq!(
+            store
+                .get_document(source.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .processing_status,
+            DocumentProcessingStatus::Queued
+        );
+        assert_eq!(
+            store
+                .claim_document_job(failed_at, failed_at + chrono::Duration::minutes(5))
+                .await
+                .unwrap(),
+            None
+        );
+
+        let second = store
+            .claim_document_job(retry_at, retry_at + chrono::Duration::minutes(5))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.attempt_count, 2);
+        let permanent_at = retry_at + chrono::Duration::minutes(1);
+        assert_eq!(
+            store
+                .record_document_job_failure(
+                    second.id,
+                    second.lease_token.unwrap(),
+                    permanent_at,
+                    None,
+                    "invalid_source",
+                    None,
+                )
+                .await
+                .unwrap(),
+            Some(DocumentJobStatus::Failed)
+        );
+        let failed = store.get_document_job(second.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, DocumentJobStatus::Failed);
+        assert_eq!(failed.finished_at, Some(permanent_at));
+        assert_eq!(failed.last_error_code.as_deref(), Some("invalid_source"));
+        assert_eq!(
+            store
+                .get_document(source.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .processing_status,
+            DocumentProcessingStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn document_job_failure_validates_details_and_exhausts_retry_budget() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///exhaust-failure.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "one attempt".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(56_500, 0).unwrap(),
+        };
+        let (_, queued) = store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 1)
+            .await
+            .unwrap();
+        let claimed_at = queued.available_at + chrono::Duration::seconds(1);
+        let claimed = store
+            .claim_document_job(claimed_at, claimed_at + chrono::Duration::minutes(5))
+            .await
+            .unwrap()
+            .unwrap();
+        let failed_at = claimed_at + chrono::Duration::minutes(1);
+        assert!(store
+            .record_document_job_failure(
+                claimed.id,
+                claimed.lease_token.unwrap(),
+                failed_at,
+                Some(failed_at),
+                "timeout",
+                None,
+            )
+            .await
+            .is_err());
+        assert!(store
+            .record_document_job_failure(
+                claimed.id,
+                claimed.lease_token.unwrap(),
+                failed_at,
+                None,
+                "",
+                None,
+            )
+            .await
+            .is_err());
+        assert!(store
+            .record_document_job_failure(
+                claimed.id,
+                claimed.lease_token.unwrap(),
+                failed_at,
+                None,
+                "timeout",
+                Some(""),
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .record_document_job_failure(
+                    claimed.id,
+                    uuid::Uuid::new_v4(),
+                    failed_at,
+                    None,
+                    "timeout",
+                    None,
+                )
+                .await
+                .unwrap(),
+            None
+        );
+
+        assert_eq!(
+            store
+                .record_document_job_failure(
+                    claimed.id,
+                    claimed.lease_token.unwrap(),
+                    failed_at,
+                    Some(failed_at + chrono::Duration::minutes(1)),
+                    "timeout",
+                    Some("retry budget is exhausted"),
+                )
+                .await
+                .unwrap(),
+            Some(DocumentJobStatus::Failed)
+        );
+        let failed = store.get_document_job(claimed.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, DocumentJobStatus::Failed);
+        assert_eq!(failed.finished_at, Some(failed_at));
+    }
+
+    #[tokio::test]
+    async fn completion_document_failure_rolls_back_the_job_transition() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///complete-rollback.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "roll back completion".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(57_000, 0).unwrap(),
+        };
+        let (_, queued) = store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)
+            .await
+            .unwrap();
+        let claimed_at = queued.available_at + chrono::Duration::seconds(1);
+        let claimed = store
+            .claim_document_job(claimed_at, claimed_at + chrono::Duration::minutes(5))
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .conn
+            .execute_unprepared(
+                "CREATE TRIGGER fail_document_ready
+                 BEFORE UPDATE OF processing_status ON document
+                 WHEN NEW.processing_status = 'ready'
+                 BEGIN
+                     SELECT RAISE(FAIL, 'injected document completion failure');
+                 END;",
+            )
+            .await
+            .unwrap();
+
+        let completed_at = claimed_at + chrono::Duration::minutes(1);
+        assert!(store
+            .complete_document_index_job(claimed.id, claimed.lease_token.unwrap(), completed_at,)
+            .await
+            .is_err());
+        assert_eq!(
+            store.get_document_job(claimed.id).await.unwrap(),
+            Some(claimed)
+        );
+        let document = store.get_document(source.id).await.unwrap().unwrap();
+        assert_eq!(
+            document.processing_status,
+            DocumentProcessingStatus::Processing
+        );
+        assert_eq!(document.indexed_revision, None);
     }
 
     #[tokio::test]
