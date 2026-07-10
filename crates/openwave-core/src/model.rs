@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::id::{ChatId, DocumentId, MessageId, ProjectId, TurnId};
+use crate::id::{ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, TurnId};
 
 /// An optional grouping of chats that share a workspace and (later) a document
 /// corpus. A chat may belong to a project or stand alone — unlike some designs
@@ -29,6 +29,93 @@ pub struct Project {
     pub workspace_dir: PathBuf,
     /// When the project was created.
     pub created_at: DateTime<Utc>,
+}
+
+/// User-visible lifecycle of the current authoritative document revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DocumentProcessingStatus {
+    /// Durable source exists and awaits processing or retry.
+    Queued,
+    /// A worker owns the current processing job.
+    Processing,
+    /// The current revision is fully represented in the derived index.
+    Ready,
+    /// Processing exhausted retries or hit a permanent failure.
+    Failed,
+}
+
+impl DocumentProcessingStatus {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Processing => "processing",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Semantic stage performed by a durable document job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DocumentJobKind {
+    /// Chunk and embed canonical content into the derived retrieval index.
+    Index,
+}
+
+impl DocumentJobKind {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Index => "index",
+        }
+    }
+}
+
+/// Durable delivery state of one document-processing job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DocumentJobStatus {
+    /// Eligible to be claimed at `available_at`.
+    Queued,
+    /// Currently owned by the exact lease token and expiry on the job.
+    Running,
+    /// Failed transiently and becomes claimable again at `available_at`.
+    RetryWait,
+    /// Completed successfully.
+    Succeeded,
+    /// Exhausted retries or failed permanently.
+    Failed,
+    /// Superseded or explicitly cancelled.
+    Cancelled,
+}
+
+impl DocumentJobStatus {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::RetryWait => "retry_wait",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Whether no worker may claim this job again without an explicit retry.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
 }
 
 /// An authoritative source document whose derived chunks live in the retrieval
@@ -57,6 +144,8 @@ pub struct DocumentRecord {
     /// delete and recreation of the same document id, so stale index writers
     /// cannot confuse two document lifecycles.
     pub revision_token: Uuid,
+    /// Processing lifecycle of the current authoritative revision.
+    pub processing_status: DocumentProcessingStatus,
     /// Revision currently represented in the retrieval index, if any.
     pub indexed_revision: Option<i64>,
     /// Chunker/embedder fingerprint for the indexed revision.
@@ -70,6 +159,59 @@ pub struct DocumentRecord {
     pub updated_at: DateTime<Utc>,
     /// When the current index watermark was recorded.
     pub indexed_at: Option<DateTime<Utc>>,
+}
+
+/// One durable semantic processing stage bound to an exact document revision.
+///
+/// Expensive work happens outside the operational database transaction. Every
+/// operational-state mutation must therefore present `lease_token` and still
+/// match the job's `(document_id, content_revision, revision_token)`. This fences
+/// stale database completion; derived stores such as the vector index also need
+/// generation-aware publication before multi-worker execution is safe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentJob {
+    /// Stable job identity.
+    pub id: DocumentJobId,
+    /// Authoritative document this job processes.
+    pub document_id: DocumentId,
+    /// Exact monotonic source revision claimed by this job.
+    pub content_revision: i64,
+    /// Exact lifecycle identity; prevents delete/recreate ABA completion in the
+    /// operational store and identifies the generation derived stores must fence.
+    pub revision_token: Uuid,
+    /// Semantic pipeline stage.
+    pub kind: DocumentJobKind,
+    /// Durable delivery state.
+    pub status: DocumentJobStatus,
+    /// Identity of the parser/chunker/embedder configuration for this stage.
+    pub pipeline_fingerprint: String,
+    /// Claims already made, including the current claim when running.
+    pub attempt_count: i32,
+    /// Maximum claims before a retryable error becomes terminal.
+    pub max_attempts: i32,
+    /// Earliest time a queued/retry-wait job may be claimed.
+    pub available_at: DateTime<Utc>,
+    /// Exact claim identity required for heartbeat/completion writes.
+    pub lease_token: Option<Uuid>,
+    /// When the current claim becomes recoverably stale.
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    /// When the first claim began.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When this job entered a terminal state.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Stable machine-readable failure category.
+    pub last_error_code: Option<String>,
+    /// Bounded diagnostic detail for local operators.
+    pub last_error_detail: Option<String>,
+    /// When this semantic job was created.
+    pub created_at: DateTime<Utc>,
+    /// When its durable state last changed.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl DocumentJob {
+    /// Maximum persisted parser/chunker/embedder fingerprint length.
+    pub const MAX_PIPELINE_FINGERPRINT_LEN: usize = 512;
 }
 
 /// Metadata returned by bounded document listings.
@@ -91,6 +233,8 @@ pub struct DocumentSummaryRecord {
     pub title: Option<String>,
     /// Current authoritative source revision.
     pub content_revision: i64,
+    /// Processing lifecycle of the current authoritative revision.
+    pub processing_status: DocumentProcessingStatus,
     /// Revision currently represented in the retrieval index, if any.
     pub indexed_revision: Option<i64>,
     /// Chunker/embedder fingerprint for the indexed revision.
@@ -229,4 +373,27 @@ pub struct ToolCallRecord {
     pub created_at: DateTime<Utc>,
     /// When the result was written, if completed.
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_processing_enums_have_stable_snake_case_values() {
+        assert_eq!(
+            serde_json::to_string(&DocumentProcessingStatus::Processing).unwrap(),
+            "\"processing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DocumentJobKind::Index).unwrap(),
+            "\"index\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DocumentJobStatus::RetryWait).unwrap(),
+            "\"retry_wait\""
+        );
+        assert!(DocumentJobStatus::Succeeded.is_terminal());
+        assert!(!DocumentJobStatus::Running.is_terminal());
+    }
 }

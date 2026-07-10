@@ -22,8 +22,9 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, ChatId, DocumentId, MessageId, ProjectId, TurnId};
 use crate::model::{
-    Chat, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert,
-    Message, Project, Role, ToolCallRecord,
+    Chat, DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentProcessingStatus,
+    DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert, Message, Project, Role,
+    ToolCallRecord,
 };
 use crate::storage::Store;
 
@@ -49,6 +50,7 @@ struct DocumentSummaryRow {
     media_type: String,
     title: Option<String>,
     content_revision: i64,
+    processing_status: String,
     indexed_revision: Option<i64>,
     index_fingerprint: Option<String>,
     created_at: chrono::DateTime<Utc>,
@@ -121,6 +123,7 @@ impl Store for DbStore {
             canonical_text: Set(document.canonical_text.clone()),
             content_revision: Set(document.content_revision),
             revision_token: Set(uuid::Uuid::new_v4()),
+            processing_status: Set(document.processing_status.as_str().into()),
             indexed_revision: Set(document.indexed_revision),
             index_fingerprint: Set(document.index_fingerprint.clone()),
             created_at: Set(document.created_at),
@@ -134,11 +137,12 @@ impl Store for DbStore {
     }
 
     async fn get_document(&self, id: DocumentId) -> Result<Option<DocumentRecord>> {
-        Ok(entities::document::Entity::find_by_id(id.0)
+        entities::document::Entity::find_by_id(id.0)
             .one(&self.conn)
             .await
             .map_err(store_err)?
-            .map(document_from_model))
+            .map(document_from_model)
+            .transpose()
     }
 
     async fn list_documents(&self, scope: DocumentScope) -> Result<Vec<DocumentRecord>> {
@@ -152,14 +156,14 @@ impl Store for DbStore {
                 query.filter(entities::document::Column::ProjectId.eq(id.0))
             }
         };
-        Ok(query
+        query
             .order_by_desc(entities::document::Column::CreatedAt)
             .all(&self.conn)
             .await
             .map_err(store_err)?
             .into_iter()
             .map(document_from_model)
-            .collect())
+            .collect()
     }
 
     async fn list_document_summaries(
@@ -190,7 +194,7 @@ impl Store for DbStore {
             );
         }
 
-        Ok(query
+        query
             .select_only()
             .columns([
                 entities::document::Column::Id,
@@ -199,6 +203,7 @@ impl Store for DbStore {
                 entities::document::Column::MediaType,
                 entities::document::Column::Title,
                 entities::document::Column::ContentRevision,
+                entities::document::Column::ProcessingStatus,
                 entities::document::Column::IndexedRevision,
                 entities::document::Column::IndexFingerprint,
                 entities::document::Column::CreatedAt,
@@ -214,7 +219,7 @@ impl Store for DbStore {
             .map_err(store_err)?
             .into_iter()
             .map(document_summary_from_row)
-            .collect())
+            .collect()
     }
 
     async fn list_document_ids(&self, scope: DocumentScope) -> Result<Vec<DocumentId>> {
@@ -294,6 +299,10 @@ impl Store for DbStore {
                         sea_orm::sea_query::Expr::value(revision_token),
                     )
                     .col_expr(
+                        entities::document::Column::ProcessingStatus,
+                        sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
+                    )
+                    .col_expr(
                         entities::document::Column::IndexedRevision,
                         sea_orm::sea_query::Expr::value(Option::<i64>::None),
                     )
@@ -338,6 +347,7 @@ impl Store for DbStore {
                 canonical_text: Set(document.canonical_text.clone()),
                 content_revision: Set(1),
                 revision_token: Set(revision_token),
+                processing_status: Set(DocumentProcessingStatus::Queued.as_str().into()),
                 indexed_revision: Set(None),
                 index_fingerprint: Set(None),
                 created_at: Set(document.updated_at),
@@ -367,6 +377,13 @@ impl Store for DbStore {
         fingerprint: &str,
         indexed_at: chrono::DateTime<Utc>,
     ) -> Result<bool> {
+        if fingerprint.is_empty()
+            || fingerprint.chars().count() > crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
+        {
+            return Err(AgentError::Store(
+                "document index fingerprint must contain 1 to 512 characters".into(),
+            ));
+        }
         let result = entities::document::Entity::update_many()
             .col_expr(
                 entities::document::Column::IndexedRevision,
@@ -379,6 +396,10 @@ impl Store for DbStore {
             .col_expr(
                 entities::document::Column::IndexedAt,
                 sea_orm::sea_query::Expr::value(Some(indexed_at)),
+            )
+            .col_expr(
+                entities::document::Column::ProcessingStatus,
+                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Ready.as_str()),
             )
             .filter(entities::document::Column::Id.eq(id.0))
             .filter(entities::document::Column::ContentRevision.eq(revision))
@@ -407,6 +428,10 @@ impl Store for DbStore {
             .col_expr(
                 entities::document::Column::IndexedAt,
                 sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .col_expr(
+                entities::document::Column::ProcessingStatus,
+                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
             )
             .filter(entities::document::Column::Id.eq(id.0))
             .filter(entities::document::Column::ContentRevision.eq(revision))
@@ -613,8 +638,8 @@ fn project_from_model(model: entities::project::Model) -> Project {
     }
 }
 
-fn document_from_model(model: entities::document::Model) -> DocumentRecord {
-    DocumentRecord {
+fn document_from_model(model: entities::document::Model) -> Result<DocumentRecord> {
+    Ok(DocumentRecord {
         id: DocumentId(model.id),
         project_id: model.project_id.map(ProjectId),
         source_uri: model.source_uri,
@@ -623,28 +648,30 @@ fn document_from_model(model: entities::document::Model) -> DocumentRecord {
         canonical_text: model.canonical_text,
         content_revision: model.content_revision,
         revision_token: model.revision_token,
+        processing_status: document_processing_status_from_db(&model.processing_status)?,
         indexed_revision: model.indexed_revision,
         index_fingerprint: model.index_fingerprint,
         created_at: model.created_at,
         updated_at: model.updated_at,
         indexed_at: model.indexed_at,
-    }
+    })
 }
 
-fn document_summary_from_row(row: DocumentSummaryRow) -> DocumentSummaryRecord {
-    DocumentSummaryRecord {
+fn document_summary_from_row(row: DocumentSummaryRow) -> Result<DocumentSummaryRecord> {
+    Ok(DocumentSummaryRecord {
         id: DocumentId(row.id),
         project_id: row.project_id.map(ProjectId),
         source_uri: row.source_uri,
         media_type: row.media_type,
         title: row.title,
         content_revision: row.content_revision,
+        processing_status: document_processing_status_from_db(&row.processing_status)?,
         indexed_revision: row.indexed_revision,
         index_fingerprint: row.index_fingerprint,
         created_at: row.created_at,
         updated_at: row.updated_at,
         indexed_at: row.indexed_at,
-    }
+    })
 }
 
 fn document_from_upsert(
@@ -662,11 +689,24 @@ fn document_from_upsert(
         canonical_text: document.canonical_text.clone(),
         content_revision,
         revision_token,
+        processing_status: DocumentProcessingStatus::Queued,
         indexed_revision: None,
         index_fingerprint: None,
         created_at,
         updated_at: document.updated_at,
         indexed_at: None,
+    }
+}
+
+fn document_processing_status_from_db(text: &str) -> Result<DocumentProcessingStatus> {
+    match text {
+        "queued" => Ok(DocumentProcessingStatus::Queued),
+        "processing" => Ok(DocumentProcessingStatus::Processing),
+        "ready" => Ok(DocumentProcessingStatus::Ready),
+        "failed" => Ok(DocumentProcessingStatus::Failed),
+        other => Err(AgentError::Store(format!(
+            "unknown document processing status: {other}"
+        ))),
     }
 }
 
@@ -747,11 +787,46 @@ mod entities {
             pub canonical_text: String,
             pub content_revision: i64,
             pub revision_token: Uuid,
+            pub processing_status: String,
             pub indexed_revision: Option<i64>,
             pub index_fingerprint: Option<String>,
             pub created_at: DateTimeUtc,
             pub updated_at: DateTimeUtc,
             pub indexed_at: Option<DateTimeUtc>,
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+
+    #[cfg(test)]
+    pub mod document_job {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+        #[sea_orm(table_name = "document_job")]
+        pub struct Model {
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub id: Uuid,
+            pub document_id: Uuid,
+            pub content_revision: i64,
+            pub revision_token: Uuid,
+            pub kind: String,
+            pub status: String,
+            pub pipeline_fingerprint: String,
+            pub attempt_count: i32,
+            pub max_attempts: i32,
+            pub available_at: DateTimeUtc,
+            pub lease_token: Option<Uuid>,
+            pub lease_expires_at: Option<DateTimeUtc>,
+            pub started_at: Option<DateTimeUtc>,
+            pub finished_at: Option<DateTimeUtc>,
+            pub last_error_code: Option<String>,
+            pub last_error_detail: Option<String>,
+            pub created_at: DateTimeUtc,
+            pub updated_at: DateTimeUtc,
         }
 
         #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -895,6 +970,8 @@ mod entities {
 /// DDL for whichever backend is connected.
 mod migration {
     use sea_orm_migration::prelude::*;
+
+    use super::{DocumentJobKind, DocumentJobStatus, DocumentProcessingStatus};
 
     pub struct Migrator;
 
@@ -1212,9 +1289,9 @@ mod migration {
         }
     }
 
-    /// Adds the authoritative document catalog. The retrieval database remains a
-    /// derived index; this table retains enough canonical content and index
-    /// watermark state to rebuild it safely.
+    /// Adds authoritative documents and their durable processing jobs. The
+    /// retrieval database remains derived state; lifecycle, retry, and lease
+    /// ownership live in the operational database.
     struct AddDocuments;
 
     impl MigrationName for AddDocuments {
@@ -1237,8 +1314,20 @@ mod migration {
                 .and(Expr::col(Document::IndexedAt).is_null());
             let watermark_present = Expr::col(Document::IndexedRevision)
                 .is_not_null()
-                .and(Expr::col(Document::IndexFingerprint).is_not_null())
+                .and(Expr::col(Document::IndexFingerprint).is_not_null().and(
+                    Func::char_length(Expr::col(Document::IndexFingerprint)).between(
+                        1,
+                        crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN as i32,
+                    ),
+                ))
                 .and(Expr::col(Document::IndexedAt).is_not_null());
+            let processing_watermark_consistent = Expr::col(Document::ProcessingStatus)
+                .eq(DocumentProcessingStatus::Ready.as_str())
+                .and(Expr::col(Document::IndexedRevision).eq(Expr::col(Document::ContentRevision)))
+                .and(watermark_present)
+                .or(Expr::col(Document::ProcessingStatus)
+                    .ne(DocumentProcessingStatus::Ready.as_str())
+                    .and(watermark_absent));
 
             manager
                 .create_table(
@@ -1258,6 +1347,12 @@ mod migration {
                                 .default(1),
                         )
                         .col(ColumnDef::new(Document::RevisionToken).uuid().not_null())
+                        .col(
+                            ColumnDef::new(Document::ProcessingStatus)
+                                .text()
+                                .not_null()
+                                .default(DocumentProcessingStatus::Queued.as_str()),
+                        )
                         .col(ColumnDef::new(Document::IndexedRevision).big_integer())
                         .col(ColumnDef::new(Document::IndexFingerprint).text())
                         .col(
@@ -1285,8 +1380,14 @@ mod migration {
                                 .or(Expr::col(Document::SourceUri).ne("")),
                         )
                         .check(Expr::col(Document::ContentRevision).gte(1))
+                        .check(Expr::col(Document::ProcessingStatus).is_in([
+                            DocumentProcessingStatus::Queued.as_str(),
+                            DocumentProcessingStatus::Processing.as_str(),
+                            DocumentProcessingStatus::Ready.as_str(),
+                            DocumentProcessingStatus::Failed.as_str(),
+                        ]))
                         .check(valid_index_revision)
-                        .check(watermark_absent.or(watermark_present))
+                        .check(processing_watermark_consistent)
                         .to_owned(),
                 )
                 .await?;
@@ -1300,10 +1401,254 @@ mod migration {
                         .to_owned(),
                 )
                 .await?;
+
+            let valid_job_status = Expr::col(DocumentJob::Status).is_in([
+                DocumentJobStatus::Queued.as_str(),
+                DocumentJobStatus::Running.as_str(),
+                DocumentJobStatus::RetryWait.as_str(),
+                DocumentJobStatus::Succeeded.as_str(),
+                DocumentJobStatus::Failed.as_str(),
+                DocumentJobStatus::Cancelled.as_str(),
+            ]);
+            let running_lease = Expr::col(DocumentJob::Status)
+                .eq(DocumentJobStatus::Running.as_str())
+                .and(Expr::col(DocumentJob::LeaseToken).is_not_null())
+                .and(Expr::col(DocumentJob::LeaseExpiresAt).is_not_null());
+            let no_lease = Expr::col(DocumentJob::Status)
+                .ne(DocumentJobStatus::Running.as_str())
+                .and(Expr::col(DocumentJob::LeaseToken).is_null())
+                .and(Expr::col(DocumentJob::LeaseExpiresAt).is_null());
+            let terminal_finished = Expr::col(DocumentJob::Status)
+                .is_in([
+                    DocumentJobStatus::Succeeded.as_str(),
+                    DocumentJobStatus::Failed.as_str(),
+                    DocumentJobStatus::Cancelled.as_str(),
+                ])
+                .and(Expr::col(DocumentJob::FinishedAt).is_not_null());
+            let nonterminal_unfinished = Expr::col(DocumentJob::Status)
+                .is_in([
+                    DocumentJobStatus::Queued.as_str(),
+                    DocumentJobStatus::Running.as_str(),
+                    DocumentJobStatus::RetryWait.as_str(),
+                ])
+                .and(Expr::col(DocumentJob::FinishedAt).is_null());
+            let queued_attempt = Expr::col(DocumentJob::Status)
+                .eq(DocumentJobStatus::Queued.as_str())
+                .and(Expr::col(DocumentJob::AttemptCount).eq(0))
+                .and(Expr::col(DocumentJob::StartedAt).is_null());
+            let running_attempt = Expr::col(DocumentJob::Status)
+                .eq(DocumentJobStatus::Running.as_str())
+                .and(Expr::col(DocumentJob::AttemptCount).gte(1))
+                .and(Expr::col(DocumentJob::StartedAt).is_not_null());
+            let retryable_attempt = Expr::col(DocumentJob::Status)
+                .eq(DocumentJobStatus::RetryWait.as_str())
+                .and(Expr::col(DocumentJob::AttemptCount).gte(1))
+                .and(Expr::col(DocumentJob::AttemptCount).lt(Expr::col(DocumentJob::MaxAttempts)))
+                .and(Expr::col(DocumentJob::StartedAt).is_not_null());
+            let completed_attempt = Expr::col(DocumentJob::Status)
+                .is_in([
+                    DocumentJobStatus::Succeeded.as_str(),
+                    DocumentJobStatus::Failed.as_str(),
+                ])
+                .and(Expr::col(DocumentJob::AttemptCount).gte(1))
+                .and(Expr::col(DocumentJob::StartedAt).is_not_null());
+            let cancelled_attempt = Expr::col(DocumentJob::Status)
+                .eq(DocumentJobStatus::Cancelled.as_str())
+                .and(
+                    Expr::col(DocumentJob::AttemptCount)
+                        .eq(0)
+                        .and(Expr::col(DocumentJob::StartedAt).is_null())
+                        .or(Expr::col(DocumentJob::AttemptCount)
+                            .gte(1)
+                            .and(Expr::col(DocumentJob::StartedAt).is_not_null())),
+                );
+
+            manager
+                .create_table(
+                    Table::create()
+                        .table(DocumentJob::Table)
+                        .if_not_exists()
+                        .col(
+                            ColumnDef::new(DocumentJob::Id)
+                                .uuid()
+                                .not_null()
+                                .primary_key(),
+                        )
+                        .col(ColumnDef::new(DocumentJob::DocumentId).uuid().not_null())
+                        .col(
+                            ColumnDef::new(DocumentJob::ContentRevision)
+                                .big_integer()
+                                .not_null(),
+                        )
+                        .col(ColumnDef::new(DocumentJob::RevisionToken).uuid().not_null())
+                        .col(ColumnDef::new(DocumentJob::Kind).string_len(64).not_null())
+                        .col(
+                            ColumnDef::new(DocumentJob::Status)
+                                .string_len(32)
+                                .not_null()
+                                .default(DocumentJobStatus::Queued.as_str()),
+                        )
+                        .col(
+                            ColumnDef::new(DocumentJob::PipelineFingerprint)
+                                .string_len(512)
+                                .not_null(),
+                        )
+                        .col(
+                            ColumnDef::new(DocumentJob::AttemptCount)
+                                .integer()
+                                .not_null()
+                                .default(0),
+                        )
+                        .col(
+                            ColumnDef::new(DocumentJob::MaxAttempts)
+                                .integer()
+                                .not_null()
+                                .default(5),
+                        )
+                        .col(
+                            ColumnDef::new(DocumentJob::AvailableAt)
+                                .timestamp_with_time_zone()
+                                .not_null(),
+                        )
+                        .col(ColumnDef::new(DocumentJob::LeaseToken).uuid())
+                        .col(ColumnDef::new(DocumentJob::LeaseExpiresAt).timestamp_with_time_zone())
+                        .col(ColumnDef::new(DocumentJob::StartedAt).timestamp_with_time_zone())
+                        .col(ColumnDef::new(DocumentJob::FinishedAt).timestamp_with_time_zone())
+                        .col(ColumnDef::new(DocumentJob::LastErrorCode).string_len(128))
+                        .col(ColumnDef::new(DocumentJob::LastErrorDetail).string_len(4096))
+                        .col(
+                            ColumnDef::new(DocumentJob::CreatedAt)
+                                .timestamp_with_time_zone()
+                                .not_null(),
+                        )
+                        .col(
+                            ColumnDef::new(DocumentJob::UpdatedAt)
+                                .timestamp_with_time_zone()
+                                .not_null(),
+                        )
+                        .foreign_key(
+                            ForeignKey::create()
+                                .name("fk_document_job_document")
+                                .from(DocumentJob::Table, DocumentJob::DocumentId)
+                                .to(Document::Table, Document::Id)
+                                .on_delete(ForeignKeyAction::Cascade),
+                        )
+                        .check(Expr::col(DocumentJob::ContentRevision).gte(1))
+                        .check(
+                            Expr::col(DocumentJob::Kind).is_in([DocumentJobKind::Index.as_str()]),
+                        )
+                        .check(
+                            Func::char_length(Expr::col(DocumentJob::Kind))
+                                .lte(64)
+                                .and(
+                                    Func::char_length(Expr::col(DocumentJob::PipelineFingerprint))
+                                        .between(
+                                            1,
+                                            crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
+                                                as i32,
+                                        ),
+                                )
+                                .and(
+                                    Expr::col(DocumentJob::LastErrorCode).is_null().or(
+                                        Func::char_length(Expr::col(DocumentJob::LastErrorCode))
+                                            .between(1, 128),
+                                    ),
+                                )
+                                .and(
+                                    Expr::col(DocumentJob::LastErrorDetail).is_null().or(
+                                        Func::char_length(Expr::col(DocumentJob::LastErrorDetail))
+                                            .between(1, 4096),
+                                    ),
+                                ),
+                        )
+                        .check(valid_job_status)
+                        .check(
+                            Expr::col(DocumentJob::AttemptCount)
+                                .gte(0)
+                                .and(Expr::col(DocumentJob::MaxAttempts).gte(1))
+                                .and(
+                                    Expr::col(DocumentJob::AttemptCount)
+                                        .lte(Expr::col(DocumentJob::MaxAttempts)),
+                                ),
+                        )
+                        .check(running_lease.or(no_lease))
+                        .check(terminal_finished.or(nonterminal_unfinished))
+                        .check(
+                            queued_attempt
+                                .or(running_attempt)
+                                .or(retryable_attempt)
+                                .or(completed_attempt)
+                                .or(cancelled_attempt),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_document_job_idempotency")
+                        .table(DocumentJob::Table)
+                        .col(DocumentJob::DocumentId)
+                        .col(DocumentJob::RevisionToken)
+                        .col(DocumentJob::Kind)
+                        .col(DocumentJob::PipelineFingerprint)
+                        .unique()
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_document_job_one_active")
+                        .table(DocumentJob::Table)
+                        .col(DocumentJob::DocumentId)
+                        .unique()
+                        .and_where(Expr::col(DocumentJob::Status).is_in([
+                            DocumentJobStatus::Queued.as_str(),
+                            DocumentJobStatus::Running.as_str(),
+                            DocumentJobStatus::RetryWait.as_str(),
+                        ]))
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_document_job_due")
+                        .table(DocumentJob::Table)
+                        .col(DocumentJob::Status)
+                        .col(DocumentJob::AvailableAt)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_document_job_stale_lease")
+                        .table(DocumentJob::Table)
+                        .col(DocumentJob::Status)
+                        .col(DocumentJob::LeaseExpiresAt)
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_document_job_history")
+                        .table(DocumentJob::Table)
+                        .col(DocumentJob::DocumentId)
+                        .col(DocumentJob::CreatedAt)
+                        .to_owned(),
+                )
+                .await?;
             Ok(())
         }
 
         async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .drop_table(Table::drop().table(DocumentJob::Table).to_owned())
+                .await?;
             manager
                 .drop_table(Table::drop().table(Document::Table).to_owned())
                 .await?;
@@ -1331,11 +1676,35 @@ mod migration {
         CanonicalText,
         ContentRevision,
         RevisionToken,
+        ProcessingStatus,
         IndexedRevision,
         IndexFingerprint,
         CreatedAt,
         UpdatedAt,
         IndexedAt,
+    }
+
+    #[derive(DeriveIden)]
+    enum DocumentJob {
+        Table,
+        Id,
+        DocumentId,
+        ContentRevision,
+        RevisionToken,
+        Kind,
+        Status,
+        PipelineFingerprint,
+        AttemptCount,
+        MaxAttempts,
+        AvailableAt,
+        LeaseToken,
+        LeaseExpiresAt,
+        StartedAt,
+        FinishedAt,
+        LastErrorCode,
+        LastErrorDetail,
+        CreatedAt,
+        UpdatedAt,
     }
 
     #[derive(DeriveIden)]
@@ -1395,6 +1764,7 @@ mod migration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::DocumentJobKind;
     use chrono::{DateTime, Utc};
 
     async fn temp_store() -> (tempfile::TempDir, DbStore) {
@@ -1435,6 +1805,7 @@ mod tests {
             canonical_text: "# Résumé\n\n売上 grew by 10%.".into(),
             content_revision: 1,
             revision_token: uuid::Uuid::new_v4(),
+            processing_status: DocumentProcessingStatus::Queued,
             indexed_revision: None,
             index_fingerprint: None,
             created_at,
@@ -1540,6 +1911,7 @@ mod tests {
         unscoped.created_at = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
         let mut in_a = sample_document(Some(project_a.id));
         in_a.created_at = DateTime::<Utc>::from_timestamp(2_000, 0).unwrap();
+        in_a.processing_status = DocumentProcessingStatus::Ready;
         in_a.indexed_revision = Some(1);
         in_a.index_fingerprint = Some("parser=v1;chunker=v1;embed=test".into());
         in_a.indexed_at = Some(DateTime::<Utc>::from_timestamp(2_001, 0).unwrap());
@@ -1706,6 +2078,177 @@ mod tests {
         let mut partial_watermark = sample_document(None);
         partial_watermark.indexed_revision = Some(1);
         assert!(store.create_document(&partial_watermark).await.is_err());
+
+        let mut empty_fingerprint = sample_document(None);
+        empty_fingerprint.processing_status = DocumentProcessingStatus::Ready;
+        empty_fingerprint.indexed_revision = Some(1);
+        empty_fingerprint.index_fingerprint = Some(String::new());
+        empty_fingerprint.indexed_at = Some(Utc::now());
+        assert!(store.create_document(&empty_fingerprint).await.is_err());
+
+        let mut oversized_fingerprint = sample_document(None);
+        oversized_fingerprint.processing_status = DocumentProcessingStatus::Ready;
+        oversized_fingerprint.indexed_revision = Some(1);
+        oversized_fingerprint.index_fingerprint =
+            Some("x".repeat(crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN + 1));
+        oversized_fingerprint.indexed_at = Some(Utc::now());
+        assert!(store.create_document(&oversized_fingerprint).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn document_job_schema_enforces_delivery_and_idempotency_invariants() {
+        let (_dir, store) = temp_store().await;
+        let document = sample_document(None);
+        store.create_document(&document).await.unwrap();
+        let document = store.get_document(document.id).await.unwrap().unwrap();
+        let now = DateTime::<Utc>::from_timestamp(1_752_148_800, 0).unwrap();
+        let make_job =
+            |document: &DocumentRecord, fingerprint: &str| entities::document_job::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                document_id: Set(document.id.0),
+                content_revision: Set(document.content_revision),
+                revision_token: Set(document.revision_token),
+                kind: Set(DocumentJobKind::Index.as_str().into()),
+                status: Set(DocumentJobStatus::Queued.as_str().into()),
+                pipeline_fingerprint: Set(fingerprint.into()),
+                attempt_count: Set(0),
+                max_attempts: Set(5),
+                available_at: Set(now),
+                lease_token: Set(None),
+                lease_expires_at: Set(None),
+                started_at: Set(None),
+                finished_at: Set(None),
+                last_error_code: Set(None),
+                last_error_detail: Set(None),
+                created_at: Set(now),
+                updated_at: Set(now),
+            };
+        let first = make_job(&document, "pipeline-v1")
+            .insert(&store.conn)
+            .await
+            .unwrap();
+
+        // A document has only one nonterminal pipeline stage at a time.
+        assert!(make_job(&document, "pipeline-v2")
+            .insert(&store.conn)
+            .await
+            .is_err());
+
+        // State-dependent attempt, lease, and timestamp rules are independent.
+        let another_document = sample_document(None);
+        store.create_document(&another_document).await.unwrap();
+        let another_document = store
+            .get_document(another_document.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut running_without_lease = make_job(&another_document, "pipeline-v1");
+        running_without_lease.status = Set(DocumentJobStatus::Running.as_str().into());
+        running_without_lease.attempt_count = Set(1);
+        running_without_lease.started_at = Set(Some(now));
+        assert!(running_without_lease.insert(&store.conn).await.is_err());
+        let mut running_without_attempt = make_job(&another_document, "pipeline-v1");
+        running_without_attempt.status = Set(DocumentJobStatus::Running.as_str().into());
+        running_without_attempt.lease_token = Set(Some(uuid::Uuid::new_v4()));
+        running_without_attempt.lease_expires_at = Set(Some(now + chrono::Duration::minutes(5)));
+        assert!(running_without_attempt.insert(&store.conn).await.is_err());
+        let mut exhausted_retry = make_job(&another_document, "pipeline-v1");
+        exhausted_retry.status = Set(DocumentJobStatus::RetryWait.as_str().into());
+        exhausted_retry.attempt_count = Set(5);
+        exhausted_retry.started_at = Set(Some(now));
+        assert!(exhausted_retry.insert(&store.conn).await.is_err());
+        let mut terminal_without_finish = make_job(&another_document, "pipeline-v1");
+        terminal_without_finish.status = Set(DocumentJobStatus::Failed.as_str().into());
+        terminal_without_finish.attempt_count = Set(5);
+        terminal_without_finish.started_at = Set(Some(now));
+        assert!(terminal_without_finish.insert(&store.conn).await.is_err());
+        let mut terminal_without_attempt = make_job(&another_document, "pipeline-v1");
+        terminal_without_attempt.status = Set(DocumentJobStatus::Succeeded.as_str().into());
+        terminal_without_attempt.finished_at = Set(Some(now));
+        assert!(terminal_without_attempt.insert(&store.conn).await.is_err());
+
+        let mut unknown_kind = make_job(&another_document, "pipeline-v1");
+        unknown_kind.kind = Set("unknown".into());
+        assert!(unknown_kind.insert(&store.conn).await.is_err());
+        assert!(make_job(&another_document, "")
+            .insert(&store.conn)
+            .await
+            .is_err());
+        assert!(make_job(&another_document, &"x".repeat(513))
+            .insert(&store.conn)
+            .await
+            .is_err());
+        let mut oversized_error = make_job(&another_document, "pipeline-v1");
+        oversized_error.last_error_code = Set(Some("e".repeat(129)));
+        assert!(oversized_error.insert(&store.conn).await.is_err());
+        let mut empty_error = make_job(&another_document, "pipeline-v1");
+        empty_error.last_error_code = Set(Some(String::new()));
+        assert!(empty_error.insert(&store.conn).await.is_err());
+        let mut empty_detail = make_job(&another_document, "pipeline-v1");
+        empty_detail.last_error_detail = Set(Some(String::new()));
+        assert!(empty_detail.insert(&store.conn).await.is_err());
+        let mut oversized_detail = make_job(&another_document, "pipeline-v1");
+        oversized_detail.last_error_detail = Set(Some("d".repeat(4097)));
+        assert!(oversized_detail.insert(&store.conn).await.is_err());
+
+        let valid_running_document = sample_document(None);
+        store
+            .create_document(&valid_running_document)
+            .await
+            .unwrap();
+        let valid_running_document = store
+            .get_document(valid_running_document.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut valid_running = make_job(&valid_running_document, "pipeline-v1");
+        valid_running.status = Set(DocumentJobStatus::Running.as_str().into());
+        valid_running.attempt_count = Set(1);
+        valid_running.started_at = Set(Some(now));
+        valid_running.lease_token = Set(Some(uuid::Uuid::new_v4()));
+        valid_running.lease_expires_at = Set(Some(now + chrono::Duration::minutes(5)));
+        valid_running.insert(&store.conn).await.unwrap();
+
+        entities::document_job::Entity::update_many()
+            .col_expr(
+                entities::document_job::Column::Status,
+                sea_orm::sea_query::Expr::value(DocumentJobStatus::Succeeded.as_str()),
+            )
+            .col_expr(
+                entities::document_job::Column::FinishedAt,
+                sea_orm::sea_query::Expr::value(Some(now)),
+            )
+            .col_expr(
+                entities::document_job::Column::AttemptCount,
+                sea_orm::sea_query::Expr::value(1),
+            )
+            .col_expr(
+                entities::document_job::Column::StartedAt,
+                sea_orm::sea_query::Expr::value(Some(now)),
+            )
+            .filter(entities::document_job::Column::Id.eq(first.id))
+            .exec(&store.conn)
+            .await
+            .unwrap();
+
+        // Terminal history frees the active slot, but the same semantic job is
+        // still deduplicated by exact revision, kind, and pipeline fingerprint.
+        assert!(make_job(&document, "pipeline-v1")
+            .insert(&store.conn)
+            .await
+            .is_err());
+        make_job(&document, "pipeline-v2")
+            .insert(&store.conn)
+            .await
+            .unwrap();
+
+        store.delete_document(document.id).await.unwrap();
+        let remaining = entities::document_job::Entity::find()
+            .filter(entities::document_job::Column::DocumentId.eq(document.id.0))
+            .all(&store.conn)
+            .await
+            .unwrap();
+        assert!(remaining.is_empty());
     }
 
     #[tokio::test]
@@ -1727,6 +2270,24 @@ mod tests {
         assert_eq!(revision_one.content_revision, 1);
         assert_eq!(revision_one.created_at, first_at);
         assert_eq!(revision_one.indexed_revision, None);
+        assert_eq!(
+            revision_one.processing_status,
+            DocumentProcessingStatus::Queued
+        );
+        assert!(store
+            .mark_document_indexed(id, 1, revision_one.revision_token, "", first_at)
+            .await
+            .is_err());
+        assert!(store
+            .mark_document_indexed(
+                id,
+                1,
+                revision_one.revision_token,
+                &"x".repeat(crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN + 1),
+                first_at,
+            )
+            .await
+            .is_err());
         assert!(store
             .mark_document_indexed(id, 1, revision_one.revision_token, "index-v1", first_at,)
             .await
@@ -1744,6 +2305,10 @@ mod tests {
         assert_eq!(revision_two.updated_at, second_at);
         assert_ne!(revision_two.revision_token, revision_one.revision_token);
         assert_eq!(revision_two.indexed_revision, None);
+        assert_eq!(
+            revision_two.processing_status,
+            DocumentProcessingStatus::Queued
+        );
         assert_eq!(revision_two.index_fingerprint, None);
         assert_eq!(revision_two.indexed_at, None);
 
@@ -1758,6 +2323,7 @@ mod tests {
             .unwrap());
         let indexed = store.get_document(id).await.unwrap().unwrap();
         assert_eq!(indexed.indexed_revision, Some(2));
+        assert_eq!(indexed.processing_status, DocumentProcessingStatus::Ready);
         assert_eq!(indexed.index_fingerprint.as_deref(), Some("index-v2"));
         assert_eq!(indexed.indexed_at, Some(second_at));
         assert!(!store
@@ -1770,6 +2336,7 @@ mod tests {
             .unwrap());
         let cleared = store.get_document(id).await.unwrap().unwrap();
         assert_eq!(cleared.indexed_revision, None);
+        assert_eq!(cleared.processing_status, DocumentProcessingStatus::Queued);
         assert_eq!(cleared.index_fingerprint, None);
         assert_eq!(cleared.indexed_at, None);
 
