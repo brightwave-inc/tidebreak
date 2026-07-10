@@ -65,6 +65,8 @@ mod document;
 mod embed;
 mod error;
 mod id;
+#[cfg(feature = "vec-lance")]
+mod lance_store;
 #[cfg(feature = "embed-openai")]
 mod openai_embed;
 mod parse;
@@ -78,6 +80,8 @@ pub use document::{ByteSpan, Chunk, Citation, Document, DocumentSource, ScoredCh
 pub use embed::{Embedder, Embedding, HashEmbedder};
 pub use error::{Result, RetrievalError};
 pub use id::{ChunkId, DocumentId};
+#[cfg(feature = "vec-lance")]
+pub use lance_store::LanceVectorStore;
 #[cfg(feature = "embed-openai")]
 pub use openai_embed::OpenAiEmbedder;
 pub use parse::{DocumentParser, ParsedDocument, PlainTextParser};
