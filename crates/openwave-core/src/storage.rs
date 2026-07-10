@@ -26,6 +26,38 @@ use crate::model::{
     DocumentScope, DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
 };
 
+/// Why maintenance determined that a document needs an index job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentIndexJobReason {
+    /// The operational watermark is current, but the derived generation is absent.
+    DerivedStateMissing,
+    /// The desired generation exists only partially and cannot be safely reused.
+    DerivedStateIncomplete,
+    /// The configured chunking/embedding pipeline differs from the indexed one.
+    PipelineChanged,
+}
+
+impl DocumentIndexJobReason {
+    pub(crate) const fn advances_generation(self) -> bool {
+        matches!(self, Self::DerivedStateIncomplete | Self::PipelineChanged)
+    }
+}
+
+/// Result of atomically ensuring one desired document index job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnsureDocumentIndexJobOutcome {
+    /// A new job was inserted or an exact terminal job was reset to queued.
+    Enqueued(DocumentJob),
+    /// The desired current job already exists and requires no state change.
+    Existing(DocumentJob),
+    /// The desired current job failed and requires an explicit user retry.
+    Failed(DocumentJob),
+    /// The source document no longer exists.
+    MissingDocument,
+    /// The caller inspected an obsolete source generation.
+    GenerationChanged(DocumentGeneration),
+}
+
 fn document_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "document storage is not implemented by this Store".into(),
@@ -159,6 +191,24 @@ pub trait Store: Send + Sync {
         _pipeline_fingerprint: &str,
         _max_attempts: i32,
     ) -> Result<(DocumentRecord, DocumentJob)> {
+        document_storage_unavailable()
+    }
+
+    /// Atomically establish the current index job requested by an auditor.
+    ///
+    /// `expected_generation` is a compare-and-swap fence around the auditor's
+    /// observation. Missing derived state requeues the exact current generation;
+    /// incomplete derived state and a changed pipeline advance the source
+    /// generation once without changing source fields. Failed jobs remain failed
+    /// until an explicit retry.
+    async fn ensure_document_index_job(
+        &self,
+        _document_id: DocumentId,
+        _expected_generation: DocumentGeneration,
+        _pipeline_fingerprint: &str,
+        _max_attempts: i32,
+        _reason: DocumentIndexJobReason,
+    ) -> Result<EnsureDocumentIndexJobOutcome> {
         document_storage_unavailable()
     }
 
@@ -408,6 +458,24 @@ mod tests {
         state.tombstones.remove(&id);
         state.pending_retirements.remove(&id);
         Ok(generation)
+    }
+
+    fn reset_mem_document_job(
+        job: &mut DocumentJob,
+        max_attempts: i32,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        job.status = DocumentJobStatus::Queued;
+        job.attempt_count = 0;
+        job.max_attempts = max_attempts;
+        job.available_at = now;
+        job.lease_token = None;
+        job.lease_expires_at = None;
+        job.started_at = None;
+        job.finished_at = None;
+        job.last_error_code = None;
+        job.last_error_detail = None;
+        job.updated_at = now;
     }
 
     #[async_trait]
@@ -693,6 +761,139 @@ mod tests {
             };
             state.jobs.insert(job.id, job.clone());
             Ok((record, job))
+        }
+        async fn ensure_document_index_job(
+            &self,
+            document_id: DocumentId,
+            expected_generation: DocumentGeneration,
+            pipeline_fingerprint: &str,
+            max_attempts: i32,
+            reason: DocumentIndexJobReason,
+        ) -> Result<EnsureDocumentIndexJobOutcome> {
+            if pipeline_fingerprint.is_empty()
+                || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
+                || max_attempts < 1
+            {
+                return Err(AgentError::Store(
+                    "invalid document index-job maintenance request".into(),
+                ));
+            }
+
+            let mut state = self.document_state.lock().unwrap();
+            let Some(mut document) = state.documents.get(&document_id).cloned() else {
+                return Ok(EnsureDocumentIndexJobOutcome::MissingDocument);
+            };
+
+            if document.generation() != expected_generation {
+                if reason.advances_generation()
+                    && expected_generation
+                        .content_revision
+                        .checked_add(1)
+                        .is_some_and(|revision| revision == document.content_revision)
+                {
+                    if let Some(job) = state.jobs.values().find(|job| {
+                        job.document_id == document_id
+                            && job.generation() == document.generation()
+                            && job.kind == DocumentJobKind::Index
+                            && job.pipeline_fingerprint == pipeline_fingerprint
+                    }) {
+                        return Ok(if job.status == DocumentJobStatus::Failed {
+                            EnsureDocumentIndexJobOutcome::Failed(job.clone())
+                        } else {
+                            EnsureDocumentIndexJobOutcome::Existing(job.clone())
+                        });
+                    }
+                }
+                return Ok(EnsureDocumentIndexJobOutcome::GenerationChanged(
+                    document.generation(),
+                ));
+            }
+
+            let desired_job_id = state.jobs.values().find_map(|job| {
+                (job.document_id == document_id
+                    && job.generation() == document.generation()
+                    && job.kind == DocumentJobKind::Index
+                    && job.pipeline_fingerprint == pipeline_fingerprint)
+                    .then_some(job.id)
+            });
+            if let Some(job_id) = desired_job_id {
+                let job = state.jobs.get(&job_id).unwrap().clone();
+                if matches!(
+                    job.status,
+                    DocumentJobStatus::Queued
+                        | DocumentJobStatus::Running
+                        | DocumentJobStatus::RetryWait
+                ) || (reason == DocumentIndexJobReason::PipelineChanged
+                    && job.status == DocumentJobStatus::Succeeded)
+                {
+                    return Ok(EnsureDocumentIndexJobOutcome::Existing(job));
+                }
+                if job.status == DocumentJobStatus::Failed {
+                    return Ok(EnsureDocumentIndexJobOutcome::Failed(job));
+                }
+                if reason == DocumentIndexJobReason::DerivedStateMissing {
+                    let now = chrono::Utc::now();
+                    let job = state.jobs.get_mut(&job_id).unwrap();
+                    reset_mem_document_job(job, max_attempts, now);
+                    let job = job.clone();
+                    document.processing_status = DocumentProcessingStatus::Queued;
+                    document.indexed_revision = None;
+                    document.index_fingerprint = None;
+                    document.indexed_at = None;
+                    state.documents.insert(document_id, document);
+                    return Ok(EnsureDocumentIndexJobOutcome::Enqueued(job));
+                }
+            }
+
+            if reason.advances_generation() {
+                let generation = allocate_mem_generation(&mut state, document_id)?;
+                document.content_revision = generation.content_revision;
+                document.revision_token = generation.revision_token;
+            }
+            document.processing_status = DocumentProcessingStatus::Queued;
+            document.indexed_revision = None;
+            document.index_fingerprint = None;
+            document.indexed_at = None;
+            state.documents.insert(document_id, document.clone());
+
+            let now = chrono::Utc::now();
+            for job in state.jobs.values_mut().filter(|job| {
+                job.document_id == document_id
+                    && matches!(
+                        job.status,
+                        DocumentJobStatus::Queued
+                            | DocumentJobStatus::Running
+                            | DocumentJobStatus::RetryWait
+                    )
+            }) {
+                job.status = DocumentJobStatus::Cancelled;
+                job.lease_token = None;
+                job.lease_expires_at = None;
+                job.finished_at = Some(now);
+                job.updated_at = now;
+            }
+            let job = DocumentJob {
+                id: DocumentJobId::new(),
+                document_id,
+                content_revision: document.content_revision,
+                revision_token: document.revision_token,
+                kind: DocumentJobKind::Index,
+                status: DocumentJobStatus::Queued,
+                pipeline_fingerprint: pipeline_fingerprint.into(),
+                attempt_count: 0,
+                max_attempts,
+                available_at: now,
+                lease_token: None,
+                lease_expires_at: None,
+                started_at: None,
+                finished_at: None,
+                last_error_code: None,
+                last_error_detail: None,
+                created_at: now,
+                updated_at: now,
+            };
+            state.jobs.insert(job.id, job.clone());
+            Ok(EnsureDocumentIndexJobOutcome::Enqueued(job))
         }
         async fn get_document_job(&self, id: DocumentJobId) -> Result<Option<DocumentJob>> {
             Ok(self.document_state.lock().unwrap().jobs.get(&id).cloned())
@@ -1324,7 +1525,111 @@ mod tests {
     }
 
     #[test]
-    fn mem_store_delete_overflow_leaves_source_job_and_clock_unchanged() {
+    fn mem_index_maintenance_requeues_or_advances_by_reason() {
+        let store = MemStore::default();
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///maintenance.txt".into()),
+            media_type: "text/plain".into(),
+            title: Some("maintenance".into()),
+            canonical_text: "stable source".into(),
+            updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(100, 0).unwrap(),
+        };
+        let (first_document, first_job) =
+            block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)).unwrap();
+        let claim_at = first_job.available_at + chrono::Duration::seconds(1);
+        let claimed =
+            block_on(store.claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1)))
+                .unwrap()
+                .unwrap();
+        assert!(block_on(store.complete_document_index_job(
+            claimed.id,
+            claimed.lease_token.unwrap(),
+            claim_at + chrono::Duration::seconds(1),
+        ))
+        .unwrap());
+
+        let missing = block_on(store.ensure_document_index_job(
+            source.id,
+            first_document.generation(),
+            "pipeline-v1",
+            5,
+            DocumentIndexJobReason::DerivedStateMissing,
+        ))
+        .unwrap();
+        let EnsureDocumentIndexJobOutcome::Enqueued(requeued) = missing else {
+            panic!("missing state should requeue the exact succeeded job")
+        };
+        assert_eq!(requeued.id, first_job.id);
+        assert_eq!(requeued.generation(), first_document.generation());
+        assert_eq!(requeued.max_attempts, 5);
+
+        let changed = block_on(store.ensure_document_index_job(
+            source.id,
+            first_document.generation(),
+            "pipeline-v2",
+            4,
+            DocumentIndexJobReason::PipelineChanged,
+        ))
+        .unwrap();
+        let EnsureDocumentIndexJobOutcome::Enqueued(changed_job) = changed else {
+            panic!("pipeline change should enqueue an advanced generation")
+        };
+        assert_eq!(
+            changed_job.content_revision,
+            first_document.content_revision + 1
+        );
+        let repeated = block_on(store.ensure_document_index_job(
+            source.id,
+            first_document.generation(),
+            "pipeline-v2",
+            4,
+            DocumentIndexJobReason::PipelineChanged,
+        ))
+        .unwrap();
+        assert_eq!(
+            repeated,
+            EnsureDocumentIndexJobOutcome::Existing(changed_job.clone())
+        );
+        let changed_claim_at = changed_job.available_at + chrono::Duration::seconds(1);
+        let changed_claim = block_on(store.claim_document_job(
+            changed_claim_at,
+            changed_claim_at + chrono::Duration::minutes(1),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(changed_claim.id, changed_job.id);
+        assert!(block_on(store.complete_document_index_job(
+            changed_claim.id,
+            changed_claim.lease_token.unwrap(),
+            changed_claim_at + chrono::Duration::seconds(1),
+        ))
+        .unwrap());
+        let incomplete = block_on(store.ensure_document_index_job(
+            source.id,
+            changed_job.generation(),
+            "pipeline-v2",
+            6,
+            DocumentIndexJobReason::DerivedStateIncomplete,
+        ))
+        .unwrap();
+        let EnsureDocumentIndexJobOutcome::Enqueued(incomplete_job) = incomplete else {
+            panic!("incomplete succeeded state should advance its generation")
+        };
+        assert_eq!(
+            incomplete_job.content_revision,
+            changed_job.content_revision + 1
+        );
+        let current = block_on(store.get_document(source.id)).unwrap().unwrap();
+        assert_eq!(current.generation(), incomplete_job.generation());
+        assert_eq!(current.canonical_text, source.canonical_text);
+        assert_eq!(current.created_at, first_document.created_at);
+        assert_eq!(current.updated_at, first_document.updated_at);
+    }
+
+    #[test]
+    fn mem_store_generation_overflow_leaves_source_job_and_clock_unchanged() {
         let store = MemStore::default();
         let source = DocumentUpsert {
             id: DocumentId::new(),
@@ -1358,7 +1663,45 @@ mod tests {
             block_on(store.get_document_generation(source.id)).unwrap(),
             Some(maximum)
         );
-        assert_eq!(block_on(store.get_document_job(job.id)).unwrap(), Some(job));
+        assert_eq!(
+            block_on(store.get_document_job(job.id)).unwrap(),
+            Some(job.clone())
+        );
+
+        let succeeded = {
+            let mut state = store.document_state.lock().unwrap();
+            let now = chrono::Utc::now();
+            let job = state.jobs.get_mut(&job.id).unwrap();
+            job.content_revision = i64::MAX;
+            job.status = DocumentJobStatus::Succeeded;
+            job.attempt_count = 1;
+            job.finished_at = Some(now);
+            job.updated_at = now;
+            job.clone()
+        };
+        assert!(block_on(store.ensure_document_index_job(
+            source.id,
+            maximum,
+            "pipeline-v1",
+            3,
+            DocumentIndexJobReason::DerivedStateIncomplete,
+        ))
+        .is_err());
+        assert_eq!(
+            block_on(store.get_document(source.id))
+                .unwrap()
+                .unwrap()
+                .generation(),
+            maximum
+        );
+        assert_eq!(
+            block_on(store.get_document_generation(source.id)).unwrap(),
+            Some(maximum)
+        );
+        assert_eq!(
+            block_on(store.get_document_job(succeeded.id)).unwrap(),
+            Some(succeeded)
+        );
     }
 
     #[test]

@@ -56,7 +56,9 @@ pub use provider::{
     Usage,
 };
 pub use steer::{SteerInbox, SteerMessage};
-pub use storage::{BlobStore, SecretProvider, Store};
+pub use storage::{
+    BlobStore, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, SecretProvider, Store,
+};
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 #[cfg(feature = "tools")]
 pub use tools::{ListDir, ReadFile, WriteFile};

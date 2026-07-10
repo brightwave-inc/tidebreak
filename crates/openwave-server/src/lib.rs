@@ -14,6 +14,7 @@
 mod approvals;
 mod auth;
 mod bus;
+mod document_auditor;
 mod document_worker;
 mod error;
 mod extract;
@@ -137,6 +138,7 @@ pub struct Server {
     token: Arc<str>,
     listener: TcpListener,
     router: Router,
+    _document_auditor: AbortTask,
     _document_worker: AbortTask,
 }
 
@@ -199,6 +201,13 @@ pub async fn bind(config: Config) -> Result<Server> {
         state.document_writes.clone(),
         document_worker::DocumentWorkerConfig::default(),
     );
+    let document_auditor = document_auditor::DocumentAuditor::new(
+        state.store.clone(),
+        state.retrieval.clone(),
+        state.document_writes.clone(),
+        state.document_job_wake.clone(),
+        document_auditor::DocumentAuditorConfig::default(),
+    );
     let router = app(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -208,6 +217,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         .local_addr()
         .map_err(|e| AgentError::config(format!("no local address: {e}")))?;
 
+    let document_auditor = tokio::spawn(document_auditor.run());
     let document_worker = tokio::spawn(document_worker.run());
 
     Ok(Server {
@@ -215,6 +225,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         token,
         listener,
         router,
+        _document_auditor: AbortTask(document_auditor),
         _document_worker: AbortTask(document_worker),
     })
 }
