@@ -11,3 +11,13 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "io-util"] }
+# Only the tool contracts (Tool / ToolRegistry / ToolCtx / …), not the SQLite /
+# keychain / agent-loop machinery — hence default-features = false.
+openwave-core = { path = "../openwave-core", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
