@@ -13,8 +13,9 @@ pub(crate) fn rank(
     query_text: &str,
     query_embedding: &Embedding,
     k: usize,
+    min_dense_similarity: f32,
 ) -> Vec<ScoredChunk> {
-    let dense = dense(records, query_embedding, k);
+    let dense = dense(records, query_embedding, k, min_dense_similarity);
     let lexical = bm25(records, query_text, k);
     let mut fused = HashMap::new();
     for (position, hit) in dense.into_iter().enumerate() {
@@ -37,6 +38,7 @@ pub(crate) fn dense(
     records: &[&VectorRecord],
     query_embedding: &Embedding,
     k: usize,
+    min_similarity: f32,
 ) -> Vec<ScoredChunk> {
     let mut hits = records
         .iter()
@@ -44,6 +46,7 @@ pub(crate) fn dense(
             chunk: record.chunk.clone(),
             score: query_embedding.cosine_similarity(&record.embedding),
         })
+        .filter(|hit| hit.score >= min_similarity)
         .collect::<Vec<_>>();
     sort_hits(&mut hits);
     hits.truncate(k);
@@ -165,7 +168,13 @@ mod tests {
         let dense = record("ordinary semantic match", vec![1.0, 0.0]);
         let records = [&lexical, &dense];
 
-        let hits = rank(&records, "zxq 4412", &Embedding(vec![1.0, 0.0]), 2);
+        let hits = rank(
+            &records,
+            "zxq 4412",
+            &Embedding(vec![1.0, 0.0]),
+            2,
+            crate::DEFAULT_MIN_DENSE_SIMILARITY,
+        );
 
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().any(|hit| hit.chunk.text == lexical.chunk.text));
@@ -178,7 +187,7 @@ mod tests {
         let second = record("second", vec![0.0, 1.0]);
         let records = [&first, &second];
 
-        let hits = rank(&records, "missing", &Embedding(vec![0.0, 0.0]), 2);
+        let hits = rank(&records, "missing", &Embedding(vec![0.0, 0.0]), 2, 0.0);
 
         let mut expected = [first.chunk.id, second.chunk.id];
         expected.sort_by_key(|id| id.0);
