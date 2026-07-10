@@ -47,7 +47,7 @@ pub use id::{CallId, ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, St
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
 pub use model::{
-    Chat, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
+    Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert,
     Message, Project, Role, ToolCallRecord,
 };

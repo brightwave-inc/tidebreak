@@ -22,7 +22,7 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, TurnId};
 use crate::model::{
-    Chat, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
+    Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert,
     Message, Project, Role, ToolCallRecord,
 };
@@ -114,6 +114,18 @@ impl Store for DbStore {
     }
 
     async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
+        let transaction = self.conn.begin().await.map_err(store_err)?;
+        acquire_document_write_lock(&transaction, document.id).await?;
+        let revision_token = uuid::Uuid::new_v4();
+        entities::document_generation::ActiveModel {
+            document_id: Set(document.id.0),
+            content_revision: Set(document.content_revision),
+            revision_token: Set(revision_token),
+            tombstone: Set(false),
+        }
+        .insert(&transaction)
+        .await
+        .map_err(store_err)?;
         entities::document::ActiveModel {
             id: Set(document.id.0),
             project_id: Set(document.project_id.map(|id| id.0)),
@@ -122,7 +134,7 @@ impl Store for DbStore {
             title: Set(document.title.clone()),
             canonical_text: Set(document.canonical_text.clone()),
             content_revision: Set(document.content_revision),
-            revision_token: Set(uuid::Uuid::new_v4()),
+            revision_token: Set(revision_token),
             processing_status: Set(document.processing_status.as_str().into()),
             indexed_revision: Set(document.indexed_revision),
             index_fingerprint: Set(document.index_fingerprint.clone()),
@@ -130,9 +142,10 @@ impl Store for DbStore {
             updated_at: Set(document.updated_at),
             indexed_at: Set(document.indexed_at),
         }
-        .insert(&self.conn)
+        .insert(&transaction)
         .await
         .map_err(store_err)?;
+        transaction.commit().await.map_err(store_err)?;
         Ok(())
     }
 
@@ -246,16 +259,89 @@ impl Store for DbStore {
             .collect())
     }
 
-    async fn delete_document(&self, id: DocumentId) -> Result<()> {
-        entities::document::Entity::delete_by_id(id.0)
-            .exec(&self.conn)
+    async fn get_document_generation(&self, id: DocumentId) -> Result<Option<DocumentGeneration>> {
+        Ok(entities::document_generation::Entity::find_by_id(id.0)
+            .one(&self.conn)
             .await
-            .map_err(store_err)?;
-        Ok(())
+            .map_err(store_err)?
+            .map(|generation| DocumentGeneration {
+                content_revision: generation.content_revision,
+                revision_token: generation.revision_token,
+            }))
+    }
+
+    async fn delete_document(&self, id: DocumentId) -> Result<DocumentGeneration> {
+        loop {
+            let transaction = self.conn.begin().await.map_err(store_err)?;
+            acquire_document_write_lock(&transaction, id).await?;
+            let document = entities::document::Entity::find_by_id(id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            let retained = entities::document_generation::Entity::find_by_id(id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            if document.is_none() && retained.as_ref().is_some_and(|row| row.tombstone) {
+                let retained = retained.unwrap();
+                transaction.commit().await.map_err(store_err)?;
+                return Ok(DocumentGeneration {
+                    content_revision: retained.content_revision,
+                    revision_token: retained.revision_token,
+                });
+            }
+            if let Some(document) = document.as_ref() {
+                ensure_live_document_generation_on(&transaction, document).await?;
+            }
+
+            let Some(advanced) = try_advance_document_generation_on(&transaction, id, true).await?
+            else {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            };
+            if let Some(document) = document {
+                let live_generation = DocumentGeneration {
+                    content_revision: document.content_revision,
+                    revision_token: document.revision_token,
+                };
+                if advanced.previous != Some(live_generation) {
+                    return Err(AgentError::Store(format!(
+                        "document {id} does not match its retained generation clock"
+                    )));
+                }
+                let deleted = entities::document::Entity::delete_many()
+                    .filter(entities::document::Column::Id.eq(id.0))
+                    .filter(
+                        entities::document::Column::ContentRevision.eq(document.content_revision),
+                    )
+                    .filter(entities::document::Column::RevisionToken.eq(document.revision_token))
+                    .exec(&transaction)
+                    .await
+                    .map_err(store_err)?;
+                if deleted.rows_affected != 1 {
+                    transaction.rollback().await.map_err(store_err)?;
+                    continue;
+                }
+            }
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(advanced.current);
+        }
     }
 
     async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
-        upsert_document_on(&self.conn, document).await
+        loop {
+            let transaction = self.conn.begin().await.map_err(store_err)?;
+            acquire_document_write_lock(&transaction, document.id).await?;
+            match try_upsert_document_on(&transaction, document).await? {
+                Some(record) => {
+                    transaction.commit().await.map_err(store_err)?;
+                    return Ok(record);
+                }
+                None => {
+                    transaction.rollback().await.map_err(store_err)?;
+                }
+            }
+        }
     }
 
     async fn upsert_document_and_enqueue_index(
@@ -306,6 +392,7 @@ impl Store for DbStore {
                     .await
                     .map_err(store_err)?
                 {
+                    ensure_live_document_generation_on(&transaction, &current).await?;
                     let current = document_from_model(current)?;
                     let job = document_job_from_model(job)?;
                     transaction.commit().await.map_err(store_err)?;
@@ -1345,17 +1432,114 @@ fn document_upsert_matches(current: &entities::document::Model, document: &Docum
         && current.canonical_text == document.canonical_text
 }
 
-/// Optimistic source upsert shared by ordinary writes and transactional enqueue.
-async fn upsert_document_on<C>(conn: &C, document: &DocumentUpsert) -> Result<DocumentRecord>
+struct AdvancedDocumentGeneration {
+    previous: Option<DocumentGeneration>,
+    current: DocumentGeneration,
+}
+
+async fn ensure_live_document_generation_on<C>(
+    conn: &C,
+    document: &entities::document::Model,
+) -> Result<()>
 where
     C: ConnectionTrait,
 {
-    loop {
-        match try_upsert_document_on(conn, document).await? {
-            Some(record) => return Ok(record),
-            None => continue,
-        }
+    let generation = entities::document_generation::Entity::find_by_id(document.id)
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    if generation.as_ref().is_none_or(|generation| {
+        generation.tombstone
+            || generation.content_revision != document.content_revision
+            || generation.revision_token != document.revision_token
+    }) {
+        return Err(AgentError::Store(format!(
+            "document {} does not match its retained generation clock",
+            document.id
+        )));
     }
+    Ok(())
+}
+
+async fn try_advance_document_generation_on<C>(
+    conn: &C,
+    id: DocumentId,
+    tombstone: bool,
+) -> Result<Option<AdvancedDocumentGeneration>>
+where
+    C: ConnectionTrait,
+{
+    let previous = entities::document_generation::Entity::find_by_id(id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    if let Some(previous) = previous {
+        let next_revision = previous
+            .content_revision
+            .checked_add(1)
+            .ok_or_else(|| AgentError::Store(format!("document {id} revision overflow")))?;
+        let revision_token = uuid::Uuid::new_v4();
+        let updated = entities::document_generation::Entity::update_many()
+            .col_expr(
+                entities::document_generation::Column::ContentRevision,
+                sea_orm::sea_query::Expr::value(next_revision),
+            )
+            .col_expr(
+                entities::document_generation::Column::RevisionToken,
+                sea_orm::sea_query::Expr::value(revision_token),
+            )
+            .col_expr(
+                entities::document_generation::Column::Tombstone,
+                sea_orm::sea_query::Expr::value(tombstone),
+            )
+            .filter(entities::document_generation::Column::DocumentId.eq(id.0))
+            .filter(
+                entities::document_generation::Column::ContentRevision
+                    .eq(previous.content_revision),
+            )
+            .filter(
+                entities::document_generation::Column::RevisionToken.eq(previous.revision_token),
+            )
+            .exec(conn)
+            .await
+            .map_err(store_err)?;
+        if updated.rows_affected != 1 {
+            return Ok(None);
+        }
+        return Ok(Some(AdvancedDocumentGeneration {
+            previous: Some(DocumentGeneration {
+                content_revision: previous.content_revision,
+                revision_token: previous.revision_token,
+            }),
+            current: DocumentGeneration {
+                content_revision: next_revision,
+                revision_token,
+            },
+        }));
+    }
+
+    let current = DocumentGeneration {
+        content_revision: 1,
+        revision_token: uuid::Uuid::new_v4(),
+    };
+    let inserted =
+        entities::document_generation::Entity::insert(entities::document_generation::ActiveModel {
+            document_id: Set(id.0),
+            content_revision: Set(current.content_revision),
+            revision_token: Set(current.revision_token),
+            tombstone: Set(tombstone),
+        })
+        .on_conflict_do_nothing()
+        .exec_without_returning(conn)
+        .await
+        .map_err(store_err)?;
+    if !matches!(inserted, TryInsertResult::Inserted(1)) {
+        return Ok(None);
+    }
+    Ok(Some(AdvancedDocumentGeneration {
+        previous: None,
+        current,
+    }))
 }
 
 async fn try_upsert_document_on<C>(
@@ -1365,119 +1549,125 @@ async fn try_upsert_document_on<C>(
 where
     C: ConnectionTrait,
 {
-    // `None` means another transaction inserted this id after our absent-row
-    // read. Enqueue callers restart their outer transaction so they repeat the
-    // semantic-idempotency lookup before allocating another revision.
-    // Optimistic compare-and-set makes the allocated revision itself the result
-    // of this write, including under concurrent first insertions.
-    loop {
-        let current = entities::document::Entity::find_by_id(document.id.0)
-            .one(conn)
-            .await
-            .map_err(store_err)?;
-
-        if let Some(current) = current {
-            let next_revision = current.content_revision.checked_add(1).ok_or_else(|| {
-                AgentError::Store(format!("document {} revision overflow", document.id))
-            })?;
-            let revision_token = uuid::Uuid::new_v4();
-            let result = entities::document::Entity::update_many()
-                .col_expr(
-                    entities::document::Column::ProjectId,
-                    sea_orm::sea_query::Expr::value(document.project_id.map(|id| id.0)),
-                )
-                .col_expr(
-                    entities::document::Column::SourceUri,
-                    sea_orm::sea_query::Expr::value(document.source_uri.clone()),
-                )
-                .col_expr(
-                    entities::document::Column::MediaType,
-                    sea_orm::sea_query::Expr::value(document.media_type.clone()),
-                )
-                .col_expr(
-                    entities::document::Column::Title,
-                    sea_orm::sea_query::Expr::value(document.title.clone()),
-                )
-                .col_expr(
-                    entities::document::Column::CanonicalText,
-                    sea_orm::sea_query::Expr::value(document.canonical_text.clone()),
-                )
-                .col_expr(
-                    entities::document::Column::ContentRevision,
-                    sea_orm::sea_query::Expr::value(next_revision),
-                )
-                .col_expr(
-                    entities::document::Column::RevisionToken,
-                    sea_orm::sea_query::Expr::value(revision_token),
-                )
-                .col_expr(
-                    entities::document::Column::ProcessingStatus,
-                    sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
-                )
-                .col_expr(
-                    entities::document::Column::IndexedRevision,
-                    sea_orm::sea_query::Expr::value(Option::<i64>::None),
-                )
-                .col_expr(
-                    entities::document::Column::IndexFingerprint,
-                    sea_orm::sea_query::Expr::value(Option::<String>::None),
-                )
-                .col_expr(
-                    entities::document::Column::UpdatedAt,
-                    sea_orm::sea_query::Expr::value(document.updated_at),
-                )
-                .col_expr(
-                    entities::document::Column::IndexedAt,
-                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-                )
-                .filter(entities::document::Column::Id.eq(document.id.0))
-                .filter(entities::document::Column::ContentRevision.eq(current.content_revision))
-                .filter(entities::document::Column::RevisionToken.eq(current.revision_token))
-                .exec(conn)
-                .await
-                .map_err(store_err)?;
-            if result.rows_affected == 1 {
-                return Ok(Some(document_from_upsert(
-                    document,
-                    current.created_at,
-                    next_revision,
-                    revision_token,
-                )));
-            }
-            continue;
-        }
-
-        let revision_token = uuid::Uuid::new_v4();
-        let inserted = entities::document::Entity::insert(entities::document::ActiveModel {
-            id: Set(document.id.0),
-            project_id: Set(document.project_id.map(|id| id.0)),
-            source_uri: Set(document.source_uri.clone()),
-            media_type: Set(document.media_type.clone()),
-            title: Set(document.title.clone()),
-            canonical_text: Set(document.canonical_text.clone()),
-            content_revision: Set(1),
-            revision_token: Set(revision_token),
-            processing_status: Set(DocumentProcessingStatus::Queued.as_str().into()),
-            indexed_revision: Set(None),
-            index_fingerprint: Set(None),
-            created_at: Set(document.updated_at),
-            updated_at: Set(document.updated_at),
-            indexed_at: Set(None),
-        })
-        .on_conflict_do_nothing()
-        .exec_without_returning(conn)
+    // `None` means a concurrent writer won either generation or source CAS.
+    // Callers must roll back the outer transaction and repeat semantic checks.
+    let existing = entities::document::Entity::find_by_id(document.id.0)
+        .one(conn)
         .await
         .map_err(store_err)?;
-        if matches!(inserted, TryInsertResult::Inserted(1)) {
-            return Ok(Some(document_from_upsert(
-                document,
-                document.updated_at,
-                1,
-                revision_token,
+    if let Some(existing) = existing.as_ref() {
+        ensure_live_document_generation_on(conn, existing).await?;
+    }
+    let Some(advanced) = try_advance_document_generation_on(conn, document.id, false).await? else {
+        return Ok(None);
+    };
+
+    if let Some(existing) = existing {
+        let existing_generation = DocumentGeneration {
+            content_revision: existing.content_revision,
+            revision_token: existing.revision_token,
+        };
+        if advanced.previous != Some(existing_generation) {
+            return Err(AgentError::Store(format!(
+                "document {} does not match its retained generation clock",
+                document.id
             )));
         }
+        let result = entities::document::Entity::update_many()
+            .col_expr(
+                entities::document::Column::ProjectId,
+                sea_orm::sea_query::Expr::value(document.project_id.map(|id| id.0)),
+            )
+            .col_expr(
+                entities::document::Column::SourceUri,
+                sea_orm::sea_query::Expr::value(document.source_uri.clone()),
+            )
+            .col_expr(
+                entities::document::Column::MediaType,
+                sea_orm::sea_query::Expr::value(document.media_type.clone()),
+            )
+            .col_expr(
+                entities::document::Column::Title,
+                sea_orm::sea_query::Expr::value(document.title.clone()),
+            )
+            .col_expr(
+                entities::document::Column::CanonicalText,
+                sea_orm::sea_query::Expr::value(document.canonical_text.clone()),
+            )
+            .col_expr(
+                entities::document::Column::ContentRevision,
+                sea_orm::sea_query::Expr::value(advanced.current.content_revision),
+            )
+            .col_expr(
+                entities::document::Column::RevisionToken,
+                sea_orm::sea_query::Expr::value(advanced.current.revision_token),
+            )
+            .col_expr(
+                entities::document::Column::ProcessingStatus,
+                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
+            )
+            .col_expr(
+                entities::document::Column::IndexedRevision,
+                sea_orm::sea_query::Expr::value(Option::<i64>::None),
+            )
+            .col_expr(
+                entities::document::Column::IndexFingerprint,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                entities::document::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(document.updated_at),
+            )
+            .col_expr(
+                entities::document::Column::IndexedAt,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .filter(entities::document::Column::Id.eq(document.id.0))
+            .filter(entities::document::Column::ContentRevision.eq(existing.content_revision))
+            .filter(entities::document::Column::RevisionToken.eq(existing.revision_token))
+            .exec(conn)
+            .await
+            .map_err(store_err)?;
+        if result.rows_affected != 1 {
+            return Ok(None);
+        }
+        return Ok(Some(document_from_upsert(
+            document,
+            existing.created_at,
+            advanced.current.content_revision,
+            advanced.current.revision_token,
+        )));
+    }
+
+    let inserted = entities::document::Entity::insert(entities::document::ActiveModel {
+        id: Set(document.id.0),
+        project_id: Set(document.project_id.map(|id| id.0)),
+        source_uri: Set(document.source_uri.clone()),
+        media_type: Set(document.media_type.clone()),
+        title: Set(document.title.clone()),
+        canonical_text: Set(document.canonical_text.clone()),
+        content_revision: Set(advanced.current.content_revision),
+        revision_token: Set(advanced.current.revision_token),
+        processing_status: Set(DocumentProcessingStatus::Queued.as_str().into()),
+        indexed_revision: Set(None),
+        index_fingerprint: Set(None),
+        created_at: Set(document.updated_at),
+        updated_at: Set(document.updated_at),
+        indexed_at: Set(None),
+    })
+    .on_conflict_do_nothing()
+    .exec_without_returning(conn)
+    .await
+    .map_err(store_err)?;
+    if !matches!(inserted, TryInsertResult::Inserted(1)) {
         return Ok(None);
     }
+    Ok(Some(document_from_upsert(
+        document,
+        document.updated_at,
+        advanced.current.content_revision,
+        advanced.current.revision_token,
+    )))
 }
 
 async fn cancel_document_job_on<C>(
@@ -1725,6 +1915,25 @@ fn role_from_db(text: &str) -> Result<Role> {
 /// types (`Chat`, `Message`), never these, so the ORM never leaks into the
 /// crate's contract.
 mod entities {
+    pub mod document_generation {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+        #[sea_orm(table_name = "document_generation")]
+        pub struct Model {
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub document_id: Uuid,
+            pub content_revision: i64,
+            pub revision_token: Uuid,
+            pub tombstone: bool,
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+
     pub mod document {
         use sea_orm::entity::prelude::*;
 
@@ -2285,6 +2494,38 @@ mod migration {
             manager
                 .create_table(
                     Table::create()
+                        .table(DocumentGeneration::Table)
+                        .if_not_exists()
+                        .col(
+                            ColumnDef::new(DocumentGeneration::DocumentId)
+                                .uuid()
+                                .not_null()
+                                .primary_key(),
+                        )
+                        .col(
+                            ColumnDef::new(DocumentGeneration::ContentRevision)
+                                .big_integer()
+                                .not_null(),
+                        )
+                        .col(
+                            ColumnDef::new(DocumentGeneration::RevisionToken)
+                                .uuid()
+                                .not_null(),
+                        )
+                        .col(
+                            ColumnDef::new(DocumentGeneration::Tombstone)
+                                .boolean()
+                                .not_null()
+                                .default(false),
+                        )
+                        .check(Expr::col(DocumentGeneration::ContentRevision).gte(1))
+                        .to_owned(),
+                )
+                .await?;
+
+            manager
+                .create_table(
+                    Table::create()
                         .table(Document::Table)
                         .if_not_exists()
                         .col(ColumnDef::new(Document::Id).uuid().not_null().primary_key())
@@ -2324,7 +2565,7 @@ mod migration {
                                 .name("fk_document_project")
                                 .from(Document::Table, Document::ProjectId)
                                 .to(Project::Table, Project::Id)
-                                .on_delete(ForeignKeyAction::Cascade),
+                                .on_delete(ForeignKeyAction::Restrict),
                         )
                         .check(Expr::col(Document::MediaType).ne(""))
                         .check(
@@ -2619,6 +2860,9 @@ mod migration {
             manager
                 .drop_table(Table::drop().table(Document::Table).to_owned())
                 .await?;
+            manager
+                .drop_table(Table::drop().table(DocumentGeneration::Table).to_owned())
+                .await?;
             Ok(())
         }
     }
@@ -2649,6 +2893,15 @@ mod migration {
         CreatedAt,
         UpdatedAt,
         IndexedAt,
+    }
+
+    #[derive(DeriveIden)]
+    enum DocumentGeneration {
+        Table,
+        DocumentId,
+        ContentRevision,
+        RevisionToken,
+        Tombstone,
     }
 
     #[derive(DeriveIden)]
@@ -3004,7 +3257,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn document_project_fk_rejects_orphans_and_cascades_delete() {
+    async fn document_project_fk_rejects_orphans_and_direct_project_deletion() {
         let (_dir, store) = temp_store().await;
         let orphan = sample_document(Some(ProjectId::new()));
         assert!(store.create_document(&orphan).await.is_err());
@@ -3013,11 +3266,24 @@ mod tests {
         store.create_project(&project).await.unwrap();
         let document = sample_document(Some(project.id));
         store.create_document(&document).await.unwrap();
-        entities::project::Entity::delete_by_id(project.id.0)
+        assert!(entities::project::Entity::delete_by_id(project.id.0)
             .exec(&store.conn)
             .await
-            .unwrap();
-        assert_eq!(store.get_document(document.id).await.unwrap(), None);
+            .is_err());
+        assert!(store.get_project(project.id).await.unwrap().is_some());
+        assert_eq!(
+            store
+                .get_document(document.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .generation(),
+            store
+                .get_document_generation(document.id)
+                .await
+                .unwrap()
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -3378,6 +3644,10 @@ mod tests {
             .await
             .is_err());
         assert_eq!(store.get_document(source.id).await.unwrap(), None);
+        assert_eq!(
+            store.get_document_generation(source.id).await.unwrap(),
+            None
+        );
         assert_eq!(store.list_document_jobs(source.id).await.unwrap(), vec![]);
     }
 
@@ -3435,6 +3705,11 @@ mod tests {
             .unwrap();
         let original_document = store.get_document(source.id).await.unwrap().unwrap();
         let original_job = store.get_document_job(job.id).await.unwrap().unwrap();
+        let original_generation = store
+            .get_document_generation(source.id)
+            .await
+            .unwrap()
+            .unwrap();
 
         store
             .conn
@@ -3469,6 +3744,50 @@ mod tests {
             store.list_document_jobs(replacement.id).await.unwrap(),
             vec![original_job]
         );
+        assert_eq!(
+            store.get_document_generation(replacement.id).await.unwrap(),
+            Some(original_generation)
+        );
+    }
+
+    #[tokio::test]
+    async fn document_delete_failure_rolls_back_tombstone_source_and_jobs() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///delete-rollback.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "retain on failure".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(45_000, 0).unwrap(),
+        };
+        let (document, job) = store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 5)
+            .await
+            .unwrap();
+        store
+            .conn
+            .execute_unprepared(
+                "CREATE TRIGGER fail_document_delete
+                 BEFORE DELETE ON document
+                 BEGIN
+                     SELECT RAISE(FAIL, 'injected document delete failure');
+                 END;",
+            )
+            .await
+            .unwrap();
+
+        assert!(store.delete_document(source.id).await.is_err());
+        assert_eq!(
+            store.get_document(source.id).await.unwrap(),
+            Some(document.clone())
+        );
+        assert_eq!(
+            store.get_document_generation(source.id).await.unwrap(),
+            Some(document.generation())
+        );
+        assert_eq!(store.get_document_job(job.id).await.unwrap(), Some(job));
     }
 
     #[tokio::test]
@@ -4320,6 +4639,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_delete_and_enqueue_leave_one_coherent_generation() {
+        let (_dir, store) = temp_store().await;
+        let store = std::sync::Arc::new(store);
+        for iteration in 0..8 {
+            let source = DocumentUpsert {
+                id: DocumentId::new(),
+                project_id: None,
+                source_uri: Some(format!("file:///delete-enqueue-{iteration}.txt")),
+                media_type: "text/plain".into(),
+                title: None,
+                canonical_text: "first".into(),
+                updated_at: DateTime::<Utc>::from_timestamp(110_000 + iteration * 2, 0).unwrap(),
+            };
+            let (first, _) = store
+                .upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)
+                .await
+                .unwrap();
+            assert_eq!(first.content_revision, 1);
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+
+            let delete_store = store.clone();
+            let delete_barrier = barrier.clone();
+            let id = source.id;
+            let deletion = tokio::spawn(async move {
+                delete_barrier.wait().await;
+                delete_store.delete_document(id).await
+            });
+            let enqueue_store = store.clone();
+            let enqueue_barrier = barrier.clone();
+            let replacement = DocumentUpsert {
+                canonical_text: "replacement".into(),
+                updated_at: source.updated_at + chrono::Duration::seconds(1),
+                ..source.clone()
+            };
+            let enqueue = tokio::spawn(async move {
+                enqueue_barrier.wait().await;
+                enqueue_store
+                    .upsert_document_and_enqueue_index(&replacement, "pipeline-v1", 3)
+                    .await
+            });
+            barrier.wait().await;
+
+            let tombstone = deletion.await.unwrap().unwrap();
+            let (enqueued, _) = enqueue.await.unwrap().unwrap();
+            let retained = store
+                .get_document_generation(source.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(retained.content_revision, 3);
+            assert_eq!(
+                retained.content_revision,
+                tombstone.content_revision.max(enqueued.content_revision)
+            );
+            match store.get_document(source.id).await.unwrap() {
+                Some(current) => {
+                    assert_eq!(current.generation(), retained);
+                    let jobs = store.list_document_jobs(source.id).await.unwrap();
+                    assert_eq!(jobs.len(), 1);
+                    assert_eq!(jobs[0].generation(), retained);
+                }
+                None => {
+                    assert_eq!(retained, tombstone);
+                    assert!(store
+                        .list_document_jobs(source.id)
+                        .await
+                        .unwrap()
+                        .is_empty());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn document_upsert_revisions_and_index_watermark_are_compare_and_set() {
         let (_dir, store) = temp_store().await;
         let id = DocumentId::derive("file:///report.txt");
@@ -4435,18 +4828,20 @@ mod tests {
         let old = store.upsert_document(&first).await.unwrap();
         store.delete_document(first.id).await.unwrap();
         let recreated_at = DateTime::<Utc>::from_timestamp(2, 0).unwrap();
-        store
-            .create_document(&DocumentRecord {
+        let recreated = store
+            .upsert_document(&DocumentUpsert {
+                id: old.id,
+                project_id: old.project_id,
+                source_uri: old.source_uri.clone(),
+                media_type: old.media_type.clone(),
+                title: old.title.clone(),
                 canonical_text: "new lifecycle".into(),
-                created_at: recreated_at,
                 updated_at: recreated_at,
-                ..old.clone()
             })
             .await
             .unwrap();
-        let recreated = store.get_document(first.id).await.unwrap().unwrap();
 
-        assert_eq!(recreated.content_revision, 1);
+        assert_eq!(recreated.content_revision, 3);
         assert_ne!(recreated.revision_token, old.revision_token);
         assert!(!store
             .mark_document_indexed(
@@ -4468,6 +4863,99 @@ mod tests {
             )
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn document_generation_clock_survives_unknown_delete_and_recreation() {
+        let (_dir, store) = temp_store().await;
+        let id = DocumentId::new();
+
+        let unknown_tombstone = store.delete_document(id).await.unwrap();
+        assert_eq!(unknown_tombstone.content_revision, 1);
+        assert_eq!(store.delete_document(id).await.unwrap(), unknown_tombstone);
+        assert_eq!(
+            store.get_document_generation(id).await.unwrap(),
+            Some(unknown_tombstone)
+        );
+        assert_eq!(store.get_document(id).await.unwrap(), None);
+
+        let source = DocumentUpsert {
+            id,
+            project_id: None,
+            source_uri: Some("file:///generation-clock.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "first live source".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(100_000, 0).unwrap(),
+        };
+        let first = store.upsert_document(&source).await.unwrap();
+        assert_eq!(first.content_revision, 2);
+        assert_ne!(first.revision_token, unknown_tombstone.revision_token);
+        let second = store
+            .upsert_document(&DocumentUpsert {
+                canonical_text: "second live source".into(),
+                ..source.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(second.content_revision, 3);
+
+        let tombstone = store.delete_document(id).await.unwrap();
+        assert_eq!(tombstone.content_revision, 4);
+        assert_eq!(store.delete_document(id).await.unwrap(), tombstone);
+        let recreated = store.upsert_document(&source).await.unwrap();
+        assert_eq!(recreated.content_revision, 5);
+        assert_ne!(recreated.revision_token, tombstone.revision_token);
+        assert_eq!(
+            recreated.generation(),
+            store.get_document_generation(id).await.unwrap().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn document_generation_overflow_leaves_source_and_clock_unchanged() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "maximum generation".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(101_000, 0).unwrap(),
+        };
+        let first = store.upsert_document(&source).await.unwrap();
+        entities::document_generation::Entity::update_many()
+            .col_expr(
+                entities::document_generation::Column::ContentRevision,
+                sea_orm::sea_query::Expr::value(i64::MAX),
+            )
+            .filter(entities::document_generation::Column::DocumentId.eq(source.id.0))
+            .exec(&store.conn)
+            .await
+            .unwrap();
+        entities::document::Entity::update_many()
+            .col_expr(
+                entities::document::Column::ContentRevision,
+                sea_orm::sea_query::Expr::value(i64::MAX),
+            )
+            .filter(entities::document::Column::Id.eq(source.id.0))
+            .exec(&store.conn)
+            .await
+            .unwrap();
+        let before = store.get_document(source.id).await.unwrap().unwrap();
+        assert_eq!(before.content_revision, i64::MAX);
+        assert_eq!(before.revision_token, first.revision_token);
+
+        assert!(store.upsert_document(&source).await.is_err());
+        assert_eq!(
+            store.get_document(source.id).await.unwrap(),
+            Some(before.clone())
+        );
+        assert_eq!(
+            store.get_document_generation(source.id).await.unwrap(),
+            Some(before.generation())
+        );
     }
 
     #[tokio::test]
@@ -4513,6 +5001,10 @@ mod tests {
         };
         assert!(store.upsert_document(&upsert).await.is_err());
         assert_eq!(store.get_document(upsert.id).await.unwrap(), None);
+        assert_eq!(
+            store.get_document_generation(upsert.id).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

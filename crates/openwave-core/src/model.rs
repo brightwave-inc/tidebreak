@@ -118,6 +118,18 @@ impl DocumentJobStatus {
     }
 }
 
+/// Exact, monotonically ordered source generation for one stable document id.
+///
+/// The revision clock survives hard source deletion, while the token identifies
+/// one exact revision and prevents equal-revision corruption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentGeneration {
+    /// Monotonic revision for this document id, including delete tombstones.
+    pub content_revision: i64,
+    /// Opaque identity for this exact generation.
+    pub revision_token: Uuid,
+}
+
 /// An authoritative source document whose derived chunks live in the retrieval
 /// index. Canonical text stays in the operational store so an index can be
 /// rebuilt after an embedding or chunking change. Reprocessing with a different
@@ -136,13 +148,13 @@ pub struct DocumentRecord {
     pub title: Option<String>,
     /// Parsed text-of-record used to rechunk, re-embed, and verify citations.
     pub canonical_text: String,
-    /// Monotonic content revision, starting at one.
+    /// Monotonic content revision, starting at one and continuing through hard
+    /// delete tombstones and later recreation of this document id.
     pub content_revision: i64,
     /// Opaque identity for this exact content revision.
     ///
-    /// Unlike the integer revision, this token cannot be reused after a hard
-    /// delete and recreation of the same document id, so stale index writers
-    /// cannot confuse two document lifecycles.
+    /// Paired with the integer clock as exact identity so equal-revision
+    /// corruption cannot be mistaken for the same generation.
     pub revision_token: Uuid,
     /// Processing lifecycle of the current authoritative revision.
     pub processing_status: DocumentProcessingStatus,
@@ -159,6 +171,17 @@ pub struct DocumentRecord {
     pub updated_at: DateTime<Utc>,
     /// When the current index watermark was recorded.
     pub indexed_at: Option<DateTime<Utc>>,
+}
+
+impl DocumentRecord {
+    /// Exact generation represented by this live source record.
+    #[must_use]
+    pub const fn generation(&self) -> DocumentGeneration {
+        DocumentGeneration {
+            content_revision: self.content_revision,
+            revision_token: self.revision_token,
+        }
+    }
 }
 
 /// One durable semantic processing stage bound to an exact document revision.
@@ -210,6 +233,15 @@ pub struct DocumentJob {
 }
 
 impl DocumentJob {
+    /// Exact source generation this job is allowed to process.
+    #[must_use]
+    pub const fn generation(&self) -> DocumentGeneration {
+        DocumentGeneration {
+            content_revision: self.content_revision,
+            revision_token: self.revision_token,
+        }
+    }
+
     /// Maximum persisted parser/chunker/embedder fingerprint length.
     pub const MAX_PIPELINE_FINGERPRINT_LEN: usize = 512;
     /// Maximum persisted stable failure-code length.

@@ -711,7 +711,16 @@ mod tests {
                 .list_document_summaries(scope, after, limit)
                 .await
         }
-        async fn delete_document(&self, id: openwave_core::DocumentId) -> Result<()> {
+        async fn get_document_generation(
+            &self,
+            id: openwave_core::DocumentId,
+        ) -> Result<Option<openwave_core::DocumentGeneration>> {
+            self.inner.get_document_generation(id).await
+        }
+        async fn delete_document(
+            &self,
+            id: openwave_core::DocumentId,
+        ) -> Result<openwave_core::DocumentGeneration> {
             if self.fail_document_delete.swap(false, Ordering::SeqCst) {
                 return Err(AgentError::Store(
                     "injected document catalog delete failure".into(),
