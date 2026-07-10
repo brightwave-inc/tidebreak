@@ -325,9 +325,9 @@ fn retrieval_error(err: RetrievalError) -> ServerError {
 }
 
 /// `POST /documents` — ingest a document into the shared retrieval index
-/// (`201 Created`). The index is in-memory for now, so it does not survive a
-/// restart. The ingested chunks are immediately searchable via `POST /search` and
-/// the agent's `search` tool.
+/// (`201 Created`). The index is persisted to LanceDB under the data directory, so
+/// ingested documents survive a restart. The chunks are immediately searchable via
+/// `POST /search` and the agent's `search` tool.
 pub async fn ingest_document(
     State(state): State<AppState>,
     Json(body): Json<IngestDocument>,
