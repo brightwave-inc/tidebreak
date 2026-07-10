@@ -20,10 +20,10 @@ use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, DocumentId, ProjectId};
+use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
 use crate::model::{
-    Chat, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert,
-    Message, Project, ToolCallRecord,
+    Chat, DocumentJob, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSummaryRecord,
+    DocumentUpsert, Message, Project, ToolCallRecord,
 };
 
 fn document_storage_unavailable<T>() -> Result<T> {
@@ -105,6 +105,36 @@ pub trait Store: Send + Sync {
     /// its revision atomically, preserves `created_at`, and clears the index
     /// watermark. Returns the committed record.
     async fn upsert_document(&self, _document: &DocumentUpsert) -> Result<DocumentRecord> {
+        document_storage_unavailable()
+    }
+
+    /// Atomically persist a new source revision and enqueue its index job.
+    ///
+    /// Any older nonterminal job for the document is cancelled in the same
+    /// transaction. The returned job is bound to the returned record's exact
+    /// `(content_revision, revision_token)` identity. Repeating identical source
+    /// content and pipeline fingerprint returns that exact revision/job without
+    /// allocating another, including its original `max_attempts` and terminal
+    /// status. Intentional reprocessing/retry is an explicit job-state transition,
+    /// not another source write. `DocumentUpsert::updated_at` is source metadata
+    /// and is deliberately excluded from retry identity. Workflow timestamps are
+    /// owned by the store rather than copied from source metadata.
+    async fn upsert_document_and_enqueue_index(
+        &self,
+        _document: &DocumentUpsert,
+        _pipeline_fingerprint: &str,
+        _max_attempts: i32,
+    ) -> Result<(DocumentRecord, DocumentJob)> {
+        document_storage_unavailable()
+    }
+
+    /// Fetch one durable document job by id.
+    async fn get_document_job(&self, _id: DocumentJobId) -> Result<Option<DocumentJob>> {
+        document_storage_unavailable()
+    }
+
+    /// List a document's semantic job history, oldest first.
+    async fn list_document_jobs(&self, _document_id: DocumentId) -> Result<Vec<DocumentJob>> {
         document_storage_unavailable()
     }
 
@@ -222,14 +252,20 @@ mod tests {
     use futures::executor::block_on;
 
     use super::*;
-    use crate::model::DocumentProcessingStatus;
+    use crate::model::{DocumentJobKind, DocumentJobStatus, DocumentProcessingStatus};
 
     /// Minimal in-memory `Store` — proves the trait is object-safe and usable
     /// behind `Arc<dyn Store>`, and exercises the signatures.
     #[derive(Default)]
+    struct MemDocumentState {
+        documents: HashMap<DocumentId, DocumentRecord>,
+        jobs: HashMap<DocumentJobId, DocumentJob>,
+    }
+
+    #[derive(Default)]
     struct MemStore {
         projects: Mutex<HashMap<ProjectId, Project>>,
-        documents: Mutex<HashMap<DocumentId, DocumentRecord>>,
+        document_state: Mutex<MemDocumentState>,
         chats: Mutex<HashMap<ChatId, Chat>>,
         settings: Mutex<HashMap<String, Value>>,
         events: Mutex<Vec<(ChatId, SequencedEvent)>>,
@@ -254,17 +290,28 @@ mod tests {
         async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
             let mut document = document.clone();
             document.revision_token = uuid::Uuid::new_v4();
-            self.documents.lock().unwrap().insert(document.id, document);
+            self.document_state
+                .lock()
+                .unwrap()
+                .documents
+                .insert(document.id, document);
             Ok(())
         }
         async fn get_document(&self, id: DocumentId) -> Result<Option<DocumentRecord>> {
-            Ok(self.documents.lock().unwrap().get(&id).cloned())
+            Ok(self
+                .document_state
+                .lock()
+                .unwrap()
+                .documents
+                .get(&id)
+                .cloned())
         }
         async fn list_documents(&self, scope: DocumentScope) -> Result<Vec<DocumentRecord>> {
             Ok(self
-                .documents
+                .document_state
                 .lock()
                 .unwrap()
+                .documents
                 .values()
                 .filter(|document| match scope {
                     DocumentScope::All => true,
@@ -281,9 +328,10 @@ mod tests {
             limit: u64,
         ) -> Result<Vec<DocumentSummaryRecord>> {
             let mut documents: Vec<_> = self
-                .documents
+                .document_state
                 .lock()
                 .unwrap()
+                .documents
                 .values()
                 .filter(|document| match scope {
                     DocumentScope::All => true,
@@ -309,7 +357,9 @@ mod tests {
             Ok(documents)
         }
         async fn delete_document(&self, id: DocumentId) -> Result<()> {
-            self.documents.lock().unwrap().remove(&id);
+            let mut state = self.document_state.lock().unwrap();
+            state.documents.remove(&id);
+            state.jobs.retain(|_, job| job.document_id != id);
             Ok(())
         }
         async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
@@ -321,8 +371,8 @@ mod tests {
             {
                 return Err(AgentError::Store("invalid document upsert".into()));
             }
-            let mut documents = self.documents.lock().unwrap();
-            let record = match documents.get(&document.id) {
+            let mut state = self.document_state.lock().unwrap();
+            let record = match state.documents.get(&document.id) {
                 Some(existing) => {
                     let content_revision =
                         existing.content_revision.checked_add(1).ok_or_else(|| {
@@ -362,8 +412,143 @@ mod tests {
                     indexed_at: None,
                 },
             };
-            documents.insert(record.id, record.clone());
+            state.documents.insert(record.id, record.clone());
             Ok(record)
+        }
+        async fn upsert_document_and_enqueue_index(
+            &self,
+            document: &DocumentUpsert,
+            pipeline_fingerprint: &str,
+            max_attempts: i32,
+        ) -> Result<(DocumentRecord, DocumentJob)> {
+            if pipeline_fingerprint.is_empty()
+                || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
+                || max_attempts < 1
+                || document.media_type.is_empty()
+                || document.source_uri.as_deref() == Some("")
+                || document
+                    .project_id
+                    .is_some_and(|id| !self.projects.lock().unwrap().contains_key(&id))
+            {
+                return Err(AgentError::Store("invalid document job enqueue".into()));
+            }
+
+            let mut state = self.document_state.lock().unwrap();
+            if let Some(existing) = state.documents.get(&document.id).filter(|existing| {
+                existing.project_id == document.project_id
+                    && existing.source_uri == document.source_uri
+                    && existing.media_type == document.media_type
+                    && existing.title == document.title
+                    && existing.canonical_text == document.canonical_text
+            }) {
+                if let Some(job) = state.jobs.values().find(|job| {
+                    job.document_id == existing.id
+                        && job.content_revision == existing.content_revision
+                        && job.revision_token == existing.revision_token
+                        && job.kind == DocumentJobKind::Index
+                        && job.pipeline_fingerprint == pipeline_fingerprint
+                }) {
+                    return Ok((existing.clone(), job.clone()));
+                }
+            }
+
+            let workflow_now = chrono::Utc::now();
+            let record = match state.documents.get(&document.id) {
+                Some(existing) => DocumentRecord {
+                    id: document.id,
+                    project_id: document.project_id,
+                    source_uri: document.source_uri.clone(),
+                    media_type: document.media_type.clone(),
+                    title: document.title.clone(),
+                    canonical_text: document.canonical_text.clone(),
+                    content_revision: existing.content_revision.checked_add(1).ok_or_else(
+                        || AgentError::Store(format!("document {} revision overflow", document.id)),
+                    )?,
+                    revision_token: uuid::Uuid::new_v4(),
+                    processing_status: DocumentProcessingStatus::Queued,
+                    indexed_revision: None,
+                    index_fingerprint: None,
+                    created_at: existing.created_at,
+                    updated_at: document.updated_at,
+                    indexed_at: None,
+                },
+                None => DocumentRecord {
+                    id: document.id,
+                    project_id: document.project_id,
+                    source_uri: document.source_uri.clone(),
+                    media_type: document.media_type.clone(),
+                    title: document.title.clone(),
+                    canonical_text: document.canonical_text.clone(),
+                    content_revision: 1,
+                    revision_token: uuid::Uuid::new_v4(),
+                    processing_status: DocumentProcessingStatus::Queued,
+                    indexed_revision: None,
+                    index_fingerprint: None,
+                    created_at: document.updated_at,
+                    updated_at: document.updated_at,
+                    indexed_at: None,
+                },
+            };
+            state.documents.insert(record.id, record.clone());
+
+            for job in state.jobs.values_mut().filter(|job| {
+                job.document_id == record.id
+                    && matches!(
+                        job.status,
+                        DocumentJobStatus::Queued
+                            | DocumentJobStatus::Running
+                            | DocumentJobStatus::RetryWait
+                    )
+            }) {
+                job.status = DocumentJobStatus::Cancelled;
+                job.lease_token = None;
+                job.lease_expires_at = None;
+                job.finished_at = Some(workflow_now);
+                job.updated_at = workflow_now;
+            }
+            let job = DocumentJob {
+                id: DocumentJobId::new(),
+                document_id: record.id,
+                content_revision: record.content_revision,
+                revision_token: record.revision_token,
+                kind: DocumentJobKind::Index,
+                status: DocumentJobStatus::Queued,
+                pipeline_fingerprint: pipeline_fingerprint.into(),
+                attempt_count: 0,
+                max_attempts,
+                available_at: workflow_now,
+                lease_token: None,
+                lease_expires_at: None,
+                started_at: None,
+                finished_at: None,
+                last_error_code: None,
+                last_error_detail: None,
+                created_at: workflow_now,
+                updated_at: workflow_now,
+            };
+            state.jobs.insert(job.id, job.clone());
+            Ok((record, job))
+        }
+        async fn get_document_job(&self, id: DocumentJobId) -> Result<Option<DocumentJob>> {
+            Ok(self.document_state.lock().unwrap().jobs.get(&id).cloned())
+        }
+        async fn list_document_jobs(&self, document_id: DocumentId) -> Result<Vec<DocumentJob>> {
+            let mut jobs: Vec<_> = self
+                .document_state
+                .lock()
+                .unwrap()
+                .jobs
+                .values()
+                .filter(|job| job.document_id == document_id)
+                .cloned()
+                .collect();
+            jobs.sort_by(|left, right| {
+                left.content_revision
+                    .cmp(&right.content_revision)
+                    .then_with(|| left.created_at.cmp(&right.created_at))
+                    .then_with(|| left.id.0.cmp(&right.id.0))
+            });
+            Ok(jobs)
         }
         async fn mark_document_indexed(
             &self,
@@ -381,8 +566,8 @@ mod tests {
                     "document index fingerprint must contain 1 to 512 characters".into(),
                 ));
             }
-            let mut documents = self.documents.lock().unwrap();
-            let Some(document) = documents.get_mut(&id) else {
+            let mut state = self.document_state.lock().unwrap();
+            let Some(document) = state.documents.get_mut(&id) else {
                 return Ok(false);
             };
             if document.content_revision != revision || document.revision_token != revision_token {
@@ -400,8 +585,8 @@ mod tests {
             revision: i64,
             revision_token: uuid::Uuid,
         ) -> Result<bool> {
-            let mut documents = self.documents.lock().unwrap();
-            let Some(document) = documents.get_mut(&id) else {
+            let mut state = self.document_state.lock().unwrap();
+            let Some(document) = state.documents.get_mut(&id) else {
                 return Ok(false);
             };
             if document.content_revision != revision || document.revision_token != revision_token {
@@ -530,5 +715,33 @@ mod tests {
             block_on(store.get_setting("model")).unwrap(),
             Some(serde_json::json!("claude"))
         );
+
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///mem-store.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "atomic source and job".into(),
+            updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
+        };
+        let first =
+            block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)).unwrap();
+        let retry = DocumentUpsert {
+            updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(2, 0).unwrap(),
+            ..source.clone()
+        };
+        assert_eq!(
+            block_on(store.upsert_document_and_enqueue_index(&retry, "pipeline-v1", 3)).unwrap(),
+            first
+        );
+        assert_eq!(
+            block_on(store.list_document_jobs(source.id)).unwrap(),
+            vec![first.1.clone()]
+        );
+
+        block_on(store.delete_document(source.id)).unwrap();
+        assert_eq!(block_on(store.get_document(source.id)).unwrap(), None);
+        assert_eq!(block_on(store.get_document_job(first.1.id)).unwrap(), None);
     }
 }
