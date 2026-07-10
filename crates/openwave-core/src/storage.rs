@@ -22,8 +22,8 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
 use crate::model::{
-    Chat, DocumentJob, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSummaryRecord,
-    DocumentUpsert, Message, Project, ToolCallRecord,
+    Chat, DocumentJob, DocumentJobStatus, DocumentListCursor, DocumentRecord, DocumentScope,
+    DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
 };
 
 fn document_storage_unavailable<T>() -> Result<T> {
@@ -167,6 +167,38 @@ pub trait Store: Send + Sync {
         _now: chrono::DateTime<chrono::Utc>,
         _lease_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
+        document_storage_unavailable()
+    }
+
+    /// Atomically succeed a live index job and publish its exact document
+    /// revision as ready in the operational store.
+    ///
+    /// Returns `false` when the job is no longer running under the exact,
+    /// unexpired lease or its timestamp would regress durable state.
+    async fn complete_document_index_job(
+        &self,
+        _id: DocumentJobId,
+        _lease_token: uuid::Uuid,
+        _completed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        document_storage_unavailable()
+    }
+
+    /// Atomically record a live job failure and its matching document state.
+    ///
+    /// A future `retry_at` moves a job with attempts remaining to `retry_wait`
+    /// and its document to `queued`; no retry time, or an exhausted attempt
+    /// budget, moves both to terminal `failed`. Returns the resulting job status,
+    /// or `None` when the exact live lease no longer owns the job.
+    async fn record_document_job_failure(
+        &self,
+        _id: DocumentJobId,
+        _lease_token: uuid::Uuid,
+        _failed_at: chrono::DateTime<chrono::Utc>,
+        _retry_at: Option<chrono::DateTime<chrono::Utc>>,
+        _error_code: &str,
+        _error_detail: Option<&str>,
+    ) -> Result<Option<DocumentJobStatus>> {
         document_storage_unavailable()
     }
 
@@ -727,6 +759,132 @@ mod tests {
             job.updated_at = now;
             Ok(true)
         }
+        async fn complete_document_index_job(
+            &self,
+            id: DocumentJobId,
+            lease_token: uuid::Uuid,
+            completed_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<bool> {
+            let mut state = self.document_state.lock().unwrap();
+            let Some(candidate) = state.jobs.get(&id).cloned() else {
+                return Ok(false);
+            };
+            if candidate.status != DocumentJobStatus::Running
+                || candidate.lease_token != Some(lease_token)
+                || candidate
+                    .lease_expires_at
+                    .is_none_or(|expiry| expiry <= completed_at)
+                || candidate.updated_at > completed_at
+            {
+                return Ok(false);
+            }
+            let document_matches =
+                state
+                    .documents
+                    .get(&candidate.document_id)
+                    .is_some_and(|document| {
+                        document.content_revision == candidate.content_revision
+                            && document.revision_token == candidate.revision_token
+                            && document.processing_status == DocumentProcessingStatus::Processing
+                    });
+            if !document_matches {
+                return Err(AgentError::Store(format!(
+                    "running document job {} does not match its exact processing document {}",
+                    candidate.id, candidate.document_id
+                )));
+            }
+
+            let job = state.jobs.get_mut(&id).unwrap();
+            job.status = DocumentJobStatus::Succeeded;
+            job.lease_token = None;
+            job.lease_expires_at = None;
+            job.finished_at = Some(completed_at);
+            job.last_error_code = None;
+            job.last_error_detail = None;
+            job.updated_at = completed_at;
+            let document = state.documents.get_mut(&candidate.document_id).unwrap();
+            document.processing_status = DocumentProcessingStatus::Ready;
+            document.indexed_revision = Some(candidate.content_revision);
+            document.index_fingerprint = Some(candidate.pipeline_fingerprint);
+            document.indexed_at = Some(completed_at);
+            Ok(true)
+        }
+        async fn record_document_job_failure(
+            &self,
+            id: DocumentJobId,
+            lease_token: uuid::Uuid,
+            failed_at: chrono::DateTime<chrono::Utc>,
+            retry_at: Option<chrono::DateTime<chrono::Utc>>,
+            error_code: &str,
+            error_detail: Option<&str>,
+        ) -> Result<Option<DocumentJobStatus>> {
+            let code_len = error_code.chars().count();
+            if !(1..=DocumentJob::MAX_ERROR_CODE_LEN).contains(&code_len)
+                || error_detail.is_some_and(|detail| {
+                    !(1..=DocumentJob::MAX_ERROR_DETAIL_LEN).contains(&detail.chars().count())
+                })
+                || retry_at.is_some_and(|retry_at| retry_at <= failed_at)
+            {
+                return Err(AgentError::Store("invalid document job failure".into()));
+            }
+            let mut state = self.document_state.lock().unwrap();
+            let Some(candidate) = state.jobs.get(&id).cloned() else {
+                return Ok(None);
+            };
+            if candidate.status != DocumentJobStatus::Running
+                || candidate.lease_token != Some(lease_token)
+                || candidate
+                    .lease_expires_at
+                    .is_none_or(|expiry| expiry <= failed_at)
+                || candidate.updated_at > failed_at
+            {
+                return Ok(None);
+            }
+            let document_matches =
+                state
+                    .documents
+                    .get(&candidate.document_id)
+                    .is_some_and(|document| {
+                        document.content_revision == candidate.content_revision
+                            && document.revision_token == candidate.revision_token
+                            && document.processing_status == DocumentProcessingStatus::Processing
+                    });
+            if !document_matches {
+                return Err(AgentError::Store(format!(
+                    "running document job {} does not match its exact processing document {}",
+                    candidate.id, candidate.document_id
+                )));
+            }
+
+            let will_retry = retry_at.is_some() && candidate.attempt_count < candidate.max_attempts;
+            let status = if will_retry {
+                DocumentJobStatus::RetryWait
+            } else {
+                DocumentJobStatus::Failed
+            };
+            let job = state.jobs.get_mut(&id).unwrap();
+            job.status = status;
+            job.lease_token = None;
+            job.lease_expires_at = None;
+            job.last_error_code = Some(error_code.to_owned());
+            job.last_error_detail = error_detail.map(str::to_owned);
+            job.updated_at = failed_at;
+            if let Some(retry_at) = retry_at.filter(|_| will_retry) {
+                job.available_at = retry_at;
+            } else {
+                job.finished_at = Some(failed_at);
+            }
+            state
+                .documents
+                .get_mut(&candidate.document_id)
+                .unwrap()
+                .processing_status = if will_retry {
+                DocumentProcessingStatus::Queued
+            } else {
+                DocumentProcessingStatus::Failed
+            };
+            Ok(Some(status))
+        }
         async fn mark_document_indexed(
             &self,
             id: DocumentId,
@@ -931,9 +1089,43 @@ mod tests {
             extended,
         ))
         .unwrap());
+        assert!(block_on(store.complete_document_index_job(
+            claimed.id,
+            claimed.lease_token.unwrap(),
+            claim_at + chrono::Duration::minutes(2),
+        ))
+        .unwrap());
 
         block_on(store.delete_document(source.id)).unwrap();
         assert_eq!(block_on(store.get_document(source.id)).unwrap(), None);
         assert_eq!(block_on(store.get_document_job(first.1.id)).unwrap(), None);
+
+        let retry_source = DocumentUpsert {
+            id: DocumentId::new(),
+            canonical_text: "retry state".into(),
+            ..source
+        };
+        let (_, retry_job) =
+            block_on(store.upsert_document_and_enqueue_index(&retry_source, "pipeline-v1", 2))
+                .unwrap();
+        let retry_claim_at = retry_job.available_at + chrono::Duration::seconds(1);
+        let retry_claim = block_on(store.claim_document_job(
+            retry_claim_at,
+            retry_claim_at + chrono::Duration::minutes(5),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            block_on(store.record_document_job_failure(
+                retry_claim.id,
+                retry_claim.lease_token.unwrap(),
+                retry_claim_at + chrono::Duration::minutes(1),
+                Some(retry_claim_at + chrono::Duration::minutes(2)),
+                "timeout",
+                None,
+            ))
+            .unwrap(),
+            Some(DocumentJobStatus::RetryWait)
+        );
     }
 }

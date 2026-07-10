@@ -765,6 +765,36 @@ mod tests {
                 .heartbeat_document_job(id, lease_token, now, lease_expires_at)
                 .await
         }
+        async fn complete_document_index_job(
+            &self,
+            id: openwave_core::DocumentJobId,
+            lease_token: uuid::Uuid,
+            completed_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<bool> {
+            self.inner
+                .complete_document_index_job(id, lease_token, completed_at)
+                .await
+        }
+        async fn record_document_job_failure(
+            &self,
+            id: openwave_core::DocumentJobId,
+            lease_token: uuid::Uuid,
+            failed_at: chrono::DateTime<chrono::Utc>,
+            retry_at: Option<chrono::DateTime<chrono::Utc>>,
+            error_code: &str,
+            error_detail: Option<&str>,
+        ) -> Result<Option<openwave_core::DocumentJobStatus>> {
+            self.inner
+                .record_document_job_failure(
+                    id,
+                    lease_token,
+                    failed_at,
+                    retry_at,
+                    error_code,
+                    error_detail,
+                )
+                .await
+        }
         async fn mark_document_indexed(
             &self,
             id: openwave_core::DocumentId,
