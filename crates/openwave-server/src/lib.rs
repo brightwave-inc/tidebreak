@@ -17,6 +17,7 @@ mod bus;
 mod error;
 mod extract;
 mod hub;
+mod index_repair;
 mod provider;
 mod providers;
 mod resolver;
@@ -25,6 +26,7 @@ mod state;
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::{header, Method};
 use axum::routing::{get, post};
@@ -135,6 +137,15 @@ pub struct Server {
     token: Arc<str>,
     listener: TcpListener,
     router: Router,
+    _index_repair: AbortTask,
+}
+
+struct AbortTask(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Server {
@@ -181,6 +192,10 @@ pub async fn bind(config: Config) -> Result<Server> {
         agent_config,
     );
     let token = state.token.clone();
+    let repair_store = state.store.clone();
+    let repair_retrieval = state.retrieval.clone();
+    let repair_writes = state.document_writes.clone();
+    let repair_wake = state.index_repair_wake.clone();
     let router = app(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -190,11 +205,68 @@ pub async fn bind(config: Config) -> Result<Server> {
         .local_addr()
         .map_err(|e| AgentError::config(format!("no local address: {e}")))?;
 
+    let index_repair = tokio::spawn(async move {
+        let mut repairer = index_repair::IndexRepairer::default();
+        let mut failure_delay = Duration::from_secs(60);
+        loop {
+            let retry_soon = match repairer
+                .repair(
+                    repair_store.clone(),
+                    repair_retrieval.clone(),
+                    repair_writes.clone(),
+                )
+                .await
+            {
+                Ok(report) => {
+                    let retry_soon = !report.failures.is_empty();
+                    if report.repaired > 0 || retry_soon {
+                        eprintln!(
+                            "openwave: document index repair scanned {}, repaired {}, skipped {}, failed {}",
+                            report.scanned,
+                            report.repaired,
+                            report.skipped,
+                            report.failures.len()
+                        );
+                        for failure in report.failures {
+                            eprintln!(
+                                "openwave: document index repair failed for {}: {}",
+                                failure.document_id, failure.error
+                            );
+                        }
+                    }
+                    retry_soon
+                }
+                Err(error) => {
+                    eprintln!("openwave: document index repair scan failed: {error}");
+                    true
+                }
+            };
+            let base_delay = if retry_soon {
+                let delay = failure_delay;
+                failure_delay = failure_delay
+                    .saturating_mul(5)
+                    .min(Duration::from_secs(6 * 60 * 60));
+                delay
+            } else {
+                failure_delay = Duration::from_secs(60);
+                Duration::from_secs(6 * 60 * 60)
+            };
+            let jitter_bound = (base_delay.as_secs() / 10).max(1);
+            let jitter = (uuid::Uuid::new_v4().as_u128() % u128::from(jitter_bound)) as u64;
+            let delay = base_delay.saturating_add(Duration::from_secs(jitter));
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = repair_wake.notified() => {}
+            }
+        }
+    });
+
     Ok(Server {
         local_addr,
         token,
         listener,
         router,
+        _index_repair: AbortTask(index_repair),
     })
 }
 
@@ -579,6 +651,7 @@ mod tests {
         release: Arc<Notify>,
         blocked: std::sync::atomic::AtomicBool,
         fail_document_delete: std::sync::atomic::AtomicBool,
+        fail_document_mark: std::sync::atomic::AtomicBool,
     }
 
     impl PauseTerminalStore {
@@ -589,11 +662,16 @@ mod tests {
                 release,
                 blocked: std::sync::atomic::AtomicBool::new(false),
                 fail_document_delete: std::sync::atomic::AtomicBool::new(false),
+                fail_document_mark: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
         fn fail_next_document_delete(&self) {
             self.fail_document_delete.store(true, Ordering::SeqCst);
+        }
+
+        fn fail_next_document_mark(&self) {
+            self.fail_document_mark.store(true, Ordering::SeqCst);
         }
     }
 
@@ -655,6 +733,11 @@ mod tests {
             fingerprint: &str,
             indexed_at: chrono::DateTime<chrono::Utc>,
         ) -> Result<bool> {
+            if self.fail_document_mark.swap(false, Ordering::SeqCst) {
+                return Err(AgentError::Store(
+                    "injected document watermark failure".into(),
+                ));
+            }
             self.inner
                 .mark_document_indexed(id, revision, revision_token, fingerprint, indexed_at)
                 .await
@@ -749,6 +832,42 @@ mod tests {
             .unwrap(),
         );
         test_app_from_parts(provider, retrieval, store, dir)
+    }
+
+    async fn test_app_with_retrieval_and_wake(
+        provider: Arc<dyn ModelProvider>,
+        retrieval: Arc<Retriever>,
+    ) -> (
+        Router,
+        Arc<str>,
+        Arc<dyn Store>,
+        tempfile::TempDir,
+        Arc<Notify>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let state = AppState::new(
+            Config::desktop(dir.path()),
+            store.clone(),
+            Arc::new(FixedResolver(provider)),
+            Arc::new(MemSecrets::default()),
+            Arc::new(ToolRegistry::new()),
+            retrieval,
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        );
+        let token = state.token.clone();
+        let wake = state.index_repair_wake.clone();
+        (app(state), token, store, dir, wake)
     }
 
     fn test_app_from_parts(
@@ -1130,8 +1249,8 @@ mod tests {
             Arc::new(FailingEmbedder),
             Arc::new(InMemoryVectorStore::new(8)),
         ));
-        let (router, token, store, _dir) =
-            test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
+        let (router, token, store, _dir, repair_wake) =
+            test_app_with_retrieval_and_wake(Arc::new(FakeProvider), retrieval).await;
         let bearer = format!("Bearer {token}");
 
         let response = post_json(
@@ -1158,6 +1277,9 @@ mod tests {
         assert_eq!(record.content_revision, 1);
         assert_eq!(record.indexed_revision, None);
         assert_eq!(record.index_fingerprint, None);
+        tokio::time::timeout(Duration::from_millis(100), repair_wake.notified())
+            .await
+            .expect("failed live ingest should wake index repair");
     }
 
     #[tokio::test]
@@ -1505,6 +1627,289 @@ mod tests {
         }
 
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn index_repair_rebuilds_missing_rows_despite_a_current_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("repair.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let retrieval = Arc::new(Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::default()),
+            Arc::new(HashEmbedder::default()),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        ));
+        let writes = Arc::new(crate::state::DocumentWriteGuard::default());
+        let upsert = openwave_core::DocumentUpsert {
+            id: openwave_core::DocumentId::derive("file:///repair.txt"),
+            project_id: None,
+            source_uri: Some("file:///repair.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "repair this durable source".into(),
+            updated_at: chrono::Utc::now(),
+        };
+        let revision = store.upsert_document(&upsert).await.unwrap();
+        let fingerprint = retrieval.index_fingerprint();
+        assert!(store
+            .mark_document_indexed(
+                revision.id,
+                revision.content_revision,
+                revision.revision_token,
+                &fingerprint,
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap());
+
+        let report =
+            index_repair::repair_document_index(store.clone(), retrieval.clone(), writes.clone())
+                .await
+                .unwrap();
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.repaired, 1);
+        assert_eq!(report.skipped, 0);
+        assert!(report.failures.is_empty());
+        let repaired = store.get_document(revision.id).await.unwrap().unwrap();
+        assert_eq!(repaired.indexed_revision, Some(1));
+        assert_eq!(
+            repaired.index_fingerprint.as_deref(),
+            Some(fingerprint.as_str())
+        );
+        let hits = retrieval.search("durable source", 1).await.unwrap();
+        assert_eq!(hits[0].document_id, revision.id);
+
+        let second = index_repair::repair_document_index(store, retrieval, writes)
+            .await
+            .unwrap();
+        assert_eq!(second.scanned, 1);
+        assert_eq!(second.repaired, 0);
+        assert_eq!(second.skipped, 1);
+        assert!(second.failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn index_repair_invalidates_all_stale_rows_before_embedding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("repair-invalidation.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let vectors = Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS));
+        let seed_retrieval = Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::default()),
+            Arc::new(HashEmbedder::default()),
+            vectors.clone(),
+        );
+        let mut revisions = Vec::new();
+        for (id, text) in [
+            (openwave_core::DocumentId::new(), "first stale source"),
+            (openwave_core::DocumentId::new(), "second stale source"),
+        ] {
+            let revision = store
+                .upsert_document(&openwave_core::DocumentUpsert {
+                    id,
+                    project_id: None,
+                    source_uri: None,
+                    media_type: "text/plain".into(),
+                    title: None,
+                    canonical_text: text.into(),
+                    updated_at: chrono::Utc::now(),
+                })
+                .await
+                .unwrap();
+            let document = openwave_retrieval::Document::with_id(
+                id,
+                openwave_retrieval::DocumentSource::Inline,
+                "text/plain",
+                text,
+            );
+            seed_retrieval.index_document(&document).await.unwrap();
+            assert!(store
+                .mark_document_indexed(
+                    id,
+                    revision.content_revision,
+                    revision.revision_token,
+                    "obsolete-pipeline",
+                    chrono::Utc::now(),
+                )
+                .await
+                .unwrap());
+            revisions.push(revision);
+        }
+
+        let embedder = Arc::new(FirstBatchGatedEmbedder {
+            inner: HashEmbedder::default(),
+            calls: AtomicUsize::new(0),
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let retrieval = Arc::new(Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::default()),
+            embedder.clone(),
+            vectors.clone(),
+        ));
+        let repair = tokio::spawn(index_repair::repair_document_index(
+            store,
+            retrieval,
+            Arc::new(crate::state::DocumentWriteGuard::default()),
+        ));
+        tokio::time::timeout(Duration::from_secs(1), embedder.entered.notified())
+            .await
+            .expect("repair did not reach embedding");
+
+        for revision in &revisions {
+            assert_eq!(vectors.document_len(revision.id).await.unwrap(), Some(0));
+        }
+        embedder.release.notify_one();
+        let report = repair.await.unwrap().unwrap();
+        assert_eq!(report.repaired, 2);
+        assert!(report.failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn index_repair_isolates_document_failures_and_keeps_them_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("repair-failure.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let retrieval = Arc::new(Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::default()),
+            Arc::new(FailingEmbedder),
+            Arc::new(InMemoryVectorStore::new(8)),
+        ));
+        let revision = store
+            .upsert_document(&openwave_core::DocumentUpsert {
+                id: openwave_core::DocumentId::new(),
+                project_id: None,
+                source_uri: None,
+                media_type: "text/plain".into(),
+                title: None,
+                canonical_text: "retry later".into(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let report = index_repair::repair_document_index(
+            store.clone(),
+            retrieval,
+            Arc::new(crate::state::DocumentWriteGuard::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.repaired, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].document_id, revision.id);
+        assert!(report.failures[0]
+            .error
+            .contains("injected embedding failure"));
+        assert_eq!(
+            store
+                .get_document(revision.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .indexed_revision,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn index_repair_retries_a_pending_watermark_without_reembedding() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("repair-watermark.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let store = Arc::new(PauseTerminalStore::new(
+            inner,
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+        ));
+        let embedder = Arc::new(FailAfterFirstBatchEmbedder {
+            inner: HashEmbedder::default(),
+            calls: AtomicUsize::new(0),
+        });
+        let retrieval = Arc::new(Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::default()),
+            embedder.clone(),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        ));
+        let revision = store
+            .upsert_document(&openwave_core::DocumentUpsert {
+                id: openwave_core::DocumentId::new(),
+                project_id: None,
+                source_uri: None,
+                media_type: "text/plain".into(),
+                title: None,
+                canonical_text: "embed exactly once".into(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        store.fail_next_document_mark();
+        let writes = Arc::new(crate::state::DocumentWriteGuard::default());
+        let mut repairer = index_repair::IndexRepairer::default();
+
+        let first = repairer
+            .repair(store.clone(), retrieval.clone(), writes.clone())
+            .await
+            .unwrap();
+        assert_eq!(first.repaired, 0);
+        assert_eq!(first.failures.len(), 1);
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .get_document(revision.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .indexed_revision,
+            None
+        );
+
+        let second = repairer
+            .repair(store.clone(), retrieval, writes)
+            .await
+            .unwrap();
+        assert_eq!(second.repaired, 1);
+        assert!(second.failures.is_empty());
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .get_document(revision.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .indexed_revision,
+            Some(revision.content_revision)
+        );
     }
 
     #[tokio::test]

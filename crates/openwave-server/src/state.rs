@@ -8,7 +8,7 @@ use openwave_core::{
     ToolRegistry,
 };
 use openwave_retrieval::Retriever;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard};
 use uuid::Uuid;
 
 use crate::approvals::ApprovalBroker;
@@ -39,6 +39,9 @@ pub struct AppState {
     /// Serializes source, index, and watermark writes for one document while
     /// allowing unrelated documents to ingest concurrently.
     pub document_writes: Arc<DocumentWriteGuard>,
+    /// Wakes the background reconciler when a live document operation leaves
+    /// authoritative source in a stale, rebuildable state.
+    pub(crate) index_repair_wake: Arc<Notify>,
     /// Per-turn agent tuning (model, limits, …).
     pub agent_config: AgentConfig,
     /// The secret every request must present as `Authorization: Bearer <token>`.
@@ -72,6 +75,7 @@ impl AppState {
             tools,
             retrieval,
             document_writes: Arc::new(DocumentWriteGuard::default()),
+            index_repair_wake: Arc::new(Notify::new()),
             agent_config,
             token: Uuid::new_v4().to_string().into(),
             active_turns: Arc::new(TurnGuard::default()),

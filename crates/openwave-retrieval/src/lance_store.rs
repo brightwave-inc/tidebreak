@@ -296,6 +296,14 @@ impl VectorStore for LanceVectorStore {
         Ok(())
     }
 
+    async fn document_len(&self, document_id: DocumentId) -> Result<Option<usize>> {
+        self.table
+            .count_rows(Some(format!("document_id = '{document_id}'")))
+            .await
+            .map(Some)
+            .map_err(lance_err)
+    }
+
     async fn len(&self) -> Result<usize> {
         self.table.count_rows(None).await.map_err(lance_err)
     }
@@ -433,6 +441,11 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(store.len().await.unwrap(), 2);
+            assert_eq!(store.document_len(doc).await.unwrap(), Some(2));
+            assert_eq!(
+                store.document_len(DocumentId::new()).await.unwrap(),
+                Some(0)
+            );
 
             // Nearest to "east" is the east vector, with its span/text intact.
             let hits = store.query(&Embedding(vec![1.0, 0.0]), 1).await.unwrap();

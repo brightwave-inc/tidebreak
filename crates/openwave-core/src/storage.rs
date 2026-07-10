@@ -81,6 +81,19 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
+    /// List document ids in `scope` without requiring canonical content.
+    ///
+    /// The default preserves compatibility for external stores; database-backed
+    /// implementations should project only the id column for maintenance scans.
+    async fn list_document_ids(&self, scope: DocumentScope) -> Result<Vec<DocumentId>> {
+        Ok(self
+            .list_documents(scope)
+            .await?
+            .into_iter()
+            .map(|document| document.id)
+            .collect())
+    }
+
     /// Delete an authoritative document record. Idempotent for unknown ids.
     async fn delete_document(&self, _id: DocumentId) -> Result<()> {
         document_storage_unavailable()

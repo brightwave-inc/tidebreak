@@ -59,7 +59,10 @@ pub struct DocumentRecord {
     pub revision_token: Uuid,
     /// Revision currently represented in the retrieval index, if any.
     pub indexed_revision: Option<i64>,
-    /// Canonical-text/chunker/embedder fingerprint for the indexed revision.
+    /// Chunker/embedder fingerprint for the indexed revision.
+    ///
+    /// Parser provenance is separate because reparsing requires original source
+    /// bytes; canonical text alone can only be rechunked and re-embedded.
     pub index_fingerprint: Option<String>,
     /// When this record was first created.
     pub created_at: DateTime<Utc>,

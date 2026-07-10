@@ -61,6 +61,16 @@ pub trait VectorStore: Send + Sync {
         records: Vec<VectorRecord>,
     ) -> Result<()>;
 
+    /// Count physically stored chunks for one document when the backend can do
+    /// so efficiently.
+    ///
+    /// `None` means coverage cannot be verified; repair callers should then act
+    /// conservatively rather than treating a catalog watermark as proof that
+    /// derived rows still exist.
+    async fn document_len(&self, _document_id: DocumentId) -> Result<Option<usize>> {
+        Ok(None)
+    }
+
     /// The number of records currently stored.
     async fn len(&self) -> Result<usize>;
 
@@ -187,6 +197,19 @@ impl VectorStore for InMemoryVectorStore {
         Ok(())
     }
 
+    async fn document_len(&self, document_id: DocumentId) -> Result<Option<usize>> {
+        let store = self
+            .records
+            .read()
+            .map_err(|_| RetrievalError::vector_store("in-memory store lock poisoned"))?;
+        Ok(Some(
+            store
+                .iter()
+                .filter(|record| record.chunk.document_id == document_id)
+                .count(),
+        ))
+    }
+
     async fn len(&self) -> Result<usize> {
         let store = self
             .records
@@ -279,6 +302,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.len().await.unwrap(), 1);
+        assert_eq!(store.document_len(doc).await.unwrap(), Some(1));
+        assert_eq!(
+            store.document_len(DocumentId::new()).await.unwrap(),
+            Some(0)
+        );
         // The second upsert's vector won.
         let hits = store.query(&Embedding(vec![0.0, 1.0]), 1).await.unwrap();
         assert!((hits[0].score - 1.0).abs() < 1e-6);

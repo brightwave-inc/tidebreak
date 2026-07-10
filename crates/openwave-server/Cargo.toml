@@ -15,7 +15,7 @@ openwave-core = { path = "../openwave-core", default-features = false, features 
 openwave-router = { path = "../openwave-router" }
 openwave-retrieval = { path = "../openwave-retrieval", features = ["vec-lance"] }
 axum = { workspace = true }
-tokio = { workspace = true, features = ["net", "rt", "sync", "macros"] }
+tokio = { workspace = true, features = ["net", "rt", "sync", "macros", "time"] }
 tower-http = { version = "0.6", features = ["cors"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
