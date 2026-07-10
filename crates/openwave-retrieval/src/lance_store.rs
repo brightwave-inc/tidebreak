@@ -50,19 +50,42 @@ impl LanceVectorStore {
     /// Open (or create) a LanceDB-backed store at `uri` for vectors of `dims`.
     ///
     /// `uri` is a local directory path; it's created if missing, and an existing
-    /// dataset there is reopened (that's what makes the index durable). The `dims`
-    /// must match the dataset's existing vector column when reopening.
+    /// dataset there is reopened (that's what makes the index durable).
+    ///
+    /// **Embedder-change guardrail:** if an existing table's vector width doesn't
+    /// match `dims` (e.g. the configured embedder changed — offline 256-dim vs
+    /// OpenAI 1536-dim), the old table is dropped and recreated empty. The index is
+    /// derived data (re-embeddable from source documents), so rebuilding is the
+    /// safe response to a dimensionality change rather than erroring every write.
     pub async fn connect(uri: &str, dims: usize) -> Result<Self> {
         let schema = build_schema(dims);
         let db = lancedb::connect(uri).execute().await.map_err(lance_err)?;
         let names = db.table_names().execute().await.map_err(lance_err)?;
-        let table = if names.iter().any(|n| n == TABLE) {
-            db.open_table(TABLE).execute().await.map_err(lance_err)?
+
+        let existing_dims = if names.iter().any(|n| n == TABLE) {
+            let table = db.open_table(TABLE).execute().await.map_err(lance_err)?;
+            vector_dim(&table.schema().await.map_err(lance_err)?)
         } else {
-            db.create_empty_table(TABLE, schema.clone())
+            None
+        };
+
+        let table = match existing_dims {
+            Some(existing) if existing == dims => {
+                db.open_table(TABLE).execute().await.map_err(lance_err)?
+            }
+            Some(_) => {
+                // Incompatible width: drop and start fresh.
+                db.drop_table(TABLE, &[]).await.map_err(lance_err)?;
+                db.create_empty_table(TABLE, schema.clone())
+                    .execute()
+                    .await
+                    .map_err(lance_err)?
+            }
+            None => db
+                .create_empty_table(TABLE, schema.clone())
                 .execute()
                 .await
-                .map_err(lance_err)?
+                .map_err(lance_err)?,
         };
         Ok(Self {
             table,
@@ -134,9 +157,12 @@ impl VectorStore for LanceVectorStore {
         for record in &records {
             self.check_dims(&record.embedding)?;
         }
-        // Delete any existing rows with these chunk ids, then append — the
-        // delete-then-insert upsert. Chunk ids are UUIDs (hex + hyphens only), so
+        // Collapse duplicate chunk ids within the batch (last wins) so this backend
+        // matches InMemoryVectorStore's by-id dedupe — appending blindly would
+        // otherwise leave two rows for one chunk. Then delete any existing rows with
+        // these ids and append. Chunk ids are UUIDs (hex + hyphens only), so
         // interpolating them into the SQL predicate is injection-safe.
+        let records = dedupe_by_chunk_id(records);
         let ids: Vec<String> = records
             .iter()
             .map(|r| format!("'{}'", r.chunk.id))
@@ -182,10 +208,15 @@ impl VectorStore for LanceVectorStore {
         for record in &records {
             self.check_dims(&record.embedding)?;
         }
-        // Delete the document's rows, then append the new ones. LanceDB commits
-        // each op as a dataset version; unlike the in-memory store this isn't a
-        // single atomic write, so concurrent replaces of the *same* document
-        // should be serialized by the caller (the server ingests per request).
+        let records = dedupe_by_chunk_id(records);
+        // Delete the document's rows, then append the new ones. This is NOT a
+        // single atomic write: LanceDB commits the delete and the append as
+        // separate dataset versions, so (a) a concurrent `query` landing between
+        // them sees the document as empty, and (b) if the append fails after the
+        // delete commits (I/O error, cancellation), the document's old chunks are
+        // gone with nothing to replace them — data loss until the next successful
+        // re-ingest, not a mix of versions. Callers must serialize re-ingests of
+        // the same document (the server ingests one request at a time).
         self.table
             .delete(&format!("document_id = '{document_id}'"))
             .await
@@ -196,6 +227,33 @@ impl VectorStore for LanceVectorStore {
     async fn len(&self) -> Result<usize> {
         self.table.count_rows(None).await.map_err(lance_err)
     }
+}
+
+/// Collapse records with the same chunk id to the last occurrence, preserving
+/// first-seen order — so a batch carrying a duplicate id stores one row, not two.
+fn dedupe_by_chunk_id(records: Vec<VectorRecord>) -> Vec<VectorRecord> {
+    let mut index = std::collections::HashMap::new();
+    let mut out: Vec<VectorRecord> = Vec::with_capacity(records.len());
+    for record in records {
+        if let Some(&i) = index.get(&record.chunk.id) {
+            out[i] = record;
+        } else {
+            index.insert(record.chunk.id, out.len());
+            out.push(record);
+        }
+    }
+    out
+}
+
+/// The vector column's fixed width in a table schema, if present.
+fn vector_dim(schema: &SchemaRef) -> Option<usize> {
+    schema
+        .field_with_name(VECTOR_COL)
+        .ok()
+        .and_then(|field| match field.data_type() {
+            DataType::FixedSizeList(_, size) => Some(*size as usize),
+            _ => None,
+        })
 }
 
 /// The table schema: scalar citation columns plus the fixed-width vector column.
@@ -326,6 +384,54 @@ mod tests {
         assert_eq!(reopened.len().await.unwrap(), 1);
         let hits = reopened.query(&Embedding(vec![1.0, 0.0]), 5).await.unwrap();
         assert_eq!(hits[0].chunk.text, "south");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_paths_dedupe_same_chunk_id_within_a_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let doc = DocumentId::new();
+        // Two records with the same derived chunk id (same span) => one row, last wins.
+        let a = record(doc, 0, "old", vec![1.0, 0.0]);
+        let b = record(doc, 0, "new", vec![0.0, 1.0]);
+        assert_eq!(a.chunk.id, b.chunk.id);
+
+        store.upsert(vec![a.clone(), b.clone()]).await.unwrap();
+        assert_eq!(store.len().await.unwrap(), 1);
+
+        store.replace_document(doc, vec![a, b]).await.unwrap();
+        assert_eq!(store.len().await.unwrap(), 1);
+        let hits = store.query(&Embedding(vec![0.0, 1.0]), 5).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.text, "new");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reopening_with_different_dims_rebuilds_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().to_str().unwrap();
+
+        // Fill a 2-dim index.
+        {
+            let store = LanceVectorStore::connect(uri, 2).await.unwrap();
+            store
+                .upsert(vec![record(DocumentId::new(), 0, "a", vec![1.0, 0.0])])
+                .await
+                .unwrap();
+            assert_eq!(store.len().await.unwrap(), 1);
+        }
+        // Reopen with a different width (embedder changed) — old data is dropped,
+        // and the store accepts the new width instead of erroring.
+        let store = LanceVectorStore::connect(uri, 3).await.unwrap();
+        assert_eq!(store.dimensions(), 3);
+        assert!(store.is_empty().await.unwrap());
+        store
+            .upsert(vec![record(DocumentId::new(), 0, "b", vec![1.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+        assert_eq!(store.len().await.unwrap(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
