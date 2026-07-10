@@ -356,6 +356,17 @@ pub async fn ingest_document(
     ))
 }
 
+/// `DELETE /documents/{id}` — remove a document and its chunks from the index
+/// (`204 No Content`). Idempotent: deleting an unknown or already-removed document
+/// still returns `204`. `id` is the `document_id` returned by `POST /documents`.
+pub async fn delete_document(
+    State(state): State<AppState>,
+    Path(id): Path<DocumentId>,
+) -> Result<StatusCode, ServerError> {
+    state.retrieval.delete(id).await.map_err(retrieval_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Body of `POST /search`.
 #[derive(Debug, Deserialize)]
 pub struct SearchRequest {

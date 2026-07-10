@@ -125,6 +125,12 @@ impl Retriever {
         let hits = self.store.query(&embedding, k).await?;
         Ok(hits.into_iter().map(Citation::from).collect())
     }
+
+    /// Remove a document and all its chunks from the index. Idempotent — deleting a
+    /// document that was never ingested (or already removed) is a no-op.
+    pub async fn delete(&self, document_id: DocumentId) -> Result<()> {
+        self.store.replace_document(document_id, Vec::new()).await
+    }
 }
 
 #[cfg(test)]
@@ -289,6 +295,26 @@ The Great Barrier Reef is the world's largest coral reef system.";
         let out = r.ingest(uri(), "text/plain", b"   ").await.unwrap();
         assert_eq!(out.chunks, 0);
         assert!(r.store().is_empty().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn delete_removes_a_documents_chunks_and_is_idempotent() {
+        let r = retriever();
+        let outcome = r
+            .ingest(
+                DocumentSource::uri("file:///doc.txt"),
+                "text/plain",
+                b"alpha beta gamma delta epsilon",
+            )
+            .await
+            .unwrap();
+        assert!(r.store().len().await.unwrap() > 0);
+
+        r.delete(outcome.document.id).await.unwrap();
+        assert!(r.store().is_empty().await.unwrap());
+        // Deleting again (or an unknown document) is a no-op, not an error.
+        r.delete(outcome.document.id).await.unwrap();
+        r.delete(DocumentId::new()).await.unwrap();
     }
 
     #[tokio::test]

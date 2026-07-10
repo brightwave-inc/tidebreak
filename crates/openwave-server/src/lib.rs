@@ -71,6 +71,10 @@ pub fn app(state: AppState) -> Router {
             axum::routing::delete(routes::delete_provider_credential),
         )
         .route("/documents", post(routes::ingest_document))
+        .route(
+            "/documents/{id}",
+            axum::routing::delete(routes::delete_document),
+        )
         .route("/search", post(routes::search_documents))
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route(
@@ -885,6 +889,58 @@ mod tests {
             .unwrap()
             .contains("Jupiter"));
         assert_eq!(citations[0]["document_id"], ingest["document_id"]);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_document_removes_it_from_the_index() {
+        let (router, token, _store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let ingest: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/documents",
+                serde_json::json!({ "uri": "file:///doc.txt", "content": "Jupiter is a gas giant." }),
+            )
+            .await,
+        )
+        .await;
+        let id = ingest["document_id"].as_str().unwrap().to_string();
+
+        let delete = |id: String| {
+            let router = router.clone();
+            let bearer = bearer.clone();
+            async move {
+                router
+                    .oneshot(
+                        Request::builder()
+                            .method("DELETE")
+                            .uri(format!("/documents/{id}"))
+                            .header(header::AUTHORIZATION, &bearer)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        assert_eq!(delete(id.clone()).await, StatusCode::NO_CONTENT);
+        // Gone from the index.
+        let results: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/search",
+                serde_json::json!({ "query": "gas giant" }),
+            )
+            .await,
+        )
+        .await;
+        assert!(results["citations"].as_array().unwrap().is_empty());
+        // Idempotent: deleting again is still 204.
+        assert_eq!(delete(id).await, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
