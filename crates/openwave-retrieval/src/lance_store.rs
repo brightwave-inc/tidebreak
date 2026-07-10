@@ -18,19 +18,25 @@
 
 use std::fs::{File, OpenOptions};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arrow_array::types::Float32Type;
 use arrow_array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
-    RecordBatchIterator, StringArray, UInt64Array,
+    RecordBatchIterator, StringArray, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use arrow_select::take::take;
 use async_trait::async_trait;
 use futures::TryStreamExt;
+use lancedb::index::scalar::FullTextSearchQuery;
+use lancedb::index::{Index, IndexType};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::rerankers::Reranker;
+use lancedb::table::{OptimizeAction, OptimizeOptions};
 use lancedb::{DistanceType, Table};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use crate::document::{ByteSpan, Chunk, ScoredChunk};
 use crate::embed::Embedding;
@@ -47,6 +53,8 @@ const TABLE: &str = "chunks";
 const VECTOR_COL: &str = "vector";
 /// LanceDB's distance column on query results.
 const DISTANCE_COL: &str = "_distance";
+const RELEVANCE_COL: &str = "_relevance_score";
+const INDEX_MUTATION_THRESHOLD: usize = 20;
 const UNVERSIONED_CHUNK: &str = "unversioned_chunk";
 const STAGED_CHUNK: &str = "staged_chunk";
 const ACTIVE_CHUNK: &str = "active_chunk";
@@ -57,14 +65,95 @@ const VISIBLE_CHUNKS: &str = "row_kind IN ('unversioned_chunk', 'active_chunk')"
 /// A persistent [`VectorStore`] backed by a local LanceDB dataset.
 ///
 /// One instance serializes every mutation so marker reads and their following
-/// merge commit form one coordinator operation. An exclusive lock file enforces
-/// one writer instance per dataset across handles and processes.
+/// merge commit form one coordinator operation. Queries share a read guard so
+/// Lance's lexical and dense branches observe one publication snapshot while
+/// still running concurrently with other queries. An exclusive lock file
+/// enforces one writer instance per dataset across handles and processes.
 pub struct LanceVectorStore {
     table: Table,
     schema: SchemaRef,
     dims: usize,
-    write_lock: Mutex<()>,
+    publication_lock: RwLock<()>,
+    text_index_name: String,
+    index_mutations: AtomicUsize,
     _writer_lock: File,
+}
+
+/// Conventional RRF(k=60) with a stable chunk-id secondary order.
+#[derive(Debug)]
+struct DeterministicRrf;
+
+fn hybrid_row_ids(batch: &RecordBatch) -> lancedb::Result<&UInt64Array> {
+    batch
+        .column_by_name("_rowid")
+        .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| lancedb::Error::InvalidInput {
+            message: "hybrid candidate is missing _rowid".to_string(),
+        })
+}
+
+#[async_trait]
+impl Reranker for DeterministicRrf {
+    async fn rerank_hybrid(
+        &self,
+        _query: &str,
+        vector_results: RecordBatch,
+        fts_results: RecordBatch,
+    ) -> lancedb::Result<RecordBatch> {
+        let mut scores = std::collections::BTreeMap::new();
+        for (position, row_id) in hybrid_row_ids(&vector_results)?.values().iter().enumerate() {
+            *scores.entry(*row_id).or_insert(0.0) += 1.0 / (61.0 + position as f32);
+        }
+        for (position, row_id) in hybrid_row_ids(&fts_results)?.values().iter().enumerate() {
+            *scores.entry(*row_id).or_insert(0.0) += 1.0 / (61.0 + position as f32);
+        }
+
+        let combined = self.merge_results(vector_results, fts_results)?;
+        let combined_row_ids = hybrid_row_ids(&combined)?;
+        let chunk_ids = combined
+            .column_by_name("chunk_id")
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| lancedb::Error::InvalidInput {
+                message: "hybrid candidate is missing chunk_id".to_string(),
+            })?;
+        let parsed_chunk_ids = (0..combined.num_rows())
+            .map(|index| {
+                chunk_ids.value(index).parse::<ChunkId>().map_err(|error| {
+                    lancedb::Error::InvalidInput {
+                        message: format!("hybrid candidate has invalid chunk_id: {error}"),
+                    }
+                })
+            })
+            .collect::<lancedb::Result<Vec<_>>>()?;
+        let relevance = Float32Array::from_iter_values(
+            combined_row_ids
+                .values()
+                .iter()
+                .map(|row_id| scores[row_id]),
+        );
+        let mut order = (0..combined.num_rows()).collect::<Vec<_>>();
+        order.sort_by(|left, right| {
+            relevance
+                .value(*right)
+                .total_cmp(&relevance.value(*left))
+                .then_with(|| parsed_chunk_ids[*left].0.cmp(&parsed_chunk_ids[*right].0))
+        });
+        let order = UInt32Array::from_iter_values(order.into_iter().map(|index| index as u32));
+
+        let mut fields = combined.schema().fields().to_vec();
+        fields.push(Arc::new(Field::new(
+            RELEVANCE_COL,
+            DataType::Float32,
+            false,
+        )));
+        let mut columns = combined.columns().to_vec();
+        columns.push(Arc::new(relevance));
+        let columns = columns
+            .iter()
+            .map(|column| take(column.as_ref(), &order, None))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).map_err(Into::into)
+    }
 }
 
 struct StoredRow {
@@ -129,11 +218,42 @@ impl LanceVectorStore {
                 .await
                 .map_err(lance_err)?,
         };
+        let text_index = table
+            .list_indices()
+            .await
+            .map_err(lance_err)?
+            .into_iter()
+            .find(|index| index.index_type == IndexType::FTS && index.columns == ["text"]);
+        let text_index_name = if let Some(index) = text_index {
+            index.name
+        } else {
+            table
+                .create_index(&["text"], Index::FTS(Default::default()))
+                .execute()
+                .await
+                .map_err(lance_err)?;
+            "text_idx".to_string()
+        };
+        if table
+            .index_stats(&text_index_name)
+            .await
+            .map_err(lance_err)?
+            .is_some_and(|stats| stats.num_unindexed_rows > 0)
+        {
+            let mut options = OptimizeOptions::default();
+            options.index_names = Some(vec![text_index_name.clone()]);
+            table
+                .optimize(OptimizeAction::Index(options))
+                .await
+                .map_err(lance_err)?;
+        }
         Ok(Self {
             table,
             schema,
             dims,
-            write_lock: Mutex::new(()),
+            publication_lock: RwLock::new(()),
+            text_index_name,
+            index_mutations: AtomicUsize::new(0),
             _writer_lock: writer_lock,
         })
     }
@@ -371,6 +491,22 @@ impl LanceVectorStore {
             merge.when_not_matched_by_source_delete(Some(filter));
         }
         merge.execute(Box::new(reader)).await.map_err(lance_err)?;
+        let mutations = self.index_mutations.fetch_add(1, Ordering::Relaxed) + 1;
+        if mutations >= INDEX_MUTATION_THRESHOLD {
+            let mut options = OptimizeOptions::default();
+            options.index_names = Some(vec![self.text_index_name.clone()]);
+            if self
+                .table
+                .optimize(OptimizeAction::Index(options))
+                .await
+                .is_ok()
+            {
+                self.index_mutations.store(0, Ordering::Relaxed);
+            }
+            // Index maintenance is an optimization, not part of publication.
+            // On failure the committed mutation remains successful and the
+            // counter stays above threshold so the next mutation retries.
+        }
         Ok(())
     }
 
@@ -536,7 +672,7 @@ impl VectorStore for LanceVectorStore {
         if records.is_empty() {
             return Ok(());
         }
-        let _write = self.write_lock.lock().await;
+        let _write = self.publication_lock.write().await;
         let mut documents = std::collections::HashMap::new();
         for record in &records {
             documents
@@ -559,6 +695,7 @@ impl VectorStore for LanceVectorStore {
 
     async fn query(
         &self,
+        query_text: &str,
         query: &Embedding,
         k: usize,
         scope: SearchScope,
@@ -567,6 +704,7 @@ impl VectorStore for LanceVectorStore {
         if k == 0 {
             return Ok(Vec::new());
         }
+        let _snapshot = self.publication_lock.read().await;
         // Lance applies this predicate before the vector limit, so a closer row
         // in another corpus cannot consume one of this scope's top-k slots.
         // ProjectId is a parsed UUID newtype, not caller-provided query text.
@@ -574,7 +712,7 @@ impl VectorStore for LanceVectorStore {
             SearchScope::Unscoped => "project_id IS NULL".to_string(),
             SearchScope::Project(project_id) => format!("project_id = '{project_id}'"),
         };
-        let mut stream = self
+        let vector_query = self
             .table
             .query()
             .nearest_to(query.0.as_slice())
@@ -582,14 +720,26 @@ impl VectorStore for LanceVectorStore {
             .only_if(format!("({VISIBLE_CHUNKS}) AND ({scope_filter})"))
             .column(VECTOR_COL)
             .distance_type(DistanceType::Cosine)
-            .limit(k)
-            .execute()
-            .await
-            .map_err(lance_err)?;
+            .limit(k);
+        let hybrid = !query_text.trim().is_empty();
+        let mut stream = if hybrid {
+            vector_query
+                .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+                .rerank(Arc::new(DeterministicRrf))
+                .execute()
+                .await
+                .map_err(lance_err)?
+        } else {
+            vector_query.execute().await.map_err(lance_err)?
+        };
 
         let mut out = Vec::new();
         while let Some(batch) = stream.try_next().await.map_err(lance_err)? {
-            read_batch(&batch, &mut out)?;
+            if hybrid {
+                read_hybrid_batch(&batch, &mut out)?;
+            } else {
+                read_batch(&batch, &mut out)?;
+            }
         }
         Ok(out)
     }
@@ -601,7 +751,7 @@ impl VectorStore for LanceVectorStore {
     ) -> Result<()> {
         self.validate_document_records(document_id, &records)?;
         let records = dedupe_by_chunk_id(records);
-        let _write = self.write_lock.lock().await;
+        let _write = self.publication_lock.write().await;
         self.validate_live_document_scope(document_id, &records)
             .await?;
         if self.generation_rows_exist(document_id).await? {
@@ -627,7 +777,7 @@ impl VectorStore for LanceVectorStore {
         }
         self.validate_document_records(document_id, &records)?;
         let records = dedupe_by_chunk_id(records);
-        let _write = self.write_lock.lock().await;
+        let _write = self.publication_lock.write().await;
         if !records.is_empty() {
             self.validate_live_document_scope(document_id, &records)
                 .await?;
@@ -676,7 +826,7 @@ impl VectorStore for LanceVectorStore {
         document_id: DocumentId,
         generation: DocumentGeneration,
     ) -> Result<bool> {
-        let _write = self.write_lock.lock().await;
+        let _write = self.publication_lock.write().await;
         let staged = self.generation_marker(document_id, STAGED_MARKER).await?;
         if let Some(staged) = staged {
             if staged != generation {
@@ -722,7 +872,7 @@ impl VectorStore for LanceVectorStore {
         &self,
         document_id: DocumentId,
     ) -> Result<Option<DocumentGenerationState>> {
-        let _read = self.write_lock.lock().await;
+        let _read = self.publication_lock.read().await;
         let active = self.generation_marker(document_id, ACTIVE_MARKER).await?;
         let staged = self.generation_marker(document_id, STAGED_MARKER).await?;
         let newest = newest_generation(document_id, active, staged)?;
@@ -851,16 +1001,33 @@ fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Resu
 /// Decode one result batch into [`ScoredChunk`]s, converting cosine distance to
 /// similarity (`1 - distance`) so scores match the crate's `[-1, 1]` convention.
 fn read_batch(batch: &RecordBatch, out: &mut Vec<ScoredChunk>) -> Result<()> {
+    read_scored_batch(batch, DISTANCE_COL, |distance| 1.0 - distance, out)
+}
+
+fn read_hybrid_batch(batch: &RecordBatch, out: &mut Vec<ScoredChunk>) -> Result<()> {
+    read_scored_batch(batch, RELEVANCE_COL, |score| score, out)
+}
+
+fn read_scored_batch(
+    batch: &RecordBatch,
+    score_column: &str,
+    convert_score: impl Fn(f32) -> f32,
+    out: &mut Vec<ScoredChunk>,
+) -> Result<()> {
     let chunk_ids = str_col(batch, "chunk_id")?;
     let doc_ids = str_col(batch, "document_id")?;
     let ordinals = u64_col(batch, "ordinal")?;
     let texts = str_col(batch, "text")?;
     let starts = u64_col(batch, "span_start")?;
     let ends = u64_col(batch, "span_end")?;
-    let distances = batch
-        .column_by_name(DISTANCE_COL)
+    let scores = batch
+        .column_by_name(score_column)
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-        .ok_or_else(|| RetrievalError::vector_store("query result missing _distance column"))?;
+        .ok_or_else(|| {
+            RetrievalError::vector_store(format!(
+                "query result missing or mistyped {score_column} column"
+            ))
+        })?;
 
     for i in 0..batch.num_rows() {
         let chunk_id: ChunkId = chunk_ids
@@ -880,7 +1047,7 @@ fn read_batch(batch: &RecordBatch, out: &mut Vec<ScoredChunk>) -> Result<()> {
                 text: texts.value(i).to_string(),
                 span,
             },
-            score: 1.0 - distances.value(i),
+            score: convert_score(scores.value(i)),
         });
     }
     Ok(())
@@ -985,13 +1152,13 @@ mod tests {
 
             // Nearest to "east" is the east vector, with its span/text intact.
             let hits = store
-                .query(&Embedding(vec![1.0, 0.0]), 1, SearchScope::Unscoped)
+                .query("", &Embedding(vec![1.0, 0.0]), 1, SearchScope::Unscoped)
                 .await
                 .unwrap();
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].chunk.text, "east");
             assert_eq!(hits[0].chunk.document_id, doc);
-            assert!(hits[0].score > 0.9);
+            assert!((hits[0].score - 1.0).abs() < 1e-6);
 
             // A replacement is published as exactly one Lance dataset version.
             let version_before_replace = store.table.version().await.unwrap();
@@ -1005,7 +1172,7 @@ mod tests {
             );
             assert_eq!(store.len().await.unwrap(), 1);
             let hits = store
-                .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
+                .query("", &Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
                 .await
                 .unwrap();
             assert_eq!(hits[0].chunk.text, "south");
@@ -1015,7 +1182,7 @@ mod tests {
         let reopened = LanceVectorStore::connect(uri, 2).await.unwrap();
         assert_eq!(reopened.len().await.unwrap(), 1);
         let hits = reopened
-            .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(hits[0].chunk.text, "south");
@@ -1044,13 +1211,16 @@ mod tests {
                 .unwrap();
 
             let query = Embedding(vec![1.0, 0.0]);
-            let unscoped = store.query(&query, 1, SearchScope::Unscoped).await.unwrap();
+            let unscoped = store
+                .query("", &query, 1, SearchScope::Unscoped)
+                .await
+                .unwrap();
             let a = store
-                .query(&query, 1, SearchScope::Project(project_a))
+                .query("", &query, 1, SearchScope::Project(project_a))
                 .await
                 .unwrap();
             let b = store
-                .query(&query, 1, SearchScope::Project(project_b))
+                .query("", &query, 1, SearchScope::Project(project_b))
                 .await
                 .unwrap();
             assert_eq!(unscoped[0].chunk.text, "unscoped");
@@ -1062,7 +1232,7 @@ mod tests {
         let query = Embedding(vec![1.0, 0.0]);
         assert_eq!(
             reopened
-                .query(&query, 1, SearchScope::Unscoped)
+                .query("", &query, 1, SearchScope::Unscoped)
                 .await
                 .unwrap()[0]
                 .chunk
@@ -1071,7 +1241,7 @@ mod tests {
         );
         assert_eq!(
             reopened
-                .query(&query, 1, SearchScope::Project(project_a))
+                .query("", &query, 1, SearchScope::Project(project_a))
                 .await
                 .unwrap()[0]
                 .chunk
@@ -1080,13 +1250,217 @@ mod tests {
         );
         assert_eq!(
             reopened
-                .query(&query, 1, SearchScope::Project(project_b))
+                .query("", &query, 1, SearchScope::Project(project_b))
                 .await
                 .unwrap()[0]
                 .chunk
                 .text,
             "project-b"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_hybrid_search_sees_appends_but_not_staged_rows_and_prefilters_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let project = ProjectId::new();
+
+        // The FTS index is created with the empty table. These rows are appended
+        // afterward and must still participate in native hybrid search.
+        store
+            .upsert(vec![
+                record(
+                    DocumentId::new(),
+                    0,
+                    "needleshard exact identifier",
+                    vec![0.0, 1.0],
+                ),
+                record(
+                    DocumentId::new(),
+                    0,
+                    "semantic dense candidate",
+                    vec![1.0, 0.0],
+                ),
+                project_record(
+                    project,
+                    DocumentId::new(),
+                    0,
+                    "needleshard wrong corpus",
+                    vec![1.0, 0.0],
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let query = Embedding(vec![1.0, 0.0]);
+        let hits = store
+            .query("needleshard", &query, 2, SearchScope::Unscoped)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].chunk.text, "needleshard exact identifier");
+        assert!(hits
+            .iter()
+            .any(|hit| hit.chunk.text == "semantic dense candidate"));
+        assert!(hits
+            .iter()
+            .all(|hit| hit.chunk.text != "needleshard wrong corpus"));
+
+        let staged_document = DocumentId::new();
+        let staged_generation = generation(1);
+        store
+            .stage_document_generation(
+                staged_document,
+                staged_generation,
+                vec![record(
+                    staged_document,
+                    0,
+                    "stagedneedle remains hidden",
+                    vec![1.0, 0.0],
+                )],
+            )
+            .await
+            .unwrap();
+        let before_activation = store
+            .query("stagedneedle", &query, 3, SearchScope::Unscoped)
+            .await
+            .unwrap();
+        assert!(before_activation
+            .iter()
+            .all(|hit| hit.chunk.text != "stagedneedle remains hidden"));
+
+        assert!(store
+            .activate_document_generation(staged_document, staged_generation)
+            .await
+            .unwrap());
+        let after_activation = store
+            .query("stagedneedle", &query, 3, SearchScope::Unscoped)
+            .await
+            .unwrap();
+        assert!(after_activation
+            .iter()
+            .any(|hit| hit.chunk.text == "stagedneedle remains hidden"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_hybrid_tie_at_k_boundary_matches_chunk_id_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let dense = record(
+            DocumentId::derive("tie-dense"),
+            0,
+            "dense candidate",
+            vec![1.0, 0.0],
+        );
+        let lexical = record(
+            DocumentId::derive("tie-lexical"),
+            0,
+            "lexicalneedle candidate",
+            vec![0.0, 1.0],
+        );
+        let expected = dense.chunk.id.0.min(lexical.chunk.id.0);
+        store.upsert(vec![dense, lexical]).await.unwrap();
+
+        let hits = store
+            .query(
+                "lexicalneedle",
+                &Embedding(vec![1.0, 0.0]),
+                1,
+                SearchScope::Unscoped,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.id.0, expected);
+        assert!((hits[0].score - (1.0 / 61.0)).abs() < 1e-6);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconnect_catches_up_fts_index_and_preserves_hybrid_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().to_str().unwrap();
+        {
+            let store = LanceVectorStore::connect(uri, 2).await.unwrap();
+            store
+                .upsert(vec![record(
+                    DocumentId::derive("reconnect-hybrid"),
+                    0,
+                    "reconnectneedle exact match",
+                    vec![0.0, 1.0],
+                )])
+                .await
+                .unwrap();
+            let stats = store
+                .table
+                .index_stats(&store.text_index_name)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stats.num_unindexed_rows, 1);
+        }
+
+        let reopened = LanceVectorStore::connect(uri, 2).await.unwrap();
+        let stats = reopened
+            .table
+            .index_stats(&reopened.text_index_name)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stats.num_unindexed_rows, 0);
+        assert_eq!(stats.num_indexed_rows, 1);
+        let hits = reopened
+            .query(
+                "reconnectneedle",
+                &Embedding(vec![1.0, 0.0]),
+                1,
+                SearchScope::Unscoped,
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits[0].chunk.text, "reconnectneedle exact match");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fts_index_is_optimized_after_bounded_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+
+        for index in 0..INDEX_MUTATION_THRESHOLD {
+            store
+                .upsert(vec![record(
+                    DocumentId::derive(&format!("index-maintenance-{index}")),
+                    0,
+                    &format!("maintenance row {index}"),
+                    vec![1.0, 0.0],
+                )])
+                .await
+                .unwrap();
+            if index + 1 == INDEX_MUTATION_THRESHOLD - 1 {
+                let stats = store
+                    .table
+                    .index_stats(&store.text_index_name)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stats.num_unindexed_rows, INDEX_MUTATION_THRESHOLD - 1);
+            }
+        }
+
+        let stats = store
+            .table
+            .index_stats(&store.text_index_name)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stats.num_unindexed_rows, 0);
+        assert_eq!(stats.num_indexed_rows, INDEX_MUTATION_THRESHOLD);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1128,7 +1502,7 @@ mod tests {
 
         let query = Embedding(vec![1.0, 0.0]);
         assert!(store
-            .query(&query, 1, SearchScope::Project(project_a))
+            .query("", &query, 1, SearchScope::Project(project_a))
             .await
             .unwrap()
             .is_empty());
@@ -1138,7 +1512,7 @@ mod tests {
             .unwrap());
         assert_eq!(
             store
-                .query(&query, 1, SearchScope::Project(project_a))
+                .query("", &query, 1, SearchScope::Project(project_a))
                 .await
                 .unwrap()[0]
                 .chunk
@@ -1147,7 +1521,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .query(&query, 1, SearchScope::Project(project_b))
+                .query("", &query, 1, SearchScope::Project(project_b))
                 .await
                 .unwrap()[0]
                 .chunk
@@ -1176,7 +1550,7 @@ mod tests {
         store.replace_document(doc, vec![a, b]).await.unwrap();
         assert_eq!(store.len().await.unwrap(), 1);
         let hits = store
-            .query(&Embedding(vec![0.0, 1.0]), 5, SearchScope::Unscoped)
+            .query("", &Embedding(vec![0.0, 1.0]), 5, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -1235,7 +1609,7 @@ mod tests {
             .await
             .unwrap();
         assert!(store
-            .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
             .await
             .unwrap()
             .is_empty());
@@ -1244,7 +1618,7 @@ mod tests {
             .await
             .unwrap();
         assert!(store
-            .query(&Embedding(vec![1.0, 0.0]), 0, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 0, SearchScope::Unscoped)
             .await
             .unwrap()
             .is_empty());
@@ -1272,7 +1646,7 @@ mod tests {
         assert_eq!(store.table.version().await.unwrap(), version + 1);
         assert_eq!(store.len().await.unwrap(), 1);
         let hits = store
-            .query(&Embedding(vec![0.0, 1.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![0.0, 1.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -1308,7 +1682,7 @@ mod tests {
         b.unwrap();
 
         let texts: std::collections::BTreeSet<_> = store
-            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap()
             .into_iter()
@@ -1341,7 +1715,7 @@ mod tests {
         assert!(err.to_string().contains("belongs to document"));
         assert_eq!(store.table.version().await.unwrap(), version);
         let hits = store
-            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -1383,7 +1757,7 @@ mod tests {
             assert_eq!(store.table.version().await.unwrap(), version);
         }
         let hits = store
-            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -1480,6 +1854,7 @@ mod tests {
         assert_eq!(
             store
                 .query(
+                    "",
                     &Embedding(vec![1.0, 0.0]),
                     10,
                     SearchScope::Project(project_a),
@@ -1492,6 +1867,7 @@ mod tests {
         );
         assert!(store
             .query(
+                "",
                 &Embedding(vec![1.0, 0.0]),
                 10,
                 SearchScope::Project(project_b),
@@ -1546,6 +1922,7 @@ mod tests {
         );
         let project_a_hits = store
             .query(
+                "",
                 &Embedding(vec![1.0, 0.0]),
                 10,
                 SearchScope::Project(project_a),
@@ -1557,6 +1934,7 @@ mod tests {
         }));
         assert!(store
             .query(
+                "",
                 &Embedding(vec![1.0, 0.0]),
                 10,
                 SearchScope::Project(project_b),
@@ -1676,7 +2054,7 @@ mod tests {
             Some(DocumentGenerationState::Staged(first))
         );
         let hits = store
-            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -1699,7 +2077,7 @@ mod tests {
         );
         assert_eq!(reopened.len().await.unwrap(), 2);
         let hits = reopened
-            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
         assert!(hits.iter().any(|hit| hit.chunk.text == "first"));
@@ -1853,6 +2231,7 @@ mod tests {
         assert_eq!(
             store
                 .query(
+                    "",
                     &Embedding(vec![0.0, 1.0]),
                     5,
                     SearchScope::Project(project_a)
@@ -1865,6 +2244,7 @@ mod tests {
         assert_eq!(
             store
                 .query(
+                    "",
                     &Embedding(vec![0.0, 1.0]),
                     5,
                     SearchScope::Project(project_b)
@@ -1912,7 +2292,7 @@ mod tests {
             .await
             .unwrap());
         let hits = store
-            .query(&Embedding(vec![0.0, 1.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![0.0, 1.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);

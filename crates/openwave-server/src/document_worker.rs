@@ -536,11 +536,12 @@ mod tests {
 
         async fn query(
             &self,
+            query_text: &str,
             query: &Embedding,
             k: usize,
             scope: openwave_retrieval::SearchScope,
         ) -> openwave_retrieval::Result<Vec<ScoredChunk>> {
-            self.inner.query(query, k, scope).await
+            self.inner.query(query_text, query, k, scope).await
         }
 
         async fn replace_document(

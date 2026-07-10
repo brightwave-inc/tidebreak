@@ -130,7 +130,7 @@ impl Tool for SearchTool {
             Some(project_id) => SearchScope::Project(project_id),
             None => SearchScope::Unscoped,
         };
-        let hits = match self.store.query(&embedding, k, scope).await {
+        let hits = match self.store.query(query, &embedding, k, scope).await {
             Ok(hits) => hits,
             Err(err) => return Ok(ToolOutput::error(format!("search failed: {err}"))),
         };

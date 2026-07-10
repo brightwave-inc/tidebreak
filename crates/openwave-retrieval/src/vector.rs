@@ -1,11 +1,10 @@
-//! The vector-store seam: upsert embedded chunks, then query by nearest vector.
+//! The vector-store seam: upsert embedded chunks, then query by hybrid relevance.
 //!
 //! [`VectorStore`] is the interface every backend implements. [`InMemoryVectorStore`]
 //! is the reference backend — a brute-force cosine scan behind a lock. It has no
 //! persistence and is O(n) per query, which is exactly right for tests, small
 //! local corpora, and pinning down the semantics that persistent backends
-//! (sqlite-vec, pgvector, Qdrant) must reproduce. Those, plus hybrid dense+sparse
-//! search, arrive as feature-gated backends behind this trait later.
+//! (sqlite-vec, pgvector, Qdrant) must reproduce.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -81,7 +80,7 @@ impl DocumentGenerationState {
     }
 }
 
-/// Stores embedded chunks and retrieves them by vector similarity.
+/// Stores embedded chunks and retrieves them by fused lexical and dense relevance.
 ///
 /// Object-safe and async so backends can do I/O. Implementations are held behind
 /// `Arc<dyn VectorStore>`.
@@ -97,12 +96,15 @@ pub trait VectorStore: Send + Sync {
     /// fence.
     async fn upsert(&self, records: Vec<VectorRecord>) -> Result<()>;
 
-    /// Return the `k` chunks most similar to `query`, highest score first.
+    /// Return the `k` chunks most relevant to the query text and embedding.
     ///
+    /// Non-empty text participates in lexical ranking; empty text requests the
+    /// dense-only fallback used by low-level callers and compatibility tests.
     /// Fewer than `k` come back when the store holds fewer records. `k == 0`
     /// yields an empty result.
     async fn query(
         &self,
+        query_text: &str,
         query: &Embedding,
         k: usize,
         scope: SearchScope,
@@ -198,7 +200,7 @@ pub trait VectorStore: Send + Sync {
     }
 }
 
-/// A brute-force, in-memory [`VectorStore`] using cosine similarity.
+/// An in-memory [`VectorStore`] using BM25, cosine similarity, and RRF.
 pub struct InMemoryVectorStore {
     dims: usize,
     state: RwLock<InMemoryVectorState>,
@@ -338,6 +340,7 @@ impl VectorStore for InMemoryVectorStore {
 
     async fn query(
         &self,
+        query_text: &str,
         query: &Embedding,
         k: usize,
         scope: SearchScope,
@@ -358,23 +361,14 @@ impl VectorStore for InMemoryVectorStore {
                 .filter_map(|publication| publication.active.as_ref())
                 .flat_map(|active| active.records.iter()),
         );
-        let mut scored: Vec<ScoredChunk> = visible
+        let visible = visible
             .filter(|record| scope.includes(record.project_id))
-            .map(|r| ScoredChunk {
-                chunk: r.chunk.clone(),
-                score: query.cosine_similarity(&r.embedding),
-            })
-            .collect();
-
-        // Highest score first. `total_cmp` gives a total order over f32 (no NaN
-        // surprises); ties fall back to chunk id for a stable, reproducible order.
-        scored.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.chunk.id.0.cmp(&b.chunk.id.0))
-        });
-        scored.truncate(k);
-        Ok(scored)
+            .collect::<Vec<_>>();
+        if query_text.trim().is_empty() {
+            Ok(crate::hybrid::dense(&visible, query, k))
+        } else {
+            Ok(crate::hybrid::rank(&visible, query_text, query, k))
+        }
     }
 
     async fn replace_document(
@@ -685,7 +679,7 @@ mod tests {
             }
         ));
         assert!(store
-            .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
             .await
             .is_err());
     }
@@ -705,7 +699,7 @@ mod tests {
 
         // A query pointing east should rank "east" first, then the diagonal.
         let hits = store
-            .query(&Embedding(vec![1.0, 0.0]), 2, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 2, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(hits.len(), 2);
@@ -747,6 +741,7 @@ mod tests {
 
         let project_hits = store
             .query(
+                "",
                 &Embedding(vec![1.0, 0.0]),
                 1,
                 SearchScope::Project(project_a),
@@ -757,11 +752,93 @@ mod tests {
         assert_eq!(project_hits[0].chunk.text, "weaker right-project hit");
 
         let unscoped_hits = store
-            .query(&Embedding(vec![1.0, 0.0]), 1, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 1, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(unscoped_hits.len(), 1);
         assert_eq!(unscoped_hits[0].chunk.text, "stronger unscoped hit");
+    }
+
+    #[tokio::test]
+    async fn hybrid_query_fuses_lexical_and_dense_candidates_within_scope() {
+        let store = InMemoryVectorStore::new(2);
+        let project = ProjectId::new();
+        store
+            .upsert(vec![
+                record(
+                    DocumentId::new(),
+                    0,
+                    "needleshard exact identifier",
+                    vec![0.0, 1.0],
+                ),
+                record(
+                    DocumentId::new(),
+                    0,
+                    "semantic dense candidate",
+                    vec![1.0, 0.0],
+                ),
+                scoped_record(
+                    DocumentId::new(),
+                    project,
+                    0,
+                    "needleshard wrong corpus",
+                    vec![1.0, 0.0],
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let hits = store
+            .query(
+                "needleshard",
+                &Embedding(vec![1.0, 0.0]),
+                2,
+                SearchScope::Unscoped,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].chunk.text, "needleshard exact identifier");
+        assert!(hits
+            .iter()
+            .any(|hit| hit.chunk.text == "semantic dense candidate"));
+        assert!(hits
+            .iter()
+            .all(|hit| hit.chunk.text != "needleshard wrong corpus"));
+    }
+
+    #[tokio::test]
+    async fn hybrid_tie_at_k_boundary_uses_chunk_id() {
+        let store = InMemoryVectorStore::new(2);
+        let dense = record(
+            DocumentId::derive("tie-dense"),
+            0,
+            "dense candidate",
+            vec![1.0, 0.0],
+        );
+        let lexical = record(
+            DocumentId::derive("tie-lexical"),
+            0,
+            "lexicalneedle candidate",
+            vec![0.0, 1.0],
+        );
+        let expected = dense.chunk.id.0.min(lexical.chunk.id.0);
+        store.upsert(vec![dense, lexical]).await.unwrap();
+
+        let hits = store
+            .query(
+                "lexicalneedle",
+                &Embedding(vec![1.0, 0.0]),
+                1,
+                SearchScope::Unscoped,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.id.0, expected);
+        assert!((hits[0].score - (1.0 / 61.0)).abs() < 1e-6);
     }
 
     #[tokio::test]
@@ -831,6 +908,7 @@ mod tests {
         assert_eq!(store.len().await.unwrap(), 1);
         let hits = store
             .query(
+                "",
                 &Embedding(vec![1.0, 0.0]),
                 10,
                 SearchScope::Project(project_a),
@@ -841,6 +919,7 @@ mod tests {
         assert_eq!(hits[0].chunk.text, "original");
         assert!(store
             .query(
+                "",
                 &Embedding(vec![0.0, 1.0]),
                 10,
                 SearchScope::Project(project_b),
@@ -903,6 +982,7 @@ mod tests {
             .unwrap();
         assert!(store
             .query(
+                "",
                 &Embedding(vec![0.0, 1.0]),
                 1,
                 SearchScope::Project(project_b),
@@ -1004,6 +1084,7 @@ mod tests {
         assert_eq!(
             store
                 .query(
+                    "",
                     &Embedding(vec![0.0, 1.0]),
                     1,
                     SearchScope::Project(project_b),
@@ -1021,12 +1102,12 @@ mod tests {
         let store = InMemoryVectorStore::new(2);
         assert!(store.is_empty().await.unwrap());
         assert!(store
-            .query(&Embedding(vec![1.0, 0.0]), 0, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 0, SearchScope::Unscoped)
             .await
             .unwrap()
             .is_empty());
         assert!(store
-            .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
             .await
             .unwrap()
             .is_empty());
@@ -1053,7 +1134,7 @@ mod tests {
         );
         // The second upsert's vector won.
         let hits = store
-            .query(&Embedding(vec![0.0, 1.0]), 1, SearchScope::Unscoped)
+            .query("", &Embedding(vec![0.0, 1.0]), 1, SearchScope::Unscoped)
             .await
             .unwrap();
         assert!((hits[0].score - 1.0).abs() < 1e-6);
@@ -1080,7 +1161,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.len().await.unwrap(), 2); // one a, one b
         let hits = store
-            .query(&Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
             .await
             .unwrap();
         assert!(hits.iter().any(|h| h.chunk.text == "a-new"));
@@ -1108,7 +1189,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.len().await.unwrap(), 1);
         let hits = store
-            .query(&Embedding(vec![0.0, 1.0]), 5, SearchScope::Unscoped)
+            .query("", &Embedding(vec![0.0, 1.0]), 5, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -1161,7 +1242,7 @@ mod tests {
 
         assert!(err.to_string().contains("belongs to document"));
         let hits = store
-            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -1191,7 +1272,7 @@ mod tests {
             Some(DocumentGenerationState::Staged(first))
         );
         assert!(store
-            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap()
             .is_empty());
@@ -1220,7 +1301,7 @@ mod tests {
             GenerationStageOutcome::Staged
         );
         let before_activation = store
-            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(before_activation.len(), 1);
@@ -1239,7 +1320,7 @@ mod tests {
             .unwrap());
 
         let after_activation = store
-            .query(&Embedding(vec![0.0, 1.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![0.0, 1.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(after_activation.len(), 1);
@@ -1382,6 +1463,7 @@ mod tests {
         assert_eq!(
             store
                 .query(
+                    "",
                     &Embedding(vec![0.0, 1.0]),
                     5,
                     SearchScope::Project(project_a)
@@ -1394,6 +1476,7 @@ mod tests {
         assert_eq!(
             store
                 .query(
+                    "",
                     &Embedding(vec![0.0, 1.0]),
                     5,
                     SearchScope::Project(project_b)
@@ -1466,7 +1549,7 @@ mod tests {
             .await
             .is_err());
         let hits = store
-            .query(&Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);

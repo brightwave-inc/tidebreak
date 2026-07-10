@@ -76,8 +76,8 @@ list and fetch from sources like Drive and Box.
 
 ## `openwave-retrieval` — embeddings, vector search, citations ⚪
 
-Embeddings, chunking, ingestion, and grounded citations behind a `VectorStore`
-seam that runs embedded (sqlite-vec) or against pgvector / Qdrant.
+Embeddings, chunking, hybrid lexical+dense search, and grounded citations behind
+a `VectorStore` seam with in-memory and durable embedded LanceDB backends.
 
 **Depends on:** `openwave-core`.
 
