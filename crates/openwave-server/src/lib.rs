@@ -70,10 +70,13 @@ pub fn app(state: AppState) -> Router {
             "/providers/{kind}/credential",
             axum::routing::delete(routes::delete_provider_credential),
         )
-        .route("/documents", post(routes::ingest_document))
+        .route(
+            "/documents",
+            post(routes::ingest_document).get(routes::list_documents),
+        )
         .route(
             "/documents/{id}",
-            axum::routing::delete(routes::delete_document),
+            get(routes::get_document).delete(routes::delete_document),
         )
         .route("/search", post(routes::search_documents))
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
@@ -619,6 +622,16 @@ mod tests {
             scope: openwave_core::DocumentScope,
         ) -> Result<Vec<openwave_core::DocumentRecord>> {
             self.inner.list_documents(scope).await
+        }
+        async fn list_document_summaries(
+            &self,
+            scope: openwave_core::DocumentScope,
+            after: Option<openwave_core::DocumentListCursor>,
+            limit: u64,
+        ) -> Result<Vec<openwave_core::DocumentSummaryRecord>> {
+            self.inner
+                .list_document_summaries(scope, after, limit)
+                .await
         }
         async fn delete_document(&self, id: openwave_core::DocumentId) -> Result<()> {
             if self.fail_document_delete.swap(false, Ordering::SeqCst) {
@@ -1291,6 +1304,207 @@ mod tests {
             .unwrap();
         assert_eq!(record.canonical_text, "source comes first");
         assert_eq!(record.indexed_revision, Some(1));
+    }
+
+    #[tokio::test]
+    async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
+        let (router, token, store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let ingested: serde_json::Value = json_body(
+            post_json(
+                &router,
+                &bearer,
+                "/documents",
+                serde_json::json!({
+                    "uri": "file:///catalog.txt",
+                    "media_type": "text/markdown",
+                    "content": "# Catalog\n\nDurable source",
+                }),
+            )
+            .await,
+        )
+        .await;
+        let id = ingested["document_id"].as_str().unwrap().to_owned();
+
+        for suffix in ["second", "third"] {
+            assert_eq!(
+                post_json(
+                    &router,
+                    &bearer,
+                    "/documents",
+                    serde_json::json!({
+                        "uri": format!("file:///{suffix}.txt"),
+                        "content": format!("{suffix} document"),
+                    }),
+                )
+                .await
+                .status(),
+                StatusCode::CREATED
+            );
+        }
+
+        let project = make_project(&router, &bearer).await;
+        let project_document_id = openwave_core::DocumentId::new();
+        let now = chrono::Utc::now();
+        store
+            .create_document(&openwave_core::DocumentRecord {
+                id: project_document_id,
+                project_id: Some(project.id),
+                source_uri: Some("file:///project-secret.txt".into()),
+                media_type: "text/plain".into(),
+                title: None,
+                canonical_text: "project-only source".into(),
+                content_revision: 1,
+                revision_token: uuid::Uuid::new_v4(),
+                indexed_revision: None,
+                index_fingerprint: None,
+                created_at: now,
+                updated_at: now,
+                indexed_at: None,
+            })
+            .await
+            .unwrap();
+
+        let get = |uri: String| {
+            let router = router.clone();
+            let bearer = bearer.clone();
+            async move {
+                router
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .header(header::AUTHORIZATION, bearer)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let first = get("/documents?limit=2".into()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first: serde_json::Value = json_body(first).await;
+        let first_documents = first["documents"].as_array().unwrap();
+        assert_eq!(first_documents.len(), 2);
+        let cursor = first["next_cursor"].as_str().expect("a second page");
+        assert!(first_documents.iter().all(|summary| {
+            summary.get("content").is_none() && summary.get("revision_token").is_none()
+        }));
+
+        let second = get(format!("/documents?limit=2&cursor={cursor}")).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let second: serde_json::Value = json_body(second).await;
+        let second_documents = second["documents"].as_array().unwrap();
+        assert_eq!(second_documents.len(), 1);
+        assert!(second["next_cursor"].is_null());
+
+        let listed_ids: std::collections::HashSet<_> = first_documents
+            .iter()
+            .chain(second_documents)
+            .map(|summary| summary["document_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(listed_ids.len(), 3);
+        assert!(listed_ids.contains(id.as_str()));
+        assert!(!listed_ids.contains(project_document_id.to_string().as_str()));
+
+        let catalog_summary = first_documents
+            .iter()
+            .chain(second_documents)
+            .find(|summary| summary["document_id"] == id)
+            .unwrap();
+        assert_eq!(catalog_summary["uri"], "file:///catalog.txt");
+        assert_eq!(catalog_summary["media_type"], "text/markdown");
+        assert_eq!(catalog_summary["content_revision"], 1);
+        assert_eq!(catalog_summary["indexed_revision"], 1);
+
+        let detail = get(format!("/documents/{id}")).await;
+        assert_eq!(detail.status(), StatusCode::OK);
+        let detail: serde_json::Value = json_body(detail).await;
+        assert_eq!(detail["content"], "# Catalog\n\nDurable source");
+        assert_eq!(detail["document_id"], id);
+        assert!(detail.get("revision_token").is_none());
+
+        assert_eq!(
+            get(format!("/documents/{project_document_id}"))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        assert_eq!(
+            get("/documents?limit=0".into()).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            get("/documents?cursor=garbage".into()).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        assert_eq!(
+            get(format!("/documents/{}", openwave_core::DocumentId::new()))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn document_catalog_cursor_preserves_nanosecond_ordering() {
+        let (router, token, store, _dir) = test_app().await;
+        let bearer = format!("Bearer {token}");
+        let mut expected = Vec::new();
+
+        for nanos in [900, 800, 700] {
+            let id = openwave_core::DocumentId::new();
+            let created_at = chrono::DateTime::from_timestamp(1_700_000_000, nanos).unwrap();
+            store
+                .create_document(&openwave_core::DocumentRecord {
+                    id,
+                    project_id: None,
+                    source_uri: Some(format!("file:///{nanos}.txt")),
+                    media_type: "text/plain".into(),
+                    title: None,
+                    canonical_text: nanos.to_string(),
+                    content_revision: 1,
+                    revision_token: uuid::Uuid::new_v4(),
+                    indexed_revision: None,
+                    index_fingerprint: None,
+                    created_at,
+                    updated_at: created_at,
+                    indexed_at: None,
+                })
+                .await
+                .unwrap();
+            expected.push(id.to_string());
+        }
+
+        let mut uri = "/documents?limit=1".to_owned();
+        let mut actual = Vec::new();
+        loop {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::AUTHORIZATION, &bearer)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let page: serde_json::Value = json_body(response).await;
+            let documents = page["documents"].as_array().unwrap();
+            assert_eq!(documents.len(), 1);
+            actual.push(documents[0]["document_id"].as_str().unwrap().to_owned());
+            let Some(cursor) = page["next_cursor"].as_str() else {
+                break;
+            };
+            uri = format!("/documents?limit=1&cursor={cursor}");
+        }
+
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]

@@ -22,7 +22,8 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, DocumentId, ProjectId};
 use crate::model::{
-    Chat, DocumentRecord, DocumentScope, DocumentUpsert, Message, Project, ToolCallRecord,
+    Chat, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert,
+    Message, Project, ToolCallRecord,
 };
 
 fn document_storage_unavailable<T>() -> Result<T> {
@@ -63,6 +64,20 @@ pub trait Store: Send + Sync {
 
     /// List documents in `scope`, most-recently-created first.
     async fn list_documents(&self, _scope: DocumentScope) -> Result<Vec<DocumentRecord>> {
+        document_storage_unavailable()
+    }
+
+    /// List document metadata in deterministic newest-first order.
+    ///
+    /// At most `limit` records are returned. When `after` is present, results
+    /// begin strictly after its `(created_at, id)` tuple in descending display
+    /// order. Implementations must not load canonical text or revision tokens.
+    async fn list_document_summaries(
+        &self,
+        _scope: DocumentScope,
+        _after: Option<DocumentListCursor>,
+        _limit: u64,
+    ) -> Result<Vec<DocumentSummaryRecord>> {
         document_storage_unavailable()
     }
 
@@ -243,6 +258,40 @@ mod tests {
                 .cloned()
                 .collect())
         }
+        async fn list_document_summaries(
+            &self,
+            scope: DocumentScope,
+            after: Option<DocumentListCursor>,
+            limit: u64,
+        ) -> Result<Vec<DocumentSummaryRecord>> {
+            let mut documents: Vec<_> = self
+                .documents
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|document| match scope {
+                    DocumentScope::All => true,
+                    DocumentScope::Unscoped => document.project_id.is_none(),
+                    DocumentScope::Project(id) => document.project_id == Some(id),
+                })
+                .filter(|document| {
+                    after.is_none_or(|cursor| {
+                        document.created_at < cursor.created_at
+                            || (document.created_at == cursor.created_at
+                                && document.id.0 < cursor.id.0)
+                    })
+                })
+                .map(document_summary)
+                .collect();
+            documents.sort_by(|left, right| {
+                right
+                    .created_at
+                    .cmp(&left.created_at)
+                    .then_with(|| right.id.0.cmp(&left.id.0))
+            });
+            documents.truncate(limit.try_into().unwrap_or(usize::MAX));
+            Ok(documents)
+        }
         async fn delete_document(&self, id: DocumentId) -> Result<()> {
             self.documents.lock().unwrap().remove(&id);
             Ok(())
@@ -413,6 +462,22 @@ mod tests {
                 .filter(|(id, e)| *id == chat_id && e.seq > after)
                 .map(|(_, e)| e.clone())
                 .collect())
+        }
+    }
+
+    fn document_summary(document: &DocumentRecord) -> DocumentSummaryRecord {
+        DocumentSummaryRecord {
+            id: document.id,
+            project_id: document.project_id,
+            source_uri: document.source_uri.clone(),
+            media_type: document.media_type.clone(),
+            title: document.title.clone(),
+            content_revision: document.content_revision,
+            indexed_revision: document.indexed_revision,
+            index_fingerprint: document.index_fingerprint.clone(),
+            created_at: document.created_at,
+            updated_at: document.updated_at,
+            indexed_at: document.indexed_at,
         }
     }
 
