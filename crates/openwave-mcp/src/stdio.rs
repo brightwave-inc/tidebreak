@@ -36,18 +36,25 @@ where
         if line.trim().is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<Request>(&line) {
+        let response = match parse_request(&line) {
             Ok(request) => server.handle(request).await,
-            Err(err) => Some(Response::error(
-                Value::Null,
-                RpcError::new(error_code::PARSE_ERROR, format!("invalid JSON-RPC: {err}")),
-            )),
+            Err(error) => Some(Response::error(Value::Null, error)),
         };
         if let Some(response) = response {
             write_line(&mut writer, &response).await?;
         }
     }
     Ok(())
+}
+
+/// Parse one line into a [`Request`], distinguishing a syntax error (`-32700
+/// Parse error`) from valid JSON that isn't a well-formed request (`-32600 Invalid
+/// Request`, e.g. a missing `method`).
+fn parse_request(line: &str) -> Result<Request, RpcError> {
+    let value: Value = serde_json::from_str(line)
+        .map_err(|e| RpcError::new(error_code::PARSE_ERROR, format!("invalid JSON: {e}")))?;
+    serde_json::from_value(value)
+        .map_err(|e| RpcError::new(error_code::INVALID_REQUEST, format!("invalid request: {e}")))
 }
 
 /// Write a response as one JSON line, then flush.
@@ -111,5 +118,22 @@ mod tests {
             serde_json::from_str(String::from_utf8(output).unwrap().trim()).unwrap();
         assert_eq!(response["error"]["code"], error_code::PARSE_ERROR);
         assert_eq!(response["id"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn serve_reports_invalid_request_for_valid_json_without_method() {
+        // Valid JSON, but not a well-formed request (no `method`) => -32600, not
+        // the -32700 reserved for JSON syntax errors.
+        let mut output = Vec::new();
+        serve(
+            &br#"{"jsonrpc":"2.0","id":1}"#[..],
+            &mut output,
+            empty_server(),
+        )
+        .await
+        .unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(String::from_utf8(output).unwrap().trim()).unwrap();
+        assert_eq!(response["error"]["code"], error_code::INVALID_REQUEST);
     }
 }

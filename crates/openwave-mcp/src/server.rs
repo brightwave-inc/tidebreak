@@ -56,8 +56,19 @@ impl McpServer {
             // silently; nothing to reply.
             return None;
         }
-        // A request always has an id here (checked above).
-        let id = req.id.clone().unwrap_or(Value::Null);
+        let id = req.reply_id();
+
+        // The version must be exactly "2.0"; anything else (including an absent
+        // field) is a malformed request per JSON-RPC 2.0.
+        if req.jsonrpc != "2.0" {
+            return Some(Response::error(
+                id,
+                RpcError::new(
+                    error_code::INVALID_REQUEST,
+                    "jsonrpc must be \"2.0\"".to_string(),
+                ),
+            ));
+        }
 
         let outcome = match req.method.as_str() {
             "initialize" => Ok(self.initialize_result()),
@@ -86,7 +97,7 @@ impl McpServer {
     }
 
     fn list_tools_result(&self) -> Value {
-        let tools = self
+        let mut tools: Vec<ToolDescriptor> = self
             .tools
             .specs()
             .into_iter()
@@ -96,6 +107,9 @@ impl McpServer {
                 input_schema: spec.input_schema,
             })
             .collect();
+        // The registry is a HashMap; sort by name so the advertised list is stable
+        // across launches (friendlier for clients and snapshot tests).
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
         serde_json::to_value(ListToolsResult { tools })
             .expect("ListToolsResult is always serializable")
     }
@@ -125,6 +139,7 @@ impl McpServer {
             content: vec![Content::Text {
                 text: output.content,
             }],
+            structured_content: output.data,
             is_error: output.is_error,
         };
         serde_json::to_value(result).map_err(|e| {
@@ -166,10 +181,11 @@ mod tests {
         }
         async fn execute(&self, _ctx: &ToolCtx, args: Value) -> openwave_core::Result<ToolOutput> {
             let text = args.get("text").and_then(Value::as_str).unwrap_or("");
-            if text == "boom" {
-                return Ok(ToolOutput::error("asked to fail"));
+            match text {
+                "boom" => Ok(ToolOutput::error("asked to fail")),
+                "withdata" => Ok(ToolOutput::text("ok").with_data(json!({"n": 1}))),
+                _ => Ok(ToolOutput::text(format!("echo: {text}"))),
             }
-            Ok(ToolOutput::text(format!("echo: {text}")))
         }
     }
 
@@ -263,6 +279,51 @@ mod tests {
             unknown_method.error.unwrap().code,
             error_code::METHOD_NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn structured_output_is_surfaced_as_structured_content() {
+        let resp = server()
+            .handle(request(
+                7,
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "withdata"}}),
+            ))
+            .await
+            .unwrap();
+        let result = resp.result.unwrap();
+        assert_eq!(result["structuredContent"], json!({"n": 1}));
+        // Tools without structured data omit the field entirely.
+        let plain = server()
+            .handle(request(
+                8,
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "hi"}}),
+            ))
+            .await
+            .unwrap();
+        assert!(plain.result.unwrap().get("structuredContent").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_request_with_explicit_null_id_still_gets_a_reply() {
+        // Present-but-null id is a request (must be answered), not a notification.
+        let req: Request =
+            serde_json::from_value(json!({"jsonrpc": "2.0", "id": null, "method": "tools/list"}))
+                .unwrap();
+        assert!(!req.is_notification());
+        let resp = server().handle(req).await.unwrap();
+        assert_eq!(resp.id, Value::Null);
+        assert!(resp.result.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_wrong_jsonrpc_version_is_an_invalid_request() {
+        let req: Request =
+            serde_json::from_value(json!({"jsonrpc": "1.0", "id": 9, "method": "tools/list"}))
+                .unwrap();
+        let resp = server().handle(req).await.unwrap();
+        assert_eq!(resp.error.unwrap().code, error_code::INVALID_REQUEST);
     }
 
     #[tokio::test]

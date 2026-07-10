@@ -25,14 +25,18 @@ pub mod error_code {
     pub const INTERNAL_ERROR: i64 = -32603;
 }
 
-/// An incoming JSON-RPC message. `id` absent ⇒ a notification (no response).
+/// An incoming JSON-RPC message. An **absent** `id` ⇒ a notification (no
+/// response); a present `id` (including the literal `null`) ⇒ a request that must
+/// be answered.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
-    /// Must be `"2.0"`; retained so a response can echo the framing verbatim.
+    /// The JSON-RPC version; must be `"2.0"` (validated by the server).
     #[serde(default)]
     pub jsonrpc: String,
-    /// Request id. Absent for notifications.
-    #[serde(default)]
+    /// Request id. The outer option distinguishes an *absent* id (`None`, a
+    /// notification) from a present `null` id (`Some(Null)`, still a request), via
+    /// [`present_or_absent`] — serde's plain `Option` collapses both to `None`.
+    #[serde(default, deserialize_with = "present_or_absent")]
     pub id: Option<Value>,
     /// The method name (e.g. `"tools/list"`).
     pub method: String,
@@ -42,11 +46,28 @@ pub struct Request {
 }
 
 impl Request {
-    /// Whether this is a notification (no `id`, so no reply is sent).
+    /// Whether this is a notification (no `id` at all, so no reply is sent).
     #[must_use]
     pub fn is_notification(&self) -> bool {
         self.id.is_none()
     }
+
+    /// The id to echo in the response (the present value, or `null` if `id` was
+    /// the literal `null`). Only meaningful when this is not a notification.
+    #[must_use]
+    pub fn reply_id(&self) -> Value {
+        self.id.clone().unwrap_or(Value::Null)
+    }
+}
+
+/// Deserialize a present field (including JSON `null`) as `Some(..)`; the
+/// `#[serde(default)]` on the field supplies `None` when it is absent. This lets a
+/// present-but-`null` `id` be told apart from a missing one.
+fn present_or_absent<'de, D>(deserializer: D) -> std::result::Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 /// A JSON-RPC response — exactly one of `result` or `error` is set.
@@ -177,6 +198,10 @@ pub struct CallToolParams {
 #[derive(Debug, Clone, Serialize)]
 pub struct CallToolResult {
     pub content: Vec<Content>,
+    /// A tool's optional structured payload (the agent tool's `data`), surfaced as
+    /// MCP `structuredContent` when present.
+    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
     #[serde(rename = "isError")]
     pub is_error: bool,
 }
