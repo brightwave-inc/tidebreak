@@ -52,8 +52,9 @@ pub trait VectorStore: Send + Sync {
     /// must be atomic with respect to other store operations — two concurrent
     /// re-ingests of the same document must not interleave a partial delete and
     /// insert and leave a mix of versions. Passing an empty `records` clears the
-    /// document. Implementations validate each record's dimensionality, as
-    /// [`VectorStore::upsert`] does.
+    /// document. Every record must belong to `document_id`; implementations reject
+    /// cross-document records and validate each embedding's dimensionality, as
+    /// [`VectorStore::upsert`] does, before mutating the store.
     async fn replace_document(
         &self,
         document_id: DocumentId,
@@ -158,6 +159,12 @@ impl VectorStore for InMemoryVectorStore {
     ) -> Result<()> {
         for record in &records {
             self.check_dims(&record.embedding)?;
+            if record.chunk.document_id != document_id {
+                return Err(RetrievalError::vector_store(format!(
+                    "replacement record {} belongs to document {}, expected {document_id}",
+                    record.chunk.id, record.chunk.document_id
+                )));
+            }
         }
         // Delete + insert under a single write lock, so a concurrent ingest can't
         // observe or race a half-applied replacement.
@@ -354,5 +361,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RetrievalError::DimensionMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn replace_document_rejects_records_from_another_document() {
+        let store = InMemoryVectorStore::new(2);
+        let existing = DocumentId::new();
+        let wrong = DocumentId::new();
+        store
+            .upsert(vec![record(existing, 0, "original", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+
+        let err = store
+            .replace_document(existing, vec![record(wrong, 0, "wrong", vec![0.0, 1.0])])
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("belongs to document"));
+        let hits = store.query(&Embedding(vec![1.0, 0.0]), 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.text, "original");
     }
 }

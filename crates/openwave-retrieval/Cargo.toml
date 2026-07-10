@@ -20,10 +20,10 @@ tool = ["dep:openwave-core"]
 # A real OpenAI-compatible embedding provider (network, via reqwest). The offline
 # HashEmbedder is always available regardless.
 embed-openai = ["dep:reqwest"]
-# A durable, embedded vector store backed by LanceDB (pure-Rust, on-disk). NOT a
-# default feature: LanceDB needs `protoc` at build time, which the CI runner does
-# not have, so building it by default would break CI. Enable locally with
-# `PROTOC` set. See docs/notes on wiring this as the server default.
+# A durable, embedded vector store backed by LanceDB (pure-Rust, on-disk). Not a
+# default feature for library consumers because it pulls a large dependency tree
+# and needs `protoc` at build time. OpenWave's workspace CI installs `protoc`, and
+# the server enables this feature explicitly.
 vec-lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:futures"]
 
 [dependencies]
