@@ -122,6 +122,7 @@ impl Store for DbStore {
             content_revision: Set(document.content_revision),
             revision_token: Set(revision_token),
             tombstone: Set(false),
+            retirement_pending: Set(false),
         }
         .insert(&transaction)
         .await
@@ -268,6 +269,70 @@ impl Store for DbStore {
                 content_revision: generation.content_revision,
                 revision_token: generation.revision_token,
             }))
+    }
+
+    async fn list_pending_document_retirements(
+        &self,
+        after: Option<DocumentId>,
+        limit: u64,
+    ) -> Result<Vec<(DocumentId, DocumentGeneration)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut query = entities::document_generation::Entity::find()
+            .select_only()
+            .column(entities::document_generation::Column::DocumentId)
+            .column(entities::document_generation::Column::ContentRevision)
+            .column(entities::document_generation::Column::RevisionToken)
+            .filter(entities::document_generation::Column::Tombstone.eq(true))
+            .filter(entities::document_generation::Column::RetirementPending.eq(true));
+        if let Some(after) = after {
+            query = query.filter(entities::document_generation::Column::DocumentId.gt(after.0));
+        }
+        Ok(query
+            .order_by_asc(entities::document_generation::Column::DocumentId)
+            .limit(limit)
+            .into_tuple::<(uuid::Uuid, i64, uuid::Uuid)>()
+            .all(&self.conn)
+            .await
+            .map_err(store_err)?
+            .into_iter()
+            .map(|(id, content_revision, revision_token)| {
+                (
+                    DocumentId(id),
+                    DocumentGeneration {
+                        content_revision,
+                        revision_token,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    async fn complete_document_retirement(
+        &self,
+        id: DocumentId,
+        generation: DocumentGeneration,
+    ) -> Result<bool> {
+        let updated = entities::document_generation::Entity::update_many()
+            .col_expr(
+                entities::document_generation::Column::RetirementPending,
+                sea_orm::sea_query::Expr::value(false),
+            )
+            .filter(entities::document_generation::Column::DocumentId.eq(id.0))
+            .filter(
+                entities::document_generation::Column::ContentRevision
+                    .eq(generation.content_revision),
+            )
+            .filter(
+                entities::document_generation::Column::RevisionToken.eq(generation.revision_token),
+            )
+            .filter(entities::document_generation::Column::Tombstone.eq(true))
+            .filter(entities::document_generation::Column::RetirementPending.eq(true))
+            .exec(&self.conn)
+            .await
+            .map_err(store_err)?;
+        Ok(updated.rows_affected == 1)
     }
 
     async fn delete_document(&self, id: DocumentId) -> Result<DocumentGeneration> {
@@ -489,6 +554,182 @@ impl Store for DbStore {
             .into_iter()
             .map(document_job_from_model)
             .collect()
+    }
+
+    async fn retry_document_index_job(
+        &self,
+        document_id: DocumentId,
+        pipeline_fingerprint: &str,
+        max_attempts: i32,
+    ) -> Result<Option<DocumentJob>> {
+        if pipeline_fingerprint.is_empty()
+            || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
+        {
+            return Err(AgentError::Store(
+                "document job pipeline fingerprint must contain 1 to 512 characters".into(),
+            ));
+        }
+        if max_attempts < 1 {
+            return Err(AgentError::Store(
+                "document job max_attempts must be at least one".into(),
+            ));
+        }
+
+        let transaction = self.conn.begin().await.map_err(store_err)?;
+        acquire_document_write_lock(&transaction, document_id).await?;
+        let Some(document) = entities::document::Entity::find_by_id(document_id.0)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+        else {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(None);
+        };
+        ensure_live_document_generation_on(&transaction, &document).await?;
+        let candidate = entities::document_job::Entity::find()
+            .filter(entities::document_job::Column::DocumentId.eq(document.id))
+            .filter(entities::document_job::Column::ContentRevision.eq(document.content_revision))
+            .filter(entities::document_job::Column::RevisionToken.eq(document.revision_token))
+            .filter(entities::document_job::Column::Kind.eq(DocumentJobKind::Index.as_str()))
+            .filter(entities::document_job::Column::PipelineFingerprint.eq(pipeline_fingerprint))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?;
+        let Some(candidate) = candidate else {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(None);
+        };
+        let mut parsed = document_job_from_model(candidate.clone())?;
+        if matches!(
+            parsed.status,
+            DocumentJobStatus::Queued | DocumentJobStatus::Running | DocumentJobStatus::RetryWait
+        ) {
+            let expected = if parsed.status == DocumentJobStatus::Running {
+                DocumentProcessingStatus::Processing
+            } else {
+                DocumentProcessingStatus::Queued
+            };
+            if document.processing_status != expected.as_str() {
+                return Err(AgentError::Store(format!(
+                    "document job {} is {} but exact document {} is unexpectedly {}",
+                    parsed.id,
+                    parsed.status.as_str(),
+                    document_id,
+                    document.processing_status
+                )));
+            }
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(parsed));
+        }
+        if parsed.status != DocumentJobStatus::Failed {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(None);
+        }
+        if document.processing_status != DocumentProcessingStatus::Failed.as_str() {
+            return Err(AgentError::Store(format!(
+                "failed document job {} does not match failed document {}",
+                parsed.id, document_id
+            )));
+        }
+
+        let now = Utc::now();
+        let revived = entities::document_job::Entity::update_many()
+            .col_expr(
+                entities::document_job::Column::Status,
+                sea_orm::sea_query::Expr::value(DocumentJobStatus::Queued.as_str()),
+            )
+            .col_expr(
+                entities::document_job::Column::AttemptCount,
+                sea_orm::sea_query::Expr::value(0),
+            )
+            .col_expr(
+                entities::document_job::Column::MaxAttempts,
+                sea_orm::sea_query::Expr::value(max_attempts),
+            )
+            .col_expr(
+                entities::document_job::Column::AvailableAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .col_expr(
+                entities::document_job::Column::LeaseToken,
+                sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+            )
+            .col_expr(
+                entities::document_job::Column::LeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .col_expr(
+                entities::document_job::Column::StartedAt,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .col_expr(
+                entities::document_job::Column::FinishedAt,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .col_expr(
+                entities::document_job::Column::LastErrorCode,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                entities::document_job::Column::LastErrorDetail,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                entities::document_job::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(entities::document_job::Column::Id.eq(candidate.id))
+            .filter(entities::document_job::Column::Status.eq(DocumentJobStatus::Failed.as_str()))
+            .filter(entities::document_job::Column::UpdatedAt.eq(candidate.updated_at))
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+        let document_queued = entities::document::Entity::update_many()
+            .col_expr(
+                entities::document::Column::ProcessingStatus,
+                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
+            )
+            .col_expr(
+                entities::document::Column::IndexedRevision,
+                sea_orm::sea_query::Expr::value(Option::<i64>::None),
+            )
+            .col_expr(
+                entities::document::Column::IndexFingerprint,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                entities::document::Column::IndexedAt,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .filter(entities::document::Column::Id.eq(document.id))
+            .filter(entities::document::Column::ContentRevision.eq(document.content_revision))
+            .filter(entities::document::Column::RevisionToken.eq(document.revision_token))
+            .filter(
+                entities::document::Column::ProcessingStatus
+                    .eq(DocumentProcessingStatus::Failed.as_str()),
+            )
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+        if revived.rows_affected != 1 || document_queued.rows_affected != 1 {
+            return Err(AgentError::Store(format!(
+                "failed document job {} changed during explicit retry",
+                parsed.id
+            )));
+        }
+        transaction.commit().await.map_err(store_err)?;
+        parsed.status = DocumentJobStatus::Queued;
+        parsed.attempt_count = 0;
+        parsed.max_attempts = max_attempts;
+        parsed.available_at = now;
+        parsed.lease_token = None;
+        parsed.lease_expires_at = None;
+        parsed.started_at = None;
+        parsed.finished_at = None;
+        parsed.last_error_code = None;
+        parsed.last_error_detail = None;
+        parsed.updated_at = now;
+        Ok(Some(parsed))
     }
 
     async fn claim_document_job(
@@ -1492,6 +1733,10 @@ where
                 entities::document_generation::Column::Tombstone,
                 sea_orm::sea_query::Expr::value(tombstone),
             )
+            .col_expr(
+                entities::document_generation::Column::RetirementPending,
+                sea_orm::sea_query::Expr::value(tombstone),
+            )
             .filter(entities::document_generation::Column::DocumentId.eq(id.0))
             .filter(
                 entities::document_generation::Column::ContentRevision
@@ -1528,6 +1773,7 @@ where
             content_revision: Set(current.content_revision),
             revision_token: Set(current.revision_token),
             tombstone: Set(tombstone),
+            retirement_pending: Set(tombstone),
         })
         .on_conflict_do_nothing()
         .exec_without_returning(conn)
@@ -1926,6 +2172,7 @@ mod entities {
             pub content_revision: i64,
             pub revision_token: Uuid,
             pub tombstone: bool,
+            pub retirement_pending: bool,
         }
 
         #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -2518,7 +2765,18 @@ mod migration {
                                 .not_null()
                                 .default(false),
                         )
+                        .col(
+                            ColumnDef::new(DocumentGeneration::RetirementPending)
+                                .boolean()
+                                .not_null()
+                                .default(false),
+                        )
                         .check(Expr::col(DocumentGeneration::ContentRevision).gte(1))
+                        .check(
+                            Expr::col(DocumentGeneration::RetirementPending)
+                                .eq(false)
+                                .or(Expr::col(DocumentGeneration::Tombstone).eq(true)),
+                        )
                         .to_owned(),
                 )
                 .await?;
@@ -2902,6 +3160,7 @@ mod migration {
         ContentRevision,
         RevisionToken,
         Tombstone,
+        RetirementPending,
     }
 
     #[derive(DeriveIden)]
@@ -4227,6 +4486,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_retry_only_revives_current_failed_index_job() {
+        let (_dir, store) = temp_store().await;
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "retry me".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
+        };
+        let (_, queued) = store
+            .upsert_document_and_enqueue_index(&source, "pipeline-v1", 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .retry_document_index_job(source.id, "pipeline-v1", 9)
+                .await
+                .unwrap(),
+            Some(queued.clone())
+        );
+
+        let claim_at = queued.available_at + chrono::Duration::seconds(1);
+        let running = store
+            .claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .retry_document_index_job(source.id, "pipeline-v1", 9)
+                .await
+                .unwrap(),
+            Some(running.clone())
+        );
+        assert_eq!(
+            store
+                .record_document_job_failure(
+                    running.id,
+                    running.lease_token.unwrap(),
+                    claim_at + chrono::Duration::seconds(1),
+                    None,
+                    "embedding_failed",
+                    Some("service unavailable"),
+                )
+                .await
+                .unwrap(),
+            Some(DocumentJobStatus::Failed)
+        );
+        assert_eq!(
+            store
+                .retry_document_index_job(source.id, "other-pipeline", 4)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let retried = store
+            .retry_document_index_job(source.id, "pipeline-v1", 4)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retried.id, queued.id);
+        assert_eq!(retried.status, DocumentJobStatus::Queued);
+        assert_eq!(retried.attempt_count, 0);
+        assert_eq!(retried.max_attempts, 4);
+        assert_eq!(retried.lease_token, None);
+        assert_eq!(retried.lease_expires_at, None);
+        assert_eq!(retried.started_at, None);
+        assert_eq!(retried.finished_at, None);
+        assert_eq!(retried.last_error_code, None);
+        assert_eq!(retried.last_error_detail, None);
+        let document = store.get_document(source.id).await.unwrap().unwrap();
+        assert_eq!(document.processing_status, DocumentProcessingStatus::Queued);
+        assert_eq!(document.indexed_revision, None);
+        assert_eq!(document.index_fingerprint, None);
+        assert_eq!(document.indexed_at, None);
+        assert_eq!(
+            store
+                .retry_document_index_job(source.id, "pipeline-v1", 8)
+                .await
+                .unwrap(),
+            Some(retried.clone())
+        );
+
+        let retry_claim_at = retried.available_at + chrono::Duration::seconds(1);
+        let retry_running = store
+            .claim_document_job(
+                retry_claim_at,
+                retry_claim_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .complete_document_index_job(
+                retry_running.id,
+                retry_running.lease_token.unwrap(),
+                retry_claim_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .retry_document_index_job(source.id, "pipeline-v1", 4)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let replacement = DocumentUpsert {
+            canonical_text: "replacement".into(),
+            updated_at: source.updated_at + chrono::Duration::seconds(1),
+            ..source.clone()
+        };
+        let (_, cancelled) = store
+            .upsert_document_and_enqueue_index(&replacement, "pipeline-v2", 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .retry_document_index_job(replacement.id, "pipeline-v1", 4)
+                .await
+                .unwrap(),
+            None
+        );
+        store
+            .upsert_document_and_enqueue_index(
+                &DocumentUpsert {
+                    canonical_text: "newer replacement".into(),
+                    updated_at: source.updated_at + chrono::Duration::seconds(2),
+                    ..replacement
+                },
+                "pipeline-v3",
+                2,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_document_job(cancelled.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            DocumentJobStatus::Cancelled
+        );
+        assert_eq!(
+            store
+                .retry_document_index_job(source.id, "pipeline-v2", 4)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn completion_document_failure_rolls_back_the_job_transition() {
         let (_dir, store) = temp_store().await;
         let source = DocumentUpsert {
@@ -4909,6 +5326,124 @@ mod tests {
         assert_eq!(
             recreated.generation(),
             store.get_document_generation(id).await.unwrap().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_document_retirement_survives_reopen_and_uses_exact_cas() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("retirement.db").display()
+        );
+        let id = DocumentId::new();
+        let source = DocumentUpsert {
+            id,
+            project_id: None,
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "retire me".into(),
+            updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
+        };
+        let store = DbStore::connect(&url).await.unwrap();
+        store.upsert_document(&source).await.unwrap();
+        let tombstone = store.delete_document(id).await.unwrap();
+        assert_eq!(store.delete_document(id).await.unwrap(), tombstone);
+        assert_eq!(
+            store
+                .list_pending_document_retirements(None, 0)
+                .await
+                .unwrap(),
+            vec![]
+        );
+        drop(store);
+
+        let store = DbStore::connect(&url).await.unwrap();
+        assert_eq!(
+            store
+                .list_pending_document_retirements(None, 10)
+                .await
+                .unwrap(),
+            vec![(id, tombstone)]
+        );
+
+        let recreated = store
+            .upsert_document(&DocumentUpsert {
+                canonical_text: "new lifecycle".into(),
+                updated_at: DateTime::<Utc>::from_timestamp(2, 0).unwrap(),
+                ..source
+            })
+            .await
+            .unwrap();
+        assert!(store
+            .list_pending_document_retirements(None, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!store
+            .complete_document_retirement(id, tombstone)
+            .await
+            .unwrap());
+
+        let current_tombstone = store.delete_document(id).await.unwrap();
+        assert_eq!(
+            current_tombstone.content_revision,
+            recreated.content_revision + 1
+        );
+        assert!(!store
+            .complete_document_retirement(id, tombstone)
+            .await
+            .unwrap());
+        assert!(store
+            .complete_document_retirement(id, current_tombstone)
+            .await
+            .unwrap());
+        assert!(!store
+            .complete_document_retirement(id, current_tombstone)
+            .await
+            .unwrap());
+        assert!(store
+            .list_pending_document_retirements(None, 10)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_document_retirement_cursor_advances_and_can_wrap() {
+        let (_dir, store) = temp_store().await;
+        let ids = [1_u128, 2, 3].map(|value| DocumentId(uuid::Uuid::from_u128(value)));
+        let mut generations = Vec::new();
+        for id in ids {
+            generations.push(store.delete_document(id).await.unwrap());
+        }
+
+        assert_eq!(
+            store
+                .list_pending_document_retirements(None, 2)
+                .await
+                .unwrap(),
+            vec![(ids[0], generations[0]), (ids[1], generations[1])]
+        );
+        assert_eq!(
+            store
+                .list_pending_document_retirements(Some(ids[1]), 2)
+                .await
+                .unwrap(),
+            vec![(ids[2], generations[2])]
+        );
+        assert!(store
+            .list_pending_document_retirements(Some(ids[2]), 2)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .list_pending_document_retirements(None, 1)
+                .await
+                .unwrap(),
+            vec![(ids[0], generations[0])]
         );
     }
 

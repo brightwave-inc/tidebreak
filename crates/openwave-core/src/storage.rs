@@ -100,6 +100,31 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
+    /// List durable source-free tombstones whose retrieval retirement is unfinished.
+    ///
+    /// Results are ordered by document id, strictly after `after` when present,
+    /// and bounded by `limit`. A worker can advance past a poison entry and wrap
+    /// to the beginning by issuing a later scan with `after = None`.
+    async fn list_pending_document_retirements(
+        &self,
+        _after: Option<DocumentId>,
+        _limit: u64,
+    ) -> Result<Vec<(DocumentId, DocumentGeneration)>> {
+        document_storage_unavailable()
+    }
+
+    /// Mark one exact tombstone generation's retrieval retirement complete.
+    ///
+    /// Returns `false` when the generation is no longer pending, including when
+    /// the document was recreated or advanced since the caller observed it.
+    async fn complete_document_retirement(
+        &self,
+        _id: DocumentId,
+        _generation: DocumentGeneration,
+    ) -> Result<bool> {
+        document_storage_unavailable()
+    }
+
     /// Hard-delete source content and return its durable tombstone generation.
     ///
     /// The generation clock is retained without source content. Repeated deletion
@@ -144,6 +169,22 @@ pub trait Store: Send + Sync {
 
     /// List a document's semantic job history, oldest first.
     async fn list_document_jobs(&self, _document_id: DocumentId) -> Result<Vec<DocumentJob>> {
+        document_storage_unavailable()
+    }
+
+    /// Explicitly retry the current exact-generation failed index job.
+    ///
+    /// A matching failed job is reset to a fresh queued delivery using a
+    /// store-owned timestamp and `max_attempts`. Repeating the request while that
+    /// exact job is already nonterminal returns it unchanged. Succeeded,
+    /// cancelled, superseded, missing, or differently fingerprinted jobs are not
+    /// revived and return `None`.
+    async fn retry_document_index_job(
+        &self,
+        _document_id: DocumentId,
+        _pipeline_fingerprint: &str,
+        _max_attempts: i32,
+    ) -> Result<Option<DocumentJob>> {
         document_storage_unavailable()
     }
 
@@ -334,6 +375,7 @@ mod tests {
         documents: HashMap<DocumentId, DocumentRecord>,
         generations: HashMap<DocumentId, DocumentGeneration>,
         tombstones: HashSet<DocumentId>,
+        pending_retirements: HashSet<DocumentId>,
         jobs: HashMap<DocumentJobId, DocumentJob>,
     }
 
@@ -364,6 +406,7 @@ mod tests {
         };
         state.generations.insert(id, generation);
         state.tombstones.remove(&id);
+        state.pending_retirements.remove(&id);
         Ok(generation)
     }
 
@@ -391,6 +434,7 @@ mod tests {
             document.revision_token = uuid::Uuid::new_v4();
             state.generations.insert(document.id, document.generation());
             state.tombstones.remove(&document.id);
+            state.pending_retirements.remove(&document.id);
             state.documents.insert(document.id, document);
             Ok(())
         }
@@ -472,6 +516,7 @@ mod tests {
                 let generation = allocate_mem_generation(&mut state, id)?;
                 state.documents.remove(&id);
                 state.tombstones.insert(id);
+                state.pending_retirements.insert(id);
                 generation
             } else if let Some(generation) = state.generations.get(&id) {
                 *generation
@@ -480,6 +525,41 @@ mod tests {
             };
             state.jobs.retain(|_, job| job.document_id != id);
             Ok(generation)
+        }
+
+        async fn list_pending_document_retirements(
+            &self,
+            after: Option<DocumentId>,
+            limit: u64,
+        ) -> Result<Vec<(DocumentId, DocumentGeneration)>> {
+            let state = self.document_state.lock().unwrap();
+            let mut retirements: Vec<_> = state
+                .pending_retirements
+                .iter()
+                .filter(|id| after.is_none_or(|after| id.0 > after.0))
+                .filter(|id| !state.documents.contains_key(id) && state.tombstones.contains(id))
+                .map(|id| (*id, state.generations[id]))
+                .collect();
+            retirements.sort_unstable_by_key(|(id, _)| id.0);
+            retirements.truncate(limit.try_into().unwrap_or(usize::MAX));
+            Ok(retirements)
+        }
+
+        async fn complete_document_retirement(
+            &self,
+            id: DocumentId,
+            generation: DocumentGeneration,
+        ) -> Result<bool> {
+            let mut state = self.document_state.lock().unwrap();
+            if !state.pending_retirements.contains(&id)
+                || !state.tombstones.contains(&id)
+                || state.documents.contains_key(&id)
+                || state.generations.get(&id) != Some(&generation)
+            {
+                return Ok(false);
+            }
+            state.pending_retirements.remove(&id);
+            Ok(true)
         }
         async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
             if document.media_type.is_empty()
@@ -634,6 +714,90 @@ mod tests {
                     .then_with(|| left.id.0.cmp(&right.id.0))
             });
             Ok(jobs)
+        }
+        async fn retry_document_index_job(
+            &self,
+            document_id: DocumentId,
+            pipeline_fingerprint: &str,
+            max_attempts: i32,
+        ) -> Result<Option<DocumentJob>> {
+            if pipeline_fingerprint.is_empty()
+                || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
+                || max_attempts < 1
+            {
+                return Err(AgentError::Store("invalid document job retry".into()));
+            }
+            let mut state = self.document_state.lock().unwrap();
+            let Some(document) = state.documents.get(&document_id).cloned() else {
+                return Ok(None);
+            };
+            let candidate_id = state
+                .jobs
+                .values()
+                .find(|job| {
+                    job.document_id == document_id
+                        && job.content_revision == document.content_revision
+                        && job.revision_token == document.revision_token
+                        && job.kind == DocumentJobKind::Index
+                        && job.pipeline_fingerprint == pipeline_fingerprint
+                })
+                .map(|job| job.id);
+            let Some(candidate_id) = candidate_id else {
+                return Ok(None);
+            };
+            let candidate = state.jobs.get(&candidate_id).unwrap().clone();
+            if matches!(
+                candidate.status,
+                DocumentJobStatus::Queued
+                    | DocumentJobStatus::Running
+                    | DocumentJobStatus::RetryWait
+            ) {
+                let expected = if candidate.status == DocumentJobStatus::Running {
+                    DocumentProcessingStatus::Processing
+                } else {
+                    DocumentProcessingStatus::Queued
+                };
+                if document.processing_status != expected {
+                    return Err(AgentError::Store(format!(
+                        "document job {} is {} but exact document {} is unexpectedly {}",
+                        candidate.id,
+                        candidate.status.as_str(),
+                        document_id,
+                        document.processing_status.as_str()
+                    )));
+                }
+                return Ok(Some(candidate));
+            }
+            if candidate.status != DocumentJobStatus::Failed {
+                return Ok(None);
+            }
+            if document.processing_status != DocumentProcessingStatus::Failed {
+                return Err(AgentError::Store(format!(
+                    "failed document job {} does not match failed document {}",
+                    candidate.id, document_id
+                )));
+            }
+
+            let now = chrono::Utc::now();
+            let job = state.jobs.get_mut(&candidate_id).unwrap();
+            job.status = DocumentJobStatus::Queued;
+            job.attempt_count = 0;
+            job.max_attempts = max_attempts;
+            job.available_at = now;
+            job.lease_token = None;
+            job.lease_expires_at = None;
+            job.started_at = None;
+            job.finished_at = None;
+            job.last_error_code = None;
+            job.last_error_detail = None;
+            job.updated_at = now;
+            let job = job.clone();
+            let document = state.documents.get_mut(&document_id).unwrap();
+            document.processing_status = DocumentProcessingStatus::Queued;
+            document.indexed_revision = None;
+            document.index_fingerprint = None;
+            document.indexed_at = None;
+            Ok(Some(job))
         }
         async fn claim_document_job(
             &self,
@@ -1195,5 +1359,203 @@ mod tests {
             Some(maximum)
         );
         assert_eq!(block_on(store.get_document_job(job.id)).unwrap(), Some(job));
+    }
+
+    #[test]
+    fn mem_store_document_retirement_is_durable_state_with_exact_completion() {
+        let store = MemStore::default();
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "retire me".into(),
+            updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
+        };
+        block_on(store.upsert_document(&source)).unwrap();
+
+        let tombstone = block_on(store.delete_document(source.id)).unwrap();
+        assert_eq!(
+            block_on(store.list_pending_document_retirements(None, 10)).unwrap(),
+            vec![(source.id, tombstone)]
+        );
+        assert_eq!(
+            block_on(store.delete_document(source.id)).unwrap(),
+            tombstone
+        );
+
+        let recreated = block_on(store.upsert_document(&DocumentUpsert {
+            canonical_text: "new lifecycle".into(),
+            ..source.clone()
+        }))
+        .unwrap();
+        assert!(block_on(store.list_pending_document_retirements(None, 10))
+            .unwrap()
+            .is_empty());
+        assert!(!block_on(store.complete_document_retirement(source.id, tombstone)).unwrap());
+
+        let current_tombstone = block_on(store.delete_document(source.id)).unwrap();
+        assert_ne!(current_tombstone, tombstone);
+        assert_eq!(
+            current_tombstone.content_revision,
+            recreated.content_revision + 1
+        );
+        assert!(!block_on(store.complete_document_retirement(source.id, tombstone)).unwrap());
+        assert!(
+            block_on(store.complete_document_retirement(source.id, current_tombstone)).unwrap()
+        );
+        assert!(
+            !block_on(store.complete_document_retirement(source.id, current_tombstone)).unwrap()
+        );
+        assert!(block_on(store.list_pending_document_retirements(None, 10))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn mem_store_pending_retirement_cursor_advances_and_can_wrap() {
+        let store = MemStore::default();
+        let ids = [1_u128, 2, 3].map(|value| DocumentId(uuid::Uuid::from_u128(value)));
+        let generations = ids.map(|id| block_on(store.delete_document(id)).unwrap());
+
+        assert_eq!(
+            block_on(store.list_pending_document_retirements(None, 2)).unwrap(),
+            vec![(ids[0], generations[0]), (ids[1], generations[1])]
+        );
+        assert_eq!(
+            block_on(store.list_pending_document_retirements(Some(ids[1]), 2)).unwrap(),
+            vec![(ids[2], generations[2])]
+        );
+        assert!(
+            block_on(store.list_pending_document_retirements(Some(ids[2]), 2))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            block_on(store.list_pending_document_retirements(None, 1)).unwrap(),
+            vec![(ids[0], generations[0])]
+        );
+    }
+
+    #[test]
+    fn mem_store_explicit_retry_only_revives_current_failed_index_job() {
+        let store = MemStore::default();
+        let source = DocumentUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "retry me".into(),
+            updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
+        };
+        let (_, queued) =
+            block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 2)).unwrap();
+        assert_eq!(
+            block_on(store.retry_document_index_job(source.id, "pipeline-v1", 9)).unwrap(),
+            Some(queued.clone())
+        );
+
+        let claim_at = queued.available_at + chrono::Duration::seconds(1);
+        let running =
+            block_on(store.claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1)))
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            block_on(store.retry_document_index_job(source.id, "pipeline-v1", 9)).unwrap(),
+            Some(running.clone())
+        );
+        assert_eq!(
+            block_on(store.record_document_job_failure(
+                running.id,
+                running.lease_token.unwrap(),
+                claim_at + chrono::Duration::seconds(1),
+                None,
+                "embedding_failed",
+                Some("service unavailable"),
+            ))
+            .unwrap(),
+            Some(DocumentJobStatus::Failed)
+        );
+        assert_eq!(
+            block_on(store.retry_document_index_job(source.id, "other-pipeline", 4)).unwrap(),
+            None
+        );
+
+        let retried = block_on(store.retry_document_index_job(source.id, "pipeline-v1", 4))
+            .unwrap()
+            .unwrap();
+        assert_eq!(retried.id, queued.id);
+        assert_eq!(retried.status, DocumentJobStatus::Queued);
+        assert_eq!(retried.attempt_count, 0);
+        assert_eq!(retried.max_attempts, 4);
+        assert_eq!(retried.lease_token, None);
+        assert_eq!(retried.lease_expires_at, None);
+        assert_eq!(retried.started_at, None);
+        assert_eq!(retried.finished_at, None);
+        assert_eq!(retried.last_error_code, None);
+        assert_eq!(retried.last_error_detail, None);
+        let document = block_on(store.get_document(source.id)).unwrap().unwrap();
+        assert_eq!(document.processing_status, DocumentProcessingStatus::Queued);
+        assert_eq!(document.indexed_revision, None);
+        assert_eq!(document.index_fingerprint, None);
+        assert_eq!(document.indexed_at, None);
+        assert_eq!(
+            block_on(store.retry_document_index_job(source.id, "pipeline-v1", 8)).unwrap(),
+            Some(retried.clone())
+        );
+
+        let retry_claim_at = retried.available_at + chrono::Duration::seconds(1);
+        let retry_running = block_on(store.claim_document_job(
+            retry_claim_at,
+            retry_claim_at + chrono::Duration::minutes(1),
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(block_on(store.complete_document_index_job(
+            retry_running.id,
+            retry_running.lease_token.unwrap(),
+            retry_claim_at + chrono::Duration::seconds(1),
+        ))
+        .unwrap());
+        assert_eq!(
+            block_on(store.retry_document_index_job(source.id, "pipeline-v1", 4)).unwrap(),
+            None
+        );
+
+        let replacement = DocumentUpsert {
+            canonical_text: "replacement".into(),
+            updated_at: source.updated_at + chrono::Duration::seconds(1),
+            ..source.clone()
+        };
+        let (_, cancelled) =
+            block_on(store.upsert_document_and_enqueue_index(&replacement, "pipeline-v2", 2))
+                .unwrap();
+        assert_eq!(
+            block_on(store.retry_document_index_job(replacement.id, "pipeline-v1", 4)).unwrap(),
+            None
+        );
+        block_on(store.upsert_document_and_enqueue_index(
+            &DocumentUpsert {
+                canonical_text: "newer replacement".into(),
+                updated_at: source.updated_at + chrono::Duration::seconds(2),
+                ..replacement
+            },
+            "pipeline-v3",
+            2,
+        ))
+        .unwrap();
+        assert_eq!(
+            block_on(store.get_document_job(cancelled.id))
+                .unwrap()
+                .unwrap()
+                .status,
+            DocumentJobStatus::Cancelled
+        );
+        assert_eq!(
+            block_on(store.retry_document_index_job(source.id, "pipeline-v2", 4)).unwrap(),
+            None
+        );
     }
 }
