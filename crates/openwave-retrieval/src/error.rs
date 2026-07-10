@@ -3,7 +3,8 @@
 //! [`RetrievalError`] mirrors the shape of `openwave-core`'s `AgentError`: a lean,
 //! `#[non_exhaustive]` enum whose variants grow as the code that produces them
 //! lands (parsing, embedding, vector backends). Keeping it separate from the core
-//! error keeps `openwave-retrieval` a standalone leaf crate for now.
+//! error keeps retrieval failures separate from agent/runtime failures even though
+//! both crates share the persisted [`openwave_core::DocumentId`] type.
 
 use thiserror::Error;
 

@@ -18,10 +18,16 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::error::Result;
+use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, ProjectId};
-use crate::model::{Chat, Message, Project, ToolCallRecord};
+use crate::id::{ChatId, DocumentId, ProjectId};
+use crate::model::{Chat, DocumentRecord, DocumentScope, Message, Project, ToolCallRecord};
+
+fn document_storage_unavailable<T>() -> Result<T> {
+    Err(AgentError::Store(
+        "document storage is not implemented by this Store".into(),
+    ))
+}
 
 /// Durable metadata and conversation state.
 ///
@@ -37,6 +43,29 @@ pub trait Store: Send + Sync {
 
     /// List projects, most-recently-created first.
     async fn list_projects(&self) -> Result<Vec<Project>>;
+
+    /// Persist a new authoritative document record.
+    ///
+    /// `project_id`, when present, must identify an existing project. The default
+    /// database store enforces this with a cascading foreign key.
+    async fn create_document(&self, _document: &DocumentRecord) -> Result<()> {
+        document_storage_unavailable()
+    }
+
+    /// Fetch an authoritative document by id, or `None` if it does not exist.
+    async fn get_document(&self, _id: DocumentId) -> Result<Option<DocumentRecord>> {
+        document_storage_unavailable()
+    }
+
+    /// List documents in `scope`, most-recently-created first.
+    async fn list_documents(&self, _scope: DocumentScope) -> Result<Vec<DocumentRecord>> {
+        document_storage_unavailable()
+    }
+
+    /// Delete an authoritative document record. Idempotent for unknown ids.
+    async fn delete_document(&self, _id: DocumentId) -> Result<()> {
+        document_storage_unavailable()
+    }
 
     /// Persist a new chat.
     ///
@@ -128,6 +157,7 @@ mod tests {
     #[derive(Default)]
     struct MemStore {
         projects: Mutex<HashMap<ProjectId, Project>>,
+        documents: Mutex<HashMap<DocumentId, DocumentRecord>>,
         chats: Mutex<HashMap<ChatId, Chat>>,
         settings: Mutex<HashMap<String, Value>>,
         events: Mutex<Vec<(ChatId, SequencedEvent)>>,
@@ -148,6 +178,34 @@ mod tests {
         }
         async fn list_projects(&self) -> Result<Vec<Project>> {
             Ok(self.projects.lock().unwrap().values().cloned().collect())
+        }
+        async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
+            self.documents
+                .lock()
+                .unwrap()
+                .insert(document.id, document.clone());
+            Ok(())
+        }
+        async fn get_document(&self, id: DocumentId) -> Result<Option<DocumentRecord>> {
+            Ok(self.documents.lock().unwrap().get(&id).cloned())
+        }
+        async fn list_documents(&self, scope: DocumentScope) -> Result<Vec<DocumentRecord>> {
+            Ok(self
+                .documents
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|document| match scope {
+                    DocumentScope::All => true,
+                    DocumentScope::Unscoped => document.project_id.is_none(),
+                    DocumentScope::Project(id) => document.project_id == Some(id),
+                })
+                .cloned()
+                .collect())
+        }
+        async fn delete_document(&self, id: DocumentId) -> Result<()> {
+            self.documents.lock().unwrap().remove(&id);
+            Ok(())
         }
         async fn create_chat(&self, chat: &Chat) -> Result<()> {
             self.chats.lock().unwrap().insert(chat.id, chat.clone());

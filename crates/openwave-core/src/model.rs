@@ -12,8 +12,9 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-use crate::id::{ChatId, MessageId, ProjectId, TurnId};
+use crate::id::{ChatId, DocumentId, MessageId, ProjectId, TurnId};
 
 /// An optional grouping of chats that share a workspace and (later) a document
 /// corpus. A chat may belong to a project or stand alone — unlike some designs
@@ -28,6 +29,56 @@ pub struct Project {
     pub workspace_dir: PathBuf,
     /// When the project was created.
     pub created_at: DateTime<Utc>,
+}
+
+/// An authoritative source document whose derived chunks live in the retrieval
+/// index. Canonical text stays in the operational store so an index can be
+/// rebuilt after an embedding or chunking change. Reprocessing with a different
+/// parser additionally requires the original bytes, which belong in `BlobStore`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentRecord {
+    /// Stable identifier shared with the retrieval index.
+    pub id: DocumentId,
+    /// Owning project, or `None` for an explicitly unscoped document.
+    pub project_id: Option<ProjectId>,
+    /// Source path or URL, or `None` for content supplied inline.
+    pub source_uri: Option<String>,
+    /// Media type of the canonical content.
+    pub media_type: String,
+    /// Optional human-facing title.
+    pub title: Option<String>,
+    /// Parsed text-of-record used to rechunk, re-embed, and verify citations.
+    pub canonical_text: String,
+    /// Monotonic content revision, starting at one.
+    pub content_revision: i64,
+    /// Opaque identity for this exact content revision.
+    ///
+    /// Unlike the integer revision, this token cannot be reused after a hard
+    /// delete and recreation of the same document id, so stale index writers
+    /// cannot confuse two document lifecycles.
+    pub revision_token: Uuid,
+    /// Revision currently represented in the retrieval index, if any.
+    pub indexed_revision: Option<i64>,
+    /// Canonical-text/chunker/embedder fingerprint for the indexed revision.
+    pub index_fingerprint: Option<String>,
+    /// When this record was first created.
+    pub created_at: DateTime<Utc>,
+    /// When authoritative content or metadata last changed.
+    pub updated_at: DateTime<Utc>,
+    /// When the current index watermark was recorded.
+    pub indexed_at: Option<DateTime<Utc>>,
+}
+
+/// Corpus ownership filter for document listings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DocumentScope {
+    /// Every document, for maintenance and reindexing only.
+    All,
+    /// Only explicitly projectless documents.
+    Unscoped,
+    /// Only documents owned by this project.
+    Project(ProjectId),
 }
 
 /// Who authored a message.

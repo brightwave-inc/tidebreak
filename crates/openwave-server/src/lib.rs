@@ -468,6 +468,24 @@ mod tests {
         async fn list_projects(&self) -> Result<Vec<Project>> {
             self.inner.list_projects().await
         }
+        async fn create_document(&self, document: &openwave_core::DocumentRecord) -> Result<()> {
+            self.inner.create_document(document).await
+        }
+        async fn get_document(
+            &self,
+            id: openwave_core::DocumentId,
+        ) -> Result<Option<openwave_core::DocumentRecord>> {
+            self.inner.get_document(id).await
+        }
+        async fn list_documents(
+            &self,
+            scope: openwave_core::DocumentScope,
+        ) -> Result<Vec<openwave_core::DocumentRecord>> {
+            self.inner.list_documents(scope).await
+        }
+        async fn delete_document(&self, id: openwave_core::DocumentId) -> Result<()> {
+            self.inner.delete_document(id).await
+        }
         async fn create_chat(&self, chat: &Chat) -> Result<()> {
             self.inner.create_chat(chat).await
         }
