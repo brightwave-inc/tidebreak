@@ -60,6 +60,20 @@ pub trait Embedder: Send + Sync {
     /// The dimensionality every vector this embedder returns will have.
     fn dimensions(&self) -> usize;
 
+    /// Stable identity for document-vector behavior used in index watermarks.
+    ///
+    /// Custom embedders should override this when two configurations with the
+    /// same width can produce incompatible vectors. The value must remain stable
+    /// for this embedder instance's lifetime; runtime reconfiguration requires a
+    /// new instance.
+    fn fingerprint(&self) -> String {
+        format!(
+            "custom-embedder:type={}:dimensions={}",
+            std::any::type_name::<Self>(),
+            self.dimensions()
+        )
+    }
+
     /// Embed a batch of documents for indexing.
     async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Embedding>>;
 
@@ -128,6 +142,10 @@ impl Default for HashEmbedder {
 impl Embedder for HashEmbedder {
     fn dimensions(&self) -> usize {
         self.dims
+    }
+
+    fn fingerprint(&self) -> String {
+        format!("hash-fnv1a-v1:{}d", self.dims)
     }
 
     async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Embedding>> {

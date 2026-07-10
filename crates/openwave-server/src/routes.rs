@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
-    Agent, ApprovalDecision, CallId, Chat, ChatId, Project, ProjectId, SecretProvider,
-    SequencedEvent, Store,
+    Agent, ApprovalDecision, CallId, Chat, ChatId, DocumentUpsert, Project, ProjectId,
+    SecretProvider, SequencedEvent, Store,
 };
 use openwave_retrieval::{Citation, DocumentId, DocumentSource, RetrievalError, SearchTool};
 
@@ -324,10 +324,11 @@ fn retrieval_error(err: RetrievalError) -> ServerError {
     }
 }
 
-/// `POST /documents` — ingest a document into the shared retrieval index
-/// (`201 Created`). The index is persisted to LanceDB under the data directory, so
-/// ingested documents survive a restart. The chunks are immediately searchable via
-/// `POST /search` and the agent's `search` tool.
+/// `POST /documents` — persist canonical source content, then ingest it into the
+/// shared retrieval index (`201 Created`). Source is committed before external
+/// embedding work; a failed index attempt remains cataloged without a watermark so
+/// it can be retried. Successful chunks are immediately searchable via `POST
+/// /search` and the agent's `search` tool.
 pub async fn ingest_document(
     State(state): State<AppState>,
     Json(body): Json<IngestDocument>,
@@ -342,28 +343,105 @@ pub async fn ingest_document(
         _ => DocumentSource::Inline,
     };
     let media_type = body.media_type.as_deref().unwrap_or("text/plain");
-    let outcome = state
+    // Pipeline components promise a stable fingerprint for their lifetime. Take
+    // one snapshot and use it for the exact parse/index operation below.
+    let index_fingerprint = state.retrieval.index_fingerprint();
+    let document = state
         .retrieval
-        .ingest(source, media_type, body.content.as_bytes())
+        .parse_document(source, media_type, body.content.as_bytes())
+        .map_err(retrieval_error)?;
+    let _write = state.document_writes.acquire(document.id).await;
+    let source_uri = match &document.source {
+        DocumentSource::Uri { uri } => Some(uri.clone()),
+        DocumentSource::Inline => None,
+        _ => None,
+    };
+    // Retire the prior revision before publishing a replacement. If either
+    // watermark clearing or vector deletion fails, the old source remains
+    // authoritative; after clearing, any interruption is visible to repair.
+    if let Some(current) = state.store.get_document(document.id).await? {
+        let cleared = state
+            .store
+            .clear_document_index(current.id, current.content_revision, current.revision_token)
+            .await?;
+        if !cleared {
+            return Err(ServerError::internal(format!(
+                "document {} changed while preparing its replacement",
+                document.id
+            )));
+        }
+        state
+            .retrieval
+            .delete(document.id)
+            .await
+            .map_err(retrieval_error)?;
+    }
+    let revision = state
+        .store
+        .upsert_document(&DocumentUpsert {
+            id: document.id,
+            project_id: None,
+            source_uri,
+            media_type: document.media_type.clone(),
+            title: None,
+            canonical_text: document.text.clone(),
+            updated_at: Utc::now(),
+        })
+        .await?;
+    let chunks = state
+        .retrieval
+        .index_document(&document)
         .await
         .map_err(retrieval_error)?;
+    let indexed = state
+        .store
+        .mark_document_indexed(
+            document.id,
+            revision.content_revision,
+            revision.revision_token,
+            &index_fingerprint,
+            Utc::now(),
+        )
+        .await?;
+    if !indexed {
+        return Err(ServerError::internal(format!(
+            "document {} changed while recording its index watermark",
+            document.id
+        )));
+    }
     Ok((
         StatusCode::CREATED,
         Json(IngestResult {
-            document_id: outcome.document.id,
-            chunks: outcome.chunks,
+            document_id: document.id,
+            chunks,
         }),
     ))
 }
 
-/// `DELETE /documents/{id}` — remove a document and its chunks from the index
-/// (`204 No Content`). Idempotent: deleting an unknown or already-removed document
-/// still returns `204`. `id` is the `document_id` returned by `POST /documents`.
+/// `DELETE /documents/{id}` — remove a document's index rows and authoritative
+/// catalog record (`204 No Content`). The catalog watermark is cleared first,
+/// then index deletion happens before source deletion. Any interrupted/failed
+/// request therefore retains rebuildable source in an explicitly stale state.
+/// Idempotent: deleting an unknown or already-removed document still returns
+/// `204`. `id` is the `document_id` returned by `POST /documents`.
 pub async fn delete_document(
     State(state): State<AppState>,
     Path(id): Path<DocumentId>,
 ) -> Result<StatusCode, ServerError> {
+    let _write = state.document_writes.acquire(id).await;
+    if let Some(document) = state.store.get_document(id).await? {
+        let cleared = state
+            .store
+            .clear_document_index(id, document.content_revision, document.revision_token)
+            .await?;
+        if !cleared {
+            return Err(ServerError::internal(format!(
+                "document {id} changed while preparing it for deletion"
+            )));
+        }
+    }
     state.retrieval.delete(id).await.map_err(retrieval_error)?;
+    state.store.delete_document(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

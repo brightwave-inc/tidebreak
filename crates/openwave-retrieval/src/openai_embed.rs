@@ -17,6 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::embed::{Embedder, Embedding};
 use crate::error::{Result, RetrievalError};
@@ -93,6 +94,16 @@ impl Embedder for OpenAiEmbedder {
         self.dimensions
     }
 
+    fn fingerprint(&self) -> String {
+        format!(
+            "openai-compatible-v1:endpoint={}:model={}:dimensions={}:projection={}",
+            endpoint_fingerprint(&self.base_url),
+            self.model,
+            self.dimensions,
+            self.project_dimensions
+        )
+    }
+
     async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Embedding>> {
         // Don't make a request for nothing — the API rejects an empty input.
         if texts.is_empty() {
@@ -118,6 +129,33 @@ impl Embedder for OpenAiEmbedder {
         }
         parse_response(&bytes, texts.len(), self.dimensions)
     }
+}
+
+/// Collision-resistant identity of the endpoint's non-secret routing fields.
+fn endpoint_fingerprint(base_url: &str) -> String {
+    let canonical = reqwest::Url::parse(base_url).map_or_else(
+        |_| {
+            base_url
+                .split(['?', '#'])
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        },
+        |mut url| {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        },
+    );
+    let digest = Sha256::digest(canonical.trim_end_matches('/').as_bytes());
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 /// Build the JSON request body for an embeddings call. `dimensions` is included
@@ -300,5 +338,22 @@ mod tests {
         assert_eq!(embedder.dimensions(), 1536);
         // No network call for an empty batch, so this resolves without a server.
         assert!(embedder.embed_documents(&[]).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn fingerprint_tracks_endpoint_without_persisting_it() {
+        let default = OpenAiEmbedder::new("key", "model", 8).fingerprint();
+        let custom = OpenAiEmbedder::new("key", "model", 8)
+            .with_base_url("https://user:secret@example.test/v1?token=hidden")
+            .fingerprint();
+        let rotated_secret = OpenAiEmbedder::new("key", "model", 8)
+            .with_base_url("https://other:rotated@example.test/v1?token=changed")
+            .fingerprint();
+
+        assert_ne!(default, custom);
+        assert_eq!(custom, rotated_secret);
+        assert!(!custom.contains("secret"));
+        assert!(!custom.contains("hidden"));
+        assert!(!custom.contains("example.test"));
     }
 }

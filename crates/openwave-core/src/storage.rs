@@ -95,6 +95,19 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
+    /// Clear the index watermark for an exact content revision and lifecycle.
+    ///
+    /// Returns `false` without modifying the row when the document or exact
+    /// revision identity is no longer current.
+    async fn clear_document_index(
+        &self,
+        _id: DocumentId,
+        _revision: i64,
+        _revision_token: uuid::Uuid,
+    ) -> Result<bool> {
+        document_storage_unavailable()
+    }
+
     /// Persist a new chat.
     ///
     /// A chat's `project_id`, when set, is not checked against an existing
@@ -303,6 +316,24 @@ mod tests {
             document.indexed_revision = Some(revision);
             document.index_fingerprint = Some(fingerprint.to_string());
             document.indexed_at = Some(indexed_at);
+            Ok(true)
+        }
+        async fn clear_document_index(
+            &self,
+            id: DocumentId,
+            revision: i64,
+            revision_token: uuid::Uuid,
+        ) -> Result<bool> {
+            let mut documents = self.documents.lock().unwrap();
+            let Some(document) = documents.get_mut(&id) else {
+                return Ok(false);
+            };
+            if document.content_revision != revision || document.revision_token != revision_token {
+                return Ok(false);
+            }
+            document.indexed_revision = None;
+            document.index_fingerprint = None;
+            document.indexed_at = None;
             Ok(true)
         }
         async fn create_chat(&self, chat: &Chat) -> Result<()> {

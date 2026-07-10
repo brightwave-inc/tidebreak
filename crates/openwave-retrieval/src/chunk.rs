@@ -23,6 +23,15 @@ use crate::error::Result;
 /// future service- or model-backed chunker (sentence tokenizers, layout models)
 /// can, and returning [`Result`] now keeps that from being a breaking change.
 pub trait Chunker: Send + Sync {
+    /// Stable identity for chunk boundaries used in index watermarks.
+    ///
+    /// Custom chunkers should override this whenever an implementation change
+    /// can alter emitted chunks. The value must remain stable for this chunker
+    /// instance's lifetime; runtime reconfiguration requires a new instance.
+    fn fingerprint(&self) -> String {
+        format!("custom-chunker:type={}", std::any::type_name::<Self>())
+    }
+
     /// Produce the chunks for `document`, in document order.
     fn chunk(&self, document: &Document) -> Result<Vec<Chunk>>;
 }
@@ -63,6 +72,13 @@ impl Default for TextChunker {
 }
 
 impl Chunker for TextChunker {
+    fn fingerprint(&self) -> String {
+        format!(
+            "text-window-v1:max_chars={}:overlap={}",
+            self.max_chars, self.overlap
+        )
+    }
+
     fn chunk(&self, document: &Document) -> Result<Vec<Chunk>> {
         let text = &document.text;
 
