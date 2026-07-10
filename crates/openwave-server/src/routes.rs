@@ -361,6 +361,8 @@ pub struct DocumentSummary {
     pub title: Option<String>,
     /// Current authoritative source revision.
     pub content_revision: i64,
+    /// Processing lifecycle of the current source revision.
+    pub processing_status: openwave_core::DocumentProcessingStatus,
     /// Source revision currently represented in the index.
     pub indexed_revision: Option<i64>,
     /// Parser/chunker/embedder identity for the current indexed revision.
@@ -382,6 +384,7 @@ impl From<DocumentSummaryRecord> for DocumentSummary {
             media_type: document.media_type,
             title: document.title,
             content_revision: document.content_revision,
+            processing_status: document.processing_status,
             indexed_revision: document.indexed_revision,
             index_fingerprint: document.index_fingerprint,
             created_at: document.created_at,
@@ -400,6 +403,7 @@ impl From<&DocumentRecord> for DocumentSummary {
             media_type: document.media_type.clone(),
             title: document.title.clone(),
             content_revision: document.content_revision,
+            processing_status: document.processing_status,
             indexed_revision: document.indexed_revision,
             index_fingerprint: document.index_fingerprint.clone(),
             created_at: document.created_at,

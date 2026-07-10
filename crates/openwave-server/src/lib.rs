@@ -1478,6 +1478,7 @@ mod tests {
                 canonical_text: "project-only source".into(),
                 content_revision: 1,
                 revision_token: uuid::Uuid::new_v4(),
+                processing_status: openwave_core::DocumentProcessingStatus::Queued,
                 indexed_revision: None,
                 index_fingerprint: None,
                 created_at: now,
@@ -1538,6 +1539,7 @@ mod tests {
         assert_eq!(catalog_summary["uri"], "file:///catalog.txt");
         assert_eq!(catalog_summary["media_type"], "text/markdown");
         assert_eq!(catalog_summary["content_revision"], 1);
+        assert_eq!(catalog_summary["processing_status"], "ready");
         assert_eq!(catalog_summary["indexed_revision"], 1);
 
         let detail = get(format!("/documents/{id}")).await;
@@ -1590,6 +1592,7 @@ mod tests {
                     canonical_text: nanos.to_string(),
                     content_revision: 1,
                     revision_token: uuid::Uuid::new_v4(),
+                    processing_status: openwave_core::DocumentProcessingStatus::Queued,
                     indexed_revision: None,
                     index_fingerprint: None,
                     created_at,

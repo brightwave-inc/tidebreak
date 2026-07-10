@@ -110,6 +110,8 @@ pub trait Store: Send + Sync {
 
     /// Mark an exact `(revision, revision_token)` as indexed with `fingerprint`.
     ///
+    /// `fingerprint` must not be empty.
+    ///
     /// Returns `false` without modifying the row when the document is missing,
     /// the lifecycle token differs, or a newer content revision won the race.
     async fn mark_document_indexed(
@@ -220,6 +222,7 @@ mod tests {
     use futures::executor::block_on;
 
     use super::*;
+    use crate::model::DocumentProcessingStatus;
 
     /// Minimal in-memory `Store` — proves the trait is object-safe and usable
     /// behind `Arc<dyn Store>`, and exercises the signatures.
@@ -334,6 +337,7 @@ mod tests {
                         canonical_text: document.canonical_text.clone(),
                         content_revision,
                         revision_token: uuid::Uuid::new_v4(),
+                        processing_status: DocumentProcessingStatus::Queued,
                         indexed_revision: None,
                         index_fingerprint: None,
                         created_at: existing.created_at,
@@ -350,6 +354,7 @@ mod tests {
                     canonical_text: document.canonical_text.clone(),
                     content_revision: 1,
                     revision_token: uuid::Uuid::new_v4(),
+                    processing_status: DocumentProcessingStatus::Queued,
                     indexed_revision: None,
                     index_fingerprint: None,
                     created_at: document.updated_at,
@@ -368,6 +373,14 @@ mod tests {
             fingerprint: &str,
             indexed_at: chrono::DateTime<chrono::Utc>,
         ) -> Result<bool> {
+            if fingerprint.is_empty()
+                || fingerprint.chars().count()
+                    > crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
+            {
+                return Err(AgentError::Store(
+                    "document index fingerprint must contain 1 to 512 characters".into(),
+                ));
+            }
             let mut documents = self.documents.lock().unwrap();
             let Some(document) = documents.get_mut(&id) else {
                 return Ok(false);
@@ -378,6 +391,7 @@ mod tests {
             document.indexed_revision = Some(revision);
             document.index_fingerprint = Some(fingerprint.to_string());
             document.indexed_at = Some(indexed_at);
+            document.processing_status = DocumentProcessingStatus::Ready;
             Ok(true)
         }
         async fn clear_document_index(
@@ -396,6 +410,7 @@ mod tests {
             document.indexed_revision = None;
             document.index_fingerprint = None;
             document.indexed_at = None;
+            document.processing_status = DocumentProcessingStatus::Queued;
             Ok(true)
         }
         async fn create_chat(&self, chat: &Chat) -> Result<()> {
@@ -486,6 +501,7 @@ mod tests {
             media_type: document.media_type.clone(),
             title: document.title.clone(),
             content_revision: document.content_revision,
+            processing_status: document.processing_status,
             indexed_revision: document.indexed_revision,
             index_fingerprint: document.index_fingerprint.clone(),
             created_at: document.created_at,

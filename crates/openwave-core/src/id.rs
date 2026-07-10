@@ -69,6 +69,10 @@ id_type!(
     /// preserves the existing stable URI identity used by retrieval ingestion.
     DocumentId
 );
+id_type!(
+    /// Identifies one durable document-processing job.
+    DocumentJobId
+);
 
 impl DocumentId {
     /// Namespace UUID for URI-derived document ids. This value is part of the
