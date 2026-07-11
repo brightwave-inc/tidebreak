@@ -109,13 +109,13 @@ impl Retriever {
     ///
     /// URI sources receive a stable derived id; inline sources receive a fresh
     /// id for each parse.
-    pub fn parse_document(
+    pub async fn parse_document(
         &self,
         source: DocumentSource,
         media_type: &str,
         raw: &[u8],
     ) -> Result<Document> {
-        let parsed = self.parser.parse(raw, media_type)?;
+        let parsed = self.parser.parse(raw, media_type).await?;
         openwave_core::validate_source_regions(&parsed.text, &parsed.source_regions)
             .map_err(RetrievalError::parse)?;
         let id = match &source {
@@ -258,7 +258,7 @@ impl Retriever {
         media_type: &str,
         raw: &[u8],
     ) -> Result<IngestOutcome> {
-        let document = self.parse_document(source, media_type, raw)?;
+        let document = self.parse_document(source, media_type, raw).await?;
         let count = self.index_document(&document).await?;
 
         Ok(IngestOutcome {
@@ -331,6 +331,7 @@ mod tests {
 
     struct StaticParser(ParsedDocument);
 
+    #[async_trait::async_trait]
     impl DocumentParser for StaticParser {
         fn fingerprint(&self) -> String {
             "static-parser-v1".into()
@@ -340,7 +341,7 @@ mod tests {
             true
         }
 
-        fn parse(&self, _raw: &[u8], _media_type: &str) -> Result<ParsedDocument> {
+        async fn parse(&self, _raw: &[u8], _media_type: &str) -> Result<ParsedDocument> {
             Ok(self.0.clone())
         }
     }
@@ -707,6 +708,7 @@ The Great Barrier Reef is the world's largest coral reef system.";
                 "text/plain",
                 b"persist this before embedding",
             )
+            .await
             .unwrap();
         assert_eq!(document.id, DocumentId::derive("file:///separate.txt"));
         assert_eq!(document.text, "persist this before embedding");
@@ -719,8 +721,8 @@ The Great Barrier Reef is the world's largest coral reef system.";
         assert_eq!(hits[0].document_id, document.id);
     }
 
-    #[test]
-    fn parser_source_regions_are_validated_and_attached() {
+    #[tokio::test]
+    async fn parser_source_regions_are_validated_and_attached() {
         let parsed = ParsedDocument::from_text("page one\npage two").with_source_regions(vec![
             SourceRegion {
                 span: ByteSpan::new(0, 8),
@@ -744,6 +746,7 @@ The Great Barrier Reef is the world's largest coral reef system.";
         );
         let document = retriever
             .parse_document(DocumentSource::Inline, "application/pdf", b"ignored")
+            .await
             .unwrap();
         assert_eq!(document.source_regions, parsed.source_regions);
 
@@ -760,7 +763,9 @@ The Great Barrier Reef is the world's largest coral reef system.";
             Arc::new(InMemoryVectorStore::new(dims)),
         );
         assert!(matches!(
-            retriever.parse_document(DocumentSource::Inline, "application/pdf", b"ignored"),
+            retriever
+                .parse_document(DocumentSource::Inline, "application/pdf", b"ignored")
+                .await,
             Err(RetrievalError::Parse(_))
         ));
     }

@@ -6,10 +6,9 @@
 //! (PDF/office/images) will arrive later as a feature-gated parser behind this
 //! same trait, so the pipeline never has to care which parser produced the text.
 //!
-//! The trait is synchronous while the only implementation is CPU-only text
-//! decoding. Rich parsers must not perform expensive native or remote work on an
-//! async executor thread; the parser contract and durable worker boundary will
-//! become async before one is wired into production.
+//! Parsing is async so native or remote implementations can yield while doing
+//! I/O. CPU-heavy parsers must still isolate blocking work at their own boundary;
+//! production rich parsing belongs in the durable document worker.
 
 use crate::document::SourceRegion;
 use crate::error::{Result, RetrievalError};
@@ -45,6 +44,7 @@ impl ParserRegistry {
     }
 }
 
+#[async_trait::async_trait]
 impl DocumentParser for ParserRegistry {
     fn fingerprint(&self) -> String {
         // Length prefixes make the ordered composition unambiguous even when a
@@ -67,7 +67,7 @@ impl DocumentParser for ParserRegistry {
             .any(|parser| parser.supports(media_type))
     }
 
-    fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {
+    async fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {
         let parser = self
             .parsers
             .iter()
@@ -77,7 +77,7 @@ impl DocumentParser for ParserRegistry {
                     "no registered document parser supports media type `{media_type}`"
                 ))
             })?;
-        parser.parse(raw, media_type)
+        parser.parse(raw, media_type).await
     }
 }
 
@@ -113,6 +113,7 @@ impl ParsedDocument {
 ///
 /// Object-safe so parsers can be held as `Box<dyn DocumentParser>` and swapped by
 /// configuration (naive today, liteparse-backed later).
+#[async_trait::async_trait]
 pub trait DocumentParser: Send + Sync {
     /// Stable identity for canonical-text behavior used in index watermarks.
     ///
@@ -127,7 +128,7 @@ pub trait DocumentParser: Send + Sync {
     fn supports(&self, media_type: &str) -> bool;
 
     /// Parse `raw` bytes of the given media type into plain text.
-    fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument>;
+    async fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument>;
 }
 
 /// The zero-dependency fallback parser: decodes bytes as UTF-8 text.
@@ -147,6 +148,7 @@ impl PlainTextParser {
     }
 }
 
+#[async_trait::async_trait]
 impl DocumentParser for PlainTextParser {
     fn fingerprint(&self) -> String {
         "plain-text-lossy-v1".to_string()
@@ -159,7 +161,7 @@ impl DocumentParser for PlainTextParser {
         base.is_empty() || base.to_ascii_lowercase().starts_with("text/")
     }
 
-    fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {
+    async fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {
         if !self.supports(media_type) {
             return Err(RetrievalError::parse(format!(
                 "PlainTextParser does not support media type `{media_type}`"
@@ -180,6 +182,7 @@ mod tests {
         prefix: &'static str,
     }
 
+    #[async_trait::async_trait]
     impl DocumentParser for PrefixParser {
         fn fingerprint(&self) -> String {
             format!("prefix:{}:{}", self.media_type, self.prefix)
@@ -189,7 +192,7 @@ mod tests {
             media_type == self.media_type
         }
 
-        fn parse(&self, raw: &[u8], _media_type: &str) -> Result<ParsedDocument> {
+        async fn parse(&self, raw: &[u8], _media_type: &str) -> Result<ParsedDocument> {
             Ok(ParsedDocument::from_text(format!(
                 "{}{}",
                 self.prefix,
@@ -198,8 +201,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn registry_dispatches_to_first_supporting_parser() {
+    #[tokio::test]
+    async fn registry_dispatches_to_first_supporting_parser() {
         let registry = ParserRegistry::new()
             .with_parser(PrefixParser {
                 media_type: "application/pdf",
@@ -212,17 +215,27 @@ mod tests {
             .with_parser(PlainTextParser::new());
 
         assert_eq!(
-            registry.parse(b"pdf", "application/pdf").unwrap().text,
+            registry
+                .parse(b"pdf", "application/pdf")
+                .await
+                .unwrap()
+                .text,
             "first:pdf"
         );
-        assert_eq!(registry.parse(b"text", "text/plain").unwrap().text, "text");
+        assert_eq!(
+            registry.parse(b"text", "text/plain").await.unwrap().text,
+            "text"
+        );
     }
 
-    #[test]
-    fn registry_rejects_unsupported_media_without_invoking_a_parser() {
+    #[tokio::test]
+    async fn registry_rejects_unsupported_media_without_invoking_a_parser() {
         let registry = ParserRegistry::new().with_parser(PlainTextParser::new());
         assert!(!registry.supports("application/pdf"));
-        let error = registry.parse(b"%PDF", "application/pdf").unwrap_err();
+        let error = registry
+            .parse(b"%PDF", "application/pdf")
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("no registered document parser"));
     }
 
@@ -265,28 +278,29 @@ mod tests {
         assert!(!p.supports("image/png"));
     }
 
-    #[test]
-    fn parses_utf8_bytes_verbatim() {
+    #[tokio::test]
+    async fn parses_utf8_bytes_verbatim() {
         let p = PlainTextParser::new();
         let parsed = p
             .parse("# Title\n\nbody".as_bytes(), "text/markdown")
+            .await
             .unwrap();
         assert_eq!(parsed.text, "# Title\n\nbody");
     }
 
-    #[test]
-    fn repairs_invalid_utf8_lossily() {
+    #[tokio::test]
+    async fn repairs_invalid_utf8_lossily() {
         let p = PlainTextParser::new();
-        let parsed = p.parse(&[b'a', 0xFF, b'b'], "text/plain").unwrap();
+        let parsed = p.parse(&[b'a', 0xFF, b'b'], "text/plain").await.unwrap();
         // The lone 0xFF becomes U+FFFD; surrounding text survives.
         assert!(parsed.text.starts_with('a'));
         assert!(parsed.text.ends_with('b'));
         assert!(parsed.text.contains('\u{FFFD}'));
     }
 
-    #[test]
-    fn rejects_unsupported_media_type() {
+    #[tokio::test]
+    async fn rejects_unsupported_media_type() {
         let p = PlainTextParser::new();
-        assert!(p.parse(b"%PDF-1.7", "application/pdf").is_err());
+        assert!(p.parse(b"%PDF-1.7", "application/pdf").await.is_err());
     }
 }
