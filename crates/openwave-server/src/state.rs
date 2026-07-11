@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use openwave_core::{
-    AgentConfig, CancelToken, ChatId, Config, DocumentId, SecretProvider, SteerInbox, Store,
-    ToolRegistry,
+    AgentConfig, BlobStore, CancelToken, ChatId, Config, DocumentId, FsBlobStore, SecretProvider,
+    SteerInbox, Store, ToolRegistry,
 };
 use openwave_retrieval::Retriever;
 use tokio::sync::Notify;
@@ -26,6 +26,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Durable metadata, conversation state, and the event journal.
     pub store: Arc<dyn Store>,
+    /// Durable raw bytes and generated artifacts under the configured data directory.
+    pub blobs: Arc<dyn BlobStore>,
     /// Builds the model provider for each turn from the configured credentials.
     pub resolver: Arc<dyn ProviderResolver>,
     /// Credential custody — where the model API key is read from and written to.
@@ -64,9 +66,11 @@ impl AppState {
         retrieval: Arc<Retriever>,
         agent_config: AgentConfig,
     ) -> Self {
+        let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
         Self {
             config: Arc::new(config),
             store,
+            blobs,
             resolver,
             secrets,
             tools,

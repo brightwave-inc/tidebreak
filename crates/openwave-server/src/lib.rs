@@ -1034,6 +1034,49 @@ mod tests {
         test_app_with(Arc::new(FakeProvider)).await
     }
 
+    #[tokio::test]
+    async fn app_state_roots_blob_storage_under_the_data_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let (retrieval, _search) = build_retrieval(
+            Arc::new(HashEmbedder::default()),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        );
+        let state = AppState::new(
+            Config::desktop(dir.path()),
+            store,
+            Arc::new(FixedResolver(Arc::new(FakeProvider))),
+            Arc::new(MemSecrets::default()),
+            Arc::new(ToolRegistry::new()),
+            retrieval,
+            AgentConfig::default(),
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+
+        state
+            .blobs
+            .put(&id, b"source bytes".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.blobs.get(&id).await.unwrap().as_deref(),
+            Some(&b"source bytes"[..])
+        );
+        assert!(dir
+            .path()
+            .join("blobs")
+            .join(format!("{id}.blob"))
+            .is_file());
+    }
+
     async fn json_body<T: DeserializeOwned>(response: axum::response::Response) -> T {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()

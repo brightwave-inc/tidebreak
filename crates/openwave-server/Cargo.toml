@@ -11,7 +11,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite", "tools", "keychain"] }
+openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite", "tools", "keychain", "blob-fs"] }
 openwave-router = { path = "../openwave-router" }
 openwave-retrieval = { path = "../openwave-retrieval", features = ["vec-lance"] }
 axum = { workspace = true }
