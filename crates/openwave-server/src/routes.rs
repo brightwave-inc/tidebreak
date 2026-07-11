@@ -20,6 +20,7 @@ use openwave_core::{
 };
 use openwave_retrieval::{
     Citation, DocumentId, DocumentSource, RetrievalError, SearchScope, SearchTool,
+    MAX_SEARCH_RESULTS,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -748,7 +749,7 @@ pub async fn delete_project_document(
 pub struct SearchRequest {
     /// The natural-language query.
     pub query: String,
-    /// How many passages to return (optional; clamped to `[1, SearchTool::MAX_K]`).
+    /// How many passages to return (optional; clamped to `[1, MAX_SEARCH_RESULTS]`).
     #[serde(default)]
     pub k: Option<usize>,
 }
@@ -793,7 +794,7 @@ async fn search_documents_in_scope(
     let k = body
         .k
         .unwrap_or(SearchTool::DEFAULT_K)
-        .clamp(1, SearchTool::MAX_K);
+        .clamp(1, MAX_SEARCH_RESULTS);
     let citations = state
         .retrieval
         .search(scope, query, k)
