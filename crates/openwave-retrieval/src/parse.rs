@@ -56,7 +56,8 @@ impl DocumentParser for ParserRegistry {
             fingerprint.push(':');
             fingerprint.push_str(&child);
         }
-        fingerprint
+        let digest = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, fingerprint.as_bytes());
+        format!("parser-registry-v1:{digest}")
     }
 
     fn supports(&self, media_type: &str) -> bool {
@@ -235,6 +236,7 @@ mod tests {
 
         assert_ne!(first.fingerprint(), reversed.fingerprint());
         assert_eq!(first.fingerprint(), first.fingerprint());
+        assert_eq!(first.fingerprint().len(), 55);
     }
 
     #[test]
