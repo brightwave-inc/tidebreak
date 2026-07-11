@@ -171,6 +171,34 @@ pub struct DocumentSourceBlob {
     pub byte_len: u64,
 }
 
+/// Metadata and immutable bytes accepted for asynchronous document parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentSourceUpsert {
+    /// Stable document identifier.
+    pub id: DocumentId,
+    /// Owning project, or `None` for an explicitly unscoped document.
+    pub project_id: Option<ProjectId>,
+    /// Source path or URL, when known.
+    pub source_uri: Option<String>,
+    /// Media type used to select the parser.
+    pub media_type: String,
+    /// Optional human-facing title.
+    pub title: Option<String>,
+    /// Immutable source bytes already published to the blob store.
+    pub source_blob: DocumentSourceBlob,
+    /// Source metadata timestamp; workflow timestamps remain store-owned.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Canonical parser output published by a successfully leased parse job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentParseOutput {
+    /// Parsed text-of-record used by the indexing stage.
+    pub canonical_text: String,
+    /// Parser-produced mappings into the original source.
+    pub source_regions: Vec<SourceRegion>,
+}
+
 /// Durable delivery state of one document-processing job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

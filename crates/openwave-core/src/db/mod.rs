@@ -27,8 +27,9 @@ use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
 use crate::model::Role;
 use crate::model::{
     Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSourceBlob,
-    DocumentSummaryRecord, DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord,
+    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
+    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
+    Project, SourceRegion, ToolCallRecord,
 };
 use crate::storage::{DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, Store};
 
@@ -592,6 +593,42 @@ impl Store for DbStore {
         }
     }
 
+    async fn accept_document_source_and_enqueue_parse(
+        &self,
+        document: &DocumentSourceUpsert,
+        parser_fingerprint: &str,
+        max_attempts: i32,
+    ) -> Result<(DocumentRecord, DocumentJob)> {
+        ops::document::accept_source_and_enqueue_parse(
+            self,
+            document,
+            parser_fingerprint,
+            max_attempts,
+        )
+        .await
+    }
+
+    async fn complete_document_parse_job_and_enqueue_index(
+        &self,
+        id: DocumentJobId,
+        lease_token: uuid::Uuid,
+        completed_at: chrono::DateTime<Utc>,
+        output: &DocumentParseOutput,
+        index_fingerprint: &str,
+        index_max_attempts: i32,
+    ) -> Result<Option<(DocumentRecord, DocumentJob)>> {
+        ops::document::complete_parse_and_enqueue_index(
+            self,
+            id,
+            lease_token,
+            completed_at,
+            output,
+            index_fingerprint,
+            index_max_attempts,
+        )
+        .await
+    }
+
     async fn get_document_job(&self, id: DocumentJobId) -> Result<Option<DocumentJob>> {
         entities::document_job::Entity::find_by_id(id.0)
             .one(&self.conn)
@@ -667,6 +704,50 @@ impl Store for DbStore {
                 return Ok(EnsureDocumentIndexJobOutcome::GenerationChanged(
                     current_generation,
                 ));
+            }
+
+            if document.source_blob_id.is_some() && document.canonical_fingerprint.is_none() {
+                let parse_job = entities::document_job::Entity::find()
+                    .filter(entities::document_job::Column::DocumentId.eq(document_id.0))
+                    .filter(
+                        entities::document_job::Column::ContentRevision
+                            .eq(current_generation.content_revision),
+                    )
+                    .filter(
+                        entities::document_job::Column::RevisionToken
+                            .eq(current_generation.revision_token),
+                    )
+                    .filter(
+                        entities::document_job::Column::Kind.eq(DocumentJobKind::Parse.as_str()),
+                    )
+                    .order_by_desc(entities::document_job::Column::CreatedAt)
+                    .order_by_desc(entities::document_job::Column::Id)
+                    .one(&transaction)
+                    .await
+                    .map_err(store_err)?
+                    .ok_or_else(|| {
+                        AgentError::Store(format!(
+                            "unparsed document {document_id} has no current parse job"
+                        ))
+                    })?;
+                let parse_job = document_job_from_model(parse_job)?;
+                let outcome = if parse_job.status == DocumentJobStatus::Failed {
+                    EnsureDocumentIndexJobOutcome::Failed(parse_job)
+                } else if matches!(
+                    parse_job.status,
+                    DocumentJobStatus::Queued
+                        | DocumentJobStatus::Running
+                        | DocumentJobStatus::RetryWait
+                ) {
+                    EnsureDocumentIndexJobOutcome::Parsing(parse_job)
+                } else {
+                    return Err(AgentError::Store(format!(
+                        "unparsed document {document_id} has terminal parse state {}",
+                        parse_job.status.as_str()
+                    )));
+                };
+                transaction.commit().await.map_err(store_err)?;
+                return Ok(outcome);
             }
 
             if let Some(candidate) = find_exact_document_index_job_on(
@@ -1316,6 +1397,11 @@ impl Store for DbStore {
                 transaction.rollback().await.map_err(store_err)?;
                 return Ok(false);
             };
+            if candidate.kind != DocumentJobKind::Index.as_str() {
+                return Err(AgentError::Store(format!(
+                    "document job {id} is not an index job"
+                )));
+            }
             ensure_resolution_document_matches(&transaction, &candidate).await?;
 
             let resolved = entities::document_job::Entity::update_many()

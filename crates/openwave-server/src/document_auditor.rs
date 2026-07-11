@@ -241,6 +241,7 @@ impl DocumentAuditor {
             EnsureDocumentIndexJobOutcome::Enqueued(_) => report.enqueued += 1,
             EnsureDocumentIndexJobOutcome::Failed(_) => report.failed_jobs += 1,
             EnsureDocumentIndexJobOutcome::Existing(_)
+            | EnsureDocumentIndexJobOutcome::Parsing(_)
             | EnsureDocumentIndexJobOutcome::MissingDocument
             | EnsureDocumentIndexJobOutcome::GenerationChanged(_) => report.skipped += 1,
         }

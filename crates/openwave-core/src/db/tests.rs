@@ -1,5 +1,7 @@
 use super::*;
-use crate::model::{ByteSpan, DocumentSourceBlob, SourceLocation};
+use crate::model::{
+    ByteSpan, DocumentParseOutput, DocumentSourceBlob, DocumentSourceUpsert, SourceLocation,
+};
 use chrono::{DateTime, Utc};
 
 async fn temp_store() -> (tempfile::TempDir, DbStore) {
@@ -496,6 +498,209 @@ async fn source_regions_roundtrip_and_provenance_changes_advance_revision() {
         .unwrap();
     assert_eq!(second.content_revision, 2);
     assert_eq!(second.source_regions, changed.source_regions);
+}
+
+#[tokio::test]
+async fn raw_source_parse_completion_atomically_enqueues_index() {
+    let (_dir, store) = temp_store().await;
+    let source = DocumentSourceUpsert {
+        id: DocumentId::new(),
+        project_id: None,
+        source_uri: Some("file:///report.pdf".into()),
+        media_type: "application/pdf".into(),
+        title: Some("Report".into()),
+        source_blob: DocumentSourceBlob {
+            id: uuid::Uuid::new_v4(),
+            sha256: [0x33; 32],
+            byte_len: 4_096,
+        },
+        updated_at: Utc::now(),
+    };
+
+    let (accepted, parse_job) = store
+        .accept_document_source_and_enqueue_parse(&source, "parser=pdf-v1", 3)
+        .await
+        .unwrap();
+    assert_eq!(accepted.source_blob.as_ref(), Some(&source.source_blob));
+    assert!(accepted.canonical_text.is_empty());
+    assert_eq!(accepted.canonical_fingerprint, None);
+    assert_eq!(parse_job.kind, DocumentJobKind::Parse);
+    assert_eq!(parse_job.status, DocumentJobStatus::Queued);
+
+    let repeated = store
+        .accept_document_source_and_enqueue_parse(&source, "parser=pdf-v1", 9)
+        .await
+        .unwrap();
+    assert_eq!(repeated, (accepted.clone(), parse_job.clone()));
+    assert_eq!(
+        store
+            .ensure_document_index_job(
+                source.id,
+                accepted.generation(),
+                "chunk=v1;embed=test",
+                5,
+                DocumentIndexJobReason::PipelineChanged,
+            )
+            .await
+            .unwrap(),
+        EnsureDocumentIndexJobOutcome::Parsing(parse_job.clone())
+    );
+    assert_eq!(store.list_document_jobs(source.id).await.unwrap().len(), 1);
+
+    let claim_at = Utc::now() + chrono::Duration::seconds(1);
+    let lease_expires_at = claim_at + chrono::Duration::minutes(1);
+    let claimed = store
+        .claim_document_job(claim_at, lease_expires_at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, parse_job.id);
+    let lease_token = claimed.lease_token.unwrap();
+    assert!(store
+        .complete_document_index_job(
+            claimed.id,
+            lease_token,
+            claim_at + chrono::Duration::milliseconds(500),
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .get_document_job(claimed.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        DocumentJobStatus::Running
+    );
+    entities::document_job::Entity::update_many()
+        .col_expr(
+            entities::document_job::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Some("transient_parse".to_owned())),
+        )
+        .col_expr(
+            entities::document_job::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(Some("prior attempt".to_owned())),
+        )
+        .filter(entities::document_job::Column::Id.eq(claimed.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let output = DocumentParseOutput {
+        canonical_text: "Page one".into(),
+        source_regions: vec![SourceRegion {
+            span: ByteSpan::new(0, 8),
+            location: SourceLocation::Page {
+                number: std::num::NonZeroU32::new(1).unwrap(),
+            },
+        }],
+    };
+    let completed_at = claim_at + chrono::Duration::seconds(1);
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_parse_index_insert
+             BEFORE INSERT ON document_job
+             WHEN NEW.kind = 'index'
+             BEGIN SELECT RAISE(FAIL, 'injected index insert failure'); END",
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .complete_document_parse_job_and_enqueue_index(
+            claimed.id,
+            lease_token,
+            completed_at,
+            &output,
+            "chunk=v1;embed=test",
+            5,
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .get_document_job(claimed.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        DocumentJobStatus::Running
+    );
+    let still_processing = store.get_document(source.id).await.unwrap().unwrap();
+    assert_eq!(
+        still_processing.processing_status,
+        DocumentProcessingStatus::Processing
+    );
+    assert!(still_processing.canonical_text.is_empty());
+    assert_eq!(still_processing.canonical_fingerprint, None);
+    store
+        .conn
+        .execute_unprepared("DROP TRIGGER fail_parse_index_insert")
+        .await
+        .unwrap();
+
+    let (parsed, index_job) = store
+        .complete_document_parse_job_and_enqueue_index(
+            claimed.id,
+            lease_token,
+            completed_at,
+            &output,
+            "chunk=v1;embed=test",
+            5,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(parsed.generation(), accepted.generation());
+    assert_eq!(parsed.canonical_text, output.canonical_text);
+    assert_eq!(parsed.source_regions, output.source_regions);
+    assert_eq!(
+        parsed.canonical_fingerprint.as_deref(),
+        Some("parser=pdf-v1")
+    );
+    assert_eq!(parsed.processing_status, DocumentProcessingStatus::Queued);
+    assert_eq!(index_job.kind, DocumentJobKind::Index);
+    assert_eq!(index_job.status, DocumentJobStatus::Queued);
+    assert_eq!(index_job.document_id, source.id);
+    assert_eq!(index_job.content_revision, parsed.content_revision);
+    assert_eq!(index_job.revision_token, parsed.revision_token);
+    assert!(store
+        .complete_document_parse_job_and_enqueue_index(
+            claimed.id,
+            lease_token,
+            completed_at,
+            &output,
+            "chunk=v1;embed=test",
+            5,
+        )
+        .await
+        .unwrap()
+        .is_none());
+    let jobs = store.list_document_jobs(source.id).await.unwrap();
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(jobs[0].status, DocumentJobStatus::Succeeded);
+    assert_eq!(jobs[0].last_error_code, None);
+    assert_eq!(jobs[0].last_error_detail, None);
+    assert_eq!(jobs[1], index_job);
+
+    let (reparse, reparse_job) = store
+        .accept_document_source_and_enqueue_parse(&source, "parser=pdf-v2", 3)
+        .await
+        .unwrap();
+    assert_eq!(reparse.content_revision, parsed.content_revision + 1);
+    assert_ne!(reparse.revision_token, parsed.revision_token);
+    assert!(reparse.canonical_text.is_empty());
+    assert_eq!(reparse.canonical_fingerprint, None);
+    assert_eq!(reparse_job.kind, DocumentJobKind::Parse);
+    assert_eq!(
+        store
+            .get_document_job(index_job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        DocumentJobStatus::Cancelled
+    );
 }
 
 #[tokio::test]
