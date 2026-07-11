@@ -506,6 +506,7 @@ async fn ingest_document_in_scope(
     let mut document = state
         .retrieval
         .parse_document(source, media_type, body.content.as_bytes())
+        .await
         .map_err(retrieval_error)?;
     let source_uri = match &document.source {
         DocumentSource::Uri { uri } => Some(uri.clone()),
