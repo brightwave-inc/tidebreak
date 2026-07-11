@@ -537,14 +537,16 @@ mod tests {
             self.inner.upsert(records).await
         }
 
-        async fn query(
+        async fn query_with_options(
             &self,
             query_text: &str,
             query: &Embedding,
             k: usize,
-            scope: openwave_retrieval::SearchScope,
+            options: openwave_retrieval::SearchOptions,
         ) -> openwave_retrieval::Result<Vec<ScoredChunk>> {
-            self.inner.query(query_text, query, k, scope).await
+            self.inner
+                .query_with_options(query_text, query, k, options)
+                .await
         }
 
         async fn replace_document(
@@ -1537,7 +1539,7 @@ mod tests {
                 &router,
                 &bearer,
                 "/search",
-                serde_json::json!({"query": "project beta nebula", "k": 1}),
+                serde_json::json!({"query": "loose corpus zephyr", "k": 1}),
             )
             .await,
         )

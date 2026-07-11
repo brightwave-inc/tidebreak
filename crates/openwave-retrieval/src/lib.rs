@@ -94,6 +94,6 @@ pub use retriever::{GenerationIndexOutcome, IngestOutcome, Retriever};
 #[cfg(feature = "tool")]
 pub use search::SearchTool;
 pub use vector::{
-    DocumentGenerationState, GenerationStageOutcome, InMemoryVectorStore, SearchScope,
-    VectorRecord, VectorStore,
+    DocumentGenerationState, GenerationStageOutcome, InMemoryVectorStore, SearchOptions,
+    SearchScope, VectorRecord, VectorStore, DEFAULT_MIN_DENSE_SIMILARITY,
 };

@@ -27,6 +27,48 @@ pub enum SearchScope {
     Project(ProjectId),
 }
 
+/// Default semantic quality floor for dense retrieval candidates.
+pub const DEFAULT_MIN_DENSE_SIMILARITY: f32 = 0.2;
+
+/// Policy applied by vector backends to one search query.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SearchOptions {
+    /// Corpus boundary for the query.
+    pub scope: SearchScope,
+    /// Inclusive cosine-similarity floor for the dense branch.
+    pub min_dense_similarity: f32,
+}
+
+impl SearchOptions {
+    /// Build the default search policy for a corpus.
+    #[must_use]
+    pub const fn new(scope: SearchScope) -> Self {
+        Self {
+            scope,
+            min_dense_similarity: DEFAULT_MIN_DENSE_SIMILARITY,
+        }
+    }
+
+    /// Override the inclusive dense similarity floor.
+    #[must_use]
+    pub const fn with_min_dense_similarity(mut self, min_dense_similarity: f32) -> Self {
+        self.min_dense_similarity = min_dense_similarity;
+        self
+    }
+
+    /// Validate that the dense cutoff is finite and within the supported range.
+    pub fn validate(self) -> Result<()> {
+        if !self.min_dense_similarity.is_finite()
+            || !(0.0..=1.0).contains(&self.min_dense_similarity)
+        {
+            return Err(RetrievalError::vector_store(
+                "minimum dense similarity must be finite and within [0, 1]",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl SearchScope {
     fn includes(self, project_id: Option<ProjectId>) -> bool {
         match self {
@@ -96,10 +138,10 @@ pub trait VectorStore: Send + Sync {
     /// fence.
     async fn upsert(&self, records: Vec<VectorRecord>) -> Result<()>;
 
-    /// Return the `k` chunks most relevant to the query text and embedding.
+    /// Return the `k` chunks most relevant using the default quality policy.
     ///
     /// Non-empty text participates in lexical ranking; empty text requests the
-    /// dense-only fallback used by low-level callers and compatibility tests.
+    /// dense-only mode.
     /// Fewer than `k` come back when the store holds fewer records. `k == 0`
     /// yields an empty result.
     async fn query(
@@ -108,6 +150,27 @@ pub trait VectorStore: Send + Sync {
         query: &Embedding,
         k: usize,
         scope: SearchScope,
+    ) -> Result<Vec<ScoredChunk>> {
+        self.query_with_options(query_text, query, k, SearchOptions::new(scope))
+            .await
+    }
+
+    /// Return the `k` chunks most relevant under an explicit quality policy.
+    ///
+    /// Implementations must validate `options` before honoring `k == 0`, apply
+    /// corpus scope before branch limits, and treat `min_dense_similarity` as an
+    /// inclusive cosine-similarity cutoff on the dense branch. The cutoff is
+    /// applied before fusion and must not remove lexical-only matches. Empty
+    /// query text requests dense-only results with cosine-similarity scores.
+    /// Fused-score ties among candidates delivered by the backend branches use
+    /// chunk id as the deterministic final order. Native branch selection when
+    /// exact scores tie at that branch's `k` boundary is backend-defined.
+    async fn query_with_options(
+        &self,
+        query_text: &str,
+        query: &Embedding,
+        k: usize,
+        options: SearchOptions,
     ) -> Result<Vec<ScoredChunk>>;
 
     /// Atomically replace every chunk of `document_id` with `records`: remove the
@@ -338,13 +401,14 @@ impl VectorStore for InMemoryVectorStore {
         Ok(())
     }
 
-    async fn query(
+    async fn query_with_options(
         &self,
         query_text: &str,
         query: &Embedding,
         k: usize,
-        scope: SearchScope,
+        options: SearchOptions,
     ) -> Result<Vec<ScoredChunk>> {
+        options.validate()?;
         self.check_dims(query)?;
         if k == 0 {
             return Ok(Vec::new());
@@ -362,12 +426,23 @@ impl VectorStore for InMemoryVectorStore {
                 .flat_map(|active| active.records.iter()),
         );
         let visible = visible
-            .filter(|record| scope.includes(record.project_id))
+            .filter(|record| options.scope.includes(record.project_id))
             .collect::<Vec<_>>();
         if query_text.trim().is_empty() {
-            Ok(crate::hybrid::dense(&visible, query, k))
+            Ok(crate::hybrid::dense(
+                &visible,
+                query,
+                k,
+                options.min_dense_similarity,
+            ))
         } else {
-            Ok(crate::hybrid::rank(&visible, query_text, query, k))
+            Ok(crate::hybrid::rank(
+                &visible,
+                query_text,
+                query,
+                k,
+                options.min_dense_similarity,
+            ))
         }
     }
 
@@ -709,6 +784,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dense_cutoff_precedes_fusion_but_lexical_matches_are_rescued() {
+        let store = InMemoryVectorStore::new(2);
+        store
+            .upsert(vec![
+                record(DocumentId::new(), 0, "needle both branches", vec![1.0, 0.0]),
+                record(
+                    DocumentId::new(),
+                    0,
+                    "needle lexical rescue",
+                    vec![0.0, 1.0],
+                ),
+                record(DocumentId::new(), 0, "dense only", vec![0.8, 0.6]),
+                record(DocumentId::new(), 0, "below cutoff", vec![-1.0, 0.0]),
+            ])
+            .await
+            .unwrap();
+
+        let hybrid = store
+            .query(
+                "needle",
+                &Embedding(vec![1.0, 0.0]),
+                10,
+                SearchScope::Unscoped,
+            )
+            .await
+            .unwrap();
+        let texts = hybrid
+            .iter()
+            .map(|hit| hit.chunk.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(texts.contains(&"needle both branches"));
+        assert!(texts.contains(&"needle lexical rescue"));
+        assert!(texts.contains(&"dense only"));
+        assert!(!texts.contains(&"below cutoff"));
+        let lexical = hybrid
+            .iter()
+            .find(|hit| hit.chunk.text == "needle lexical rescue")
+            .unwrap();
+        assert!(lexical.score < DEFAULT_MIN_DENSE_SIMILARITY);
+
+        let dense = store
+            .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .await
+            .unwrap();
+        assert_eq!(
+            dense
+                .iter()
+                .map(|hit| hit.chunk.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["needle both branches", "dense only"]
+        );
+        assert!(dense
+            .iter()
+            .all(|hit| hit.score >= DEFAULT_MIN_DENSE_SIMILARITY));
+    }
+
+    #[tokio::test]
+    async fn dense_cutoff_is_inclusive_and_validated_before_empty_limit() {
+        let store = InMemoryVectorStore::new(2);
+        store
+            .upsert(vec![record(
+                DocumentId::new(),
+                0,
+                "exact boundary",
+                vec![1.0, 0.0],
+            )])
+            .await
+            .unwrap();
+        let exact = store
+            .query_with_options(
+                "",
+                &Embedding(vec![1.0, 0.0]),
+                1,
+                SearchOptions::new(SearchScope::Unscoped).with_min_dense_similarity(1.0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exact.len(), 1);
+
+        for invalid in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+            let error = store
+                .query_with_options(
+                    "",
+                    &Embedding(vec![1.0, 0.0]),
+                    0,
+                    SearchOptions::new(SearchScope::Unscoped).with_min_dense_similarity(invalid),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("within [0, 1]"));
+        }
+    }
+
+    #[tokio::test]
     async fn query_filters_by_corpus_before_scoring_and_top_k() {
         let store = InMemoryVectorStore::new(2);
         let project_a = ProjectId::new();
@@ -799,7 +968,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].chunk.text, "needleshard exact identifier");
+        assert!(hits
+            .iter()
+            .any(|hit| hit.chunk.text == "needleshard exact identifier"));
         assert!(hits
             .iter()
             .any(|hit| hit.chunk.text == "semantic dense candidate"));

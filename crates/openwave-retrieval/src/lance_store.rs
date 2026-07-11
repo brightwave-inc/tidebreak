@@ -23,10 +23,11 @@ use std::sync::Arc;
 
 use arrow_array::types::Float32Type;
 use arrow_array::{
-    Array, ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
+    Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
     RecordBatchIterator, StringArray, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use arrow_select::filter::filter_record_batch;
 use arrow_select::take::take;
 use async_trait::async_trait;
 use futures::TryStreamExt;
@@ -43,7 +44,8 @@ use crate::embed::Embedding;
 use crate::error::{Result, RetrievalError};
 use crate::id::{ChunkId, DocumentId};
 use crate::vector::{
-    DocumentGenerationState, GenerationStageOutcome, SearchScope, VectorRecord, VectorStore,
+    DocumentGenerationState, GenerationStageOutcome, SearchOptions, SearchScope, VectorRecord,
+    VectorStore,
 };
 use openwave_core::{DocumentGeneration, ProjectId};
 
@@ -81,7 +83,10 @@ pub struct LanceVectorStore {
 
 /// Conventional RRF(k=60) with a stable chunk-id secondary order.
 #[derive(Debug)]
-struct DeterministicRrf;
+struct DeterministicRrf {
+    query: Embedding,
+    min_dense_similarity: f32,
+}
 
 fn hybrid_row_ids(batch: &RecordBatch) -> lancedb::Result<&UInt64Array> {
     batch
@@ -90,6 +95,64 @@ fn hybrid_row_ids(batch: &RecordBatch) -> lancedb::Result<&UInt64Array> {
         .ok_or_else(|| lancedb::Error::InvalidInput {
             message: "hybrid candidate is missing _rowid".to_string(),
         })
+}
+
+fn hybrid_branch_order(
+    batch: &RecordBatch,
+    score_column: &str,
+    descending: bool,
+) -> lancedb::Result<Vec<usize>> {
+    if batch.num_rows() == 0 {
+        return Ok(Vec::new());
+    }
+    let scores = batch
+        .column_by_name(score_column)
+        .and_then(|column| column.as_any().downcast_ref::<Float32Array>())
+        .ok_or_else(|| lancedb::Error::InvalidInput {
+            message: format!("hybrid candidate is missing {score_column}"),
+        })?;
+    let chunk_ids = batch
+        .column_by_name("chunk_id")
+        .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+        .ok_or_else(|| lancedb::Error::InvalidInput {
+            message: "hybrid candidate is missing chunk_id".to_string(),
+        })?;
+    let parsed_chunk_ids = (0..batch.num_rows())
+        .map(|index| {
+            chunk_ids.value(index).parse::<ChunkId>().map_err(|error| {
+                lancedb::Error::InvalidInput {
+                    message: format!("hybrid candidate has invalid chunk_id: {error}"),
+                }
+            })
+        })
+        .collect::<lancedb::Result<Vec<_>>>()?;
+    let mut order = (0..batch.num_rows()).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        let score_order = if descending {
+            scores.value(*right).total_cmp(&scores.value(*left))
+        } else {
+            scores.value(*left).total_cmp(&scores.value(*right))
+        };
+        score_order.then_with(|| parsed_chunk_ids[*left].0.cmp(&parsed_chunk_ids[*right].0))
+    });
+    Ok(order)
+}
+
+fn dense_similarity(batch: &RecordBatch, index: usize, query: &Embedding) -> lancedb::Result<f32> {
+    let vectors = batch
+        .column_by_name(VECTOR_COL)
+        .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
+        .ok_or_else(|| lancedb::Error::InvalidInput {
+            message: "hybrid dense candidate is missing vector".to_string(),
+        })?;
+    let vector = vectors.value(index);
+    let vector = vector
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| lancedb::Error::InvalidInput {
+            message: "hybrid dense candidate has an invalid vector".to_string(),
+        })?;
+    Ok(query.cosine_similarity(&Embedding(vector.values().to_vec())))
 }
 
 #[async_trait]
@@ -101,14 +164,56 @@ impl Reranker for DeterministicRrf {
         fts_results: RecordBatch,
     ) -> lancedb::Result<RecordBatch> {
         let mut scores = std::collections::BTreeMap::new();
-        for (position, row_id) in hybrid_row_ids(&vector_results)?.values().iter().enumerate() {
-            *scores.entry(*row_id).or_insert(0.0) += 1.0 / (61.0 + position as f32);
+        let vector_order = hybrid_branch_order(&vector_results, DISTANCE_COL, false)?
+            .into_iter()
+            .filter_map(
+                |index| match dense_similarity(&vector_results, index, &self.query) {
+                    Ok(similarity) if similarity >= self.min_dense_similarity => Some(Ok(index)),
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
+                },
+            )
+            .collect::<lancedb::Result<Vec<_>>>()?;
+        if !vector_order.is_empty() {
+            let vector_row_ids = hybrid_row_ids(&vector_results)?;
+            for (position, index) in vector_order.into_iter().enumerate() {
+                let row_id = vector_row_ids.value(index);
+                *scores.entry(row_id).or_insert(0.0) += 1.0 / (61.0 + position as f32);
+            }
         }
-        for (position, row_id) in hybrid_row_ids(&fts_results)?.values().iter().enumerate() {
-            *scores.entry(*row_id).or_insert(0.0) += 1.0 / (61.0 + position as f32);
+        let fts_order = hybrid_branch_order(&fts_results, "_score", true)?;
+        if !fts_order.is_empty() {
+            let fts_row_ids = hybrid_row_ids(&fts_results)?;
+            for (position, index) in fts_order.into_iter().enumerate() {
+                let row_id = fts_row_ids.value(index);
+                *scores.entry(row_id).or_insert(0.0) += 1.0 / (61.0 + position as f32);
+            }
         }
 
-        let combined = self.merge_results(vector_results, fts_results)?;
+        let combined = match (vector_results.num_rows(), fts_results.num_rows()) {
+            (0, 0) | (_, 0) => vector_results,
+            (0, _) => fts_results,
+            _ => self.merge_results(vector_results, fts_results)?,
+        };
+        let keep = BooleanArray::from_iter(
+            hybrid_row_ids(&combined)?
+                .values()
+                .iter()
+                .map(|row_id| Some(scores.contains_key(row_id))),
+        );
+        let combined = filter_record_batch(&combined, &keep)?;
+        if combined.num_rows() == 0 {
+            let mut fields = combined.schema().fields().to_vec();
+            fields.push(Arc::new(Field::new(
+                RELEVANCE_COL,
+                DataType::Float32,
+                false,
+            )));
+            let mut columns = combined.columns().to_vec();
+            columns.push(Arc::new(Float32Array::from(Vec::<f32>::new())));
+            return RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+                .map_err(Into::into);
+        }
         let combined_row_ids = hybrid_row_ids(&combined)?;
         let chunk_ids = combined
             .column_by_name("chunk_id")
@@ -693,13 +798,14 @@ impl VectorStore for LanceVectorStore {
         self.merge_rows(&rows, None).await
     }
 
-    async fn query(
+    async fn query_with_options(
         &self,
         query_text: &str,
         query: &Embedding,
         k: usize,
-        scope: SearchScope,
+        options: SearchOptions,
     ) -> Result<Vec<ScoredChunk>> {
+        options.validate()?;
         self.check_dims(query)?;
         if k == 0 {
             return Ok(Vec::new());
@@ -708,24 +814,36 @@ impl VectorStore for LanceVectorStore {
         // Lance applies this predicate before the vector limit, so a closer row
         // in another corpus cannot consume one of this scope's top-k slots.
         // ProjectId is a parsed UUID newtype, not caller-provided query text.
-        let scope_filter = match scope {
+        let scope_filter = match options.scope {
             SearchScope::Unscoped => "project_id IS NULL".to_string(),
             SearchScope::Project(project_id) => format!("project_id = '{project_id}'"),
         };
-        let vector_query = self
+        let visibility_filter = format!("({VISIBLE_CHUNKS}) AND ({scope_filter})");
+        let hybrid = !query_text.trim().is_empty();
+        let mut vector_query = self
             .table
             .query()
             .nearest_to(query.0.as_slice())
             .map_err(lance_err)?
-            .only_if(format!("({VISIBLE_CHUNKS}) AND ({scope_filter})"))
+            .only_if(visibility_filter)
             .column(VECTOR_COL)
             .distance_type(DistanceType::Cosine)
+            // Branch selection stays bounded at k. A later retrieval-policy
+            // layer can add overfetch; fusion orders the candidates delivered here.
             .limit(k);
-        let hybrid = !query_text.trim().is_empty();
+        if !hybrid {
+            // Lance's upper distance bound is exclusive. Advancing by one ULP
+            // preserves our inclusive similarity-floor contract at the boundary.
+            vector_query = vector_query
+                .distance_range(None, Some((1.0 - options.min_dense_similarity).next_up()));
+        }
         let mut stream = if hybrid {
             vector_query
                 .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
-                .rerank(Arc::new(DeterministicRrf))
+                .rerank(Arc::new(DeterministicRrf {
+                    query: query.clone(),
+                    min_dense_similarity: options.min_dense_similarity,
+                }))
                 .execute()
                 .await
                 .map_err(lance_err)?
@@ -735,6 +853,9 @@ impl VectorStore for LanceVectorStore {
 
         let mut out = Vec::new();
         while let Some(batch) = stream.try_next().await.map_err(lance_err)? {
+            if batch.num_rows() == 0 {
+                continue;
+            }
             if hybrid {
                 read_hybrid_batch(&batch, &mut out)?;
             } else {
@@ -1189,6 +1310,158 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn dense_cutoff_precedes_native_fusion_but_lexical_matches_are_rescued() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        store
+            .upsert(vec![
+                record(DocumentId::new(), 0, "needle both branches", vec![1.0, 0.0]),
+                record(
+                    DocumentId::new(),
+                    0,
+                    "needle lexical rescue",
+                    vec![0.0, 1.0],
+                ),
+                record(DocumentId::new(), 0, "dense only", vec![0.8, 0.6]),
+                record(DocumentId::new(), 0, "below cutoff", vec![-1.0, 0.0]),
+            ])
+            .await
+            .unwrap();
+
+        let hybrid = store
+            .query(
+                "needle",
+                &Embedding(vec![1.0, 0.0]),
+                10,
+                SearchScope::Unscoped,
+            )
+            .await
+            .unwrap();
+        let texts = hybrid
+            .iter()
+            .map(|hit| hit.chunk.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(texts.contains(&"needle both branches"));
+        assert!(texts.contains(&"needle lexical rescue"));
+        assert!(texts.contains(&"dense only"));
+        assert!(!texts.contains(&"below cutoff"));
+        let lexical = hybrid
+            .iter()
+            .find(|hit| hit.chunk.text == "needle lexical rescue")
+            .unwrap();
+        assert!(lexical.score < crate::DEFAULT_MIN_DENSE_SIMILARITY);
+
+        let dense = store
+            .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
+            .await
+            .unwrap();
+        assert_eq!(
+            dense
+                .iter()
+                .map(|hit| hit.chunk.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["needle both branches", "dense only"]
+        );
+        assert!(dense
+            .iter()
+            .all(|hit| hit.score >= crate::DEFAULT_MIN_DENSE_SIMILARITY));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dense_distance_bound_preserves_inclusive_similarity_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        store
+            .upsert(vec![record(
+                DocumentId::new(),
+                0,
+                "exact boundary",
+                vec![1.0, 0.0],
+            )])
+            .await
+            .unwrap();
+
+        let exact = store
+            .query_with_options(
+                "",
+                &Embedding(vec![1.0, 0.0]),
+                1,
+                SearchOptions::new(SearchScope::Unscoped).with_min_dense_similarity(1.0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exact.len(), 1);
+
+        let error = store
+            .query_with_options(
+                "",
+                &Embedding(vec![1.0, 0.0]),
+                0,
+                SearchOptions::new(SearchScope::Unscoped).with_min_dense_similarity(f32::NAN),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("within [0, 1]"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lexical_only_rescue_is_scoped_stable_and_uses_one_branch_rrf_scores() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let first = record(
+            DocumentId::derive("lexical-only-a"),
+            0,
+            "lexicalneedle equal text",
+            vec![0.0, 1.0],
+        );
+        let second = record(
+            DocumentId::derive("lexical-only-b"),
+            0,
+            "lexicalneedle equal text",
+            vec![0.0, 1.0],
+        );
+        let project = ProjectId::new();
+        let wrong_scope = project_record(
+            project,
+            DocumentId::derive("lexical-only-project"),
+            0,
+            "lexicalneedle equal text",
+            vec![0.0, 1.0],
+        );
+        let mut expected = [first.chunk.id, second.chunk.id];
+        expected.sort_by_key(|id| id.0);
+        store
+            .upsert(vec![second, wrong_scope, first])
+            .await
+            .unwrap();
+
+        let hits = store
+            .query(
+                "lexicalneedle",
+                &Embedding(vec![1.0, 0.0]),
+                10,
+                SearchScope::Unscoped,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].chunk.id, expected[0]);
+        assert_eq!(hits[1].chunk.id, expected[1]);
+        assert!((hits[0].score - (1.0 / 61.0)).abs() < 1e-6);
+        assert!((hits[1].score - (1.0 / 62.0)).abs() < 1e-6);
+        assert!(hits
+            .iter()
+            .all(|hit| hit.chunk.document_id != DocumentId::derive("lexical-only-project")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn query_filters_corpus_before_top_k_and_scope_persists_on_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let uri = dir.path().to_str().unwrap();
@@ -1300,7 +1573,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].chunk.text, "needleshard exact identifier");
+        assert!(hits
+            .iter()
+            .any(|hit| hit.chunk.text == "needleshard exact identifier"));
         assert!(hits
             .iter()
             .any(|hit| hit.chunk.text == "semantic dense candidate"));
@@ -1345,7 +1620,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn native_hybrid_tie_at_k_boundary_matches_chunk_id_order() {
+    async fn native_hybrid_split_branch_tie_uses_fused_chunk_id_order() {
         let dir = tempfile::tempdir().unwrap();
         let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
             .await
@@ -1378,6 +1653,45 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.id.0, expected);
         assert!((hits[0].score - (1.0 / 61.0)).abs() < 1e-6);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_hybrid_orders_equal_branch_scores_by_chunk_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let first = record(
+            DocumentId::derive("hybrid-equal-a"),
+            0,
+            "equalneedle same text",
+            vec![1.0, 0.0],
+        );
+        let second = record(
+            DocumentId::derive("hybrid-equal-b"),
+            0,
+            "equalneedle same text",
+            vec![1.0, 0.0],
+        );
+        let mut expected = [first.chunk.id, second.chunk.id];
+        expected.sort_by_key(|id| id.0);
+        store.upsert(vec![second, first]).await.unwrap();
+
+        let hits = store
+            .query(
+                "equalneedle",
+                &Embedding(vec![1.0, 0.0]),
+                2,
+                SearchScope::Unscoped,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].chunk.id, expected[0]);
+        assert_eq!(hits[1].chunk.id, expected[1]);
+        assert!((hits[0].score - (2.0 / 61.0)).abs() < 1e-6);
+        assert!((hits[1].score - (2.0 / 62.0)).abs() < 1e-6);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1423,6 +1737,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hits[0].chunk.text, "reconnectneedle exact match");
+        assert!((hits[0].score - (1.0 / 61.0)).abs() < 1e-6);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1610,6 +1925,16 @@ mod tests {
             .unwrap();
         assert!(store
             .query("", &Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .query(
+                "missing",
+                &Embedding(vec![1.0, 0.0]),
+                5,
+                SearchScope::Unscoped,
+            )
             .await
             .unwrap()
             .is_empty());
@@ -2057,8 +2382,7 @@ mod tests {
             .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].chunk.text, "other");
+        assert!(hits.is_empty());
         drop(store);
 
         let reopened = LanceVectorStore::connect(uri, 2).await.unwrap();
@@ -2081,7 +2405,7 @@ mod tests {
             .await
             .unwrap();
         assert!(hits.iter().any(|hit| hit.chunk.text == "first"));
-        assert!(hits.iter().any(|hit| hit.chunk.text == "other"));
+        assert!(hits.iter().all(|hit| hit.chunk.text != "other"));
         assert_eq!(
             reopened.active_document_generation(doc).await.unwrap(),
             Some(first)
