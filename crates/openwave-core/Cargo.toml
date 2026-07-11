@@ -11,7 +11,7 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["sqlite", "keychain", "tools"]
+default = ["sqlite", "keychain", "tools", "blob-fs"]
 # The default SeaORM-backed Store with the SQLite driver. Turn off
 # (`default-features = false`) to depend on just the trait contracts.
 sqlite = ["dep:sea-orm", "dep:sea-orm-migration"]
@@ -19,6 +19,8 @@ sqlite = ["dep:sea-orm", "dep:sea-orm-migration"]
 keychain = ["dep:keyring", "dep:tokio"]
 # The built-in filesystem tools (read_file / list_dir / write_file).
 tools = ["dep:tokio"]
+# Durable local byte storage for desktop documents and artifacts.
+blob-fs = ["dep:tokio", "dep:windows-sys"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -40,6 +42,7 @@ tokio = { workspace = true, optional = true }
 keyring = { version = "3", features = ["apple-native"], optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"], optional = true }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"], optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["async-secret-service", "crypto-rust", "tokio"], optional = true }
 

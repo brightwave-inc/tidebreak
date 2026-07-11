@@ -15,6 +15,8 @@
 
 pub mod agent;
 pub mod approval;
+#[cfg(feature = "blob-fs")]
+pub mod blob;
 pub mod cancel;
 pub mod config;
 pub mod context;
@@ -37,6 +39,8 @@ pub use agent::{Agent, AgentConfig, ToolRegistry};
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalRequest, AutoApproveGate, RefuseGate,
 };
+#[cfg(feature = "blob-fs")]
+pub use blob::FsBlobStore;
 pub use cancel::{CancelToken, Cancelled};
 pub use config::{Config, Profile};
 #[cfg(feature = "sqlite")]
