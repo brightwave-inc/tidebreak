@@ -27,8 +27,8 @@ use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
 use crate::model::Role;
 use crate::model::{
     Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert,
-    Message, Project, SourceRegion, ToolCallRecord,
+    DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSourceBlob,
+    DocumentSummaryRecord, DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord,
 };
 use crate::storage::{DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, Store};
 
@@ -142,7 +142,19 @@ impl Store for DbStore {
             source_uri: Set(document.source_uri.clone()),
             media_type: Set(document.media_type.clone()),
             title: Set(document.title.clone()),
+            source_blob_id: Set(document.source_blob.as_ref().map(|blob| blob.id)),
+            source_sha256: Set(document
+                .source_blob
+                .as_ref()
+                .map(|blob| blob.sha256.to_vec())),
+            source_byte_len: Set(document
+                .source_blob
+                .as_ref()
+                .map(|blob| i64::try_from(blob.byte_len))
+                .transpose()
+                .map_err(|_| AgentError::Store("document source is too large".into()))?),
             canonical_text: Set(document.canonical_text.clone()),
+            canonical_fingerprint: Set(document.canonical_fingerprint.clone()),
             source_regions: Set(source_regions_to_db(&document.source_regions)),
             content_revision: Set(document.content_revision),
             revision_token: Set(revision_token),
@@ -1990,7 +2002,11 @@ fn validate_document_job_error(error_code: &str, error_detail: Option<&str>) -> 
 }
 
 fn document_upsert_matches(current: &entities::document::Model, document: &DocumentUpsert) -> bool {
-    current.project_id == document.project_id.map(|id| id.0)
+    current.source_blob_id.is_none()
+        && current.source_sha256.is_none()
+        && current.source_byte_len.is_none()
+        && current.canonical_fingerprint.is_none()
+        && current.project_id == document.project_id.map(|id| id.0)
         && current.source_uri == document.source_uri
         && current.media_type == document.media_type
         && current.title == document.title
@@ -2141,6 +2157,15 @@ where
         .await
         .map_err(store_err)?;
     if let Some(existing) = existing.as_ref() {
+        if existing.source_blob_id.is_some()
+            || existing.source_sha256.is_some()
+            || existing.source_byte_len.is_some()
+            || existing.canonical_fingerprint.is_some()
+        {
+            return Err(AgentError::Store(
+                "raw-source documents require the staged source workflow".into(),
+            ));
+        }
         if existing.project_id != document.project_id.map(|id| id.0) {
             return Err(AgentError::Store(format!(
                 "document {} cannot move between project corpora",
@@ -2240,7 +2265,11 @@ where
         source_uri: Set(document.source_uri.clone()),
         media_type: Set(document.media_type.clone()),
         title: Set(document.title.clone()),
+        source_blob_id: Set(None),
+        source_sha256: Set(None),
+        source_byte_len: Set(None),
         canonical_text: Set(document.canonical_text.clone()),
+        canonical_fingerprint: Set(None),
         source_regions: Set(source_regions_to_db(&document.source_regions)),
         content_revision: Set(advanced.current.content_revision),
         revision_token: Set(advanced.current.revision_token),
@@ -2328,6 +2357,32 @@ fn source_regions_from_db(value: Value) -> Result<Vec<SourceRegion>> {
     })
 }
 
+fn source_blob_from_model(
+    id: Option<uuid::Uuid>,
+    sha256: Option<Vec<u8>>,
+    byte_len: Option<i64>,
+) -> Result<Option<DocumentSourceBlob>> {
+    match (id, sha256, byte_len) {
+        (None, None, None) => Ok(None),
+        (Some(id), Some(sha256), Some(byte_len)) => {
+            let sha256: [u8; 32] = sha256.try_into().map_err(|_| {
+                AgentError::Store("stored document source digest must contain 32 bytes".into())
+            })?;
+            let byte_len = u64::try_from(byte_len).map_err(|_| {
+                AgentError::Store("stored document source length must be nonnegative".into())
+            })?;
+            Ok(Some(DocumentSourceBlob {
+                id,
+                sha256,
+                byte_len,
+            }))
+        }
+        _ => Err(AgentError::Store(
+            "stored document source descriptor is incomplete".into(),
+        )),
+    }
+}
+
 fn document_from_model(model: entities::document::Model) -> Result<DocumentRecord> {
     let source_regions = source_regions_from_db(model.source_regions)?;
     validate_document_source_regions(&model.canonical_text, &source_regions)?;
@@ -2337,7 +2392,13 @@ fn document_from_model(model: entities::document::Model) -> Result<DocumentRecor
         source_uri: model.source_uri,
         media_type: model.media_type,
         title: model.title,
+        source_blob: source_blob_from_model(
+            model.source_blob_id,
+            model.source_sha256,
+            model.source_byte_len,
+        )?,
         canonical_text: model.canonical_text,
+        canonical_fingerprint: model.canonical_fingerprint,
         source_regions,
         content_revision: model.content_revision,
         revision_token: model.revision_token,
@@ -2379,7 +2440,9 @@ fn document_from_upsert(
         source_uri: document.source_uri.clone(),
         media_type: document.media_type.clone(),
         title: document.title.clone(),
+        source_blob: None,
         canonical_text: document.canonical_text.clone(),
+        canonical_fingerprint: None,
         source_regions: document.source_regions.clone(),
         content_revision,
         revision_token,
@@ -2434,6 +2497,7 @@ fn document_job_from_model(model: entities::document_job::Model) -> Result<Docum
         content_revision: model.content_revision,
         revision_token: model.revision_token,
         kind: match model.kind.as_str() {
+            "parse" => DocumentJobKind::Parse,
             "index" => DocumentJobKind::Index,
             other => {
                 return Err(AgentError::Store(format!(
@@ -2507,8 +2571,12 @@ mod entities {
             pub source_uri: Option<String>,
             pub media_type: String,
             pub title: Option<String>,
+            pub source_blob_id: Option<Uuid>,
+            pub source_sha256: Option<Vec<u8>>,
+            pub source_byte_len: Option<i64>,
             #[sea_orm(column_type = "Text")]
             pub canonical_text: String,
+            pub canonical_fingerprint: Option<String>,
             pub source_regions: Json,
             pub content_revision: i64,
             pub revision_token: Uuid,
@@ -3132,7 +3200,11 @@ mod migration {
                         .col(ColumnDef::new(Document::SourceUri).text())
                         .col(ColumnDef::new(Document::MediaType).text().not_null())
                         .col(ColumnDef::new(Document::Title).text())
+                        .col(ColumnDef::new(Document::SourceBlobId).uuid())
+                        .col(ColumnDef::new(Document::SourceSha256).binary())
+                        .col(ColumnDef::new(Document::SourceByteLen).big_integer())
                         .col(ColumnDef::new(Document::CanonicalText).text().not_null())
+                        .col(ColumnDef::new(Document::CanonicalFingerprint).text())
                         .col(
                             ColumnDef::new(Document::SourceRegions)
                                 .json_binary()
@@ -3164,6 +3236,18 @@ mod migration {
                                 .not_null(),
                         )
                         .col(ColumnDef::new(Document::IndexedAt).timestamp_with_time_zone())
+                        .check(
+                            Expr::col(Document::SourceBlobId)
+                                .is_null()
+                                .and(Expr::col(Document::SourceSha256).is_null())
+                                .and(Expr::col(Document::SourceByteLen).is_null())
+                                .or(Expr::col(Document::SourceBlobId)
+                                    .is_not_null()
+                                    .and(Expr::col(Document::SourceSha256).is_not_null())
+                                    .and(Expr::col(Document::SourceByteLen).is_not_null())
+                                    .and(Expr::cust("LENGTH(source_sha256) = 32"))
+                                    .and(Expr::col(Document::SourceByteLen).gte(0))),
+                        )
                         .foreign_key(
                             ForeignKey::create()
                                 .name("fk_document_project")
@@ -3177,6 +3261,12 @@ mod migration {
                                 .is_null()
                                 .or(Expr::col(Document::SourceUri).ne("")),
                         )
+                        .check(Expr::col(Document::CanonicalFingerprint).is_null().or(
+                            Func::char_length(Expr::col(Document::CanonicalFingerprint)).between(
+                                1,
+                                crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN as i32,
+                            ),
+                        ))
                         .check(Expr::col(Document::ContentRevision).gte(1))
                         .check(Expr::col(Document::ProcessingStatus).is_in([
                             DocumentProcessingStatus::Queued.as_str(),
@@ -3338,9 +3428,10 @@ mod migration {
                                 .on_delete(ForeignKeyAction::Cascade),
                         )
                         .check(Expr::col(DocumentJob::ContentRevision).gte(1))
-                        .check(
-                            Expr::col(DocumentJob::Kind).is_in([DocumentJobKind::Index.as_str()]),
-                        )
+                        .check(Expr::col(DocumentJob::Kind).is_in([
+                            DocumentJobKind::Parse.as_str(),
+                            DocumentJobKind::Index.as_str(),
+                        ]))
                         .check(
                             Func::char_length(Expr::col(DocumentJob::Kind))
                                 .lte(64)
@@ -3488,7 +3579,11 @@ mod migration {
         SourceUri,
         MediaType,
         Title,
+        SourceBlobId,
+        SourceSha256,
+        SourceByteLen,
         CanonicalText,
+        CanonicalFingerprint,
         SourceRegions,
         ContentRevision,
         RevisionToken,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::{ByteSpan, SourceLocation};
+use crate::model::{ByteSpan, DocumentSourceBlob, SourceLocation};
 use chrono::{DateTime, Utc};
 
 async fn temp_store() -> (tempfile::TempDir, DbStore) {
@@ -37,7 +37,9 @@ fn sample_document(project_id: Option<ProjectId>) -> DocumentRecord {
         source_uri: Some("file:///資料/notes.md".into()),
         media_type: "text/markdown".into(),
         title: Some("Résumé 📈".into()),
+        source_blob: None,
         canonical_text: "# Résumé\n\n売上 grew by 10%.".into(),
+        canonical_fingerprint: None,
         source_regions: Vec::new(),
         content_revision: 1,
         revision_token: uuid::Uuid::new_v4(),
@@ -153,6 +155,12 @@ async fn documents_roundtrip_and_list_by_corpus_scope() {
     in_a.indexed_at = Some(DateTime::<Utc>::from_timestamp(2_001, 0).unwrap());
     let mut in_b = sample_document(Some(project_b.id));
     in_b.created_at = DateTime::<Utc>::from_timestamp(3_000, 0).unwrap();
+    in_b.source_blob = Some(DocumentSourceBlob {
+        id: uuid::Uuid::new_v4(),
+        sha256: [0x5a; 32],
+        byte_len: 8_192,
+    });
+    in_b.canonical_fingerprint = Some("parser=markdown-v1".into());
 
     for document in [&unscoped, &in_a, &in_b] {
         store.create_document(document).await.unwrap();
@@ -160,6 +168,25 @@ async fn documents_roundtrip_and_list_by_corpus_scope() {
     unscoped = store.get_document(unscoped.id).await.unwrap().unwrap();
     in_a = store.get_document(in_a.id).await.unwrap().unwrap();
     in_b = store.get_document(in_b.id).await.unwrap().unwrap();
+
+    let legacy_replacement = DocumentUpsert {
+        id: in_b.id,
+        project_id: in_b.project_id,
+        source_uri: in_b.source_uri.clone(),
+        media_type: in_b.media_type.clone(),
+        title: in_b.title.clone(),
+        canonical_text: in_b.canonical_text.clone(),
+        source_regions: in_b.source_regions.clone(),
+        updated_at: in_b.updated_at,
+    };
+    assert!(store
+        .upsert_document_and_enqueue_index(&legacy_replacement, "pipeline-v1", 3)
+        .await
+        .is_err());
+    assert_eq!(
+        store.get_document(in_b.id).await.unwrap(),
+        Some(in_b.clone())
+    );
 
     assert_eq!(
         store.get_document(in_a.id).await.unwrap().as_ref(),
@@ -386,6 +413,38 @@ async fn document_constraints_reject_invalid_catalog_state() {
         },
     }];
     assert!(store.create_document(&invalid_regions).await.is_err());
+
+    let mut oversized_source = sample_document(None);
+    oversized_source.source_blob = Some(DocumentSourceBlob {
+        id: uuid::Uuid::new_v4(),
+        sha256: [0; 32],
+        byte_len: u64::MAX,
+    });
+    assert!(store.create_document(&oversized_source).await.is_err());
+
+    let mut empty_parser_fingerprint = sample_document(None);
+    empty_parser_fingerprint.canonical_fingerprint = Some(String::new());
+    assert!(store
+        .create_document(&empty_parser_fingerprint)
+        .await
+        .is_err());
+
+    let mut valid_source = sample_document(None);
+    valid_source.source_blob = Some(DocumentSourceBlob {
+        id: uuid::Uuid::new_v4(),
+        sha256: [0x22; 32],
+        byte_len: 512,
+    });
+    store.create_document(&valid_source).await.unwrap();
+    assert!(entities::document::Entity::update_many()
+        .col_expr(
+            entities::document::Column::SourceSha256,
+            sea_orm::sea_query::Expr::value(Some(vec![0x22; 31])),
+        )
+        .filter(entities::document::Column::Id.eq(valid_source.id.0))
+        .exec(&store.conn)
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -471,6 +530,31 @@ async fn document_job_schema_enforces_delivery_and_idempotency_invariants() {
         .insert(&store.conn)
         .await
         .unwrap();
+
+    let mut parse_document = sample_document(None);
+    parse_document.source_blob = Some(DocumentSourceBlob {
+        id: uuid::Uuid::new_v4(),
+        sha256: [0x11; 32],
+        byte_len: 1_024,
+    });
+    store.create_document(&parse_document).await.unwrap();
+    let parse_document = store
+        .get_document(parse_document.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut parse_job = make_job(&parse_document, "parser-v1");
+    parse_job.kind = Set(DocumentJobKind::Parse.as_str().into());
+    let parse_job = parse_job.insert(&store.conn).await.unwrap();
+    assert_eq!(
+        store
+            .get_document_job(DocumentJobId(parse_job.id))
+            .await
+            .unwrap()
+            .unwrap()
+            .kind,
+        DocumentJobKind::Parse
+    );
 
     // A document has only one nonterminal pipeline stage at a time.
     assert!(make_job(&document, "pipeline-v2")
