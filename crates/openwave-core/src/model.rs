@@ -12,7 +12,86 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 use uuid::Uuid;
+
+/// A half-open UTF-8 byte range `[start, end)` in canonical document text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ByteSpan {
+    /// Inclusive start byte offset.
+    pub start: usize,
+    /// Exclusive end byte offset.
+    pub end: usize,
+}
+
+impl ByteSpan {
+    /// Construct a byte span.
+    #[must_use]
+    pub const fn new(start: usize, end: usize) -> Self {
+        debug_assert!(start <= end, "span start must not exceed end");
+        Self { start, end }
+    }
+
+    /// Number of bytes covered by the span.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.end.saturating_sub(self.start)
+    }
+
+    /// Whether the span covers no bytes.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.end <= self.start
+    }
+}
+
+/// Format-specific location in the original source represented by canonical text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SourceLocation {
+    /// One page in a paginated source. Page numbers are one-based.
+    Page {
+        /// One-based page number.
+        number: NonZeroU32,
+    },
+}
+
+/// Mapping from canonical text back to a location in the original source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRegion {
+    /// Document-global canonical-text span represented by this region.
+    pub span: ByteSpan,
+    /// Original source location for the span.
+    pub location: SourceLocation,
+}
+
+/// Validate parser-produced source regions against their canonical text.
+///
+/// Regions must be ordered, nonempty, nonoverlapping, in bounds, and aligned to
+/// UTF-8 boundaries. Gaps are valid for parser-inserted separators.
+pub fn validate_source_regions(
+    text: &str,
+    regions: &[SourceRegion],
+) -> std::result::Result<(), &'static str> {
+    let mut previous_end = 0;
+    for region in regions {
+        if region.span.is_empty() {
+            return Err("source regions must be nonempty");
+        }
+        if region.span.end > text.len() {
+            return Err("source region falls outside canonical text");
+        }
+        if !text.is_char_boundary(region.span.start) || !text.is_char_boundary(region.span.end) {
+            return Err("source region offsets must be UTF-8 character boundaries");
+        }
+        if region.span.start < previous_end {
+            return Err("source regions must be ordered and nonoverlapping");
+        }
+        previous_end = region.span.end;
+    }
+    Ok(())
+}
 
 use crate::id::{ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, TurnId};
 
@@ -148,6 +227,8 @@ pub struct DocumentRecord {
     pub title: Option<String>,
     /// Parsed text-of-record used to rechunk, re-embed, and verify citations.
     pub canonical_text: String,
+    /// Parser-produced mappings from canonical text to original source pages.
+    pub source_regions: Vec<SourceRegion>,
     /// Monotonic content revision, starting at one and continuing through hard
     /// delete tombstones and later recreation of this document id.
     pub content_revision: i64,
@@ -314,6 +395,8 @@ pub struct DocumentUpsert {
     pub title: Option<String>,
     /// Parsed text-of-record.
     pub canonical_text: String,
+    /// Parser-produced mappings from canonical text to original source pages.
+    pub source_regions: Vec<SourceRegion>,
     /// Time of this authoritative write.
     pub updated_at: DateTime<Utc>,
 }
@@ -414,6 +497,7 @@ pub struct ToolCallRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU32;
 
     #[test]
     fn document_processing_enums_have_stable_snake_case_values() {
@@ -431,5 +515,34 @@ mod tests {
         );
         assert!(DocumentJobStatus::Succeeded.is_terminal());
         assert!(!DocumentJobStatus::Running.is_terminal());
+    }
+
+    fn page_region(start: usize, end: usize, page: u32) -> SourceRegion {
+        SourceRegion {
+            span: ByteSpan::new(start, end),
+            location: SourceLocation::Page {
+                number: NonZeroU32::new(page).unwrap(),
+            },
+        }
+    }
+
+    #[test]
+    fn source_region_validation_accepts_ordered_regions_and_gaps() {
+        let text = "aé gap z";
+        assert_eq!(
+            validate_source_regions(text, &[page_region(0, 3, 1), page_region(8, 9, 2)]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn source_region_validation_rejects_invalid_spans() {
+        let text = "aéz";
+        assert!(validate_source_regions(text, &[page_region(1, 2, 1)]).is_err());
+        assert!(validate_source_regions(text, &[page_region(0, 0, 1)]).is_err());
+        assert!(validate_source_regions(text, &[page_region(0, 99, 1)]).is_err());
+        assert!(
+            validate_source_regions(text, &[page_region(2, 4, 2), page_region(0, 1, 1)]).is_err()
+        );
     }
 }

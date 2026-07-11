@@ -530,6 +530,7 @@ async fn ingest_document_in_scope(
                 media_type: document.media_type.clone(),
                 title: None,
                 canonical_text: document.text.clone(),
+                source_regions: document.source_regions.clone(),
                 updated_at: Utc::now(),
             },
             &index_fingerprint,

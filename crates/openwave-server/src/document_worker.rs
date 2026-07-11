@@ -439,7 +439,7 @@ fn canonical_document(record: &openwave_core::DocumentRecord) -> Document {
         Some(uri) => DocumentSource::uri(uri),
         None => DocumentSource::Inline,
     };
-    match record.project_id {
+    let document = match record.project_id {
         Some(project_id) => Document::with_id_scoped(
             record.id,
             project_id,
@@ -453,7 +453,8 @@ fn canonical_document(record: &openwave_core::DocumentRecord) -> Document {
             record.media_type.clone(),
             record.canonical_text.clone(),
         ),
-    }
+    };
+    document.with_source_regions(record.source_regions.clone())
 }
 
 fn classify_retrieval_error(error: &RetrievalError) -> (bool, &'static str) {
@@ -487,11 +488,12 @@ mod tests {
 
     use async_trait::async_trait;
     use openwave_core::{
-        DbStore, DocumentId, DocumentProcessingStatus, DocumentUpsert, Project, ProjectId,
+        ByteSpan, DbStore, DocumentId, DocumentProcessingStatus, DocumentUpsert, Project,
+        ProjectId, SourceLocation, SourceRegion,
     };
     use openwave_retrieval::{
         Embedder, Embedding, HashEmbedder, InMemoryVectorStore, PlainTextParser, ScoredChunk,
-        TextChunker, VectorRecord, VectorStore,
+        SearchScope, TextChunker, VectorRecord, VectorStore,
     };
 
     use super::*;
@@ -724,6 +726,7 @@ mod tests {
             media_type: "text/plain".into(),
             title: None,
             canonical_text: text.into(),
+            source_regions: Vec::new(),
             updated_at: Utc::now(),
         }
     }
@@ -771,6 +774,37 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn worker_carries_catalog_page_regions_into_citations() {
+        let (_dir, store, retrieval, _embedder, worker) = harness().await;
+        let id = DocumentId::new();
+        let text = "durable page provenance";
+        let mut input = source(id, text);
+        input.media_type = "application/pdf".into();
+        input.source_regions = vec![SourceRegion {
+            span: ByteSpan::new(0, text.len()),
+            location: SourceLocation::Page {
+                number: std::num::NonZeroU32::new(3).unwrap(),
+            },
+        }];
+        let (_, job) = store
+            .upsert_document_and_enqueue_index(&input, &retrieval.index_fingerprint(), 3)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            WorkerOutcome::Completed(job.id)
+        );
+        let citations = retrieval
+            .search(SearchScope::Unscoped, "durable page provenance", 1)
+            .await
+            .unwrap();
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].source_regions, input.source_regions);
+        assert_eq!(citations[0].snippet, text);
     }
 
     #[tokio::test]

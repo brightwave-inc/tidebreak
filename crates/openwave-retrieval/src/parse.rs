@@ -11,6 +11,7 @@
 //! async executor thread; the parser contract and durable worker boundary will
 //! become async before one is wired into production.
 
+use crate::document::SourceRegion;
 use crate::error::{Result, RetrievalError};
 
 /// Ordered collection of parsers that dispatches by media type.
@@ -87,12 +88,24 @@ impl DocumentParser for ParserRegistry {
 pub struct ParsedDocument {
     /// The canonical plain-text representation. Chunk spans index into this.
     pub text: String,
+    /// Mappings from canonical text to locations in the original source.
+    pub source_regions: Vec<SourceRegion>,
 }
 
 impl ParsedDocument {
     /// Wrap already-extracted text.
     pub fn from_text(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+        Self {
+            text: text.into(),
+            source_regions: Vec::new(),
+        }
+    }
+
+    /// Attach parser-produced source regions.
+    #[must_use]
+    pub fn with_source_regions(mut self, source_regions: Vec<SourceRegion>) -> Self {
+        self.source_regions = source_regions;
+        self
     }
 }
 

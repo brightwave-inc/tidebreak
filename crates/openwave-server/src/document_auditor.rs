@@ -253,7 +253,7 @@ fn canonical_document(record: &openwave_core::DocumentRecord) -> Document {
         Some(uri) => DocumentSource::uri(uri),
         None => DocumentSource::Inline,
     };
-    match record.project_id {
+    let document = match record.project_id {
         Some(project_id) => Document::with_id_scoped(
             record.id,
             project_id,
@@ -267,13 +267,17 @@ fn canonical_document(record: &openwave_core::DocumentRecord) -> Document {
             record.media_type.clone(),
             record.canonical_text.clone(),
         ),
-    }
+    };
+    document.with_source_regions(record.source_regions.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use openwave_core::{DbStore, DocumentJobStatus, DocumentProcessingStatus, DocumentUpsert};
+    use openwave_core::{
+        ByteSpan, DbStore, DocumentJobStatus, DocumentProcessingStatus, DocumentUpsert,
+        SourceLocation, SourceRegion,
+    };
     use openwave_retrieval::{
         Document, DocumentSource, HashEmbedder, InMemoryVectorStore, PlainTextParser, TextChunker,
     };
@@ -307,6 +311,7 @@ mod tests {
             media_type: "text/plain".into(),
             title: None,
             canonical_text: text.into(),
+            source_regions: Vec::new(),
             updated_at: Utc::now(),
         }
     }
@@ -345,6 +350,25 @@ mod tests {
                 failure_delay: Duration::from_secs(1),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn canonical_document_preserves_catalog_source_regions() {
+        let (_dir, store, _retrieval) = harness().await;
+        let text = "page provenance";
+        let mut input = source(DocumentId::new(), text);
+        input.source_regions = vec![SourceRegion {
+            span: ByteSpan::new(0, text.len()),
+            location: SourceLocation::Page {
+                number: std::num::NonZeroU32::new(4).unwrap(),
+            },
+        }];
+        let record = store.upsert_document(&input).await.unwrap();
+
+        assert_eq!(
+            canonical_document(&record).source_regions,
+            input.source_regions
+        );
     }
 
     #[tokio::test]
