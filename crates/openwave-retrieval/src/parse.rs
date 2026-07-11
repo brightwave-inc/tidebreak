@@ -6,9 +6,10 @@
 //! (PDF/office/images) will arrive later as a feature-gated parser behind this
 //! same trait, so the pipeline never has to care which parser produced the text.
 //!
-//! The trait is synchronous: naive text decoding is CPU-only, and a future
-//! parser that shells out to native tooling can wrap itself in `spawn_blocking`
-//! at its own boundary rather than forcing every caller onto an async path.
+//! The trait is synchronous while the only implementation is CPU-only text
+//! decoding. Rich parsers must not perform expensive native or remote work on an
+//! async executor thread; the parser contract and durable worker boundary will
+//! become async before one is wired into production.
 
 use crate::error::{Result, RetrievalError};
 
