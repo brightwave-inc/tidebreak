@@ -22,8 +22,9 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
 use crate::model::{
-    Chat, DocumentGeneration, DocumentJob, DocumentJobStatus, DocumentListCursor, DocumentRecord,
-    DocumentScope, DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
+    Chat, DocumentGeneration, DocumentJob, DocumentJobStatus, DocumentListCursor,
+    DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceUpsert,
+    DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
 };
 
 /// Why maintenance determined that a document needs an index job.
@@ -55,6 +56,8 @@ pub enum EnsureDocumentIndexJobOutcome {
     Existing(DocumentJob),
     /// The desired current job failed and requires an explicit user retry.
     Failed(DocumentJob),
+    /// Canonical content is still owned by the current parse stage.
+    Parsing(DocumentJob),
     /// The source document no longer exists.
     MissingDocument,
     /// The caller inspected an obsolete source generation.
@@ -209,6 +212,38 @@ pub trait Store: Send + Sync {
         _pipeline_fingerprint: &str,
         _max_attempts: i32,
     ) -> Result<(DocumentRecord, DocumentJob)> {
+        document_storage_unavailable()
+    }
+
+    /// Atomically accept immutable raw source bytes and enqueue their parse job.
+    ///
+    /// The blob must already be durably published. Repeating an identical source
+    /// and parser fingerprint returns the exact existing generation and job.
+    /// Any source or parser change advances the generation, clears canonical and
+    /// index state, and cancels older nonterminal work in the same transaction.
+    async fn accept_document_source_and_enqueue_parse(
+        &self,
+        _document: &DocumentSourceUpsert,
+        _parser_fingerprint: &str,
+        _max_attempts: i32,
+    ) -> Result<(DocumentRecord, DocumentJob)> {
+        document_storage_unavailable()
+    }
+
+    /// Atomically publish canonical parser output and enqueue the index stage.
+    ///
+    /// The transition succeeds only for the exact live, unexpired parse lease.
+    /// On success the parse job becomes terminal, canonical state becomes
+    /// authoritative, and one index job is queued in the same transaction.
+    async fn complete_document_parse_job_and_enqueue_index(
+        &self,
+        _id: DocumentJobId,
+        _lease_token: uuid::Uuid,
+        _completed_at: chrono::DateTime<chrono::Utc>,
+        _output: &DocumentParseOutput,
+        _index_fingerprint: &str,
+        _index_max_attempts: i32,
+    ) -> Result<Option<(DocumentRecord, DocumentJob)>> {
         document_storage_unavailable()
     }
 
@@ -878,6 +913,39 @@ mod tests {
                 ));
             }
 
+            if document.source_blob.is_some() && document.canonical_fingerprint.is_none() {
+                let parse_job = state
+                    .jobs
+                    .values()
+                    .filter(|job| {
+                        job.document_id == document_id
+                            && job.generation() == document.generation()
+                            && job.kind == DocumentJobKind::Parse
+                    })
+                    .max_by_key(|job| (job.created_at, job.id.0))
+                    .cloned()
+                    .ok_or_else(|| {
+                        AgentError::Store(format!(
+                            "unparsed document {document_id} has no current parse job"
+                        ))
+                    })?;
+                return Ok(if parse_job.status == DocumentJobStatus::Failed {
+                    EnsureDocumentIndexJobOutcome::Failed(parse_job)
+                } else if matches!(
+                    parse_job.status,
+                    DocumentJobStatus::Queued
+                        | DocumentJobStatus::Running
+                        | DocumentJobStatus::RetryWait
+                ) {
+                    EnsureDocumentIndexJobOutcome::Parsing(parse_job)
+                } else {
+                    return Err(AgentError::Store(format!(
+                        "unparsed document {document_id} has terminal parse state {}",
+                        parse_job.status.as_str()
+                    )));
+                });
+            }
+
             let desired_job_id = state.jobs.values().find_map(|job| {
                 (job.document_id == document_id
                     && job.generation() == document.generation()
@@ -1224,6 +1292,11 @@ mod tests {
             let Some(candidate) = state.jobs.get(&id).cloned() else {
                 return Ok(false);
             };
+            if candidate.kind != DocumentJobKind::Index {
+                return Err(AgentError::Store(format!(
+                    "document job {id} is not an index job"
+                )));
+            }
             if candidate.status != DocumentJobStatus::Running
                 || candidate.lease_token != Some(lease_token)
                 || candidate
