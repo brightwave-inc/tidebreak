@@ -39,8 +39,8 @@ use openwave_core::{
     Result, SecretProvider, Store, ToolRegistry, WriteFile,
 };
 use openwave_retrieval::{
-    Embedder, HashEmbedder, LanceVectorStore, OpenAiEmbedder, PlainTextParser, Retriever,
-    SearchTool, TextChunker, VectorStore,
+    Embedder, HashEmbedder, LanceVectorStore, OpenAiEmbedder, ParserRegistry, PlainTextParser,
+    Retriever, SearchTool, TextChunker, VectorStore,
 };
 
 use resolver::KeyedResolver;
@@ -321,7 +321,7 @@ fn build_retrieval(
     store: Arc<dyn VectorStore>,
 ) -> (Arc<Retriever>, Box<SearchTool>) {
     let retrieval = Arc::new(Retriever::new(
-        Box::new(PlainTextParser::new()),
+        Box::new(ParserRegistry::new().with_parser(PlainTextParser::new())),
         Box::new(TextChunker::default()),
         embedder.clone(),
         store.clone(),

@@ -6,11 +6,79 @@
 //! (PDF/office/images) will arrive later as a feature-gated parser behind this
 //! same trait, so the pipeline never has to care which parser produced the text.
 //!
-//! The trait is synchronous: naive text decoding is CPU-only, and a future
-//! parser that shells out to native tooling can wrap itself in `spawn_blocking`
-//! at its own boundary rather than forcing every caller onto an async path.
+//! The trait is synchronous while the only implementation is CPU-only text
+//! decoding. Rich parsers must not perform expensive native or remote work on an
+//! async executor thread; the parser contract and durable worker boundary will
+//! become async before one is wired into production.
 
 use crate::error::{Result, RetrievalError};
+
+/// Ordered collection of parsers that dispatches by media type.
+///
+/// The first parser whose [`DocumentParser::supports`] method returns `true`
+/// handles the document. Put narrow rich-format parsers before broad fallbacks.
+/// This lets applications enable PDF/Office parsers without coupling the ingest
+/// pipeline to a particular parsing library.
+#[derive(Default)]
+pub struct ParserRegistry {
+    parsers: Vec<Box<dyn DocumentParser>>,
+}
+
+impl ParserRegistry {
+    /// Construct an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a parser at the lowest dispatch priority.
+    pub fn push(&mut self, parser: Box<dyn DocumentParser>) {
+        self.parsers.push(parser);
+    }
+
+    /// Append a parser and return the registry for fluent construction.
+    #[must_use]
+    pub fn with_parser(mut self, parser: impl DocumentParser + 'static) -> Self {
+        self.push(Box::new(parser));
+        self
+    }
+}
+
+impl DocumentParser for ParserRegistry {
+    fn fingerprint(&self) -> String {
+        // Length prefixes make the ordered composition unambiguous even when a
+        // child fingerprint contains punctuation used by other fingerprints.
+        let mut fingerprint = String::from("parser-registry-v1");
+        for parser in &self.parsers {
+            let child = parser.fingerprint();
+            fingerprint.push(':');
+            fingerprint.push_str(&child.len().to_string());
+            fingerprint.push(':');
+            fingerprint.push_str(&child);
+        }
+        let digest = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, fingerprint.as_bytes());
+        format!("parser-registry-v1:{digest}")
+    }
+
+    fn supports(&self, media_type: &str) -> bool {
+        self.parsers
+            .iter()
+            .any(|parser| parser.supports(media_type))
+    }
+
+    fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {
+        let parser = self
+            .parsers
+            .iter()
+            .find(|parser| parser.supports(media_type))
+            .ok_or_else(|| {
+                RetrievalError::parse(format!(
+                    "no registered document parser supports media type `{media_type}`"
+                ))
+            })?;
+        parser.parse(raw, media_type)
+    }
+}
 
 /// The plain text extracted from a source document, plus any parser-supplied
 /// metadata. Kept as a struct (not a bare `String`) so richer parsers can attach
@@ -93,6 +161,83 @@ impl DocumentParser for PlainTextParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct PrefixParser {
+        media_type: &'static str,
+        prefix: &'static str,
+    }
+
+    impl DocumentParser for PrefixParser {
+        fn fingerprint(&self) -> String {
+            format!("prefix:{}:{}", self.media_type, self.prefix)
+        }
+
+        fn supports(&self, media_type: &str) -> bool {
+            media_type == self.media_type
+        }
+
+        fn parse(&self, raw: &[u8], _media_type: &str) -> Result<ParsedDocument> {
+            Ok(ParsedDocument::from_text(format!(
+                "{}{}",
+                self.prefix,
+                String::from_utf8_lossy(raw)
+            )))
+        }
+    }
+
+    #[test]
+    fn registry_dispatches_to_first_supporting_parser() {
+        let registry = ParserRegistry::new()
+            .with_parser(PrefixParser {
+                media_type: "application/pdf",
+                prefix: "first:",
+            })
+            .with_parser(PrefixParser {
+                media_type: "application/pdf",
+                prefix: "second:",
+            })
+            .with_parser(PlainTextParser::new());
+
+        assert_eq!(
+            registry.parse(b"pdf", "application/pdf").unwrap().text,
+            "first:pdf"
+        );
+        assert_eq!(registry.parse(b"text", "text/plain").unwrap().text, "text");
+    }
+
+    #[test]
+    fn registry_rejects_unsupported_media_without_invoking_a_parser() {
+        let registry = ParserRegistry::new().with_parser(PlainTextParser::new());
+        assert!(!registry.supports("application/pdf"));
+        let error = registry.parse(b"%PDF", "application/pdf").unwrap_err();
+        assert!(error.to_string().contains("no registered document parser"));
+    }
+
+    #[test]
+    fn registry_fingerprint_captures_ordered_children_unambiguously() {
+        let first = ParserRegistry::new()
+            .with_parser(PrefixParser {
+                media_type: "a",
+                prefix: "b:c",
+            })
+            .with_parser(PrefixParser {
+                media_type: "d",
+                prefix: "e",
+            });
+        let reversed = ParserRegistry::new()
+            .with_parser(PrefixParser {
+                media_type: "d",
+                prefix: "e",
+            })
+            .with_parser(PrefixParser {
+                media_type: "a",
+                prefix: "b:c",
+            });
+
+        assert_ne!(first.fingerprint(), reversed.fingerprint());
+        assert_eq!(first.fingerprint(), first.fingerprint());
+        assert_eq!(first.fingerprint().len(), 55);
+    }
 
     #[test]
     fn supports_text_types_and_empty_but_not_binary() {
