@@ -312,6 +312,11 @@ impl InMemoryVectorStore {
         Ok(())
     }
 
+    fn validate_record(&self, record: &VectorRecord) -> Result<()> {
+        self.check_dims(&record.embedding)?;
+        record.chunk.validate_source_regions()
+    }
+
     fn validate_document_records(
         &self,
         document_id: DocumentId,
@@ -319,7 +324,7 @@ impl InMemoryVectorStore {
     ) -> Result<Option<Option<ProjectId>>> {
         let project_id = records.first().map(|record| record.project_id);
         for record in records {
-            self.check_dims(&record.embedding)?;
+            self.validate_record(record)?;
             if record.chunk.document_id != document_id {
                 return Err(RetrievalError::vector_store(format!(
                     "replacement record {} belongs to document {}, expected {document_id}",
@@ -360,7 +365,7 @@ impl VectorStore for InMemoryVectorStore {
     async fn upsert(&self, records: Vec<VectorRecord>) -> Result<()> {
         let mut scopes = HashMap::new();
         for record in &records {
-            self.check_dims(&record.embedding)?;
+            self.validate_record(record)?;
             match scopes.entry(record.chunk.document_id) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(record.project_id);
@@ -706,7 +711,7 @@ fn upsert_unversioned(records: &mut Vec<VectorRecord>, record: VectorRecord) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::ByteSpan;
+    use crate::document::{ByteSpan, SourceLocation, SourceRegion};
     use crate::id::DocumentId;
 
     fn record(doc: DocumentId, ordinal: usize, text: &str, vector: Vec<f32>) -> VectorRecord {
@@ -757,6 +762,23 @@ mod tests {
             .query("", &Embedding(vec![1.0, 0.0]), 5, SearchScope::Unscoped)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_chunk_source_regions_before_mutation() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let mut invalid = record(doc, 0, "é", vec![1.0, 0.0]);
+        invalid.chunk.source_regions = vec![SourceRegion {
+            span: ByteSpan::new(1, 2),
+            location: SourceLocation::Page {
+                number: std::num::NonZeroU32::new(1).unwrap(),
+            },
+        }];
+
+        assert!(invalid.chunk.validate_source_regions().is_err());
+        assert!(store.upsert(vec![invalid]).await.is_err());
+        assert!(store.is_empty().await.unwrap());
     }
 
     #[tokio::test]

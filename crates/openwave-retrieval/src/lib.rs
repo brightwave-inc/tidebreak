@@ -86,7 +86,9 @@ mod selection;
 mod vector;
 
 pub use chunk::{Chunker, TextChunker};
-pub use document::{ByteSpan, Chunk, Citation, Document, DocumentSource, ScoredChunk};
+pub use document::{
+    ByteSpan, Chunk, Citation, Document, DocumentSource, ScoredChunk, SourceLocation, SourceRegion,
+};
 pub use embed::{Embedder, Embedding, HashEmbedder};
 pub use error::{Result, RetrievalError};
 pub use id::{ChunkId, DocumentId};

@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::{ByteSpan, SourceLocation};
 use chrono::{DateTime, Utc};
 
 async fn temp_store() -> (tempfile::TempDir, DbStore) {
@@ -37,6 +38,7 @@ fn sample_document(project_id: Option<ProjectId>) -> DocumentRecord {
         media_type: "text/markdown".into(),
         title: Some("Résumé 📈".into()),
         canonical_text: "# Résumé\n\n売上 grew by 10%.".into(),
+        source_regions: Vec::new(),
         content_revision: 1,
         revision_token: uuid::Uuid::new_v4(),
         processing_status: DocumentProcessingStatus::Queued,
@@ -315,6 +317,7 @@ async fn live_document_cannot_move_between_project_corpora() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "project A source".into(),
+        source_regions: Vec::new(),
         updated_at: Utc::now(),
     };
     let first = store
@@ -324,6 +327,7 @@ async fn live_document_cannot_move_between_project_corpora() {
     let moved = DocumentUpsert {
         project_id: Some(project_b.id),
         canonical_text: "must not move".into(),
+        source_regions: Vec::new(),
         ..source
     };
     assert!(store
@@ -373,6 +377,66 @@ async fn document_constraints_reject_invalid_catalog_state() {
         Some("x".repeat(crate::model::DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN + 1));
     oversized_fingerprint.indexed_at = Some(Utc::now());
     assert!(store.create_document(&oversized_fingerprint).await.is_err());
+
+    let mut invalid_regions = sample_document(None);
+    invalid_regions.source_regions = vec![SourceRegion {
+        span: ByteSpan::new(4, 5),
+        location: SourceLocation::Page {
+            number: std::num::NonZeroU32::new(1).unwrap(),
+        },
+    }];
+    assert!(store.create_document(&invalid_regions).await.is_err());
+}
+
+#[tokio::test]
+async fn source_regions_roundtrip_and_provenance_changes_advance_revision() {
+    let (_dir, store) = temp_store().await;
+    let page = |number| SourceRegion {
+        span: ByteSpan::new(0, 9),
+        location: SourceLocation::Page {
+            number: std::num::NonZeroU32::new(number).unwrap(),
+        },
+    };
+    let source = DocumentUpsert {
+        id: DocumentId::new(),
+        project_id: None,
+        source_uri: Some("file:///report.pdf".into()),
+        media_type: "application/pdf".into(),
+        title: Some("Report".into()),
+        canonical_text: "page text".into(),
+        source_regions: vec![page(1)],
+        updated_at: Utc::now(),
+    };
+
+    let (first, first_job) = store
+        .upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)
+        .await
+        .unwrap();
+    assert_eq!(first.content_revision, 1);
+    assert_eq!(first.source_regions, source.source_regions);
+    assert_eq!(
+        store.get_document(source.id).await.unwrap(),
+        Some(first.clone())
+    );
+
+    let (same, same_job) = store
+        .upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)
+        .await
+        .unwrap();
+    assert_eq!(same.generation(), first.generation());
+    assert_eq!(same_job.id, first_job.id);
+
+    let changed = DocumentUpsert {
+        source_regions: vec![page(2)],
+        updated_at: Utc::now(),
+        ..source
+    };
+    let (second, _) = store
+        .upsert_document_and_enqueue_index(&changed, "pipeline-v1", 3)
+        .await
+        .unwrap();
+    assert_eq!(second.content_revision, 2);
+    assert_eq!(second.source_regions, changed.source_regions);
 }
 
 #[tokio::test]
@@ -563,6 +627,7 @@ async fn missing_derived_state_requeues_succeeded_job_without_advancing_generati
         media_type: "text/plain".into(),
         title: Some("missing derived".into()),
         canonical_text: "same authoritative source".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(9_000, 0).unwrap(),
     };
     let ready = ready_document(&store, &source).await;
@@ -602,6 +667,7 @@ async fn index_maintenance_does_not_implicitly_revive_failed_job() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "requires an explicit retry".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(9_050, 0).unwrap(),
     };
     let (document, job) = store
@@ -665,6 +731,7 @@ async fn incomplete_succeeded_generation_advances_once_and_reuses_the_new_job() 
         media_type: "text/plain".into(),
         title: Some("incomplete derived".into()),
         canonical_text: "source remains stable".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(9_075, 0).unwrap(),
     };
     let ready = ready_document(&store, &source).await;
@@ -718,6 +785,7 @@ async fn concurrent_pipeline_change_advances_once_and_preserves_source() {
         media_type: "text/plain".into(),
         title: Some("pipeline change".into()),
         canonical_text: "same authoritative source".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(9_100, 0).unwrap(),
     };
     let ready = ready_document(&store, &source).await;
@@ -786,6 +854,7 @@ async fn source_revision_and_index_job_commit_and_supersede_together() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "first".into(),
+        source_regions: Vec::new(),
         updated_at: first_at,
     };
 
@@ -855,6 +924,7 @@ async fn source_revision_and_index_job_commit_and_supersede_together() {
     let second_at = DateTime::<Utc>::from_timestamp(20_000, 0).unwrap();
     let second_source = DocumentUpsert {
         canonical_text: "second".into(),
+        source_regions: Vec::new(),
         updated_at: second_at,
         ..first_source
     };
@@ -927,6 +997,7 @@ async fn enqueue_rolls_back_source_when_job_insert_fails() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "must roll back".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(30_000, 0).unwrap(),
     };
     assert!(store
@@ -951,6 +1022,7 @@ async fn replacement_enqueue_failure_restores_source_and_live_job() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "original".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(40_000, 0).unwrap(),
     };
     let (_, job) = store
@@ -1014,6 +1086,7 @@ async fn replacement_enqueue_failure_restores_source_and_live_job() {
         .unwrap();
     let replacement = DocumentUpsert {
         canonical_text: "replacement".into(),
+        source_regions: Vec::new(),
         updated_at: source.updated_at + chrono::Duration::seconds(1),
         ..source
     };
@@ -1050,6 +1123,7 @@ async fn document_delete_failure_rolls_back_tombstone_source_and_jobs() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "retain on failure".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(45_000, 0).unwrap(),
     };
     let (document, job) = store
@@ -1097,6 +1171,7 @@ async fn concurrent_source_enqueues_leave_one_current_revision_and_job() {
                         media_type: "text/plain".into(),
                         title: None,
                         canonical_text: format!("writer {revision}"),
+                        source_regions: Vec::new(),
                         updated_at: DateTime::<Utc>::from_timestamp(revision, 0).unwrap(),
                     },
                     "pipeline-v1",
@@ -1151,6 +1226,7 @@ async fn concurrent_identical_first_enqueues_reuse_one_revision_and_job() {
                         media_type: "text/plain".into(),
                         title: None,
                         canonical_text: "same source".into(),
+                        source_regions: Vec::new(),
                         // Source observation time is deliberately not part of
                         // semantic request identity.
                         updated_at: DateTime::<Utc>::from_timestamp(request, 0).unwrap(),
@@ -1184,6 +1260,7 @@ async fn document_job_claim_and_heartbeat_require_the_live_lease() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "claim me".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(50_000, 0).unwrap(),
     };
     let (_, queued) = store
@@ -1279,6 +1356,7 @@ async fn live_document_job_completion_atomically_publishes_ready_watermark() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "complete me".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(55_000, 0).unwrap(),
     };
     let (revision, queued) = store
@@ -1338,6 +1416,7 @@ async fn live_document_job_failure_retries_then_fails_permanently() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "fail and retry".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(56_000, 0).unwrap(),
     };
     let (_, queued) = store
@@ -1436,6 +1515,7 @@ async fn document_job_failure_validates_details_and_exhausts_retry_budget() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "one attempt".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(56_500, 0).unwrap(),
     };
     let (_, queued) = store
@@ -1526,6 +1606,7 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "retry me".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
     };
     let (_, queued) = store
@@ -1630,6 +1711,7 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
 
     let replacement = DocumentUpsert {
         canonical_text: "replacement".into(),
+        source_regions: Vec::new(),
         updated_at: source.updated_at + chrono::Duration::seconds(1),
         ..source.clone()
     };
@@ -1648,6 +1730,7 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
         .upsert_document_and_enqueue_index(
             &DocumentUpsert {
                 canonical_text: "newer replacement".into(),
+                source_regions: Vec::new(),
                 updated_at: source.updated_at + chrono::Duration::seconds(2),
                 ..replacement
             },
@@ -1684,6 +1767,7 @@ async fn completion_document_failure_rolls_back_the_job_transition() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "roll back completion".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(57_000, 0).unwrap(),
     };
     let (_, queued) = store
@@ -1736,6 +1820,7 @@ async fn expired_document_job_leases_are_reclaimed_then_fail_at_the_attempt_limi
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "recover me".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(60_000, 0).unwrap(),
     };
     let (_, queued) = store
@@ -1775,6 +1860,7 @@ async fn expired_document_job_leases_are_reclaimed_then_fail_at_the_attempt_limi
         id: DocumentId::new(),
         source_uri: Some("file:///after-exhausted-lease.txt".into()),
         canonical_text: "claim after cleanup".into(),
+        source_regions: Vec::new(),
         ..source.clone()
     };
     let (_, fallback) = store
@@ -1830,6 +1916,7 @@ async fn claim_cancels_a_superseded_candidate_then_claims_the_next_job() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "stale".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(70_000, 0).unwrap(),
     };
     let (_, stale_job) = store
@@ -1840,6 +1927,7 @@ async fn claim_cancels_a_superseded_candidate_then_claims_the_next_job() {
         id: DocumentId::new(),
         source_uri: Some("file:///next-claim.txt".into()),
         canonical_text: "next".into(),
+        source_regions: Vec::new(),
         ..first_source.clone()
     };
     let (_, next_job) = store
@@ -1889,6 +1977,7 @@ async fn claim_reports_exact_identity_status_corruption_without_cancelling() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "exact but inconsistent".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(75_000, 0).unwrap(),
     };
     let (_, queued) = store
@@ -1926,6 +2015,7 @@ async fn claim_orders_expired_and_queued_jobs_by_effective_due_time() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "expired first".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(76_000, 0).unwrap(),
     };
     let (_, running_queued) = store
@@ -1944,6 +2034,7 @@ async fn claim_orders_expired_and_queued_jobs_by_effective_due_time() {
         id: DocumentId::new(),
         source_uri: Some("file:///queued-second.txt".into()),
         canonical_text: "queued second".into(),
+        source_regions: Vec::new(),
         ..running_source
     };
     let (_, queued) = store
@@ -1997,6 +2088,7 @@ async fn concurrent_document_job_claimers_never_share_a_job() {
                     media_type: "text/plain".into(),
                     title: None,
                     canonical_text: format!("document {index}"),
+                    source_regions: Vec::new(),
                     updated_at: DateTime::<Utc>::from_timestamp(80_000 + index, 0).unwrap(),
                 },
                 "pipeline-v1",
@@ -2040,6 +2132,7 @@ async fn concurrent_claim_and_replacement_enqueue_preserve_one_current_job() {
             media_type: "text/plain".into(),
             title: None,
             canonical_text: "first".into(),
+            source_regions: Vec::new(),
             updated_at: DateTime::<Utc>::from_timestamp(90_000 + iteration * 2, 0).unwrap(),
         };
         let (_, queued) = store
@@ -2061,6 +2154,7 @@ async fn concurrent_claim_and_replacement_enqueue_preserve_one_current_job() {
         let enqueue_barrier = barrier.clone();
         let replacement = DocumentUpsert {
             canonical_text: "replacement".into(),
+            source_regions: Vec::new(),
             updated_at: source.updated_at + chrono::Duration::seconds(1),
             ..source.clone()
         };
@@ -2098,6 +2192,7 @@ async fn concurrent_delete_and_enqueue_leave_one_coherent_generation() {
             media_type: "text/plain".into(),
             title: None,
             canonical_text: "first".into(),
+            source_regions: Vec::new(),
             updated_at: DateTime::<Utc>::from_timestamp(110_000 + iteration * 2, 0).unwrap(),
         };
         let (first, _) = store
@@ -2118,6 +2213,7 @@ async fn concurrent_delete_and_enqueue_leave_one_coherent_generation() {
         let enqueue_barrier = barrier.clone();
         let replacement = DocumentUpsert {
             canonical_text: "replacement".into(),
+            source_regions: Vec::new(),
             updated_at: source.updated_at + chrono::Duration::seconds(1),
             ..source.clone()
         };
@@ -2172,6 +2268,7 @@ async fn document_upsert_revisions_and_index_watermark_are_compare_and_set() {
         media_type: "text/plain".into(),
         title: Some("Report".into()),
         canonical_text: "first version".into(),
+        source_regions: Vec::new(),
         updated_at: first_at,
     };
 
@@ -2205,6 +2302,7 @@ async fn document_upsert_revisions_and_index_watermark_are_compare_and_set() {
     let second_at = DateTime::<Utc>::from_timestamp(20_000, 0).unwrap();
     let second = DocumentUpsert {
         canonical_text: "second version".into(),
+        source_regions: Vec::new(),
         updated_at: second_at,
         ..first
     };
@@ -2271,6 +2369,7 @@ async fn stale_revision_token_cannot_mark_a_recreated_document_indexed() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "old lifecycle".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
     };
     let old = store.upsert_document(&first).await.unwrap();
@@ -2284,6 +2383,7 @@ async fn stale_revision_token_cannot_mark_a_recreated_document_indexed() {
             media_type: old.media_type.clone(),
             title: old.title.clone(),
             canonical_text: "new lifecycle".into(),
+            source_regions: Vec::new(),
             updated_at: recreated_at,
         })
         .await
@@ -2334,6 +2434,7 @@ async fn document_generation_clock_survives_unknown_delete_and_recreation() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "first live source".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(100_000, 0).unwrap(),
     };
     let first = store.upsert_document(&source).await.unwrap();
@@ -2342,6 +2443,7 @@ async fn document_generation_clock_survives_unknown_delete_and_recreation() {
     let second = store
         .upsert_document(&DocumentUpsert {
             canonical_text: "second live source".into(),
+            source_regions: Vec::new(),
             ..source.clone()
         })
         .await
@@ -2375,6 +2477,7 @@ async fn pending_document_retirement_survives_reopen_and_uses_exact_cas() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "retire me".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
     };
     let store = DbStore::connect(&url).await.unwrap();
@@ -2402,6 +2505,7 @@ async fn pending_document_retirement_survives_reopen_and_uses_exact_cas() {
     let recreated = store
         .upsert_document(&DocumentUpsert {
             canonical_text: "new lifecycle".into(),
+            source_regions: Vec::new(),
             updated_at: DateTime::<Utc>::from_timestamp(2, 0).unwrap(),
             ..source
         })
@@ -2498,6 +2602,7 @@ async fn document_generation_overflow_leaves_source_and_clock_unchanged() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "maximum generation".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(101_000, 0).unwrap(),
     };
     let first = store.upsert_document(&source).await.unwrap();
@@ -2568,10 +2673,12 @@ async fn concurrent_first_document_upserts_allocate_distinct_revisions() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "a".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
     };
     let second = DocumentUpsert {
         canonical_text: "b".into(),
+        source_regions: Vec::new(),
         ..first.clone()
     };
 
@@ -2597,6 +2704,7 @@ async fn document_upsert_rolls_back_when_project_is_unknown() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "content".into(),
+        source_regions: Vec::new(),
         updated_at: Utc::now(),
     };
     assert!(store.upsert_document(&upsert).await.is_err());
@@ -2617,6 +2725,7 @@ async fn concurrent_document_upserts_allocate_distinct_revisions() {
         media_type: "text/plain".into(),
         title: None,
         canonical_text: "base".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
     };
     let id = base.id;
@@ -2626,11 +2735,13 @@ async fn concurrent_document_upserts_allocate_distinct_revisions() {
     );
     let a = DocumentUpsert {
         canonical_text: "a".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(2, 0).unwrap(),
         ..base.clone()
     };
     let b = DocumentUpsert {
         canonical_text: "b".into(),
+        source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(3, 0).unwrap(),
         ..base
     };
@@ -2660,6 +2771,7 @@ async fn high_contention_document_upserts_do_not_drop_writers() {
                     media_type: "text/plain".into(),
                     title: None,
                     canonical_text: format!("writer {i}"),
+                    source_regions: Vec::new(),
                     updated_at: DateTime::<Utc>::from_timestamp(i, 0).unwrap(),
                 })
                 .await

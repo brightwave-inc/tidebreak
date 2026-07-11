@@ -7,43 +7,12 @@
 //! and it gives every answer a precise, verifiable pointer back into the source.
 
 use openwave_core::ProjectId;
+pub use openwave_core::{ByteSpan, SourceLocation, SourceRegion};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
+use crate::error::{Result, RetrievalError};
 use crate::id::{ChunkId, DocumentId};
-
-/// A half-open byte range `[start, end)` into a document's text.
-///
-/// Byte offsets (not char offsets) because that is what Rust string slicing
-/// speaks; both ends always fall on UTF-8 character boundaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ByteSpan {
-    /// Inclusive start byte offset.
-    pub start: usize,
-    /// Exclusive end byte offset.
-    pub end: usize,
-}
-
-impl ByteSpan {
-    /// Construct a span, panicking in debug if `start > end`.
-    #[must_use]
-    pub fn new(start: usize, end: usize) -> Self {
-        debug_assert!(start <= end, "span start {start} must not exceed end {end}");
-        Self { start, end }
-    }
-
-    /// The number of bytes the span covers.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.end.saturating_sub(self.start)
-    }
-
-    /// Whether the span covers no bytes.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.end <= self.start
-    }
-}
 
 /// Where an ingested document came from — its provenance for citations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +51,8 @@ pub struct Document {
     pub media_type: String,
     /// The extracted plain text. Chunk [`ByteSpan`]s are offsets into this.
     pub text: String,
+    /// Parser-produced mappings from canonical text to the original source.
+    pub source_regions: Vec<SourceRegion>,
 }
 
 impl Document {
@@ -112,6 +83,7 @@ impl Document {
             source,
             media_type: media_type.into(),
             text: text.into(),
+            source_regions: Vec::new(),
         }
     }
 
@@ -141,7 +113,15 @@ impl Document {
             source,
             media_type: media_type.into(),
             text: text.into(),
+            source_regions: Vec::new(),
         }
+    }
+
+    /// Attach validated parser-produced source regions.
+    #[must_use]
+    pub fn with_source_regions(mut self, source_regions: Vec<SourceRegion>) -> Self {
+        self.source_regions = source_regions;
+        self
     }
 
     /// Borrow the slice of `text` a span refers to.
@@ -151,6 +131,22 @@ impl Document {
     #[must_use]
     pub fn slice(&self, span: ByteSpan) -> Option<&str> {
         self.text.get(span.start..span.end)
+    }
+
+    /// Return source regions intersecting `span`, clipped to its boundaries.
+    #[must_use]
+    pub fn source_regions_for(&self, span: ByteSpan) -> Vec<SourceRegion> {
+        self.source_regions
+            .iter()
+            .filter_map(|region| {
+                let start = region.span.start.max(span.start);
+                let end = region.span.end.min(span.end);
+                (start < end).then(|| SourceRegion {
+                    span: ByteSpan::new(start, end),
+                    location: region.location.clone(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -168,6 +164,8 @@ pub struct Chunk {
     /// Markdown heading hierarchy that contains this chunk, outermost first.
     /// Empty for non-Markdown documents and Markdown preambles.
     pub heading_path: Vec<String>,
+    /// Original source locations represented by this chunk.
+    pub source_regions: Vec<SourceRegion>,
     /// The byte range this chunk occupies in the document text.
     pub span: ByteSpan,
 }
@@ -187,6 +185,7 @@ impl Chunk {
             ordinal,
             text: text.into(),
             heading_path: Vec::new(),
+            source_regions: Vec::new(),
             span,
         }
     }
@@ -224,6 +223,30 @@ impl Chunk {
             ))
         }
     }
+
+    pub(crate) fn validate_source_regions(&self) -> Result<()> {
+        let mut previous_end = self.span.start;
+        for region in &self.source_regions {
+            if region.span.is_empty()
+                || region.span.start < self.span.start
+                || region.span.end > self.span.end
+                || region.span.start < previous_end
+            {
+                return Err(RetrievalError::vector_store(
+                    "chunk source regions must be ordered within the chunk span",
+                ));
+            }
+            let local_start = region.span.start - self.span.start;
+            let local_end = region.span.end - self.span.start;
+            if !self.text.is_char_boundary(local_start) || !self.text.is_char_boundary(local_end) {
+                return Err(RetrievalError::vector_store(
+                    "chunk source region offsets must be UTF-8 character boundaries",
+                ));
+            }
+            previous_end = region.span.end;
+        }
+        Ok(())
+    }
 }
 
 /// A chunk paired with the relevance score a search assigned it.
@@ -254,6 +277,8 @@ pub struct Citation {
     pub snippet: String,
     /// Markdown heading hierarchy containing the cited source span.
     pub heading_path: Vec<String>,
+    /// Original source locations represented by the cited span.
+    pub source_regions: Vec<SourceRegion>,
     /// The final relevance score that surfaced this citation. When reranking is
     /// configured, this is the reranker score rather than the backend score.
     pub score: f32,
@@ -267,6 +292,7 @@ impl From<ScoredChunk> for Citation {
             span: scored.chunk.span,
             snippet: scored.chunk.text,
             heading_path: scored.chunk.heading_path,
+            source_regions: scored.chunk.source_regions,
             score: scored.score,
         }
     }

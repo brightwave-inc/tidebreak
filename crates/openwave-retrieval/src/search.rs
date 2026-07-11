@@ -21,7 +21,7 @@ use openwave_core::{ApprovalClass, Result, Tool, ToolCtx, ToolOutput, ToolSpec};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::document::Citation;
+use crate::document::{Citation, SourceLocation};
 use crate::embed::Embedder;
 use crate::rerank::{rerank_candidates, Reranker};
 use crate::selection::{candidate_limit, select};
@@ -77,7 +77,7 @@ fn render(citations: &[Citation]) -> String {
     let mut out = format!("Found {} passage{plural}:", citations.len());
     for (i, c) in citations.iter().enumerate() {
         out.push_str(&format!(
-            "\n\n{}. [score {:.3}] document {} (bytes {}..{}){}\n{}",
+            "\n\n{}. [score {:.3}] document {} (bytes {}..{}){}{}\n{}",
             i + 1,
             c.score,
             c.document_id,
@@ -88,10 +88,35 @@ fn render(citations: &[Citation]) -> String {
             } else {
                 format!("\nSection: {}", c.heading_path.join(" > "))
             },
+            render_pages(c),
             c.snippet.trim()
         ));
     }
     out
+}
+
+fn render_pages(citation: &Citation) -> String {
+    let mut pages = Vec::new();
+    for region in &citation.source_regions {
+        if let SourceLocation::Page { number } = &region.location {
+            let page = number.get();
+            if pages.last() != Some(&page) {
+                pages.push(page);
+            }
+        }
+    }
+    match pages.as_slice() {
+        [] => String::new(),
+        [page] => format!("\nPage: {page}"),
+        pages => format!(
+            "\nPages: {}",
+            pages
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 #[async_trait]
@@ -100,7 +125,8 @@ impl Tool for SearchTool {
         ToolSpec {
             name: "search".into(),
             description: "Search the indexed documents for passages relevant to a query. \
-                          Returns ranked, grounded citations (document id, byte span, and text)."
+                          Returns ranked, grounded citations (document id, byte span, source \
+                          pages when available, and text)."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -184,7 +210,9 @@ mod tests {
     use openwave_core::{ChatId, ProjectId};
 
     use crate::chunk::{Chunker, TextChunker};
-    use crate::document::{ByteSpan, Chunk, Document, DocumentSource, ScoredChunk};
+    use crate::document::{
+        ByteSpan, Chunk, Document, DocumentSource, ScoredChunk, SourceLocation, SourceRegion,
+    };
     use crate::embed::HashEmbedder;
     use crate::id::DocumentId;
     use crate::vector::{InMemoryVectorStore, SearchOptions, VectorRecord};
@@ -335,6 +363,32 @@ mod tests {
         assert!(output.ends_with("body"));
         assert_eq!(citation.snippet, "body");
         assert_eq!(citation.heading_path, ["Guide", "Setup"]);
+    }
+
+    #[test]
+    fn render_shows_single_and_multi_page_provenance() {
+        let document_id = DocumentId::new();
+        let page = |start, end, number| SourceRegion {
+            span: ByteSpan::new(start, end),
+            location: SourceLocation::Page {
+                number: std::num::NonZeroU32::new(number).unwrap(),
+            },
+        };
+        let mut single = Chunk::new(document_id, 0, ByteSpan::new(0, 4), "body");
+        single.source_regions = vec![page(0, 4, 7)];
+        let single = Citation::from(ScoredChunk {
+            chunk: single,
+            score: 0.5,
+        });
+        assert!(render(&[single]).contains("\nPage: 7\nbody"));
+
+        let mut multi = Chunk::new(document_id, 0, ByteSpan::new(0, 4), "body");
+        multi.source_regions = vec![page(0, 2, 7), page(2, 4, 8)];
+        let multi = Citation::from(ScoredChunk {
+            chunk: multi,
+            score: 0.5,
+        });
+        assert!(render(&[multi]).contains("\nPages: 7, 8\nbody"));
     }
 
     #[test]

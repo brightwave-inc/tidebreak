@@ -187,13 +187,15 @@ impl TextChunker {
             // Slice on byte offsets we computed from the same char view.
             let piece = &text[span.start..span.end];
             if !piece.trim().is_empty() {
-                chunks.push(Chunk::with_heading_path(
+                let mut chunk = Chunk::with_heading_path(
                     document.id,
                     first_ordinal + ordinal,
                     span,
                     piece,
                     heading_path.to_vec(),
-                ));
+                );
+                chunk.source_regions = document.source_regions_for(span);
+                chunks.push(chunk);
                 ordinal += 1;
             }
 
@@ -379,7 +381,8 @@ fn boundary_before(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::DocumentSource;
+    use crate::document::{DocumentSource, SourceLocation, SourceRegion};
+    use std::num::NonZeroU32;
 
     fn doc(text: &str) -> Document {
         Document::new(DocumentSource::Inline, "text/plain", text)
@@ -417,6 +420,40 @@ mod tests {
             // The recorded span must reproduce the chunk text exactly.
             assert_eq!(d.slice(chunk.span).unwrap(), chunk.text);
         }
+    }
+
+    #[test]
+    fn chunks_clip_and_preserve_document_global_page_regions() {
+        let text = "alpha bravo café delta echo";
+        let page_two_start = text.find("café").unwrap();
+        let document = doc(text).with_source_regions(vec![
+            SourceRegion {
+                span: ByteSpan::new(0, page_two_start),
+                location: SourceLocation::Page {
+                    number: NonZeroU32::new(1).unwrap(),
+                },
+            },
+            SourceRegion {
+                span: ByteSpan::new(page_two_start, text.len()),
+                location: SourceLocation::Page {
+                    number: NonZeroU32::new(2).unwrap(),
+                },
+            },
+        ]);
+
+        let chunks = TextChunker::new(15, 4).chunk(&document).unwrap();
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            for region in &chunk.source_regions {
+                assert!(region.span.start >= chunk.span.start);
+                assert!(region.span.end <= chunk.span.end);
+                assert_eq!(
+                    document.slice(region.span),
+                    Some(&text[region.span.start..region.span.end])
+                );
+            }
+        }
+        assert!(chunks.iter().any(|chunk| chunk.source_regions.len() == 2));
     }
 
     #[test]

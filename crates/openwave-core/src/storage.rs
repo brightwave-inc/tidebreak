@@ -662,6 +662,11 @@ mod tests {
             Ok(true)
         }
         async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
+            crate::model::validate_source_regions(
+                &document.canonical_text,
+                &document.source_regions,
+            )
+            .map_err(|message| AgentError::Store(message.into()))?;
             if document.media_type.is_empty()
                 || document.source_uri.as_deref() == Some("")
                 || document
@@ -693,6 +698,7 @@ mod tests {
                 media_type: document.media_type.clone(),
                 title: document.title.clone(),
                 canonical_text: document.canonical_text.clone(),
+                source_regions: document.source_regions.clone(),
                 content_revision: generation.content_revision,
                 revision_token: generation.revision_token,
                 processing_status: DocumentProcessingStatus::Queued,
@@ -711,6 +717,11 @@ mod tests {
             pipeline_fingerprint: &str,
             max_attempts: i32,
         ) -> Result<(DocumentRecord, DocumentJob)> {
+            crate::model::validate_source_regions(
+                &document.canonical_text,
+                &document.source_regions,
+            )
+            .map_err(|message| AgentError::Store(message.into()))?;
             if pipeline_fingerprint.is_empty()
                 || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
                 || max_attempts < 1
@@ -740,6 +751,7 @@ mod tests {
                     && existing.media_type == document.media_type
                     && existing.title == document.title
                     && existing.canonical_text == document.canonical_text
+                    && existing.source_regions == document.source_regions
             }) {
                 if let Some(job) = state.jobs.values().find(|job| {
                     job.document_id == existing.id
@@ -765,6 +777,7 @@ mod tests {
                 media_type: document.media_type.clone(),
                 title: document.title.clone(),
                 canonical_text: document.canonical_text.clone(),
+                source_regions: document.source_regions.clone(),
                 content_revision: generation.content_revision,
                 revision_token: generation.revision_token,
                 processing_status: DocumentProcessingStatus::Queued,
@@ -1479,6 +1492,7 @@ mod tests {
             media_type: "text/plain".into(),
             title: None,
             canonical_text: "orphan".into(),
+            source_regions: Vec::new(),
             content_revision: 1,
             revision_token: uuid::Uuid::new_v4(),
             processing_status: DocumentProcessingStatus::Queued,
@@ -1525,6 +1539,7 @@ mod tests {
             media_type: "text/plain".into(),
             title: None,
             canonical_text: "atomic source and job".into(),
+            source_regions: Vec::new(),
             updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
         };
         let first =
@@ -1578,6 +1593,7 @@ mod tests {
 
         let retry_source = DocumentUpsert {
             canonical_text: "retry state".into(),
+            source_regions: Vec::new(),
             ..source
         };
         let (recreated, retry_job) =
@@ -1628,6 +1644,7 @@ mod tests {
             media_type: "text/plain".into(),
             title: None,
             canonical_text: "project A source".into(),
+            source_regions: Vec::new(),
             updated_at: chrono::Utc::now(),
         };
         let first =
@@ -1635,6 +1652,7 @@ mod tests {
         let moved = DocumentUpsert {
             project_id: Some(project_b.id),
             canonical_text: "must not move".into(),
+            source_regions: Vec::new(),
             ..source
         };
         assert!(
@@ -1656,6 +1674,7 @@ mod tests {
             media_type: "text/plain".into(),
             title: Some("maintenance".into()),
             canonical_text: "stable source".into(),
+            source_regions: Vec::new(),
             updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(100, 0).unwrap(),
         };
         let (first_document, first_job) =
@@ -1760,6 +1779,7 @@ mod tests {
             media_type: "text/plain".into(),
             title: None,
             canonical_text: "maximum generation".into(),
+            source_regions: Vec::new(),
             updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
         };
         let (record, job) =
@@ -1836,6 +1856,7 @@ mod tests {
             media_type: "text/plain".into(),
             title: None,
             canonical_text: "retire me".into(),
+            source_regions: Vec::new(),
             updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
         };
         block_on(store.upsert_document(&source)).unwrap();
@@ -1852,6 +1873,7 @@ mod tests {
 
         let recreated = block_on(store.upsert_document(&DocumentUpsert {
             canonical_text: "new lifecycle".into(),
+            source_regions: Vec::new(),
             ..source.clone()
         }))
         .unwrap();
@@ -1919,6 +1941,7 @@ mod tests {
             media_type: "text/plain".into(),
             title: None,
             canonical_text: "retry me".into(),
+            source_regions: Vec::new(),
             updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
         };
         let (_, queued) =
@@ -1997,6 +2020,7 @@ mod tests {
 
         let replacement = DocumentUpsert {
             canonical_text: "replacement".into(),
+            source_regions: Vec::new(),
             updated_at: source.updated_at + chrono::Duration::seconds(1),
             ..source.clone()
         };
@@ -2010,6 +2034,7 @@ mod tests {
         block_on(store.upsert_document_and_enqueue_index(
             &DocumentUpsert {
                 canonical_text: "newer replacement".into(),
+                source_regions: Vec::new(),
                 updated_at: source.updated_at + chrono::Duration::seconds(2),
                 ..replacement
             },

@@ -28,7 +28,7 @@ use crate::model::Role;
 use crate::model::{
     Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert,
-    Message, Project, ToolCallRecord,
+    Message, Project, SourceRegion, ToolCallRecord,
 };
 use crate::storage::{DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, Store};
 
@@ -120,6 +120,7 @@ impl Store for DbStore {
     }
 
     async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
+        validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
         let transaction = self.conn.begin().await.map_err(store_err)?;
         acquire_document_write_lock(&transaction, document.id).await?;
         let revision_token = uuid::Uuid::new_v4();
@@ -142,6 +143,7 @@ impl Store for DbStore {
             media_type: Set(document.media_type.clone()),
             title: Set(document.title.clone()),
             canonical_text: Set(document.canonical_text.clone()),
+            source_regions: Set(source_regions_to_db(&document.source_regions)),
             content_revision: Set(document.content_revision),
             revision_token: Set(revision_token),
             processing_status: Set(document.processing_status.as_str().into()),
@@ -437,6 +439,7 @@ impl Store for DbStore {
     }
 
     async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord> {
+        validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
         loop {
             let transaction = self.conn.begin().await.map_err(store_err)?;
             acquire_document_write_lock(&transaction, document.id).await?;
@@ -458,6 +461,7 @@ impl Store for DbStore {
         pipeline_fingerprint: &str,
         max_attempts: i32,
     ) -> Result<(DocumentRecord, DocumentJob)> {
+        validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
         if pipeline_fingerprint.is_empty()
             || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
         {
@@ -1991,6 +1995,7 @@ fn document_upsert_matches(current: &entities::document::Model, document: &Docum
         && current.media_type == document.media_type
         && current.title == document.title
         && current.canonical_text == document.canonical_text
+        && current.source_regions == source_regions_to_db(&document.source_regions)
 }
 
 struct AdvancedDocumentGeneration {
@@ -2181,6 +2186,10 @@ where
                 sea_orm::sea_query::Expr::value(document.canonical_text.clone()),
             )
             .col_expr(
+                entities::document::Column::SourceRegions,
+                sea_orm::sea_query::Expr::value(source_regions_to_db(&document.source_regions)),
+            )
+            .col_expr(
                 entities::document::Column::ContentRevision,
                 sea_orm::sea_query::Expr::value(advanced.current.content_revision),
             )
@@ -2232,6 +2241,7 @@ where
         media_type: Set(document.media_type.clone()),
         title: Set(document.title.clone()),
         canonical_text: Set(document.canonical_text.clone()),
+        source_regions: Set(source_regions_to_db(&document.source_regions)),
         content_revision: Set(advanced.current.content_revision),
         revision_token: Set(advanced.current.revision_token),
         processing_status: Set(DocumentProcessingStatus::Queued.as_str().into()),
@@ -2303,7 +2313,24 @@ fn project_from_model(model: entities::project::Model) -> Project {
     }
 }
 
+fn validate_document_source_regions(text: &str, regions: &[SourceRegion]) -> Result<()> {
+    crate::model::validate_source_regions(text, regions)
+        .map_err(|message| AgentError::Store(format!("invalid document source regions: {message}")))
+}
+
+fn source_regions_to_db(regions: &[SourceRegion]) -> Value {
+    serde_json::to_value(regions).expect("SourceRegion serialization is infallible")
+}
+
+fn source_regions_from_db(value: Value) -> Result<Vec<SourceRegion>> {
+    serde_json::from_value(value).map_err(|error| {
+        AgentError::Store(format!("invalid stored document source regions: {error}"))
+    })
+}
+
 fn document_from_model(model: entities::document::Model) -> Result<DocumentRecord> {
+    let source_regions = source_regions_from_db(model.source_regions)?;
+    validate_document_source_regions(&model.canonical_text, &source_regions)?;
     Ok(DocumentRecord {
         id: DocumentId(model.id),
         project_id: model.project_id.map(ProjectId),
@@ -2311,6 +2338,7 @@ fn document_from_model(model: entities::document::Model) -> Result<DocumentRecor
         media_type: model.media_type,
         title: model.title,
         canonical_text: model.canonical_text,
+        source_regions,
         content_revision: model.content_revision,
         revision_token: model.revision_token,
         processing_status: document_processing_status_from_db(&model.processing_status)?,
@@ -2352,6 +2380,7 @@ fn document_from_upsert(
         media_type: document.media_type.clone(),
         title: document.title.clone(),
         canonical_text: document.canonical_text.clone(),
+        source_regions: document.source_regions.clone(),
         content_revision,
         revision_token,
         processing_status: DocumentProcessingStatus::Queued,
@@ -2480,6 +2509,7 @@ mod entities {
             pub title: Option<String>,
             #[sea_orm(column_type = "Text")]
             pub canonical_text: String,
+            pub source_regions: Json,
             pub content_revision: i64,
             pub revision_token: Uuid,
             pub processing_status: String,
@@ -3104,6 +3134,11 @@ mod migration {
                         .col(ColumnDef::new(Document::Title).text())
                         .col(ColumnDef::new(Document::CanonicalText).text().not_null())
                         .col(
+                            ColumnDef::new(Document::SourceRegions)
+                                .json_binary()
+                                .not_null(),
+                        )
+                        .col(
                             ColumnDef::new(Document::ContentRevision)
                                 .big_integer()
                                 .not_null()
@@ -3454,6 +3489,7 @@ mod migration {
         MediaType,
         Title,
         CanonicalText,
+        SourceRegions,
         ContentRevision,
         RevisionToken,
         ProcessingStatus,

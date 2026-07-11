@@ -41,6 +41,8 @@ use lancedb::{DistanceType, Table};
 use tokio::sync::RwLock;
 
 use crate::document::{ByteSpan, Chunk, ScoredChunk};
+#[cfg(test)]
+use crate::document::{SourceLocation, SourceRegion};
 use crate::embed::Embedding;
 use crate::error::{Result, RetrievalError};
 use crate::id::{ChunkId, DocumentId};
@@ -382,6 +384,11 @@ impl LanceVectorStore {
         Ok(())
     }
 
+    fn validate_record(&self, record: &VectorRecord) -> Result<()> {
+        self.check_dims(&record.embedding)?;
+        record.chunk.validate_source_regions()
+    }
+
     fn validate_document_records(
         &self,
         document_id: DocumentId,
@@ -389,7 +396,7 @@ impl LanceVectorStore {
     ) -> Result<()> {
         let project_id = records.first().map(|record| record.project_id);
         for record in records {
-            self.check_dims(&record.embedding)?;
+            self.validate_record(record)?;
             if record.chunk.document_id != document_id {
                 return Err(RetrievalError::vector_store(format!(
                     "replacement record {} belongs to document {}, expected {document_id}",
@@ -408,7 +415,7 @@ impl LanceVectorStore {
     fn validate_upsert_records(&self, records: &[VectorRecord]) -> Result<()> {
         let mut projects = std::collections::HashMap::new();
         for record in records {
-            self.check_dims(&record.embedding)?;
+            self.validate_record(record)?;
             match projects.entry(record.chunk.document_id) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(record.project_id);
@@ -553,6 +560,23 @@ impl LanceVectorStore {
             heading_paths.append(true);
         }
         let heading_paths = heading_paths.finish();
+        let source_region_values = rows
+            .iter()
+            .map(|row| {
+                serde_json::to_string(
+                    &row.record
+                        .as_ref()
+                        .map_or(&[][..], |record| record.chunk.source_regions.as_slice()),
+                )
+                .map_err(|error| {
+                    RetrievalError::vector_store(format!(
+                        "failed to encode source regions: {error}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let source_regions =
+            StringArray::from_iter_values(source_region_values.iter().map(String::as_str));
         let starts = UInt64Array::from_iter_values(rows.iter().map(|row| {
             row.record
                 .as_ref()
@@ -600,6 +624,7 @@ impl LanceVectorStore {
             Arc::new(ordinals),
             Arc::new(texts),
             Arc::new(heading_paths),
+            Arc::new(source_regions),
             Arc::new(retrieval_texts),
             Arc::new(starts),
             Arc::new(ends),
@@ -706,6 +731,7 @@ impl LanceVectorStore {
                 "ordinal",
                 "text",
                 "heading_path",
+                "source_regions",
                 "retrieval_text",
                 "span_start",
                 "span_end",
@@ -1082,6 +1108,7 @@ fn build_schema(dims: usize) -> SchemaRef {
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
             false,
         ),
+        Field::new("source_regions", DataType::Utf8, false),
         Field::new("retrieval_text", DataType::Utf8, false),
         Field::new("span_start", DataType::UInt64, false),
         Field::new("span_end", DataType::UInt64, false),
@@ -1105,6 +1132,7 @@ fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Resu
     let ordinals = u64_col(batch, "ordinal")?;
     let texts = str_col(batch, "text")?;
     let heading_paths = list_str_col(batch, "heading_path")?;
+    let source_regions = str_col(batch, "source_regions")?;
     let starts = u64_col(batch, "span_start")?;
     let ends = u64_col(batch, "span_end")?;
     let vectors = batch
@@ -1138,15 +1166,18 @@ fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Resu
             .as_any()
             .downcast_ref::<Float32Array>()
             .ok_or_else(|| RetrievalError::vector_store("vector values are not float32"))?;
+        let text = texts.value(index).to_string();
+        let span = ByteSpan::new(starts.value(index) as usize, ends.value(index) as usize);
         out.push(VectorRecord {
             project_id,
             chunk: Chunk {
                 id: chunk_id,
                 document_id,
                 ordinal: ordinals.value(index) as usize,
-                text: texts.value(index).to_string(),
+                text: text.clone(),
                 heading_path: list_str_value(heading_paths, index)?,
-                span: ByteSpan::new(starts.value(index) as usize, ends.value(index) as usize),
+                source_regions: decode_source_regions(source_regions.value(index), &text, span)?,
+                span,
             },
             embedding: Embedding(values.values().to_vec()),
         });
@@ -1175,6 +1206,7 @@ fn read_scored_batch(
     let ordinals = u64_col(batch, "ordinal")?;
     let texts = str_col(batch, "text")?;
     let heading_paths = list_str_col(batch, "heading_path")?;
+    let source_regions = str_col(batch, "source_regions")?;
     let starts = u64_col(batch, "span_start")?;
     let ends = u64_col(batch, "span_end")?;
     let scores = batch
@@ -1196,19 +1228,53 @@ fn read_scored_batch(
             .parse()
             .map_err(|e| RetrievalError::vector_store(format!("bad document_id: {e}")))?;
         let span = ByteSpan::new(starts.value(i) as usize, ends.value(i) as usize);
+        let text = texts.value(i).to_string();
         out.push(ScoredChunk {
             chunk: Chunk {
                 id: chunk_id,
                 document_id,
                 ordinal: ordinals.value(i) as usize,
-                text: texts.value(i).to_string(),
+                text: text.clone(),
                 heading_path: list_str_value(heading_paths, i)?,
+                source_regions: decode_source_regions(source_regions.value(i), &text, span)?,
                 span,
             },
             score: convert_score(scores.value(i)),
         });
     }
     Ok(())
+}
+
+fn decode_source_regions(
+    encoded: &str,
+    chunk_text: &str,
+    chunk_span: ByteSpan,
+) -> Result<Vec<crate::document::SourceRegion>> {
+    let regions: Vec<crate::document::SourceRegion> =
+        serde_json::from_str(encoded).map_err(|error| {
+            RetrievalError::vector_store(format!("invalid stored source regions: {error}"))
+        })?;
+    let mut previous_end = chunk_span.start;
+    for region in &regions {
+        if region.span.is_empty()
+            || region.span.start < chunk_span.start
+            || region.span.end > chunk_span.end
+            || region.span.start < previous_end
+        {
+            return Err(RetrievalError::vector_store(
+                "stored source regions are not ordered within the chunk span",
+            ));
+        }
+        let local_start = region.span.start - chunk_span.start;
+        let local_end = region.span.end - chunk_span.start;
+        if !chunk_text.is_char_boundary(local_start) || !chunk_text.is_char_boundary(local_end) {
+            return Err(RetrievalError::vector_store(
+                "stored source region offsets are not UTF-8 character boundaries",
+            ));
+        }
+        previous_end = region.span.end;
+    }
+    Ok(regions)
 }
 
 fn str_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
@@ -1338,6 +1404,13 @@ mod tests {
             let version_before_replace = store.table.version().await.unwrap();
             let mut south = record(doc, 0, "south", vec![1.0, 0.0]);
             south.chunk.heading_path = vec!["Compass".into(), "Needleshard".into()];
+            south.chunk.source_regions = vec![SourceRegion {
+                span: south.chunk.span,
+                location: SourceLocation::Page {
+                    number: std::num::NonZeroU32::new(7).unwrap(),
+                },
+            }];
+            let expected_source_regions = south.chunk.source_regions.clone();
             store.replace_document(doc, vec![south]).await.unwrap();
             assert_eq!(
                 store.table.version().await.unwrap(),
@@ -1350,6 +1423,7 @@ mod tests {
                 .unwrap();
             assert_eq!(hits[0].chunk.text, "south");
             assert_eq!(hits[0].chunk.heading_path, ["Compass", "Needleshard"]);
+            assert_eq!(hits[0].chunk.source_regions, expected_source_regions);
             let heading_hits = store
                 .query(
                     "needleshard",
@@ -1375,6 +1449,13 @@ mod tests {
             .unwrap();
         assert_eq!(hits[0].chunk.text, "south");
         assert_eq!(hits[0].chunk.heading_path, ["Compass", "Needleshard"]);
+        assert_eq!(hits[0].chunk.source_regions.len(), 1);
+        assert_eq!(
+            hits[0].chunk.source_regions[0].location,
+            SourceLocation::Page {
+                number: std::num::NonZeroU32::new(7).unwrap()
+            }
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1983,6 +2064,24 @@ mod tests {
                 actual: 2
             }
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejects_malformed_source_regions_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let mut invalid = record(DocumentId::new(), 0, "é", vec![1.0, 0.0]);
+        invalid.chunk.source_regions = vec![SourceRegion {
+            span: ByteSpan::new(1, 2),
+            location: SourceLocation::Page {
+                number: std::num::NonZeroU32::new(1).unwrap(),
+            },
+        }];
+
+        assert!(store.upsert(vec![invalid]).await.is_err());
+        assert!(store.is_empty().await.unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]

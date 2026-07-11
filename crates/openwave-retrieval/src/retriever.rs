@@ -100,6 +100,7 @@ impl Retriever {
     /// Verify that the vector backend contains the expected number of chunks for
     /// this canonical document under the active chunker.
     pub async fn index_is_complete(&self, document: &Document) -> Result<bool> {
+        validate_document_source_regions(document)?;
         let expected = self.chunker.chunk(document)?.len();
         Ok(self.store.document_len(document.id).await? == Some(expected))
     }
@@ -115,11 +116,14 @@ impl Retriever {
         raw: &[u8],
     ) -> Result<Document> {
         let parsed = self.parser.parse(raw, media_type)?;
+        openwave_core::validate_source_regions(&parsed.text, &parsed.source_regions)
+            .map_err(RetrievalError::parse)?;
         let id = match &source {
             DocumentSource::Uri { uri } => DocumentId::derive(uri),
             _ => DocumentId::new(),
         };
-        Ok(Document::with_id(id, source, media_type, parsed.text))
+        Ok(Document::with_id(id, source, media_type, parsed.text)
+            .with_source_regions(parsed.source_regions))
     }
 
     /// Chunk, embed, and atomically replace one already-parsed document's index.
@@ -205,6 +209,7 @@ impl Retriever {
     }
 
     async fn prepare_document_index(&self, document: &Document) -> Result<Vec<VectorRecord>> {
+        validate_document_source_regions(document)?;
         let chunks = self.chunker.chunk(document)?;
 
         let records: Vec<VectorRecord> = if chunks.is_empty() {
@@ -282,6 +287,11 @@ impl Retriever {
     }
 }
 
+fn validate_document_source_regions(document: &Document) -> Result<()> {
+    openwave_core::validate_source_regions(&document.text, &document.source_regions)
+        .map_err(RetrievalError::parse)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -289,9 +299,9 @@ mod tests {
 
     use super::*;
     use crate::chunk::TextChunker;
-    use crate::document::{ByteSpan, Chunk, ScoredChunk};
+    use crate::document::{ByteSpan, Chunk, ScoredChunk, SourceLocation, SourceRegion};
     use crate::embed::HashEmbedder;
-    use crate::parse::PlainTextParser;
+    use crate::parse::{DocumentParser, ParsedDocument, PlainTextParser};
     use crate::vector::{InMemoryVectorStore, SearchOptions};
 
     struct ControlledEmbedder {
@@ -317,6 +327,22 @@ mod tests {
 
     struct ContextObservingReranker {
         observed: Mutex<Vec<Vec<String>>>,
+    }
+
+    struct StaticParser(ParsedDocument);
+
+    impl DocumentParser for StaticParser {
+        fn fingerprint(&self) -> String {
+            "static-parser-v1".into()
+        }
+
+        fn supports(&self, _media_type: &str) -> bool {
+            true
+        }
+
+        fn parse(&self, _raw: &[u8], _media_type: &str) -> Result<ParsedDocument> {
+            Ok(self.0.clone())
+        }
     }
 
     #[async_trait::async_trait]
@@ -691,6 +717,52 @@ The Great Barrier Reef is the world's largest coral reef system.";
             .await
             .unwrap();
         assert_eq!(hits[0].document_id, document.id);
+    }
+
+    #[test]
+    fn parser_source_regions_are_validated_and_attached() {
+        let parsed = ParsedDocument::from_text("page one\npage two").with_source_regions(vec![
+            SourceRegion {
+                span: ByteSpan::new(0, 8),
+                location: SourceLocation::Page {
+                    number: std::num::NonZeroU32::new(1).unwrap(),
+                },
+            },
+            SourceRegion {
+                span: ByteSpan::new(9, 17),
+                location: SourceLocation::Page {
+                    number: std::num::NonZeroU32::new(2).unwrap(),
+                },
+            },
+        ]);
+        let dims = 8;
+        let retriever = Retriever::new(
+            Box::new(StaticParser(parsed.clone())),
+            Box::new(TextChunker::default()),
+            Arc::new(HashEmbedder::new(dims)),
+            Arc::new(InMemoryVectorStore::new(dims)),
+        );
+        let document = retriever
+            .parse_document(DocumentSource::Inline, "application/pdf", b"ignored")
+            .unwrap();
+        assert_eq!(document.source_regions, parsed.source_regions);
+
+        let invalid = ParsedDocument::from_text("é").with_source_regions(vec![SourceRegion {
+            span: ByteSpan::new(1, 2),
+            location: SourceLocation::Page {
+                number: std::num::NonZeroU32::new(1).unwrap(),
+            },
+        }]);
+        let retriever = Retriever::new(
+            Box::new(StaticParser(invalid)),
+            Box::new(TextChunker::default()),
+            Arc::new(HashEmbedder::new(dims)),
+            Arc::new(InMemoryVectorStore::new(dims)),
+        );
+        assert!(matches!(
+            retriever.parse_document(DocumentSource::Inline, "application/pdf", b"ignored"),
+            Err(RetrievalError::Parse(_))
+        ));
     }
 
     #[tokio::test]
