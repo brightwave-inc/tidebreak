@@ -746,7 +746,7 @@ The Great Barrier Reef is the world's largest coral reef system.";
         assert_eq!(r.canonical_fingerprint(), "plain-text-lossy-v1");
         assert_eq!(
             r.index_fingerprint(),
-            "chunker=text-window-v1:max_chars=90:overlap=0;embedder=hash-fnv1a-v1:512d"
+            "chunker=text-window-v2:markdown=atx-sections:max_chars=90:overlap=0;embedder=hash-fnv1a-v1:512d"
         );
     }
 
