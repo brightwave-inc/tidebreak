@@ -77,12 +77,17 @@ fn render(citations: &[Citation]) -> String {
     let mut out = format!("Found {} passage{plural}:", citations.len());
     for (i, c) in citations.iter().enumerate() {
         out.push_str(&format!(
-            "\n\n{}. [score {:.3}] document {} (bytes {}..{})\n{}",
+            "\n\n{}. [score {:.3}] document {} (bytes {}..{}){}\n{}",
             i + 1,
             c.score,
             c.document_id,
             c.span.start,
             c.span.end,
+            if c.heading_path.is_empty() {
+                String::new()
+            } else {
+                format!("\nSection: {}", c.heading_path.join(" > "))
+            },
             c.snippet.trim()
         ));
     }
@@ -310,6 +315,39 @@ mod tests {
             .unwrap()
             .iter()
             .any(|v| v == "query"));
+    }
+
+    #[test]
+    fn render_shows_section_context_without_changing_the_snippet() {
+        let document_id = DocumentId::new();
+        let chunk = Chunk::with_heading_path(
+            document_id,
+            0,
+            ByteSpan::new(10, 14),
+            "body",
+            vec!["Guide".into(), "Setup".into()],
+        );
+        let citation = Citation::from(ScoredChunk { chunk, score: 0.5 });
+
+        let output = render(std::slice::from_ref(&citation));
+
+        assert!(output.contains("Section: Guide > Setup"));
+        assert!(output.ends_with("body"));
+        assert_eq!(citation.snippet, "body");
+        assert_eq!(citation.heading_path, ["Guide", "Setup"]);
+    }
+
+    #[test]
+    fn render_omits_section_line_for_an_empty_breadcrumb() {
+        let citation = Citation::from(ScoredChunk {
+            chunk: Chunk::new(DocumentId::new(), 0, ByteSpan::new(0, 4), "body"),
+            score: 0.5,
+        });
+
+        let output = render(&[citation]);
+
+        assert!(!output.contains("Section:"));
+        assert!(output.ends_with("body"));
     }
 
     #[tokio::test]

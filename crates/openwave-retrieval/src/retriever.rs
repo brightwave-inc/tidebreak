@@ -210,7 +210,10 @@ impl Retriever {
         let records: Vec<VectorRecord> = if chunks.is_empty() {
             Vec::new()
         } else {
-            let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+            let texts: Vec<String> = chunks
+                .iter()
+                .map(|chunk| chunk.retrieval_text().into_owned())
+                .collect();
             let embeddings = self.embedder.embed_documents(&texts).await?;
             if embeddings.len() != chunks.len() {
                 return Err(RetrievalError::embed(format!(
@@ -297,6 +300,11 @@ mod tests {
         fail: AtomicBool,
     }
 
+    struct CapturingEmbedder {
+        inner: HashEmbedder,
+        documents: Mutex<Vec<Vec<String>>>,
+    }
+
     struct QuerySpyVectorStore {
         candidates: Vec<ScoredChunk>,
         limits: Mutex<Vec<usize>>,
@@ -307,11 +315,28 @@ mod tests {
         candidate_counts: Mutex<Vec<usize>>,
     }
 
+    struct ContextObservingReranker {
+        observed: Mutex<Vec<Vec<String>>>,
+    }
+
     #[async_trait::async_trait]
     impl Reranker for SpyReranker {
         async fn rerank(&self, _query: &str, candidates: &[ScoredChunk]) -> Result<Vec<f32>> {
             self.candidate_counts.lock().unwrap().push(candidates.len());
             Ok(self.scores.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Reranker for ContextObservingReranker {
+        async fn rerank(&self, _query: &str, candidates: &[ScoredChunk]) -> Result<Vec<f32>> {
+            self.observed.lock().unwrap().push(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.chunk.retrieval_text().into_owned())
+                    .collect(),
+            );
+            Ok(vec![1.0; candidates.len()])
         }
     }
 
@@ -377,6 +402,22 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl Embedder for CapturingEmbedder {
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+
+        async fn embed_documents(&self, texts: &[String]) -> Result<Vec<crate::Embedding>> {
+            self.documents.lock().unwrap().push(texts.to_vec());
+            self.inner.embed_documents(texts).await
+        }
+
+        async fn embed_query(&self, text: &str) -> Result<crate::Embedding> {
+            self.inner.embed_query(text).await
+        }
+    }
+
     fn retriever() -> Retriever {
         let dims = 512;
         // A 90-char window with newline-preferring cuts keeps each one-per-line
@@ -424,6 +465,42 @@ The Great Barrier Reef is the world's largest coral reef system.";
             Some(hits[0].snippet.as_str())
         );
         assert_eq!(hits[0].document_id, outcome.document.id);
+    }
+
+    #[tokio::test]
+    async fn markdown_heading_context_is_embedded_but_citations_stay_exact() {
+        let embedder = Arc::new(CapturingEmbedder {
+            inner: HashEmbedder::new(512),
+            documents: Mutex::new(Vec::new()),
+        });
+        let retriever = Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::new(10_000, 0)),
+            embedder.clone(),
+            Arc::new(InMemoryVectorStore::new(512)),
+        );
+        let document = Document::new(
+            DocumentSource::Inline,
+            "text/markdown",
+            "# Operator Guide\n## Needleshard\ninstallation details",
+        );
+
+        retriever.index_document(&document).await.unwrap();
+        let embedded = embedder.documents.lock().unwrap().clone();
+        assert_eq!(embedded.len(), 1);
+        assert_eq!(embedded[0].len(), 2);
+        assert!(embedded[0][1].starts_with("Operator Guide > Needleshard\n\n"));
+
+        let citations = retriever
+            .search(SearchScope::Unscoped, "needleshard", 1)
+            .await
+            .unwrap();
+        assert_eq!(citations[0].heading_path, ["Operator Guide", "Needleshard"]);
+        assert_eq!(
+            document.slice(citations[0].span),
+            Some(citations[0].snippet.as_str())
+        );
+        assert!(!citations[0].snippet.starts_with("Operator Guide >"));
     }
 
     #[tokio::test]
@@ -496,6 +573,38 @@ The Great Barrier Reef is the world's largest coral reef system.";
         assert_eq!(citations[0].score, 7.0);
         assert_eq!(citations[1].snippet, "candidate 6");
         assert_eq!(citations[1].score, 6.0);
+    }
+
+    #[tokio::test]
+    async fn reranker_observes_the_exact_contextual_candidate_text() {
+        let mut candidate = scored(DocumentId::new(), 0, 0, 4, "body");
+        candidate.chunk.heading_path = vec!["Guide".into(), "Setup".into()];
+        let store = Arc::new(QuerySpyVectorStore {
+            candidates: vec![candidate],
+            limits: Mutex::new(Vec::new()),
+        });
+        let reranker = Arc::new(ContextObservingReranker {
+            observed: Mutex::new(Vec::new()),
+        });
+        let retriever = Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::new(90, 0)),
+            Arc::new(HashEmbedder::new(512)),
+            store,
+        )
+        .with_reranker(reranker.clone());
+
+        let citations = retriever
+            .search(SearchScope::Unscoped, "query", 1)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reranker.observed.lock().unwrap().as_slice(),
+            &[vec!["Guide > Setup\n\nbody".to_string()]]
+        );
+        assert_eq!(citations[0].snippet, "body");
+        assert_eq!(citations[0].heading_path, ["Guide", "Setup"]);
     }
 
     #[tokio::test]
@@ -746,7 +855,7 @@ The Great Barrier Reef is the world's largest coral reef system.";
         assert_eq!(r.canonical_fingerprint(), "plain-text-lossy-v1");
         assert_eq!(
             r.index_fingerprint(),
-            "chunker=text-window-v2:markdown=atx-sections:max_chars=90:overlap=0;embedder=hash-fnv1a-v1:512d"
+            "chunker=text-window-v3:markdown=atx-heading-context:max_chars=90:overlap=0;embedder=hash-fnv1a-v1:512d"
         );
     }
 

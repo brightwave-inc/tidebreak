@@ -8,6 +8,7 @@
 
 use openwave_core::ProjectId;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 use crate::id::{ChunkId, DocumentId};
 
@@ -164,6 +165,9 @@ pub struct Chunk {
     pub ordinal: usize,
     /// The chunk's text.
     pub text: String,
+    /// Markdown heading hierarchy that contains this chunk, outermost first.
+    /// Empty for non-Markdown documents and Markdown preambles.
+    pub heading_path: Vec<String>,
     /// The byte range this chunk occupies in the document text.
     pub span: ByteSpan,
 }
@@ -182,7 +186,42 @@ impl Chunk {
             document_id,
             ordinal,
             text: text.into(),
+            heading_path: Vec::new(),
             span,
+        }
+    }
+
+    /// Build a chunk with derived structural context while preserving source text.
+    #[must_use]
+    pub fn with_heading_path(
+        document_id: DocumentId,
+        ordinal: usize,
+        span: ByteSpan,
+        text: impl Into<String>,
+        heading_path: Vec<String>,
+    ) -> Self {
+        let mut chunk = Self::new(document_id, ordinal, span, text);
+        chunk.heading_path = heading_path;
+        chunk
+    }
+
+    /// Canonical text used for embedding, lexical ranking, and model reranking.
+    ///
+    /// Citation text remains the exact source slice in [`Self::text`].
+    /// Every chunk in a Markdown section receives the same breadcrumb prefix,
+    /// including the first chunk whose exact source text still contains the raw
+    /// heading line. This deliberate duplication keeps context uniform until a
+    /// richer parser separates heading blocks from body blocks.
+    #[must_use]
+    pub fn retrieval_text(&self) -> Cow<'_, str> {
+        if self.heading_path.is_empty() {
+            Cow::Borrowed(&self.text)
+        } else {
+            Cow::Owned(format!(
+                "{}\n\n{}",
+                self.heading_path.join(" > "),
+                self.text
+            ))
         }
     }
 }
@@ -213,6 +252,8 @@ pub struct Citation {
     pub span: ByteSpan,
     /// The cited text.
     pub snippet: String,
+    /// Markdown heading hierarchy containing the cited source span.
+    pub heading_path: Vec<String>,
     /// The final relevance score that surfaced this citation. When reranking is
     /// configured, this is the reranker score rather than the backend score.
     pub score: f32,
@@ -225,6 +266,7 @@ impl From<ScoredChunk> for Citation {
             chunk_id: scored.chunk.id,
             span: scored.chunk.span,
             snippet: scored.chunk.text,
+            heading_path: scored.chunk.heading_path,
             score: scored.score,
         }
     }
@@ -260,6 +302,23 @@ mod tests {
         let span = ByteSpan::new(3, 8);
         let chunk = Chunk::new(doc, 0, span, "abcde");
         assert_eq!(chunk.id, ChunkId::derive(doc, 3, 8));
+    }
+
+    #[test]
+    fn retrieval_text_adds_context_without_changing_source_text() {
+        let doc = DocumentId::new();
+        let plain = Chunk::new(doc, 0, ByteSpan::new(0, 4), "body");
+        assert!(matches!(plain.retrieval_text(), Cow::Borrowed("body")));
+
+        let contextual = Chunk::with_heading_path(
+            doc,
+            0,
+            ByteSpan::new(0, 4),
+            "body",
+            vec!["Guide".into(), "Setup".into()],
+        );
+        assert_eq!(contextual.text, "body");
+        assert_eq!(contextual.retrieval_text(), "Guide > Setup\n\nbody");
     }
 
     #[test]
