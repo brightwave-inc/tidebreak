@@ -13,6 +13,7 @@ use crate::embed::Embedder;
 use crate::error::{Result, RetrievalError};
 use crate::id::DocumentId;
 use crate::parse::DocumentParser;
+use crate::selection::{candidate_limit, result_limit, select};
 use crate::vector::{GenerationStageOutcome, SearchScope, VectorRecord, VectorStore};
 use openwave_core::DocumentGeneration;
 
@@ -250,8 +251,13 @@ impl Retriever {
 
     /// Search the index for the `k` chunks most relevant to `query`, as citations.
     pub async fn search(&self, scope: SearchScope, query: &str, k: usize) -> Result<Vec<Citation>> {
+        let k = result_limit(k);
         let embedding = self.embedder.embed_query(query).await?;
-        let hits = self.store.query(query, &embedding, k, scope).await?;
+        let candidates = self
+            .store
+            .query(query, &embedding, candidate_limit(k), scope)
+            .await?;
+        let hits = select(candidates, k);
         Ok(hits.into_iter().map(Citation::from).collect())
     }
 
@@ -265,17 +271,67 @@ impl Retriever {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     use super::*;
     use crate::chunk::TextChunker;
+    use crate::document::{ByteSpan, Chunk, ScoredChunk};
     use crate::embed::HashEmbedder;
     use crate::parse::PlainTextParser;
-    use crate::vector::InMemoryVectorStore;
+    use crate::vector::{InMemoryVectorStore, SearchOptions};
 
     struct ControlledEmbedder {
         inner: HashEmbedder,
         calls: AtomicUsize,
         fail: AtomicBool,
+    }
+
+    struct QuerySpyVectorStore {
+        candidates: Vec<ScoredChunk>,
+        limits: Mutex<Vec<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl VectorStore for QuerySpyVectorStore {
+        async fn upsert(&self, _records: Vec<VectorRecord>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query_with_options(
+            &self,
+            _query_text: &str,
+            _query: &crate::Embedding,
+            k: usize,
+            _options: SearchOptions,
+        ) -> Result<Vec<ScoredChunk>> {
+            self.limits.lock().unwrap().push(k);
+            Ok(self.candidates.iter().take(k).cloned().collect())
+        }
+
+        async fn replace_document(
+            &self,
+            _document_id: DocumentId,
+            _records: Vec<VectorRecord>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn len(&self) -> Result<usize> {
+            Ok(self.candidates.len())
+        }
+    }
+
+    fn scored(
+        document_id: DocumentId,
+        ordinal: usize,
+        start: usize,
+        end: usize,
+        text: &str,
+    ) -> ScoredChunk {
+        ScoredChunk {
+            chunk: Chunk::new(document_id, ordinal, ByteSpan::new(start, end), text),
+            score: 1.0 - ordinal as f32 / 10.0,
+        }
     }
 
     #[async_trait::async_trait]
@@ -344,6 +400,74 @@ The Great Barrier Reef is the world's largest coral reef system.";
             Some(hits[0].snippet.as_str())
         );
         assert_eq!(hits[0].document_id, outcome.document.id);
+    }
+
+    #[tokio::test]
+    async fn search_requests_extra_candidates_and_backfills_after_suppression() {
+        let first = DocumentId::new();
+        let second = DocumentId::new();
+        let store = Arc::new(QuerySpyVectorStore {
+            candidates: vec![
+                scored(first, 0, 0, 100, "primary"),
+                scored(first, 1, 20, 80, "redundant"),
+                scored(second, 2, 0, 20, "backfill"),
+            ],
+            limits: Mutex::new(Vec::new()),
+        });
+        let retriever = Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::new(90, 0)),
+            Arc::new(HashEmbedder::new(512)),
+            store.clone(),
+        );
+
+        let citations = retriever
+            .search(SearchScope::Unscoped, "relevant material", 2)
+            .await
+            .unwrap();
+
+        assert_eq!(store.limits.lock().unwrap().as_slice(), &[8]);
+        assert_eq!(citations.len(), 2);
+        assert_eq!(citations[0].snippet, "primary");
+        assert_eq!(citations[1].snippet, "backfill");
+    }
+
+    #[tokio::test]
+    async fn search_caps_large_output_and_candidate_requests() {
+        let candidates: Vec<_> = (0..201)
+            .map(|ordinal| {
+                scored(
+                    DocumentId::new(),
+                    ordinal,
+                    ordinal * 20,
+                    ordinal * 20 + 10,
+                    "candidate",
+                )
+            })
+            .collect();
+        let store = Arc::new(QuerySpyVectorStore {
+            candidates,
+            limits: Mutex::new(Vec::new()),
+        });
+        let retriever = Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::new(90, 0)),
+            Arc::new(HashEmbedder::new(512)),
+            store.clone(),
+        );
+
+        let citations = retriever
+            .search(SearchScope::Unscoped, "relevant material", usize::MAX)
+            .await
+            .unwrap();
+        let empty = retriever
+            .search(SearchScope::Unscoped, "relevant material", 0)
+            .await
+            .unwrap();
+
+        assert_eq!(store.limits.lock().unwrap().as_slice(), &[200, 0]);
+        assert_eq!(citations.len(), crate::MAX_SEARCH_RESULTS);
+        assert!(empty.is_empty());
     }
 
     #[tokio::test]

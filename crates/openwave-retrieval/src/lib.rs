@@ -77,6 +77,7 @@ mod parse;
 mod retriever;
 #[cfg(feature = "tool")]
 mod search;
+mod selection;
 mod vector;
 
 pub use chunk::{Chunker, TextChunker};
@@ -93,6 +94,7 @@ pub use parse::{DocumentParser, ParsedDocument, PlainTextParser};
 pub use retriever::{GenerationIndexOutcome, IngestOutcome, Retriever};
 #[cfg(feature = "tool")]
 pub use search::SearchTool;
+pub use selection::MAX_SEARCH_RESULTS;
 pub use vector::{
     DocumentGenerationState, GenerationStageOutcome, InMemoryVectorStore, SearchOptions,
     SearchScope, VectorRecord, VectorStore, DEFAULT_MIN_DENSE_SIMILARITY,

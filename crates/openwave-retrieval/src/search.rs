@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 
 use crate::document::Citation;
 use crate::embed::Embedder;
+use crate::selection::{candidate_limit, select};
 use crate::vector::{SearchScope, VectorStore};
 
 /// A `Tool` that searches an embedded index and returns grounded citations.
@@ -34,8 +35,6 @@ pub struct SearchTool {
 impl SearchTool {
     /// Passages returned when the caller doesn't specify `k`.
     pub const DEFAULT_K: usize = 5;
-    /// Ceiling on `k`, so a large request can't fan out unboundedly.
-    pub const MAX_K: usize = 50;
 
     /// Build a search tool over a shared embedder and vector store.
     #[must_use]
@@ -49,7 +48,7 @@ impl SearchTool {
 struct SearchArgs {
     /// The natural-language query to search for.
     query: String,
-    /// How many passages to return (optional; clamped to `[1, MAX_K]`).
+    /// How many passages to return (optional; clamped to the shared maximum).
     #[serde(default)]
     k: Option<usize>,
 }
@@ -95,7 +94,7 @@ impl Tool for SearchTool {
                     "k": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": Self::MAX_K,
+                        "maximum": crate::MAX_SEARCH_RESULTS,
                         "description": "How many passages to return (default 5)."
                     }
                 },
@@ -120,7 +119,10 @@ impl Tool for SearchTool {
         if query.is_empty() {
             return Ok(ToolOutput::error("query must not be empty"));
         }
-        let k = args.k.unwrap_or(Self::DEFAULT_K).clamp(1, Self::MAX_K);
+        let k = args
+            .k
+            .unwrap_or(Self::DEFAULT_K)
+            .clamp(1, crate::MAX_SEARCH_RESULTS);
 
         let embedding = match self.embedder.embed_query(query).await {
             Ok(embedding) => embedding,
@@ -130,10 +132,15 @@ impl Tool for SearchTool {
             Some(project_id) => SearchScope::Project(project_id),
             None => SearchScope::Unscoped,
         };
-        let hits = match self.store.query(query, &embedding, k, scope).await {
+        let candidates = match self
+            .store
+            .query(query, &embedding, candidate_limit(k), scope)
+            .await
+        {
             Ok(hits) => hits,
             Err(err) => return Ok(ToolOutput::error(format!("search failed: {err}"))),
         };
+        let hits = select(candidates, k);
 
         let citations: Vec<Citation> = hits.into_iter().map(Citation::from).collect();
         if citations.is_empty() {
@@ -149,13 +156,15 @@ impl Tool for SearchTool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Mutex;
 
     use openwave_core::{ChatId, ProjectId};
 
     use crate::chunk::{Chunker, TextChunker};
-    use crate::document::{Document, DocumentSource};
+    use crate::document::{ByteSpan, Chunk, Document, DocumentSource, ScoredChunk};
     use crate::embed::HashEmbedder;
-    use crate::vector::{InMemoryVectorStore, VectorRecord};
+    use crate::id::DocumentId;
+    use crate::vector::{InMemoryVectorStore, SearchOptions, VectorRecord};
 
     const DIMS: usize = 512;
 
@@ -195,6 +204,54 @@ mod tests {
             chat_id: ChatId::new(),
             project_id,
             workspace_dir: PathBuf::from("/tmp/unused"),
+        }
+    }
+
+    struct SpyVectorStore {
+        candidates: Vec<ScoredChunk>,
+        calls: Mutex<Vec<(usize, SearchScope)>>,
+    }
+
+    #[async_trait]
+    impl VectorStore for SpyVectorStore {
+        async fn upsert(&self, _records: Vec<VectorRecord>) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn query_with_options(
+            &self,
+            _query_text: &str,
+            _query: &crate::Embedding,
+            k: usize,
+            options: SearchOptions,
+        ) -> crate::Result<Vec<ScoredChunk>> {
+            self.calls.lock().unwrap().push((k, options.scope));
+            Ok(self.candidates.iter().take(k).cloned().collect())
+        }
+
+        async fn replace_document(
+            &self,
+            _document_id: DocumentId,
+            _records: Vec<VectorRecord>,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn len(&self) -> crate::Result<usize> {
+            Ok(self.candidates.len())
+        }
+    }
+
+    fn scored(
+        document_id: DocumentId,
+        ordinal: usize,
+        start: usize,
+        end: usize,
+        text: &str,
+    ) -> ScoredChunk {
+        ScoredChunk {
+            chunk: Chunk::new(document_id, ordinal, ByteSpan::new(start, end), text),
+            score: 1.0 - ordinal as f32 / 10.0,
         }
     }
 
@@ -307,6 +364,44 @@ mod tests {
         assert!(alpha.content.contains("project alpha"));
         assert!(!alpha.content.contains("unscoped lighthouse"));
         assert!(!alpha.content.contains("project beta"));
+    }
+
+    #[tokio::test]
+    async fn requests_four_times_k_and_backfills_using_trusted_context_scope() {
+        let first = DocumentId::new();
+        let second = DocumentId::new();
+        let project_id = ProjectId::new();
+        let forged_project_id = ProjectId::new();
+        let store = Arc::new(SpyVectorStore {
+            candidates: vec![
+                scored(first, 0, 0, 100, "primary"),
+                scored(first, 1, 20, 80, "redundant"),
+                scored(second, 2, 0, 20, "backfill"),
+            ],
+            calls: Mutex::new(Vec::new()),
+        });
+        let tool = SearchTool::new(Arc::new(HashEmbedder::new(DIMS)), store.clone());
+
+        let output = tool
+            .execute(
+                &ctx_for(Some(project_id)),
+                json!({
+                    "query": "relevant material",
+                    "k": 2,
+                    "project_id": forged_project_id
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert!(output.content.contains("primary"));
+        assert!(!output.content.contains("redundant"));
+        assert!(output.content.contains("backfill"));
+        assert_eq!(
+            store.calls.lock().unwrap().as_slice(),
+            &[(8, SearchScope::Project(project_id))]
+        );
     }
 
     #[tokio::test]
