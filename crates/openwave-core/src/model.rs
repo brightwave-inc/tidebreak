@@ -143,6 +143,8 @@ impl DocumentProcessingStatus {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DocumentJobKind {
+    /// Parse immutable raw source bytes into canonical text and provenance.
+    Parse,
     /// Chunk and embed canonical content into the derived retrieval index.
     Index,
 }
@@ -152,9 +154,21 @@ impl DocumentJobKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Parse => "parse",
             Self::Index => "index",
         }
     }
+}
+
+/// Immutable raw source retained for reparsing one document revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentSourceBlob {
+    /// UUID key in the configured [`crate::BlobStore`].
+    pub id: Uuid,
+    /// SHA-256 digest of the exact source bytes.
+    pub sha256: [u8; 32],
+    /// Exact source byte length.
+    pub byte_len: u64,
 }
 
 /// Durable delivery state of one document-processing job.
@@ -225,8 +239,12 @@ pub struct DocumentRecord {
     pub media_type: String,
     /// Optional human-facing title.
     pub title: Option<String>,
+    /// Immutable raw bytes for this revision, when retained.
+    pub source_blob: Option<DocumentSourceBlob>,
     /// Parsed text-of-record used to rechunk, re-embed, and verify citations.
     pub canonical_text: String,
+    /// Parser fingerprint that produced the canonical text, when tracked.
+    pub canonical_fingerprint: Option<String>,
     /// Parser-produced mappings from canonical text to original source pages.
     pub source_regions: Vec<SourceRegion>,
     /// Monotonic content revision, starting at one and continuing through hard
@@ -508,6 +526,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&DocumentJobKind::Index).unwrap(),
             "\"index\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DocumentJobKind::Parse).unwrap(),
+            "\"parse\""
         );
         assert_eq!(
             serde_json::to_string(&DocumentJobStatus::RetryWait).unwrap(),

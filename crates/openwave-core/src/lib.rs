@@ -53,8 +53,8 @@ pub use keychain::KeychainSecretProvider;
 pub use model::{
     validate_source_regions, ByteSpan, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentProcessingStatus, DocumentRecord, DocumentScope,
-    DocumentSummaryRecord, DocumentUpsert, Message, Project, Role, SourceLocation, SourceRegion,
-    ToolCallRecord,
+    DocumentSourceBlob, DocumentSummaryRecord, DocumentUpsert, Message, Project, Role,
+    SourceLocation, SourceRegion, ToolCallRecord,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
