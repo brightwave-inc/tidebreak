@@ -1,7 +1,8 @@
 //! OpenWave retrieval — ingest documents, embed them, search by meaning, and get
 //! back grounded citations.
 //!
-//! The crate is built from four seams, each a trait with a working default:
+//! The crate is built from four required provider-neutral seams with working
+//! retrieval defaults, plus an optional fifth:
 //!
 //! - [`DocumentParser`] — raw bytes → plain text. Default: [`PlainTextParser`]
 //!   (zero-dependency `text/*`). Rich formats (PDF/office/images) land later as a
@@ -17,7 +18,10 @@
 //!   cosine scan, fused with reciprocal rank fusion. [`LanceVectorStore`] adds
 //!   the durable embedded implementation behind the `vec-lance` feature.
 //!
-//! [`Retriever`] wires all four into `ingest` and `search`. Everything a chunk or
+//! - [`Reranker`] — optional query/candidate scoring after broad retrieval and
+//!   before result selection. No reranker is configured by default.
+//!
+//! [`Retriever`] wires these into `ingest` and `search`. Everything a chunk or
 //! citation carries a [`ByteSpan`] — a precise byte range into the source text —
 //! so every answer points back to exactly where it came from.
 //!
@@ -60,8 +64,8 @@
 //! an [`Embedder`] backed by the OpenAI-compatible `/embeddings` endpoint — a
 //! drop-in for [`HashEmbedder`] behind the same seam.
 //!
-//! Not yet wired: model reranking, rich-format parsing, and ANN index management.
-//! Each lands as its own slice behind these seams.
+//! Not yet wired: a concrete reranking provider, rich-format parsing, and ANN
+//! index management. Each lands as its own slice behind these seams.
 
 mod chunk;
 mod document;
@@ -74,6 +78,7 @@ mod lance_store;
 #[cfg(feature = "embed-openai")]
 mod openai_embed;
 mod parse;
+mod rerank;
 mod retriever;
 #[cfg(feature = "tool")]
 mod search;
@@ -91,6 +96,7 @@ pub use lance_store::LanceVectorStore;
 pub use openai_embed::OpenAiEmbedder;
 pub use openwave_core::{DocumentGeneration, ProjectId};
 pub use parse::{DocumentParser, ParsedDocument, PlainTextParser};
+pub use rerank::Reranker;
 pub use retriever::{GenerationIndexOutcome, IngestOutcome, Retriever};
 #[cfg(feature = "tool")]
 pub use search::SearchTool;

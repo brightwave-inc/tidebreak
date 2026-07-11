@@ -192,7 +192,10 @@ impl Chunk {
 pub struct ScoredChunk {
     /// The matched chunk.
     pub chunk: Chunk,
-    /// Backend relevance score; higher is more relevant.
+    /// Relevance score; initially assigned by the backend and overwritten by an
+    /// optional reranker before final selection. Higher is more relevant within
+    /// one result set; reranker scores are not comparable across queries or
+    /// configurations.
     pub score: f32,
 }
 
@@ -210,7 +213,8 @@ pub struct Citation {
     pub span: ByteSpan,
     /// The cited text.
     pub snippet: String,
-    /// The relevance score that surfaced this citation.
+    /// The final relevance score that surfaced this citation. When reranking is
+    /// configured, this is the reranker score rather than the backend score.
     pub score: f32,
 }
 

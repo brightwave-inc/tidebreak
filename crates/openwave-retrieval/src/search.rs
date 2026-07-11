@@ -2,10 +2,10 @@
 //!
 //! [`SearchTool`] adapts the retrieval pipeline to `openwave-core`'s [`Tool`]
 //! contract so the agent loop can call it like any other capability. It holds the
-//! two seams a query needs — an [`Embedder`] and a [`VectorStore`] — and nothing
-//! else, so it stays decoupled from ingestion (parser/chunker). Point it at the
-//! *same* `Arc<dyn VectorStore>` the ingest side writes to and the agent searches
-//! a live index.
+//! query-side seams — an [`Embedder`], a [`VectorStore`], and optionally a model
+//! reranker — so it stays decoupled from ingestion (parser/chunker). Point it at
+//! the *same* `Arc<dyn VectorStore>` the ingest side writes to and the agent
+//! searches a live index.
 //!
 //! It is `ReadOnly` (never mutates), so the agent may call it without an approval
 //! prompt. Recoverable problems (empty query, an embedder/store hiccup) come back
@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 
 use crate::document::Citation;
 use crate::embed::Embedder;
+use crate::rerank::{rerank_candidates, Reranker};
 use crate::selection::{candidate_limit, select};
 use crate::vector::{SearchScope, VectorStore};
 
@@ -30,6 +31,7 @@ use crate::vector::{SearchScope, VectorStore};
 pub struct SearchTool {
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn VectorStore>,
+    reranker: Option<Arc<dyn Reranker>>,
 }
 
 impl SearchTool {
@@ -39,7 +41,18 @@ impl SearchTool {
     /// Build a search tool over a shared embedder and vector store.
     #[must_use]
     pub fn new(embedder: Arc<dyn Embedder>, store: Arc<dyn VectorStore>) -> Self {
-        Self { embedder, store }
+        Self {
+            embedder,
+            store,
+            reranker: None,
+        }
+    }
+
+    /// Configure an optional model reranker for broad retrieval candidates.
+    #[must_use]
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
+        self.reranker = Some(reranker);
+        self
     }
 }
 
@@ -140,6 +153,11 @@ impl Tool for SearchTool {
             Ok(hits) => hits,
             Err(err) => return Ok(ToolOutput::error(format!("search failed: {err}"))),
         };
+        let candidates = match rerank_candidates(self.reranker.as_deref(), query, candidates).await
+        {
+            Ok(candidates) => candidates,
+            Err(_) => return Ok(ToolOutput::error("reranking failed")),
+        };
         let hits = select(candidates, k);
 
         let citations: Vec<Citation> = hits.into_iter().map(Citation::from).collect();
@@ -210,6 +228,32 @@ mod tests {
     struct SpyVectorStore {
         candidates: Vec<ScoredChunk>,
         calls: Mutex<Vec<(usize, SearchScope)>>,
+    }
+
+    struct FailingReranker;
+
+    struct FixedReranker(Vec<f32>);
+
+    #[async_trait]
+    impl Reranker for FailingReranker {
+        async fn rerank(
+            &self,
+            _query: &str,
+            _candidates: &[ScoredChunk],
+        ) -> crate::Result<Vec<f32>> {
+            Err(crate::RetrievalError::rerank("provider unavailable"))
+        }
+    }
+
+    #[async_trait]
+    impl Reranker for FixedReranker {
+        async fn rerank(
+            &self,
+            _query: &str,
+            _candidates: &[ScoredChunk],
+        ) -> crate::Result<Vec<f32>> {
+            Ok(self.0.clone())
+        }
     }
 
     #[async_trait]
@@ -402,6 +446,53 @@ mod tests {
             store.calls.lock().unwrap().as_slice(),
             &[(8, SearchScope::Project(project_id))]
         );
+    }
+
+    #[tokio::test]
+    async fn reranker_failure_is_model_facing() {
+        let store = Arc::new(SpyVectorStore {
+            candidates: vec![
+                scored(DocumentId::new(), 0, 0, 5, "first"),
+                scored(DocumentId::new(), 1, 10, 15, "second"),
+            ],
+            calls: Mutex::new(Vec::new()),
+        });
+        let tool = SearchTool::new(Arc::new(HashEmbedder::new(DIMS)), store)
+            .with_reranker(Arc::new(FailingReranker));
+
+        let output = tool
+            .execute(&ctx(), json!({"query": "query", "k": 2}))
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert_eq!(output.content, "reranking failed");
+        assert!(!output.content.contains("provider unavailable"));
+    }
+
+    #[tokio::test]
+    async fn reranker_reorders_results_and_replaces_tool_scores() {
+        let store = Arc::new(SpyVectorStore {
+            candidates: vec![
+                scored(DocumentId::new(), 0, 0, 5, "backend first"),
+                scored(DocumentId::new(), 1, 10, 15, "reranked first"),
+            ],
+            calls: Mutex::new(Vec::new()),
+        });
+        let tool = SearchTool::new(Arc::new(HashEmbedder::new(DIMS)), store)
+            .with_reranker(Arc::new(FixedReranker(vec![0.1, 0.9])));
+
+        let output = tool
+            .execute(&ctx(), json!({"query": "query", "k": 2}))
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        let citations: Vec<Citation> = serde_json::from_value(output.data.unwrap()).unwrap();
+        assert_eq!(citations[0].snippet, "reranked first");
+        assert_eq!(citations[0].score, 0.9);
+        assert_eq!(citations[1].snippet, "backend first");
+        assert_eq!(citations[1].score, 0.1);
     }
 
     #[tokio::test]

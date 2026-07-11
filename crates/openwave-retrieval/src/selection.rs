@@ -32,8 +32,9 @@ pub(crate) fn candidate_limit(k: usize) -> usize {
 /// and gently preferring document diversity within a four-result rank window.
 ///
 /// Diversity can skip over the baseline candidate, but skipped candidates stay
-/// available for later rounds. The final results are restored to backend rank
-/// order, so selection changes membership without inventing a new score order.
+/// available for later rounds. The final results are restored to input rank
+/// order (backend rank, or reranker rank when configured), so selection changes
+/// membership without inventing a new score order.
 pub(crate) fn select(candidates: Vec<ScoredChunk>, k: usize) -> Vec<ScoredChunk> {
     if k == 0 || candidates.is_empty() {
         return Vec::new();
