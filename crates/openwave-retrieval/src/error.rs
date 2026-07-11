@@ -23,6 +23,10 @@ pub enum RetrievalError {
     #[error("embedding error: {0}")]
     Embed(String),
 
+    /// A reranking provider failed or returned malformed scores.
+    #[error("reranking error: {0}")]
+    Rerank(String),
+
     /// A vector backend failed (I/O, query, or upsert).
     #[error("vector store error: {0}")]
     VectorStore(String),
@@ -55,6 +59,11 @@ impl RetrievalError {
     /// Build a [`RetrievalError::Embed`] from anything string-like.
     pub fn embed(message: impl Into<String>) -> Self {
         Self::Embed(message.into())
+    }
+
+    /// Build a [`RetrievalError::Rerank`] from anything string-like.
+    pub fn rerank(message: impl Into<String>) -> Self {
+        Self::Rerank(message.into())
     }
 
     /// Build a [`RetrievalError::VectorStore`] from anything string-like.

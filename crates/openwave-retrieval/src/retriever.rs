@@ -1,9 +1,9 @@
 //! The end-to-end pipeline: parse → chunk → embed → store, and query → cite.
 //!
-//! [`Retriever`] wires the four seams together behind two methods, [`Retriever::ingest`]
-//! and [`Retriever::search`]. It owns a parser and chunker and shares an embedder
-//! and vector store (the store is typically shared with the rest of the process,
-//! so a future `search` tool can query the same index this ingests into).
+//! [`Retriever`] wires the retrieval seams together behind two methods,
+//! [`Retriever::ingest`] and [`Retriever::search`]. It owns a parser and chunker,
+//! shares an embedder and vector store, and can optionally rerank broad search
+//! candidates before final result selection.
 
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ use crate::embed::Embedder;
 use crate::error::{Result, RetrievalError};
 use crate::id::DocumentId;
 use crate::parse::DocumentParser;
+use crate::rerank::{rerank_candidates, Reranker};
 use crate::selection::{candidate_limit, result_limit, select};
 use crate::vector::{GenerationStageOutcome, SearchScope, VectorRecord, VectorStore};
 use openwave_core::DocumentGeneration;
@@ -42,6 +43,7 @@ pub struct Retriever {
     chunker: Box<dyn Chunker>,
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn VectorStore>,
+    reranker: Option<Arc<dyn Reranker>>,
 }
 
 impl Retriever {
@@ -58,7 +60,15 @@ impl Retriever {
             chunker,
             embedder,
             store,
+            reranker: None,
         }
+    }
+
+    /// Configure an optional model reranker for broad retrieval candidates.
+    #[must_use]
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
+        self.reranker = Some(reranker);
+        self
     }
 
     /// Borrow the shared vector store (e.g. to hand a search tool the same index).
@@ -257,6 +267,7 @@ impl Retriever {
             .store
             .query(query, &embedding, candidate_limit(k), scope)
             .await?;
+        let candidates = rerank_candidates(self.reranker.as_deref(), query, candidates).await?;
         let hits = select(candidates, k);
         Ok(hits.into_iter().map(Citation::from).collect())
     }
@@ -289,6 +300,19 @@ mod tests {
     struct QuerySpyVectorStore {
         candidates: Vec<ScoredChunk>,
         limits: Mutex<Vec<usize>>,
+    }
+
+    struct SpyReranker {
+        scores: Vec<f32>,
+        candidate_counts: Mutex<Vec<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Reranker for SpyReranker {
+        async fn rerank(&self, _query: &str, candidates: &[ScoredChunk]) -> Result<Vec<f32>> {
+            self.candidate_counts.lock().unwrap().push(candidates.len());
+            Ok(self.scores.clone())
+        }
     }
 
     #[async_trait::async_trait]
@@ -430,6 +454,75 @@ The Great Barrier Reef is the world's largest coral reef system.";
         assert_eq!(citations.len(), 2);
         assert_eq!(citations[0].snippet, "primary");
         assert_eq!(citations[1].snippet, "backfill");
+    }
+
+    #[tokio::test]
+    async fn reranks_every_overfetched_candidate_before_selection() {
+        let candidates: Vec<_> = (0..8)
+            .map(|ordinal| {
+                scored(
+                    DocumentId::new(),
+                    ordinal,
+                    ordinal * 10,
+                    ordinal * 10 + 5,
+                    &format!("candidate {ordinal}"),
+                )
+            })
+            .collect();
+        let store = Arc::new(QuerySpyVectorStore {
+            candidates,
+            limits: Mutex::new(Vec::new()),
+        });
+        let reranker = Arc::new(SpyReranker {
+            scores: (0..8).map(|index| index as f32).collect(),
+            candidate_counts: Mutex::new(Vec::new()),
+        });
+        let retriever = Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::new(90, 0)),
+            Arc::new(HashEmbedder::new(512)),
+            store.clone(),
+        )
+        .with_reranker(reranker.clone());
+
+        let citations = retriever
+            .search(SearchScope::Unscoped, "query", 2)
+            .await
+            .unwrap();
+
+        assert_eq!(store.limits.lock().unwrap().as_slice(), &[8]);
+        assert_eq!(reranker.candidate_counts.lock().unwrap().as_slice(), &[8]);
+        assert_eq!(citations[0].snippet, "candidate 7");
+        assert_eq!(citations[0].score, 7.0);
+        assert_eq!(citations[1].snippet, "candidate 6");
+        assert_eq!(citations[1].score, 6.0);
+    }
+
+    #[tokio::test]
+    async fn malformed_reranker_output_fails_search() {
+        let store = Arc::new(QuerySpyVectorStore {
+            candidates: vec![
+                scored(DocumentId::new(), 0, 0, 5, "first"),
+                scored(DocumentId::new(), 1, 10, 15, "second"),
+            ],
+            limits: Mutex::new(Vec::new()),
+        });
+        let retriever = Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::new(90, 0)),
+            Arc::new(HashEmbedder::new(512)),
+            store,
+        )
+        .with_reranker(Arc::new(SpyReranker {
+            scores: vec![1.0],
+            candidate_counts: Mutex::new(Vec::new()),
+        }));
+
+        let error = retriever
+            .search(SearchScope::Unscoped, "query", 2)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RetrievalError::Rerank(_)));
     }
 
     #[tokio::test]
