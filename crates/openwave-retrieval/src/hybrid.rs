@@ -72,7 +72,7 @@ fn bm25<'a>(records: &[&'a VectorRecord], query: &str, k: usize) -> Vec<(&'a Vec
 
     let documents = records
         .iter()
-        .map(|record| tokenize(&record.chunk.text))
+        .map(|record| tokenize(&record.chunk.retrieval_text()))
         .collect::<Vec<_>>();
     let average_length =
         documents.iter().map(Vec::len).sum::<usize>() as f32 / documents.len() as f32;
@@ -206,5 +206,21 @@ mod tests {
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].1, ranked[1].1);
         assert!(ranked[0].0.chunk.id.0 < ranked[1].0.chunk.id.0);
+    }
+
+    #[test]
+    fn lexical_ranking_matches_heading_context_but_returns_source_text() {
+        let mut contextual = record("installation details", vec![0.0, 1.0]);
+        contextual.chunk.heading_path = vec!["Operator Guide".into(), "Needleshard".into()];
+        let records = [&contextual];
+
+        let ranked = bm25(&records, "needleshard", 1);
+
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].0.chunk.text, "installation details");
+        assert_eq!(
+            ranked[0].0.chunk.retrieval_text(),
+            "Operator Guide > Needleshard\n\ninstallation details"
+        );
     }
 }

@@ -14,6 +14,8 @@ use crate::{Result, RetrievalError, ScoredChunk};
 #[async_trait]
 pub trait Reranker: Send + Sync {
     /// Score every candidate for `query`, preserving input alignment.
+    /// Implementations must use [`crate::Chunk::retrieval_text`] as the
+    /// candidate text so structural context matches embedding and lexical inputs.
     async fn rerank(&self, query: &str, candidates: &[ScoredChunk]) -> Result<Vec<f32>>;
 }
 

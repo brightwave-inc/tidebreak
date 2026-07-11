@@ -21,10 +21,11 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use arrow_array::builder::{ListBuilder, StringBuilder};
 use arrow_array::types::Float32Type;
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
-    RecordBatchIterator, StringArray, UInt32Array, UInt64Array,
+    Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Int64Array, ListArray,
+    RecordBatch, RecordBatchIterator, StringArray, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use arrow_select::filter::filter_record_batch;
@@ -328,16 +329,18 @@ impl LanceVectorStore {
             .await
             .map_err(lance_err)?
             .into_iter()
-            .find(|index| index.index_type == IndexType::FTS && index.columns == ["text"]);
+            .find(|index| {
+                index.index_type == IndexType::FTS && index.columns == ["retrieval_text"]
+            });
         let text_index_name = if let Some(index) = text_index {
             index.name
         } else {
             table
-                .create_index(&["text"], Index::FTS(Default::default()))
+                .create_index(&["retrieval_text"], Index::FTS(Default::default()))
                 .execute()
                 .await
                 .map_err(lance_err)?;
-            "text_idx".to_string()
+            "retrieval_text_idx".to_string()
         };
         if table
             .index_stats(&text_index_name)
@@ -530,6 +533,26 @@ impl LanceVectorStore {
                 .as_ref()
                 .map_or("", |record| record.chunk.text.as_str())
         }));
+        let retrieval_texts = rows
+            .iter()
+            .map(|row| {
+                row.record.as_ref().map_or_else(String::new, |record| {
+                    record.chunk.retrieval_text().into_owned()
+                })
+            })
+            .collect::<Vec<_>>();
+        let retrieval_texts =
+            StringArray::from_iter_values(retrieval_texts.iter().map(String::as_str));
+        let mut heading_paths = ListBuilder::new(StringBuilder::new());
+        for row in rows {
+            if let Some(record) = &row.record {
+                for heading in &record.chunk.heading_path {
+                    heading_paths.values().append_value(heading);
+                }
+            }
+            heading_paths.append(true);
+        }
+        let heading_paths = heading_paths.finish();
         let starts = UInt64Array::from_iter_values(rows.iter().map(|row| {
             row.record
                 .as_ref()
@@ -576,6 +599,8 @@ impl LanceVectorStore {
             Arc::new(project_ids),
             Arc::new(ordinals),
             Arc::new(texts),
+            Arc::new(heading_paths),
+            Arc::new(retrieval_texts),
             Arc::new(starts),
             Arc::new(ends),
             Arc::new(revisions),
@@ -680,6 +705,8 @@ impl LanceVectorStore {
                 "project_id",
                 "ordinal",
                 "text",
+                "heading_path",
+                "retrieval_text",
                 "span_start",
                 "span_end",
                 VECTOR_COL,
@@ -1050,6 +1077,12 @@ fn build_schema(dims: usize) -> SchemaRef {
         Field::new("project_id", DataType::Utf8, true),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("text", DataType::Utf8, false),
+        Field::new(
+            "heading_path",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            false,
+        ),
+        Field::new("retrieval_text", DataType::Utf8, false),
         Field::new("span_start", DataType::UInt64, false),
         Field::new("span_end", DataType::UInt64, false),
         Field::new("content_revision", DataType::Int64, false),
@@ -1071,6 +1104,7 @@ fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Resu
     let project_ids = str_col(batch, "project_id")?;
     let ordinals = u64_col(batch, "ordinal")?;
     let texts = str_col(batch, "text")?;
+    let heading_paths = list_str_col(batch, "heading_path")?;
     let starts = u64_col(batch, "span_start")?;
     let ends = u64_col(batch, "span_end")?;
     let vectors = batch
@@ -1111,6 +1145,7 @@ fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Resu
                 document_id,
                 ordinal: ordinals.value(index) as usize,
                 text: texts.value(index).to_string(),
+                heading_path: list_str_value(heading_paths, index)?,
                 span: ByteSpan::new(starts.value(index) as usize, ends.value(index) as usize),
             },
             embedding: Embedding(values.values().to_vec()),
@@ -1139,6 +1174,7 @@ fn read_scored_batch(
     let doc_ids = str_col(batch, "document_id")?;
     let ordinals = u64_col(batch, "ordinal")?;
     let texts = str_col(batch, "text")?;
+    let heading_paths = list_str_col(batch, "heading_path")?;
     let starts = u64_col(batch, "span_start")?;
     let ends = u64_col(batch, "span_end")?;
     let scores = batch
@@ -1166,6 +1202,7 @@ fn read_scored_batch(
                 document_id,
                 ordinal: ordinals.value(i) as usize,
                 text: texts.value(i).to_string(),
+                heading_path: list_str_value(heading_paths, i)?,
                 span,
             },
             score: convert_score(scores.value(i)),
@@ -1179,6 +1216,22 @@ fn str_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
         .column_by_name(name)
         .and_then(|c| c.as_any().downcast_ref::<StringArray>())
         .ok_or_else(|| RetrievalError::vector_store(format!("missing/mistyped column `{name}`")))
+}
+
+fn list_str_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ListArray> {
+    batch
+        .column_by_name(name)
+        .and_then(|column| column.as_any().downcast_ref::<ListArray>())
+        .ok_or_else(|| RetrievalError::vector_store(format!("missing/mistyped column `{name}`")))
+}
+
+fn list_str_value(column: &ListArray, index: usize) -> Result<Vec<String>> {
+    let values = column.value(index);
+    let values = values
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| RetrievalError::vector_store("heading_path values are not utf8"))?;
+    Ok(values.iter().flatten().map(ToOwned::to_owned).collect())
 }
 
 fn u64_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt64Array> {
@@ -1283,10 +1336,9 @@ mod tests {
 
             // A replacement is published as exactly one Lance dataset version.
             let version_before_replace = store.table.version().await.unwrap();
-            store
-                .replace_document(doc, vec![record(doc, 0, "south", vec![1.0, 0.0])])
-                .await
-                .unwrap();
+            let mut south = record(doc, 0, "south", vec![1.0, 0.0]);
+            south.chunk.heading_path = vec!["Compass".into(), "Needleshard".into()];
+            store.replace_document(doc, vec![south]).await.unwrap();
             assert_eq!(
                 store.table.version().await.unwrap(),
                 version_before_replace + 1
@@ -1297,6 +1349,21 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(hits[0].chunk.text, "south");
+            assert_eq!(hits[0].chunk.heading_path, ["Compass", "Needleshard"]);
+            let heading_hits = store
+                .query(
+                    "needleshard",
+                    &Embedding(vec![0.0, 1.0]),
+                    1,
+                    SearchScope::Unscoped,
+                )
+                .await
+                .unwrap();
+            assert_eq!(heading_hits[0].chunk.text, "south");
+            assert_eq!(
+                heading_hits[0].chunk.heading_path,
+                ["Compass", "Needleshard"]
+            );
         }
 
         // Reopen the same directory: the data is still there — that's durability.
@@ -1307,6 +1374,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hits[0].chunk.text, "south");
+        assert_eq!(hits[0].chunk.heading_path, ["Compass", "Needleshard"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

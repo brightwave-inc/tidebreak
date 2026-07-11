@@ -11,9 +11,8 @@
 //! at least one chunk, but that overlap never crosses a Markdown section.
 //!
 //! Every emitted [`Chunk`] records its exact [`ByteSpan`], which is what makes
-//! citations precise. Richer strategies — nested heading context, sentence
-//! shingles — can be layered behind the [`Chunker`] trait later; this remains the
-//! dependable single-strategy floor.
+//! citations precise. Markdown chunks also carry their containing ATX heading
+//! hierarchy as derived retrieval context without changing those source spans.
 
 use crate::document::{ByteSpan, Chunk, Document};
 use crate::error::Result;
@@ -76,7 +75,7 @@ impl Default for TextChunker {
 impl Chunker for TextChunker {
     fn fingerprint(&self) -> String {
         format!(
-            "text-window-v2:markdown=atx-sections:max_chars={}:overlap={}",
+            "text-window-v3:markdown=atx-heading-context:max_chars={}:overlap={}",
             self.max_chars, self.overlap
         )
     }
@@ -105,7 +104,7 @@ impl Chunker for TextChunker {
             return Ok(self.chunk_markdown(document, &chars, &byte_at));
         }
 
-        Ok(self.chunk_range(document, &chars, &byte_at, 0, n, false, 0))
+        Ok(self.chunk_range(document, &chars, &byte_at, 0, n, false, 0, &[]))
     }
 }
 
@@ -114,11 +113,15 @@ impl TextChunker {
         let mut chunks = Vec::new();
         let mut section_start = 0;
 
-        for heading_byte in markdown_heading_offsets(&document.text) {
+        let headings = markdown_headings(&document.text);
+        let mut heading_stack: Vec<(usize, String)> = Vec::new();
+        for heading_info in headings {
+            let heading_byte = heading_info.offset;
             let heading = byte_at
                 .binary_search(&heading_byte)
                 .expect("line starts are UTF-8 character boundaries");
             if heading > section_start {
+                let heading_path = visible_heading_path(&heading_stack);
                 chunks.extend(self.chunk_range(
                     document,
                     chars,
@@ -127,11 +130,20 @@ impl TextChunker {
                     heading,
                     true,
                     chunks.len(),
+                    &heading_path,
                 ));
             }
+            while heading_stack
+                .last()
+                .is_some_and(|(level, _)| *level >= heading_info.level)
+            {
+                heading_stack.pop();
+            }
+            heading_stack.push((heading_info.level, heading_info.title));
             section_start = heading;
         }
 
+        let heading_path = visible_heading_path(&heading_stack);
         chunks.extend(self.chunk_range(
             document,
             chars,
@@ -140,6 +152,7 @@ impl TextChunker {
             chars.len(),
             true,
             chunks.len(),
+            &heading_path,
         ));
         chunks
     }
@@ -154,6 +167,7 @@ impl TextChunker {
         range_end: usize,
         prefer_paragraphs: bool,
         first_ordinal: usize,
+        heading_path: &[String],
     ) -> Vec<Chunk> {
         let text = &document.text;
         let mut chunks = Vec::new();
@@ -173,11 +187,12 @@ impl TextChunker {
             // Slice on byte offsets we computed from the same char view.
             let piece = &text[span.start..span.end];
             if !piece.trim().is_empty() {
-                chunks.push(Chunk::new(
+                chunks.push(Chunk::with_heading_path(
                     document.id,
                     first_ordinal + ordinal,
                     span,
                     piece,
+                    heading_path.to_vec(),
                 ));
                 ordinal += 1;
             }
@@ -195,6 +210,18 @@ impl TextChunker {
     }
 }
 
+/// Derive the public breadcrumb without discarding empty structural frames.
+///
+/// A valid empty ATX heading still changes section boundaries and nesting, but
+/// contributes no user-visible context of its own.
+fn visible_heading_path(stack: &[(usize, String)]) -> Vec<String> {
+    stack
+        .iter()
+        .filter(|(_, title)| !title.is_empty())
+        .map(|(_, title)| title.clone())
+        .collect()
+}
+
 fn is_markdown(media_type: &str) -> bool {
     let base = media_type.split(';').next().unwrap_or(media_type).trim();
     matches!(
@@ -208,7 +235,14 @@ fn is_markdown(media_type: &str) -> bool {
 /// Fence recognition intentionally needs only line-local CommonMark syntax: a
 /// run of at least three backticks or tildes, indented by no more than three
 /// spaces. Heading-looking lines inside a fence remain ordinary section text.
-fn markdown_heading_offsets(text: &str) -> Vec<usize> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MarkdownHeading {
+    offset: usize,
+    level: usize,
+    title: String,
+}
+
+fn markdown_headings(text: &str) -> Vec<MarkdownHeading> {
     let mut headings = Vec::new();
     let mut offset = 0;
     let mut fence: Option<(u8, usize)> = None;
@@ -243,7 +277,43 @@ fn markdown_heading_offsets(text: &str) -> Vec<usize> {
                 if (1..=6).contains(&hashes)
                     && (body.len() == hashes || matches!(body[hashes], b' ' | b'\t'))
                 {
-                    headings.push(offset);
+                    let mut title = &body[hashes..];
+                    while title
+                        .first()
+                        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+                    {
+                        title = &title[1..];
+                    }
+                    while title
+                        .last()
+                        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+                    {
+                        title = &title[..title.len() - 1];
+                    }
+                    let closing_start = title
+                        .iter()
+                        .rposition(|byte| !matches!(byte, b'#'))
+                        .map_or(0, |index| index + 1);
+                    if closing_start < title.len()
+                        && (closing_start == 0 || matches!(title[closing_start - 1], b' ' | b'\t'))
+                    {
+                        title = if closing_start == 0 {
+                            &[]
+                        } else {
+                            &title[..closing_start - 1]
+                        };
+                        while title
+                            .last()
+                            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+                        {
+                            title = &title[..title.len() - 1];
+                        }
+                    }
+                    headings.push(MarkdownHeading {
+                        offset,
+                        level: hashes,
+                        title: String::from_utf8_lossy(title).into_owned(),
+                    });
                 }
             }
         }
@@ -459,6 +529,91 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].span, ByteSpan::new(0, valid));
         assert_eq!(chunks[1].span, ByteSpan::new(valid, text.len()));
+        assert_eq!(chunks[0].heading_path, Vec::<String>::new());
+        assert_eq!(chunks[1].heading_path, ["valid"]);
+    }
+
+    #[test]
+    fn markdown_chunks_carry_normalized_nested_heading_paths() {
+        let text = concat!(
+            "preamble\n",
+            "#   Guide ###  \nroot\n",
+            "### Install ##\nchild\n",
+            "## Configure\nsibling\n",
+            "# API\nend",
+        );
+        let document = markdown("text/x-markdown; charset=utf-8", text);
+        let chunks = TextChunker::new(10_000, 0).chunk(&document).unwrap();
+
+        assert_eq!(chunks.len(), 5);
+        assert_eq!(chunks[0].heading_path, Vec::<String>::new());
+        assert_eq!(chunks[1].heading_path, ["Guide"]);
+        assert_eq!(chunks[2].heading_path, ["Guide", "Install"]);
+        assert_eq!(chunks[3].heading_path, ["Guide", "Configure"]);
+        assert_eq!(chunks[4].heading_path, ["API"]);
+        for chunk in &chunks {
+            assert_eq!(document.slice(chunk.span), Some(chunk.text.as_str()));
+        }
+    }
+
+    #[test]
+    fn markdown_heading_stack_uses_actual_levels_for_skipped_nesting() {
+        let text = concat!(
+            "### Initial\na\n",
+            "## Parent\nb\n",
+            "#### Deep\nc\n",
+            "### Sibling\nd",
+        );
+        let document = markdown("text/markdown", text);
+        let chunks = TextChunker::new(10_000, 0).chunk(&document).unwrap();
+
+        assert_eq!(chunks[0].heading_path, ["Initial"]);
+        assert_eq!(chunks[1].heading_path, ["Parent"]);
+        assert_eq!(chunks[2].heading_path, ["Parent", "Deep"]);
+        assert_eq!(chunks[3].heading_path, ["Parent", "Sibling"]);
+    }
+
+    #[test]
+    fn closing_only_hashes_are_structural_but_absent_from_breadcrumbs() {
+        let document = markdown("text/markdown", "# ###\none\n# #\ntwo\n## Child\nthree");
+        let chunks = TextChunker::new(10_000, 0).chunk(&document).unwrap();
+
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks[0].heading_path.is_empty());
+        assert!(chunks[1].heading_path.is_empty());
+        assert_eq!(chunks[0].retrieval_text(), chunks[0].text);
+        assert_eq!(chunks[1].retrieval_text(), chunks[1].text);
+        assert_eq!(chunks[2].heading_path, ["Child"]);
+        assert!(chunks[2].retrieval_text().starts_with("Child\n\n## Child"));
+    }
+
+    #[test]
+    fn every_window_gets_uniform_context_including_the_heading_window() {
+        let document = markdown(
+            "text/markdown",
+            "# Guide\none two three four five six seven eight nine ten eleven twelve",
+        );
+        let chunks = TextChunker::new(20, 4).chunk(&document).unwrap();
+
+        assert!(chunks.len() > 2);
+        assert!(chunks.iter().all(|chunk| chunk.heading_path == ["Guide"]));
+        assert!(chunks[0].text.starts_with("# Guide"));
+        assert!(chunks[0].retrieval_text().starts_with("Guide\n\n# Guide"));
+        for chunk in &chunks {
+            assert!(chunk.retrieval_text().starts_with("Guide\n\n"));
+            assert_eq!(document.slice(chunk.span), Some(chunk.text.as_str()));
+        }
+    }
+
+    #[test]
+    fn heading_like_lines_in_fences_do_not_change_context() {
+        let text = "# Outer\n```md\n## Not a child\n```\nafter";
+        let document = markdown("text/markdown", text);
+        let chunks = TextChunker::new(10_000, 0).chunk(&document).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].heading_path, ["Outer"]);
+        assert_eq!(chunks[0].text, text);
     }
 
     #[test]
@@ -561,10 +716,10 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_invalidates_v1_markdown_indexes() {
+    fn fingerprint_invalidates_v2_markdown_indexes() {
         assert_eq!(
             TextChunker::new(90, 10).fingerprint(),
-            "text-window-v2:markdown=atx-sections:max_chars=90:overlap=10"
+            "text-window-v3:markdown=atx-heading-context:max_chars=90:overlap=10"
         );
     }
 }
