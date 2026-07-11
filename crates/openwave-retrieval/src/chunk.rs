@@ -4,14 +4,16 @@
 //! [`TextChunker`] is a boundary-aware sliding window. It walks the text in
 //! character units (so it never splits a UTF-8 codepoint), caps each window at a
 //! character budget, and prefers to cut at a natural boundary — a line break,
-//! else whitespace — within the back half of the window. Consecutive chunks
-//! overlap by a configurable number of characters so a passage straddling a cut
-//! still lands wholly inside at least one chunk.
+//! else whitespace — within the back half of the window. Markdown documents are
+//! first partitioned at ATX headings outside fenced code, and prefer paragraph
+//! boundaries within each section. Consecutive chunks overlap by a configurable
+//! number of characters so a passage straddling a cut still lands wholly inside
+//! at least one chunk, but that overlap never crosses a Markdown section.
 //!
 //! Every emitted [`Chunk`] records its exact [`ByteSpan`], which is what makes
-//! citations precise. A richer stack — hierarchical heading/paragraph chunkers,
-//! sentence shingles — can be layered behind the [`Chunker`] trait later; this is
-//! the dependable single-strategy floor.
+//! citations precise. Richer strategies — nested heading context, sentence
+//! shingles — can be layered behind the [`Chunker`] trait later; this remains the
+//! dependable single-strategy floor.
 
 use crate::document::{ByteSpan, Chunk, Document};
 use crate::error::Result;
@@ -74,7 +76,7 @@ impl Default for TextChunker {
 impl Chunker for TextChunker {
     fn fingerprint(&self) -> String {
         format!(
-            "text-window-v1:max_chars={}:overlap={}",
+            "text-window-v2:markdown=atx-sections:max_chars={}:overlap={}",
             self.max_chars, self.overlap
         )
     }
@@ -99,28 +101,88 @@ impl Chunker for TextChunker {
             return Ok(Vec::new());
         }
 
+        if is_markdown(&document.media_type) {
+            return Ok(self.chunk_markdown(document, &chars, &byte_at));
+        }
+
+        Ok(self.chunk_range(document, &chars, &byte_at, 0, n, false, 0))
+    }
+}
+
+impl TextChunker {
+    fn chunk_markdown(&self, document: &Document, chars: &[char], byte_at: &[usize]) -> Vec<Chunk> {
+        let mut chunks = Vec::new();
+        let mut section_start = 0;
+
+        for heading_byte in markdown_heading_offsets(&document.text) {
+            let heading = byte_at
+                .binary_search(&heading_byte)
+                .expect("line starts are UTF-8 character boundaries");
+            if heading > section_start {
+                chunks.extend(self.chunk_range(
+                    document,
+                    chars,
+                    byte_at,
+                    section_start,
+                    heading,
+                    true,
+                    chunks.len(),
+                ));
+            }
+            section_start = heading;
+        }
+
+        chunks.extend(self.chunk_range(
+            document,
+            chars,
+            byte_at,
+            section_start,
+            chars.len(),
+            true,
+            chunks.len(),
+        ));
+        chunks
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn chunk_range(
+        &self,
+        document: &Document,
+        chars: &[char],
+        byte_at: &[usize],
+        range_start: usize,
+        range_end: usize,
+        prefer_paragraphs: bool,
+        first_ordinal: usize,
+    ) -> Vec<Chunk> {
+        let text = &document.text;
         let mut chunks = Vec::new();
         let mut ordinal = 0;
-        let mut start = 0; // char index
+        let mut start = range_start;
 
-        while start < n {
-            let hard_end = (start + self.max_chars).min(n);
+        while start < range_end {
+            let hard_end = (start + self.max_chars).min(range_end);
             // Cut at a natural boundary unless we're already at the text's end.
-            let end = if hard_end == n {
-                n
+            let end = if hard_end == range_end {
+                range_end
             } else {
-                boundary_before(&chars, start, hard_end)
+                boundary_before(chars, start, hard_end, prefer_paragraphs)
             };
 
             let span = ByteSpan::new(byte_at[start], byte_at[end]);
             // Slice on byte offsets we computed from the same char view.
             let piece = &text[span.start..span.end];
             if !piece.trim().is_empty() {
-                chunks.push(Chunk::new(document.id, ordinal, span, piece));
+                chunks.push(Chunk::new(
+                    document.id,
+                    first_ordinal + ordinal,
+                    span,
+                    piece,
+                ));
                 ordinal += 1;
             }
 
-            if end >= n {
+            if end >= range_end {
                 break;
             }
             // Advance, carrying `overlap` chars back. Guarantee forward progress:
@@ -129,28 +191,119 @@ impl Chunker for TextChunker {
             start = if next <= start { start + 1 } else { next };
         }
 
-        Ok(chunks)
+        chunks
     }
+}
+
+fn is_markdown(media_type: &str) -> bool {
+    let base = media_type.split(';').next().unwrap_or(media_type).trim();
+    matches!(
+        base.to_ascii_lowercase().as_str(),
+        "text/markdown" | "text/x-markdown"
+    )
+}
+
+/// Return the byte offset of each ATX heading that starts a Markdown section.
+///
+/// Fence recognition intentionally needs only line-local CommonMark syntax: a
+/// run of at least three backticks or tildes, indented by no more than three
+/// spaces. Heading-looking lines inside a fence remain ordinary section text.
+fn markdown_heading_offsets(text: &str) -> Vec<usize> {
+    let mut headings = Vec::new();
+    let mut offset = 0;
+    let mut fence: Option<(u8, usize)> = None;
+
+    while offset < text.len() {
+        let remaining = &text.as_bytes()[offset..];
+        let content_len = remaining
+            .iter()
+            .position(|byte| matches!(byte, b'\r' | b'\n'))
+            .unwrap_or(remaining.len());
+        let line = &remaining[..content_len];
+        let indent = line.iter().take_while(|&&byte| byte == b' ').count();
+        let body = if indent <= 3 { &line[indent..] } else { &[] };
+
+        if let Some((marker, opening_len)) = fence {
+            let run = body.iter().take_while(|&&byte| byte == marker).count();
+            if run >= opening_len && body[run..].iter().all(|byte| matches!(byte, b' ' | b'\t')) {
+                fence = None;
+            }
+        } else {
+            let marker = body.first().copied();
+            let run = marker.map_or(0, |marker| {
+                body.iter().take_while(|&&byte| byte == marker).count()
+            });
+            if matches!(marker, Some(b'`' | b'~')) && run >= 3 {
+                // Backtick fence info strings cannot contain a backtick.
+                if marker != Some(b'`') || !body[run..].contains(&b'`') {
+                    fence = Some((marker.expect("matched marker"), run));
+                }
+            } else {
+                let hashes = body.iter().take_while(|&&byte| byte == b'#').count();
+                if (1..=6).contains(&hashes)
+                    && (body.len() == hashes || matches!(body[hashes], b' ' | b'\t'))
+                {
+                    headings.push(offset);
+                }
+            }
+        }
+
+        let line_ending_len = match &remaining[content_len..] {
+            [b'\r', b'\n', ..] => 2,
+            [b'\r' | b'\n', ..] => 1,
+            _ => 0,
+        };
+        offset += content_len + line_ending_len;
+    }
+
+    headings
 }
 
 /// Find a good char index to end a chunk within `(start, hard_end)`.
 ///
-/// Searches the back half of the window for the last line break, then the last
-/// whitespace, cutting just after it. Falls back to `hard_end` (a hard cut) when
-/// the window has no boundary. The returned index is an exclusive char index.
-fn boundary_before(chars: &[char], start: usize, hard_end: usize) -> usize {
+/// Searches the back half of the window for the last blank line when paragraph
+/// preference is enabled, then the last line break, then the last whitespace,
+/// cutting just after it. Falls back to `hard_end` (a hard cut) when the window
+/// has no boundary. The returned index is an exclusive char index.
+fn boundary_before(
+    chars: &[char],
+    start: usize,
+    hard_end: usize,
+    prefer_paragraphs: bool,
+) -> usize {
     let floor = start + (hard_end - start) / 2;
+    let mut last_blank_line = None;
     let mut last_newline = None;
     let mut last_whitespace = None;
     for (offset, &c) in chars[floor..hard_end].iter().enumerate() {
         let i = floor + offset;
-        if c == '\n' {
+        let is_line_end =
+            c == '\n' || (prefer_paragraphs && c == '\r' && chars.get(i + 1) != Some(&'\n'));
+        if is_line_end {
+            if prefer_paragraphs {
+                let previous_line_start = (0..i)
+                    .rev()
+                    .find(|&index| {
+                        chars[index] == '\n'
+                            || (chars[index] == '\r' && chars.get(index + 1) != Some(&'\n'))
+                    })
+                    .map_or(0, |newline| newline + 1);
+                if chars[previous_line_start..i]
+                    .iter()
+                    .all(|character| character.is_whitespace())
+                {
+                    last_blank_line = Some(i + 1);
+                }
+            }
             last_newline = Some(i + 1);
         } else if c.is_whitespace() {
             last_whitespace = Some(i + 1);
         }
     }
-    last_newline.or(last_whitespace).unwrap_or(hard_end)
+    last_blank_line
+        .or(last_newline)
+        .or(last_whitespace)
+        .unwrap_or(hard_end)
 }
 
 #[cfg(test)]
@@ -160,6 +313,10 @@ mod tests {
 
     fn doc(text: &str) -> Document {
         Document::new(DocumentSource::Inline, "text/plain", text)
+    }
+
+    fn markdown(media_type: &str, text: &str) -> Document {
+        Document::new(DocumentSource::Inline, media_type, text)
     }
 
     #[test]
@@ -244,5 +401,170 @@ mod tests {
         // Every byte is covered by the union of spans.
         assert_eq!(chunks.first().unwrap().span.start, 0);
         assert_eq!(chunks.last().unwrap().span.end, d.text.len());
+    }
+
+    #[test]
+    fn adjacent_markdown_sections_never_share_overlap() {
+        let text = "# Alpha\nalpha alpha alpha\n# Beta\nbeta beta beta";
+        let d = markdown("text/markdown", text);
+        let chunks = TextChunker::new(18, 8).chunk(&d).unwrap();
+        let heading = text.find("# Beta").unwrap();
+
+        assert!(chunks.iter().any(|chunk| chunk.span.end == heading));
+        assert!(chunks.iter().any(|chunk| chunk.span.start == heading));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.span.end <= heading || chunk.span.start >= heading));
+    }
+
+    #[test]
+    fn long_markdown_section_keeps_internal_overlap() {
+        let d = markdown(
+            "text/markdown",
+            "# One\none two three four five six seven eight nine ten eleven twelve",
+        );
+        let chunks = TextChunker::new(20, 6).chunk(&d).unwrap();
+
+        assert!(chunks.len() > 2);
+        for pair in chunks.windows(2) {
+            assert!(pair[1].span.start < pair[0].span.end);
+        }
+    }
+
+    #[test]
+    fn markdown_windows_prefer_paragraph_boundaries() {
+        let text = "# H\nfirst line\n\nsecond paragraph has more words to split";
+        let d = markdown("text/markdown", text);
+        let chunks = TextChunker::new(30, 0).chunk(&d).unwrap();
+
+        assert_eq!(chunks[0].text, "# H\nfirst line\n\n");
+        assert_eq!(chunks[0].span.end, text.find("second").unwrap());
+    }
+
+    #[test]
+    fn fenced_and_invalid_headings_do_not_start_sections() {
+        let text = concat!(
+            "before\n",
+            "```rust\n# fenced backtick\n```\n",
+            "~~~\n## fenced tilde\n~~~~\n",
+            "    # too indented\n",
+            "####### too many\n",
+            "###no separator\n",
+            "   ### valid\nafter",
+        );
+        let d = markdown("text/markdown", text);
+        let chunks = TextChunker::new(10_000, 100).chunk(&d).unwrap();
+        let valid = text.find("   ### valid").unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].span, ByteSpan::new(0, valid));
+        assert_eq!(chunks[1].span, ByteSpan::new(valid, text.len()));
+    }
+
+    #[test]
+    fn markdown_utf8_and_crlf_spans_are_exact_source_slices() {
+        let text = "préface\r\n# Café\r\naé日🙂 b c d e\r\n## Thé\r\nfin";
+        let d = markdown("text/markdown", text);
+        let chunks = TextChunker::new(12, 3).chunk(&d).unwrap();
+
+        for (ordinal, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.ordinal, ordinal);
+            assert_eq!(d.slice(chunk.span).unwrap(), chunk.text);
+            assert!(text.is_char_boundary(chunk.span.start));
+            assert!(text.is_char_boundary(chunk.span.end));
+        }
+        let headings = [text.find("# Café").unwrap(), text.find("## Thé").unwrap()];
+        for heading in headings {
+            assert!(chunks
+                .iter()
+                .all(|chunk| chunk.span.end <= heading || chunk.span.start >= heading));
+        }
+    }
+
+    #[test]
+    fn markdown_lone_cr_headings_and_paragraphs_are_boundaries() {
+        let text = "intro words\r\r# Héading\rfirst paragraph\r\rsecond paragraph tail";
+        let d = markdown("text/markdown", text);
+        let chunks = TextChunker::new(26, 4).chunk(&d).unwrap();
+        let heading = text.find("# Héading").unwrap();
+
+        assert!(chunks.iter().any(|chunk| chunk.span.end == heading));
+        assert!(chunks.iter().any(|chunk| chunk.span.start == heading));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.span.end <= heading || chunk.span.start >= heading));
+        assert!(chunks.iter().any(|chunk| chunk.text.ends_with("\r\r")));
+        for (ordinal, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.ordinal, ordinal);
+            assert_eq!(d.slice(chunk.span).unwrap(), chunk.text);
+        }
+    }
+
+    #[test]
+    fn lone_cr_blank_line_wins_over_a_later_line_boundary() {
+        let chars: Vec<_> = "aaaaaaaaaaaa\r\rbbbb\rcccccccccccc".chars().collect();
+
+        // The blank line ends at 14; the ordinary line ends later at 19.
+        assert_eq!(boundary_before(&chars, 0, 24, true), 14);
+    }
+
+    #[test]
+    fn plain_text_keeps_v1_boundaries_byte_for_byte() {
+        let d = doc("first paragraph\n\nsecond line here\nthird line here and tail");
+        let chunks = TextChunker::new(24, 4).chunk(&d).unwrap();
+        let spans: Vec<_> = chunks.iter().map(|chunk| chunk.span).collect();
+        let texts: Vec<_> = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+
+        assert_eq!(
+            spans,
+            vec![
+                ByteSpan::new(0, 17),
+                ByteSpan::new(13, 34),
+                ByteSpan::new(30, 54),
+                ByteSpan::new(50, 58),
+            ]
+        );
+        assert_eq!(
+            texts,
+            vec![
+                "first paragraph\n\n",
+                "ph\n\nsecond line here\n",
+                "ere\nthird line here and ",
+                "and tail",
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_text_keeps_lone_cr_as_v1_whitespace() {
+        let text = "aaaaaaaaaaaa\rb bbbbbbbbbbbbbbbbb";
+        let d = doc(text);
+        let chunks = TextChunker::new(24, 0).chunk(&d).unwrap();
+
+        // In v1 a lone CR is generic whitespace, so the later space wins. If
+        // CR were promoted to a line ending, this chunk would stop at byte 13.
+        assert_eq!(chunks[0].span, ByteSpan::new(0, 15));
+        assert_eq!(chunks[0].text, "aaaaaaaaaaaa\rb ");
+        assert_eq!(d.slice(chunks[0].span).unwrap(), chunks[0].text);
+    }
+
+    #[test]
+    fn markdown_mime_matching_ignores_case_and_parameters() {
+        for media_type in [
+            "TEXT/MARKDOWN; Charset=UTF-8",
+            " text/x-markdown ; charset=utf-8",
+        ] {
+            let d = markdown(media_type, "before\n# Heading\nafter");
+            let chunks = TextChunker::new(1_000, 0).chunk(&d).unwrap();
+            assert_eq!(chunks.len(), 2, "{media_type}");
+        }
+    }
+
+    #[test]
+    fn fingerprint_invalidates_v1_markdown_indexes() {
+        assert_eq!(
+            TextChunker::new(90, 10).fingerprint(),
+            "text-window-v2:markdown=atx-sections:max_chars=90:overlap=10"
+        );
     }
 }
