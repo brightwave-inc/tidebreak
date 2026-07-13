@@ -35,10 +35,14 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.10
       - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
         run: |
           sudo apt-get update
@@ -50,14 +54,15 @@ jobs:
             protobuf-compiler
       - uses: Swatinem/rust-cache@v2
         with:
-          # The Lance/Arrow and Tauri artifacts can exhaust a hosted runner when
-          # a full target directory is restored before every workspace gate.
+          # Keep Cargo downloads cached, but never restore the multi-gigabyte
+          # target archive that previously exhausted a hosted runner. sccache
+          # reuses individual compiler outputs without pre-filling target/.
           cache-targets: false
       - name: rustfmt
         run: cargo fmt --all --check
-      - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: build
         run: cargo build --workspace --locked
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --workspace --locked
