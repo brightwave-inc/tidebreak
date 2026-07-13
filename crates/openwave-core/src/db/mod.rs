@@ -897,180 +897,23 @@ impl Store for DbStore {
             .collect()
     }
 
-    async fn retry_document_index_job(
+    async fn retry_document_job(
         &self,
         document_id: DocumentId,
+        expected_generation: DocumentGeneration,
+        kind: DocumentJobKind,
         pipeline_fingerprint: &str,
         max_attempts: i32,
     ) -> Result<Option<DocumentJob>> {
-        if pipeline_fingerprint.is_empty()
-            || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
-        {
-            return Err(AgentError::Store(
-                "document job pipeline fingerprint must contain 1 to 512 characters".into(),
-            ));
-        }
-        if max_attempts < 1 {
-            return Err(AgentError::Store(
-                "document job max_attempts must be at least one".into(),
-            ));
-        }
-
-        let transaction = self.conn.begin().await.map_err(store_err)?;
-        acquire_document_write_lock(&transaction, document_id).await?;
-        let Some(document) = entities::document::Entity::find_by_id(document_id.0)
-            .one(&transaction)
-            .await
-            .map_err(store_err)?
-        else {
-            transaction.commit().await.map_err(store_err)?;
-            return Ok(None);
-        };
-        ensure_live_document_generation_on(&transaction, &document).await?;
-        let candidate = entities::document_job::Entity::find()
-            .filter(entities::document_job::Column::DocumentId.eq(document.id))
-            .filter(entities::document_job::Column::ContentRevision.eq(document.content_revision))
-            .filter(entities::document_job::Column::RevisionToken.eq(document.revision_token))
-            .filter(entities::document_job::Column::Kind.eq(DocumentJobKind::Index.as_str()))
-            .filter(entities::document_job::Column::PipelineFingerprint.eq(pipeline_fingerprint))
-            .one(&transaction)
-            .await
-            .map_err(store_err)?;
-        let Some(candidate) = candidate else {
-            transaction.commit().await.map_err(store_err)?;
-            return Ok(None);
-        };
-        let mut parsed = document_job_from_model(candidate.clone())?;
-        if matches!(
-            parsed.status,
-            DocumentJobStatus::Queued | DocumentJobStatus::Running | DocumentJobStatus::RetryWait
-        ) {
-            let expected = if parsed.status == DocumentJobStatus::Running {
-                DocumentProcessingStatus::Processing
-            } else {
-                DocumentProcessingStatus::Queued
-            };
-            if document.processing_status != expected.as_str() {
-                return Err(AgentError::Store(format!(
-                    "document job {} is {} but exact document {} is unexpectedly {}",
-                    parsed.id,
-                    parsed.status.as_str(),
-                    document_id,
-                    document.processing_status
-                )));
-            }
-            transaction.commit().await.map_err(store_err)?;
-            return Ok(Some(parsed));
-        }
-        if parsed.status != DocumentJobStatus::Failed {
-            transaction.commit().await.map_err(store_err)?;
-            return Ok(None);
-        }
-        if document.processing_status != DocumentProcessingStatus::Failed.as_str() {
-            return Err(AgentError::Store(format!(
-                "failed document job {} does not match failed document {}",
-                parsed.id, document_id
-            )));
-        }
-
-        let now = Utc::now();
-        let revived = entities::document_job::Entity::update_many()
-            .col_expr(
-                entities::document_job::Column::Status,
-                sea_orm::sea_query::Expr::value(DocumentJobStatus::Queued.as_str()),
-            )
-            .col_expr(
-                entities::document_job::Column::AttemptCount,
-                sea_orm::sea_query::Expr::value(0),
-            )
-            .col_expr(
-                entities::document_job::Column::MaxAttempts,
-                sea_orm::sea_query::Expr::value(max_attempts),
-            )
-            .col_expr(
-                entities::document_job::Column::AvailableAt,
-                sea_orm::sea_query::Expr::value(now),
-            )
-            .col_expr(
-                entities::document_job::Column::LeaseToken,
-                sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
-            )
-            .col_expr(
-                entities::document_job::Column::LeaseExpiresAt,
-                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-            )
-            .col_expr(
-                entities::document_job::Column::StartedAt,
-                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-            )
-            .col_expr(
-                entities::document_job::Column::FinishedAt,
-                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-            )
-            .col_expr(
-                entities::document_job::Column::LastErrorCode,
-                sea_orm::sea_query::Expr::value(Option::<String>::None),
-            )
-            .col_expr(
-                entities::document_job::Column::LastErrorDetail,
-                sea_orm::sea_query::Expr::value(Option::<String>::None),
-            )
-            .col_expr(
-                entities::document_job::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(now),
-            )
-            .filter(entities::document_job::Column::Id.eq(candidate.id))
-            .filter(entities::document_job::Column::Status.eq(DocumentJobStatus::Failed.as_str()))
-            .filter(entities::document_job::Column::UpdatedAt.eq(candidate.updated_at))
-            .exec(&transaction)
-            .await
-            .map_err(store_err)?;
-        let document_queued = entities::document::Entity::update_many()
-            .col_expr(
-                entities::document::Column::ProcessingStatus,
-                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
-            )
-            .col_expr(
-                entities::document::Column::IndexedRevision,
-                sea_orm::sea_query::Expr::value(Option::<i64>::None),
-            )
-            .col_expr(
-                entities::document::Column::IndexFingerprint,
-                sea_orm::sea_query::Expr::value(Option::<String>::None),
-            )
-            .col_expr(
-                entities::document::Column::IndexedAt,
-                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
-            )
-            .filter(entities::document::Column::Id.eq(document.id))
-            .filter(entities::document::Column::ContentRevision.eq(document.content_revision))
-            .filter(entities::document::Column::RevisionToken.eq(document.revision_token))
-            .filter(
-                entities::document::Column::ProcessingStatus
-                    .eq(DocumentProcessingStatus::Failed.as_str()),
-            )
-            .exec(&transaction)
-            .await
-            .map_err(store_err)?;
-        if revived.rows_affected != 1 || document_queued.rows_affected != 1 {
-            return Err(AgentError::Store(format!(
-                "failed document job {} changed during explicit retry",
-                parsed.id
-            )));
-        }
-        transaction.commit().await.map_err(store_err)?;
-        parsed.status = DocumentJobStatus::Queued;
-        parsed.attempt_count = 0;
-        parsed.max_attempts = max_attempts;
-        parsed.available_at = now;
-        parsed.lease_token = None;
-        parsed.lease_expires_at = None;
-        parsed.started_at = None;
-        parsed.finished_at = None;
-        parsed.last_error_code = None;
-        parsed.last_error_detail = None;
-        parsed.updated_at = now;
-        Ok(Some(parsed))
+        ops::document::retry_document_job(
+            self,
+            document_id,
+            expected_generation,
+            kind,
+            pipeline_fingerprint,
+            max_attempts,
+        )
+        .await
     }
 
     async fn claim_document_job(

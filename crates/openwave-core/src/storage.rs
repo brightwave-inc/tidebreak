@@ -22,7 +22,7 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
 use crate::model::{
-    Chat, DocumentGeneration, DocumentJob, DocumentJobStatus, DocumentListCursor,
+    Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceUpsert,
     DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
 };
@@ -275,16 +275,19 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
-    /// Explicitly retry the current exact-generation failed index job.
+    /// Explicitly retry one exact-generation failed semantic job.
     ///
     /// A matching failed job is reset to a fresh queued delivery using a
     /// store-owned timestamp and `max_attempts`. Repeating the request while that
-    /// exact job is already nonterminal returns it unchanged. Succeeded,
-    /// cancelled, superseded, missing, or differently fingerprinted jobs are not
-    /// revived and return `None`.
-    async fn retry_document_index_job(
+    /// exact job is already nonterminal returns it unchanged. The observed
+    /// generation, semantic kind, fingerprint, and document stage must all still
+    /// agree. Succeeded, cancelled, superseded, missing, or mismatched jobs are
+    /// not revived and return `None`.
+    async fn retry_document_job(
         &self,
         _document_id: DocumentId,
+        _expected_generation: DocumentGeneration,
+        _kind: DocumentJobKind,
         _pipeline_fingerprint: &str,
         _max_attempts: i32,
     ) -> Result<Option<DocumentJob>> {
@@ -1053,9 +1056,11 @@ mod tests {
             });
             Ok(jobs)
         }
-        async fn retry_document_index_job(
+        async fn retry_document_job(
             &self,
             document_id: DocumentId,
+            expected_generation: DocumentGeneration,
+            kind: DocumentJobKind,
             pipeline_fingerprint: &str,
             max_attempts: i32,
         ) -> Result<Option<DocumentJob>> {
@@ -1069,6 +1074,18 @@ mod tests {
             let Some(document) = state.documents.get(&document_id).cloned() else {
                 return Ok(None);
             };
+            if document.generation() != expected_generation {
+                return Ok(None);
+            }
+            let awaiting_parse =
+                document.source_blob.is_some() && document.canonical_fingerprint.is_none();
+            let stage_matches = match kind {
+                DocumentJobKind::Parse => awaiting_parse,
+                DocumentJobKind::Index => !awaiting_parse,
+            };
+            if !stage_matches {
+                return Ok(None);
+            }
             let candidate_id = state
                 .jobs
                 .values()
@@ -1076,7 +1093,7 @@ mod tests {
                     job.document_id == document_id
                         && job.content_revision == document.content_revision
                         && job.revision_token == document.revision_token
-                        && job.kind == DocumentJobKind::Index
+                        && job.kind == kind
                         && job.pipeline_fingerprint == pipeline_fingerprint
                 })
                 .map(|job| job.id);
@@ -2023,10 +2040,17 @@ mod tests {
             source_regions: Vec::new(),
             updated_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1, 0).unwrap(),
         };
-        let (_, queued) =
+        let (document, queued) =
             block_on(store.upsert_document_and_enqueue_index(&source, "pipeline-v1", 2)).unwrap();
         assert_eq!(
-            block_on(store.retry_document_index_job(source.id, "pipeline-v1", 9)).unwrap(),
+            block_on(store.retry_document_job(
+                source.id,
+                document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v1",
+                9,
+            ))
+            .unwrap(),
             Some(queued.clone())
         );
 
@@ -2036,7 +2060,14 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(
-            block_on(store.retry_document_index_job(source.id, "pipeline-v1", 9)).unwrap(),
+            block_on(store.retry_document_job(
+                source.id,
+                document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v1",
+                9,
+            ))
+            .unwrap(),
             Some(running.clone())
         );
         assert_eq!(
@@ -2052,13 +2083,40 @@ mod tests {
             Some(DocumentJobStatus::Failed)
         );
         assert_eq!(
-            block_on(store.retry_document_index_job(source.id, "other-pipeline", 4)).unwrap(),
+            block_on(store.retry_document_job(
+                source.id,
+                document.generation(),
+                DocumentJobKind::Index,
+                "other-pipeline",
+                4,
+            ))
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            block_on(store.retry_document_job(
+                source.id,
+                DocumentGeneration {
+                    content_revision: document.content_revision + 1,
+                    revision_token: document.revision_token,
+                },
+                DocumentJobKind::Index,
+                "pipeline-v1",
+                4,
+            ))
+            .unwrap(),
             None
         );
 
-        let retried = block_on(store.retry_document_index_job(source.id, "pipeline-v1", 4))
-            .unwrap()
-            .unwrap();
+        let retried = block_on(store.retry_document_job(
+            source.id,
+            document.generation(),
+            DocumentJobKind::Index,
+            "pipeline-v1",
+            4,
+        ))
+        .unwrap()
+        .unwrap();
         assert_eq!(retried.id, queued.id);
         assert_eq!(retried.status, DocumentJobStatus::Queued);
         assert_eq!(retried.attempt_count, 0);
@@ -2075,7 +2133,14 @@ mod tests {
         assert_eq!(document.index_fingerprint, None);
         assert_eq!(document.indexed_at, None);
         assert_eq!(
-            block_on(store.retry_document_index_job(source.id, "pipeline-v1", 8)).unwrap(),
+            block_on(store.retry_document_job(
+                source.id,
+                document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v1",
+                8,
+            ))
+            .unwrap(),
             Some(retried.clone())
         );
 
@@ -2093,7 +2158,14 @@ mod tests {
         ))
         .unwrap());
         assert_eq!(
-            block_on(store.retry_document_index_job(source.id, "pipeline-v1", 4)).unwrap(),
+            block_on(store.retry_document_job(
+                source.id,
+                document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v1",
+                4,
+            ))
+            .unwrap(),
             None
         );
 
@@ -2103,14 +2175,21 @@ mod tests {
             updated_at: source.updated_at + chrono::Duration::seconds(1),
             ..source.clone()
         };
-        let (_, cancelled) =
+        let (replacement_document, cancelled) =
             block_on(store.upsert_document_and_enqueue_index(&replacement, "pipeline-v2", 2))
                 .unwrap();
         assert_eq!(
-            block_on(store.retry_document_index_job(replacement.id, "pipeline-v1", 4)).unwrap(),
+            block_on(store.retry_document_job(
+                replacement.id,
+                replacement_document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v1",
+                4,
+            ))
+            .unwrap(),
             None
         );
-        block_on(store.upsert_document_and_enqueue_index(
+        let (newer_document, _) = block_on(store.upsert_document_and_enqueue_index(
             &DocumentUpsert {
                 canonical_text: "newer replacement".into(),
                 source_regions: Vec::new(),
@@ -2129,8 +2208,113 @@ mod tests {
             DocumentJobStatus::Cancelled
         );
         assert_eq!(
-            block_on(store.retry_document_index_job(source.id, "pipeline-v2", 4)).unwrap(),
+            block_on(store.retry_document_job(
+                source.id,
+                newer_document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v2",
+                4,
+            ))
+            .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn mem_store_explicit_retry_revives_only_pending_parse_stage() {
+        let store = MemStore::default();
+        let now = chrono::Utc::now();
+        let document_id = DocumentId::new();
+        let generation = DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+        };
+        let job = DocumentJob {
+            id: DocumentJobId::new(),
+            document_id,
+            content_revision: generation.content_revision,
+            revision_token: generation.revision_token,
+            kind: DocumentJobKind::Parse,
+            status: DocumentJobStatus::Failed,
+            pipeline_fingerprint: "parser=pdf-v1".into(),
+            attempt_count: 3,
+            max_attempts: 3,
+            available_at: now,
+            lease_token: None,
+            lease_expires_at: None,
+            started_at: Some(now),
+            finished_at: Some(now),
+            last_error_code: Some("parse_failed".into()),
+            last_error_detail: Some("malformed page".into()),
+            created_at: now,
+            updated_at: now,
+        };
+        {
+            let mut state = store.document_state.lock().unwrap();
+            state.documents.insert(
+                document_id,
+                DocumentRecord {
+                    id: document_id,
+                    project_id: None,
+                    source_uri: Some("file:///report.pdf".into()),
+                    media_type: "application/pdf".into(),
+                    title: None,
+                    source_blob: Some(crate::model::DocumentSourceBlob {
+                        id: uuid::Uuid::new_v4(),
+                        sha256: [0x33; 32],
+                        byte_len: 4_096,
+                    }),
+                    canonical_text: String::new(),
+                    canonical_fingerprint: None,
+                    source_regions: Vec::new(),
+                    content_revision: generation.content_revision,
+                    revision_token: generation.revision_token,
+                    processing_status: DocumentProcessingStatus::Failed,
+                    indexed_revision: None,
+                    index_fingerprint: None,
+                    created_at: now,
+                    updated_at: now,
+                    indexed_at: None,
+                },
+            );
+            state.jobs.insert(job.id, job.clone());
+        }
+
+        assert_eq!(
+            block_on(store.retry_document_job(
+                document_id,
+                generation,
+                DocumentJobKind::Index,
+                "parser=pdf-v1",
+                5,
+            ))
+            .unwrap(),
+            None
+        );
+        let retried = block_on(store.retry_document_job(
+            document_id,
+            generation,
+            DocumentJobKind::Parse,
+            "parser=pdf-v1",
+            5,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(retried.id, job.id);
+        assert_eq!(retried.kind, DocumentJobKind::Parse);
+        assert_eq!(retried.status, DocumentJobStatus::Queued);
+        assert_eq!(retried.attempt_count, 0);
+        assert_eq!(retried.max_attempts, 5);
+        assert_eq!(retried.started_at, None);
+        assert_eq!(retried.finished_at, None);
+        assert_eq!(retried.last_error_code, None);
+        assert_eq!(retried.last_error_detail, None);
+        assert_eq!(
+            block_on(store.get_document(document_id))
+                .unwrap()
+                .unwrap()
+                .processing_status,
+            DocumentProcessingStatus::Queued
         );
     }
 }

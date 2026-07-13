@@ -1898,13 +1898,19 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
         source_regions: Vec::new(),
         updated_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
     };
-    let (_, queued) = store
+    let (document, queued) = store
         .upsert_document_and_enqueue_index(&source, "pipeline-v1", 2)
         .await
         .unwrap();
     assert_eq!(
         store
-            .retry_document_index_job(source.id, "pipeline-v1", 9)
+            .retry_document_job(
+                source.id,
+                document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v1",
+                9,
+            )
             .await
             .unwrap(),
         Some(queued.clone())
@@ -1918,7 +1924,13 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
         .unwrap();
     assert_eq!(
         store
-            .retry_document_index_job(source.id, "pipeline-v1", 9)
+            .retry_document_job(
+                source.id,
+                document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v1",
+                9,
+            )
             .await
             .unwrap(),
         Some(running.clone())
@@ -1939,14 +1951,26 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
     );
     assert_eq!(
         store
-            .retry_document_index_job(source.id, "other-pipeline", 4)
+            .retry_document_job(
+                source.id,
+                document.generation(),
+                DocumentJobKind::Index,
+                "other-pipeline",
+                4,
+            )
             .await
             .unwrap(),
         None
     );
 
     let retried = store
-        .retry_document_index_job(source.id, "pipeline-v1", 4)
+        .retry_document_job(
+            source.id,
+            document.generation(),
+            DocumentJobKind::Index,
+            "pipeline-v1",
+            4,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -1967,7 +1991,13 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
     assert_eq!(document.indexed_at, None);
     assert_eq!(
         store
-            .retry_document_index_job(source.id, "pipeline-v1", 8)
+            .retry_document_job(
+                source.id,
+                document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v1",
+                8,
+            )
             .await
             .unwrap(),
         Some(retried.clone())
@@ -1992,7 +2022,13 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
         .unwrap());
     assert_eq!(
         store
-            .retry_document_index_job(source.id, "pipeline-v1", 4)
+            .retry_document_job(
+                source.id,
+                document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v1",
+                4,
+            )
             .await
             .unwrap(),
         None
@@ -2004,18 +2040,24 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
         updated_at: source.updated_at + chrono::Duration::seconds(1),
         ..source.clone()
     };
-    let (_, cancelled) = store
+    let (replacement_document, cancelled) = store
         .upsert_document_and_enqueue_index(&replacement, "pipeline-v2", 2)
         .await
         .unwrap();
     assert_eq!(
         store
-            .retry_document_index_job(replacement.id, "pipeline-v1", 4)
+            .retry_document_job(
+                replacement.id,
+                replacement_document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v1",
+                4,
+            )
             .await
             .unwrap(),
         None
     );
-    store
+    let (newer_document, _) = store
         .upsert_document_and_enqueue_index(
             &DocumentUpsert {
                 canonical_text: "newer replacement".into(),
@@ -2039,10 +2081,117 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
     );
     assert_eq!(
         store
-            .retry_document_index_job(source.id, "pipeline-v2", 4)
+            .retry_document_job(
+                source.id,
+                newer_document.generation(),
+                DocumentJobKind::Index,
+                "pipeline-v2",
+                4,
+            )
             .await
             .unwrap(),
         None
+    );
+}
+
+#[tokio::test]
+async fn explicit_retry_revives_only_the_pending_parse_stage() {
+    let (_dir, store) = temp_store().await;
+    let source = DocumentSourceUpsert {
+        id: DocumentId::new(),
+        project_id: None,
+        source_uri: Some("file:///retry-report.pdf".into()),
+        media_type: "application/pdf".into(),
+        title: Some("Retry report".into()),
+        source_blob: DocumentSourceBlob {
+            id: uuid::Uuid::new_v4(),
+            sha256: [0x44; 32],
+            byte_len: 4_096,
+        },
+        updated_at: Utc::now(),
+    };
+    let (document, queued) = store
+        .accept_document_source_and_enqueue_parse(&source, "parser=pdf-v1", 1)
+        .await
+        .unwrap();
+    let claim_at = queued.available_at + chrono::Duration::seconds(1);
+    let running = store
+        .claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .record_document_job_failure(
+                running.id,
+                running.lease_token.unwrap(),
+                claim_at + chrono::Duration::seconds(1),
+                None,
+                "parse_failed",
+                Some("malformed page"),
+            )
+            .await
+            .unwrap(),
+        Some(DocumentJobStatus::Failed)
+    );
+
+    assert_eq!(
+        store
+            .retry_document_job(
+                source.id,
+                document.generation(),
+                DocumentJobKind::Index,
+                "parser=pdf-v1",
+                5,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .retry_document_job(
+                source.id,
+                DocumentGeneration {
+                    content_revision: document.content_revision + 1,
+                    revision_token: document.revision_token,
+                },
+                DocumentJobKind::Parse,
+                "parser=pdf-v1",
+                5,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    let retried = store
+        .retry_document_job(
+            source.id,
+            document.generation(),
+            DocumentJobKind::Parse,
+            "parser=pdf-v1",
+            5,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retried.id, queued.id);
+    assert_eq!(retried.kind, DocumentJobKind::Parse);
+    assert_eq!(retried.status, DocumentJobStatus::Queued);
+    assert_eq!(retried.attempt_count, 0);
+    assert_eq!(retried.max_attempts, 5);
+    assert_eq!(retried.started_at, None);
+    assert_eq!(retried.finished_at, None);
+    assert_eq!(retried.last_error_code, None);
+    assert_eq!(retried.last_error_detail, None);
+    assert_eq!(
+        store
+            .get_document(source.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .processing_status,
+        DocumentProcessingStatus::Queued
     );
 }
 
