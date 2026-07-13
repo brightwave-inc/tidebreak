@@ -572,11 +572,7 @@ impl Agent {
                 return ToolOutput::error("turn cancelled while awaiting approval");
             }
         }
-        let ctx = ToolCtx {
-            chat_id: chat.id,
-            project_id: chat.project_id,
-            workspace_dir: chat.workspace_dir.clone(),
-        };
+        let ctx = ToolCtx::new(chat.id, chat.project_id, chat.workspace_dir.clone());
         let mut output = match tool.execute(&ctx, parse_args(&call.args)).await {
             Ok(output) => output,
             Err(err) => ToolOutput::error(err.to_string()),

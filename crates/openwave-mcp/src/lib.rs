@@ -18,12 +18,13 @@
 //! use openwave_core::{ChatId, ToolCtx, ToolRegistry};
 //! use openwave_mcp::McpServer;
 //!
-//! # fn demo() {
+//! # fn demo() -> std::io::Result<()> {
 //! let tools = Arc::new(ToolRegistry::new());
-//! let ctx = ToolCtx { chat_id: ChatId::new(), project_id: None, workspace_dir: "/work".into() };
+//! let ctx = ToolCtx::try_new(ChatId::new(), None, ".".into())?;
 //! let server = McpServer::new(tools, ctx);
 //! // then: `openwave_mcp::serve_stdio(server).await` inside an async runtime.
 //! # let _ = server;
+//! # Ok(())
 //! # }
 //! ```
 //!

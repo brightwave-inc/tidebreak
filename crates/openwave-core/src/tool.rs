@@ -6,6 +6,13 @@
 //! uniformly.
 
 use std::path::PathBuf;
+#[cfg(feature = "tools")]
+use std::sync::Arc;
+
+#[cfg(feature = "tools")]
+use cap_std::ambient_authority;
+#[cfg(feature = "tools")]
+use cap_std::fs::Dir;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -92,7 +99,7 @@ impl ToolOutput {
 ///
 /// Deliberately minimal in this slice — it grows (cancellation, store handles)
 /// as the agent loop lands.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolCtx {
     /// The chat this call belongs to.
     pub chat_id: ChatId,
@@ -101,6 +108,71 @@ pub struct ToolCtx {
     /// Absolute path to the chat's workspace directory. Workspace-class
     /// tools stay within it without prompting.
     pub workspace_dir: PathBuf,
+    #[cfg(feature = "tools")]
+    workspace: WorkspaceAccess,
+}
+
+#[cfg(feature = "tools")]
+#[derive(Clone)]
+enum WorkspaceAccess {
+    Open(Arc<Dir>),
+    Unavailable(Arc<str>),
+}
+
+impl std::fmt::Debug for ToolCtx {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolCtx")
+            .field("chat_id", &self.chat_id)
+            .field("project_id", &self.project_id)
+            .field("workspace_dir", &self.workspace_dir)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ToolCtx {
+    /// Build an execution context and pin the workspace to an open directory
+    /// capability. A missing workspace remains a model-facing tool error rather
+    /// than preventing unrelated tools from running.
+    pub fn new(chat_id: ChatId, project_id: Option<ProjectId>, workspace_dir: PathBuf) -> Self {
+        match Self::try_new(chat_id, project_id, workspace_dir.clone()) {
+            Ok(ctx) => ctx,
+            Err(_error) => Self {
+                chat_id,
+                project_id,
+                workspace_dir,
+                #[cfg(feature = "tools")]
+                workspace: WorkspaceAccess::Unavailable(_error.to_string().into()),
+            },
+        }
+    }
+
+    /// Build an execution context, failing if its workspace cannot be pinned.
+    pub fn try_new(
+        chat_id: ChatId,
+        project_id: Option<ProjectId>,
+        workspace_dir: PathBuf,
+    ) -> std::io::Result<Self> {
+        #[cfg(feature = "tools")]
+        let workspace = Dir::open_ambient_dir(&workspace_dir, ambient_authority())?;
+        Ok(Self {
+            chat_id,
+            project_id,
+            workspace_dir,
+            #[cfg(feature = "tools")]
+            workspace: WorkspaceAccess::Open(Arc::new(workspace)),
+        })
+    }
+
+    #[cfg(feature = "tools")]
+    pub(crate) fn workspace(&self) -> std::result::Result<Arc<Dir>, String> {
+        match &self.workspace {
+            WorkspaceAccess::Open(workspace) => Ok(Arc::clone(workspace)),
+            WorkspaceAccess::Unavailable(error) => {
+                Err(format!("workspace directory unavailable: {error}"))
+            }
+        }
+    }
 }
 
 /// A capability the agent can invoke. Implementors are held as trait objects in

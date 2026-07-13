@@ -18,12 +18,14 @@ sqlite = ["dep:sea-orm", "dep:sea-orm-migration"]
 # The OS-keychain-backed SecretProvider.
 keychain = ["dep:keyring", "dep:tokio"]
 # The built-in filesystem tools (read_file / list_dir / write_file).
-tools = ["dep:tokio"]
+tools = ["dep:cap-fs-ext", "dep:cap-std", "dep:tokio"]
 # Durable local byte storage for desktop documents and artifacts.
 blob-fs = ["dep:tokio", "dep:windows-sys"]
 
 [dependencies]
 async-trait = { workspace = true }
+cap-std = { workspace = true, optional = true }
+cap-fs-ext = { workspace = true, optional = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
