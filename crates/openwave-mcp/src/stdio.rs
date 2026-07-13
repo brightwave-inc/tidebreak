@@ -87,11 +87,13 @@ mod tests {
 
     #[tokio::test]
     async fn serve_replies_to_requests_and_skips_notifications_and_blanks() {
-        // A request, then a blank line, then a notification (no id).
+        // Initialize, acknowledge the lifecycle notification, then list tools.
         let input = concat!(
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
             "\n\n",
             r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
             "\n",
         );
         let mut output = Vec::new();
@@ -99,13 +101,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Exactly one response line (the request); the blank and notification
-        // produced nothing.
+        // The two requests get replies; the blank and notification do not.
         let out = String::from_utf8(output).unwrap();
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 1);
-        let response: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(response["id"], 1);
+        assert_eq!(lines.len(), 2);
+        let response: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(response["id"], 2);
         assert!(response["result"]["tools"].is_array());
     }
 

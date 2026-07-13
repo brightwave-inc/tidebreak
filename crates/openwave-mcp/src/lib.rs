@@ -26,9 +26,10 @@
 //! # }
 //! ```
 //!
-//! Not yet enforced: the MCP session lifecycle (gating `tools/*` on a completed
-//! `initialize`) — the server answers each request statelessly for now. The client
-//! side (mounting *external* MCP tool servers into the agent) is a later slice.
+//! The server enforces the MCP session lifecycle: tool requests remain gated until
+//! a valid `initialize` exchange is acknowledged by `notifications/initialized`.
+//! The client side (mounting *external* MCP tool servers into the agent) is a
+//! later slice.
 
 pub mod protocol;
 mod server;
