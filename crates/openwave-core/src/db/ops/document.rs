@@ -16,6 +16,7 @@ use super::super::{
     source_regions_to_db, store_err, try_advance_document_generation_on,
     validate_document_source_blob, validate_document_source_regions, DbStore,
 };
+use super::blob as blob_ops;
 
 pub(in crate::db) async fn accept_source_and_enqueue_parse(
     store: &DbStore,
@@ -63,6 +64,7 @@ pub(in crate::db) async fn accept_source_and_enqueue_parse(
                 {
                     let record = document_from_model(current.clone())?;
                     let job = document_job_from_model(job)?;
+                    blob_ops::cancel_on(&transaction, source.source_blob.id).await?;
                     transaction.commit().await.map_err(store_err)?;
                     return Ok((record, job));
                 }
@@ -119,6 +121,13 @@ pub(in crate::db) async fn accept_source_and_enqueue_parse(
         } else {
             active.insert(&transaction).await.map_err(store_err)?;
         }
+
+        blob_ops::replace_reference_on(
+            &transaction,
+            existing.as_ref().and_then(|current| current.source_blob_id),
+            source.source_blob.id,
+        )
+        .await?;
 
         cancel_live_document_jobs_on(&transaction, source.id, workflow_now).await?;
         let job = new_job(

@@ -51,10 +51,11 @@ pub use id::{CallId, ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, St
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
 pub use model::{
-    validate_source_regions, ByteSpan, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
-    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
-    DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
-    DocumentUpsert, Message, Project, Role, SourceLocation, SourceRegion, ToolCallRecord,
+    validate_source_regions, BlobRetirement, BlobRetirementStatus, ByteSpan, Chat,
+    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
+    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
+    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
+    Project, Role, SourceLocation, SourceRegion, ToolCallRecord,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
