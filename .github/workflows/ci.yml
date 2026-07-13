@@ -28,14 +28,25 @@ jobs:
           docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:latest \
             detect --source=/repo --redact --verbose
 
-  rust:
-    name: fmt · clippy · build · test
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+  lint:
+    name: clippy
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
       SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
       RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v7
@@ -43,6 +54,8 @@ jobs:
         run: rustup show
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: v0.16.0
       - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
         run: |
           sudo apt-get update
@@ -54,15 +67,70 @@ jobs:
             protobuf-compiler
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: cargo-registry
+          add-job-id-key: "false"
+          cache-bin: false
           # Keep Cargo downloads cached, but never restore the multi-gigabyte
           # target archive that previously exhausted a hosted runner. sccache
           # reuses individual compiler outputs without pre-filling target/.
           cache-targets: false
-      - name: rustfmt
-        run: cargo fmt --all --check
-      - name: build
-        run: cargo build --workspace --locked
+          # PR-scoped registry caches cannot help later PRs. Both Rust lanes
+          # restore the trusted main cache and only main refreshes it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: build · test
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: v0.16.0
+      - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-registry
+          add-job-id-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: build
+        run: cargo build --workspace --locked
       - name: test
         run: cargo test --workspace --locked
+
+  rust:
+    name: fmt · clippy · build · test
+    if: ${{ always() }}
+    needs: [fmt, lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Rust lane
+        env:
+          FMT_RESULT: ${{ needs.fmt.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          test "$FMT_RESULT" = success
+          test "$LINT_RESULT" = success
+          test "$TEST_RESULT" = success
