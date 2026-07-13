@@ -575,18 +575,24 @@ async fn retry_document_in_scope(
     project_id: Option<ProjectId>,
 ) -> Result<(StatusCode, Json<IngestResult>), ServerError> {
     let _document_write = state.document_writes.acquire(id).await;
-    if state
+    let Some(document) = state
         .store
         .get_document(id)
         .await?
-        .is_none_or(|document| document.project_id != project_id)
-    {
+        .filter(|document| document.project_id == project_id)
+    else {
         return Err(ServerError::not_found(format!("document {id} not found")));
-    }
+    };
     let fingerprint = state.retrieval.index_fingerprint();
     let Some(job) = state
         .store
-        .retry_document_index_job(id, &fingerprint, MAX_INDEX_ATTEMPTS)
+        .retry_document_job(
+            id,
+            document.generation(),
+            openwave_core::DocumentJobKind::Index,
+            &fingerprint,
+            MAX_INDEX_ATTEMPTS,
+        )
         .await?
     else {
         return Err(ServerError::conflict(format!(

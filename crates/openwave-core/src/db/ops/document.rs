@@ -294,6 +294,192 @@ pub(in crate::db) async fn complete_parse_and_enqueue_index(
     Ok(Some((record, index_job)))
 }
 
+pub(in crate::db) async fn retry_document_job(
+    store: &DbStore,
+    document_id: DocumentId,
+    expected_generation: DocumentGeneration,
+    kind: DocumentJobKind,
+    pipeline_fingerprint: &str,
+    max_attempts: i32,
+) -> Result<Option<DocumentJob>> {
+    validate_job_input(pipeline_fingerprint, max_attempts)?;
+
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_document_write_lock(&transaction, document_id).await?;
+    let Some(document) = entities::document::Entity::find_by_id(document_id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    ensure_live_document_generation_on(&transaction, &document).await?;
+    let current_generation = DocumentGeneration {
+        content_revision: document.content_revision,
+        revision_token: document.revision_token,
+    };
+    if current_generation != expected_generation {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let awaiting_parse =
+        document.source_blob_id.is_some() && document.canonical_fingerprint.is_none();
+    let stage_matches = match kind {
+        DocumentJobKind::Parse => awaiting_parse,
+        DocumentJobKind::Index => !awaiting_parse,
+    };
+    if !stage_matches {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    let candidate = entities::document_job::Entity::find()
+        .filter(entities::document_job::Column::DocumentId.eq(document.id))
+        .filter(entities::document_job::Column::ContentRevision.eq(document.content_revision))
+        .filter(entities::document_job::Column::RevisionToken.eq(document.revision_token))
+        .filter(entities::document_job::Column::Kind.eq(kind.as_str()))
+        .filter(entities::document_job::Column::PipelineFingerprint.eq(pipeline_fingerprint))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?;
+    let Some(candidate) = candidate else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let mut job = document_job_from_model(candidate.clone())?;
+    if matches!(
+        job.status,
+        DocumentJobStatus::Queued | DocumentJobStatus::Running | DocumentJobStatus::RetryWait
+    ) {
+        let expected = if job.status == DocumentJobStatus::Running {
+            DocumentProcessingStatus::Processing
+        } else {
+            DocumentProcessingStatus::Queued
+        };
+        if document.processing_status != expected.as_str() {
+            return Err(AgentError::Store(format!(
+                "document job {} is {} but exact document {} is unexpectedly {}",
+                job.id,
+                job.status.as_str(),
+                document_id,
+                document.processing_status
+            )));
+        }
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(job));
+    }
+    if job.status != DocumentJobStatus::Failed {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    if document.processing_status != DocumentProcessingStatus::Failed.as_str() {
+        return Err(AgentError::Store(format!(
+            "failed document job {} does not match failed document {}",
+            job.id, document_id
+        )));
+    }
+
+    let now = Utc::now();
+    let revived = entities::document_job::Entity::update_many()
+        .col_expr(
+            entities::document_job::Column::Status,
+            sea_orm::sea_query::Expr::value(DocumentJobStatus::Queued.as_str()),
+        )
+        .col_expr(
+            entities::document_job::Column::AttemptCount,
+            sea_orm::sea_query::Expr::value(0),
+        )
+        .col_expr(
+            entities::document_job::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(max_attempts),
+        )
+        .col_expr(
+            entities::document_job::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            entities::document_job::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::StartedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::document_job::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::document_job::Column::Id.eq(candidate.id))
+        .filter(entities::document_job::Column::Status.eq(DocumentJobStatus::Failed.as_str()))
+        .filter(entities::document_job::Column::UpdatedAt.eq(candidate.updated_at))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    let document_queued = entities::document::Entity::update_many()
+        .col_expr(
+            entities::document::Column::ProcessingStatus,
+            sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
+        )
+        .col_expr(
+            entities::document::Column::IndexedRevision,
+            sea_orm::sea_query::Expr::value(Option::<i64>::None),
+        )
+        .col_expr(
+            entities::document::Column::IndexFingerprint,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::document::Column::IndexedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .filter(entities::document::Column::Id.eq(document.id))
+        .filter(entities::document::Column::ContentRevision.eq(document.content_revision))
+        .filter(entities::document::Column::RevisionToken.eq(document.revision_token))
+        .filter(
+            entities::document::Column::ProcessingStatus
+                .eq(DocumentProcessingStatus::Failed.as_str()),
+        )
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if revived.rows_affected != 1 || document_queued.rows_affected != 1 {
+        return Err(AgentError::Store(format!(
+            "failed document job {} changed during explicit retry",
+            job.id
+        )));
+    }
+    transaction.commit().await.map_err(store_err)?;
+    job.status = DocumentJobStatus::Queued;
+    job.attempt_count = 0;
+    job.max_attempts = max_attempts;
+    job.available_at = now;
+    job.lease_token = None;
+    job.lease_expires_at = None;
+    job.started_at = None;
+    job.finished_at = None;
+    job.last_error_code = None;
+    job.last_error_detail = None;
+    job.updated_at = now;
+    Ok(Some(job))
+}
+
 fn validate_source_input(
     source: &DocumentSourceUpsert,
     parser_fingerprint: &str,
