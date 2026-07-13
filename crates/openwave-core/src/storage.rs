@@ -159,6 +159,15 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
+    /// Ensure an old filesystem orphan has a durable retirement candidate.
+    ///
+    /// Returns `true` only when a missing, succeeded, or cancelled episode was
+    /// queued. Referenced blobs, active work, and exhausted failures are left
+    /// unchanged. Filesystem auditors must hold the publisher/retirer blob guard.
+    async fn ensure_orphan_blob_retirement(&self, _blob_id: uuid::Uuid) -> Result<bool> {
+        document_storage_unavailable()
+    }
+
     /// Claim the oldest effective-due blob retirement under a fresh lease.
     ///
     /// `lease_expires_at` must be after `now`. Expired running work is reclaimed

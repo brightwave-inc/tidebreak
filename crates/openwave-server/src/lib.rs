@@ -13,6 +13,7 @@
 
 mod approvals;
 mod auth;
+mod blob_orphan_auditor;
 mod blob_retirement_worker;
 mod bus;
 mod document_auditor;
@@ -159,6 +160,7 @@ pub struct Server {
     _document_auditor: AbortTask,
     _document_worker: AbortTask,
     _blob_retirement_worker: AbortTask,
+    _blob_orphan_auditor: AbortTask,
 }
 
 struct AbortTask(tokio::task::JoinHandle<()>);
@@ -235,6 +237,13 @@ pub async fn bind(config: Config) -> Result<Server> {
         state.blob_writes.clone(),
         blob_retirement_worker::BlobRetirementWorkerConfig::default(),
     );
+    let blob_orphan_auditor = blob_orphan_auditor::BlobOrphanAuditor::new(
+        state.store.clone(),
+        state.config.data_dir.join("blobs"),
+        state.blob_writes.clone(),
+        state.blob_retirement_wake.clone(),
+        blob_orphan_auditor::BlobOrphanAuditorConfig::default(),
+    );
     let router = app(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -247,6 +256,7 @@ pub async fn bind(config: Config) -> Result<Server> {
     let document_auditor = tokio::spawn(document_auditor.run());
     let document_worker = tokio::spawn(document_worker.run());
     let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
+    let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
 
     Ok(Server {
         local_addr,
@@ -256,6 +266,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         _document_auditor: AbortTask(document_auditor),
         _document_worker: AbortTask(document_worker),
         _blob_retirement_worker: AbortTask(blob_retirement_worker),
+        _blob_orphan_auditor: AbortTask(blob_orphan_auditor),
     })
 }
 

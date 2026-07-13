@@ -292,6 +292,10 @@ impl Store for DbStore {
         ops::blob::get(self, blob_id).await
     }
 
+    async fn ensure_orphan_blob_retirement(&self, blob_id: uuid::Uuid) -> Result<bool> {
+        ops::blob::ensure_orphan(self, blob_id).await
+    }
+
     async fn claim_blob_retirement(
         &self,
         now: chrono::DateTime<Utc>,
