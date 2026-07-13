@@ -298,6 +298,150 @@ pub(in crate::db) async fn heartbeat(
     Ok(updated.rows_affected == 1)
 }
 
+pub(in crate::db) async fn complete(
+    store: &DbStore,
+    blob_id: uuid::Uuid,
+    lease_token: uuid::Uuid,
+    completed_at: chrono::DateTime<Utc>,
+) -> Result<bool> {
+    let completed = entities::blob_retirement::Entity::update_many()
+        .col_expr(
+            entities::blob_retirement::Column::Status,
+            sea_orm::sea_query::Expr::value(BlobRetirementStatus::Succeeded.as_str()),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(completed_at)),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(completed_at),
+        )
+        .filter(entities::blob_retirement::Column::BlobId.eq(blob_id))
+        .filter(
+            entities::blob_retirement::Column::Status.eq(BlobRetirementStatus::Running.as_str()),
+        )
+        .filter(entities::blob_retirement::Column::LeaseToken.eq(lease_token))
+        .filter(entities::blob_retirement::Column::LeaseExpiresAt.gt(completed_at))
+        .filter(entities::blob_retirement::Column::UpdatedAt.lte(completed_at))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(completed.rows_affected == 1)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn record_failure(
+    store: &DbStore,
+    blob_id: uuid::Uuid,
+    lease_token: uuid::Uuid,
+    failed_at: chrono::DateTime<Utc>,
+    retry_at: Option<chrono::DateTime<Utc>>,
+    error_code: &str,
+    error_detail: Option<&str>,
+) -> Result<Option<BlobRetirementStatus>> {
+    validate_error(error_code, error_detail)?;
+    if retry_at.is_some_and(|retry_at| retry_at <= failed_at) {
+        return Err(AgentError::Store(
+            "blob retirement retry time must be after failure time".into(),
+        ));
+    }
+
+    loop {
+        let transaction = store.conn.begin().await.map_err(store_err)?;
+        acquire_write_lock(&transaction).await?;
+        let candidate = entities::blob_retirement::Entity::find_by_id(blob_id)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?;
+        let Some(candidate) =
+            candidate.filter(|candidate| lease_is_live(candidate, lease_token, failed_at))
+        else {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(None);
+        };
+        let will_retry = retry_at.is_some() && candidate.attempt_count < candidate.max_attempts;
+        let next_status = if will_retry {
+            BlobRetirementStatus::RetryWait
+        } else {
+            BlobRetirementStatus::Failed
+        };
+        let update = entities::blob_retirement::Entity::update_many()
+            .col_expr(
+                entities::blob_retirement::Column::Status,
+                sea_orm::sea_query::Expr::value(next_status.as_str()),
+            )
+            .col_expr(
+                entities::blob_retirement::Column::LeaseToken,
+                sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+            )
+            .col_expr(
+                entities::blob_retirement::Column::LeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .col_expr(
+                entities::blob_retirement::Column::LastErrorCode,
+                sea_orm::sea_query::Expr::value(Some(error_code.to_owned())),
+            )
+            .col_expr(
+                entities::blob_retirement::Column::LastErrorDetail,
+                sea_orm::sea_query::Expr::value(error_detail.map(str::to_owned)),
+            )
+            .col_expr(
+                entities::blob_retirement::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(failed_at),
+            );
+        let update = if let Some(retry_at) = retry_at.filter(|_| will_retry) {
+            update.col_expr(
+                entities::blob_retirement::Column::AvailableAt,
+                sea_orm::sea_query::Expr::value(retry_at),
+            )
+        } else {
+            update.col_expr(
+                entities::blob_retirement::Column::FinishedAt,
+                sea_orm::sea_query::Expr::value(Some(failed_at)),
+            )
+        };
+        let resolved = update
+            .filter(entities::blob_retirement::Column::BlobId.eq(blob_id))
+            .filter(
+                entities::blob_retirement::Column::Status
+                    .eq(BlobRetirementStatus::Running.as_str()),
+            )
+            .filter(entities::blob_retirement::Column::AttemptCount.eq(candidate.attempt_count))
+            .filter(entities::blob_retirement::Column::LeaseToken.eq(lease_token))
+            .filter(
+                entities::blob_retirement::Column::LeaseExpiresAt.eq(candidate.lease_expires_at),
+            )
+            .filter(entities::blob_retirement::Column::UpdatedAt.eq(candidate.updated_at))
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+        if resolved.rows_affected != 1 {
+            transaction.rollback().await.map_err(store_err)?;
+            continue;
+        }
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(next_status));
+    }
+}
+
 async fn cancel_candidate_on<C>(
     conn: &C,
     candidate: &entities::blob_retirement::Model,
@@ -397,6 +541,36 @@ fn is_due(retirement: &entities::blob_retirement::Model, now: chrono::DateTime<U
             .is_some_and(|lease_expires_at| lease_expires_at <= now),
         _ => false,
     }
+}
+
+fn lease_is_live(
+    retirement: &entities::blob_retirement::Model,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    retirement.status == BlobRetirementStatus::Running.as_str()
+        && retirement.lease_token == Some(lease_token)
+        && retirement
+            .lease_expires_at
+            .is_some_and(|lease_expires_at| lease_expires_at > now)
+        && retirement.updated_at <= now
+}
+
+fn validate_error(error_code: &str, error_detail: Option<&str>) -> Result<()> {
+    let code_len = error_code.chars().count();
+    if !(1..=BlobRetirement::MAX_ERROR_CODE_LEN).contains(&code_len) {
+        return Err(AgentError::Store(
+            "blob retirement error code must contain 1 to 128 characters".into(),
+        ));
+    }
+    if error_detail.is_some_and(|detail| {
+        !(1..=BlobRetirement::MAX_ERROR_DETAIL_LEN).contains(&detail.chars().count())
+    }) {
+        return Err(AgentError::Store(
+            "blob retirement error detail must contain 1 to 4096 characters".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Coalesce a dropped source reference into one fresh retirement episode.

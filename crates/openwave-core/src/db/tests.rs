@@ -1129,6 +1129,284 @@ async fn blob_retirement_claim_and_heartbeat_require_the_live_lease() {
 }
 
 #[tokio::test]
+async fn blob_retirement_completion_requires_the_exact_live_lease() {
+    let (_dir, store) = temp_store().await;
+    let source = sample_raw_source(
+        DocumentId::new(),
+        "file:///retire-complete.bin",
+        DocumentSourceBlob::from_digest([0x75; 32], 75),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
+        .await
+        .unwrap();
+    store.delete_document(source.id).await.unwrap();
+    let queued = store
+        .get_blob_retirement(source.source_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let claimed_at = queued.available_at + chrono::Duration::seconds(1);
+    let lease_expires_at = claimed_at + chrono::Duration::minutes(5);
+    let claimed = store
+        .claim_blob_retirement(claimed_at, lease_expires_at)
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_token = claimed.lease_token.unwrap();
+    assert!(!store
+        .complete_blob_retirement(
+            claimed.blob_id,
+            uuid::Uuid::new_v4(),
+            claimed_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap());
+    assert!(!store
+        .complete_blob_retirement(
+            claimed.blob_id,
+            lease_token,
+            claimed_at - chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap());
+    assert!(!store
+        .complete_blob_retirement(claimed.blob_id, lease_token, lease_expires_at)
+        .await
+        .unwrap());
+
+    let completed_at = claimed_at + chrono::Duration::seconds(2);
+    assert!(store
+        .complete_blob_retirement(claimed.blob_id, lease_token, completed_at)
+        .await
+        .unwrap());
+    let succeeded = store
+        .get_blob_retirement(claimed.blob_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(succeeded.status, BlobRetirementStatus::Succeeded);
+    assert_eq!(succeeded.lease_token, None);
+    assert_eq!(succeeded.lease_expires_at, None);
+    assert_eq!(succeeded.finished_at, Some(completed_at));
+    assert_eq!(succeeded.last_error_code, None);
+    assert_eq!(succeeded.last_error_detail, None);
+    assert!(!store
+        .complete_blob_retirement(claimed.blob_id, lease_token, completed_at)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn blob_retirement_failure_retries_then_exhausts_the_attempt_budget() {
+    let (_dir, store) = temp_store().await;
+    let source = sample_raw_source(
+        DocumentId::new(),
+        "file:///retire-failure.bin",
+        DocumentSourceBlob::from_digest([0x76; 32], 76),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
+        .await
+        .unwrap();
+    store.delete_document(source.id).await.unwrap();
+    entities::blob_retirement::Entity::update_many()
+        .col_expr(
+            entities::blob_retirement::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(2_i32),
+        )
+        .filter(entities::blob_retirement::Column::BlobId.eq(source.source_blob.id))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let queued = store
+        .get_blob_retirement(source.source_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let first_at = queued.available_at + chrono::Duration::seconds(1);
+    let first = store
+        .claim_blob_retirement(first_at, first_at + chrono::Duration::minutes(5))
+        .await
+        .unwrap()
+        .unwrap();
+    let first_token = first.lease_token.unwrap();
+    let failed_at = first_at + chrono::Duration::seconds(1);
+    let retry_at = failed_at + chrono::Duration::minutes(1);
+    assert!(store
+        .record_blob_retirement_failure(
+            first.blob_id,
+            first_token,
+            failed_at,
+            Some(failed_at),
+            "delete_failed",
+            None,
+        )
+        .await
+        .is_err());
+    assert!(store
+        .record_blob_retirement_failure(
+            first.blob_id,
+            first_token,
+            failed_at,
+            Some(retry_at),
+            "",
+            None,
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .record_blob_retirement_failure(
+                first.blob_id,
+                uuid::Uuid::new_v4(),
+                failed_at,
+                Some(retry_at),
+                "delete_failed",
+                Some("temporary filesystem error"),
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .record_blob_retirement_failure(
+                first.blob_id,
+                first_token,
+                failed_at,
+                Some(retry_at),
+                "delete_failed",
+                Some("temporary filesystem error"),
+            )
+            .await
+            .unwrap(),
+        Some(BlobRetirementStatus::RetryWait)
+    );
+    let waiting = store
+        .get_blob_retirement(first.blob_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(waiting.status, BlobRetirementStatus::RetryWait);
+    assert_eq!(waiting.available_at, retry_at);
+    assert_eq!(waiting.finished_at, None);
+    assert_eq!(waiting.last_error_code.as_deref(), Some("delete_failed"));
+    assert_eq!(
+        store
+            .claim_blob_retirement(failed_at, failed_at + chrono::Duration::minutes(5))
+            .await
+            .unwrap(),
+        None
+    );
+
+    let second = store
+        .claim_blob_retirement(retry_at, retry_at + chrono::Duration::minutes(5))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.blob_id, first.blob_id);
+    assert_eq!(second.attempt_count, 2);
+    assert_ne!(second.lease_token, first.lease_token);
+    assert_eq!(second.last_error_code.as_deref(), Some("delete_failed"));
+    let terminal_at = retry_at + chrono::Duration::seconds(1);
+    assert_eq!(
+        store
+            .record_blob_retirement_failure(
+                second.blob_id,
+                second.lease_token.unwrap(),
+                terminal_at,
+                Some(terminal_at + chrono::Duration::minutes(1)),
+                "delete_failed",
+                None,
+            )
+            .await
+            .unwrap(),
+        Some(BlobRetirementStatus::Failed)
+    );
+    let failed = store
+        .get_blob_retirement(second.blob_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.status, BlobRetirementStatus::Failed);
+    assert_eq!(failed.attempt_count, 2);
+    assert_eq!(failed.finished_at, Some(terminal_at));
+    assert_eq!(failed.lease_token, None);
+    assert_eq!(failed.lease_expires_at, None);
+}
+
+#[tokio::test]
+async fn blob_retirement_claim_skips_an_exhausted_lease_and_returns_later_work() {
+    let (_dir, store) = temp_store().await;
+    let exhausted_source = sample_raw_source(
+        DocumentId::new(),
+        "file:///retire-exhausted-first.bin",
+        DocumentSourceBlob::from_digest([0x77; 32], 77),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&exhausted_source, "parser-v1", 3)
+        .await
+        .unwrap();
+    store.delete_document(exhausted_source.id).await.unwrap();
+    entities::blob_retirement::Entity::update_many()
+        .col_expr(
+            entities::blob_retirement::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(1_i32),
+        )
+        .filter(entities::blob_retirement::Column::BlobId.eq(exhausted_source.source_blob.id))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let exhausted_queued = store
+        .get_blob_retirement(exhausted_source.source_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let first_at = exhausted_queued.available_at + chrono::Duration::seconds(1);
+    let first_expiry = first_at + chrono::Duration::minutes(1);
+    store
+        .claim_blob_retirement(first_at, first_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let later_source = sample_raw_source(
+        DocumentId::new(),
+        "file:///retire-later-work.bin",
+        DocumentSourceBlob::from_digest([0x78; 32], 78),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&later_source, "parser-v1", 3)
+        .await
+        .unwrap();
+    store.delete_document(later_source.id).await.unwrap();
+    entities::blob_retirement::Entity::update_many()
+        .col_expr(
+            entities::blob_retirement::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(first_expiry + chrono::Duration::milliseconds(500)),
+        )
+        .filter(entities::blob_retirement::Column::BlobId.eq(later_source.source_blob.id))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let claim_at = first_expiry + chrono::Duration::seconds(1);
+    let claimed = store
+        .claim_blob_retirement(claim_at, claim_at + chrono::Duration::minutes(5))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.blob_id, later_source.source_blob.id);
+    let exhausted = store
+        .get_blob_retirement(exhausted_source.source_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exhausted.status, BlobRetirementStatus::Failed);
+    assert_eq!(exhausted.last_error_code.as_deref(), Some("lease_expired"));
+}
+
+#[tokio::test]
 async fn expired_blob_retirement_leases_are_reclaimed_then_fail_at_the_attempt_limit() {
     let (_dir, store) = temp_store().await;
     let source = sample_raw_source(

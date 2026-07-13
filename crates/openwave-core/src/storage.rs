@@ -22,9 +22,9 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
 use crate::model::{
-    BlobRetirement, Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus,
-    DocumentListCursor, DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceUpsert,
-    DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
+    BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
+    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentRecord, DocumentScope,
+    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
 };
 
 /// Why maintenance determined that a document needs an index job.
@@ -180,6 +180,36 @@ pub trait Store: Send + Sync {
         _now: chrono::DateTime<chrono::Utc>,
         _lease_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
+        document_storage_unavailable()
+    }
+
+    /// Mark one exact live blob-retirement lease as successfully deleted.
+    ///
+    /// Returns `false` if the row is no longer running under the exact,
+    /// unexpired lease or `completed_at` would regress durable state.
+    async fn complete_blob_retirement(
+        &self,
+        _blob_id: uuid::Uuid,
+        _lease_token: uuid::Uuid,
+        _completed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        document_storage_unavailable()
+    }
+
+    /// Record a deletion failure for one exact live blob-retirement lease.
+    ///
+    /// A future `retry_at` moves work with attempts remaining to `retry_wait`;
+    /// no retry time, or an exhausted attempt budget, moves it to `failed`.
+    /// Returns the resulting state, or `None` when the lease lost ownership.
+    async fn record_blob_retirement_failure(
+        &self,
+        _blob_id: uuid::Uuid,
+        _lease_token: uuid::Uuid,
+        _failed_at: chrono::DateTime<chrono::Utc>,
+        _retry_at: Option<chrono::DateTime<chrono::Utc>>,
+        _error_code: &str,
+        _error_detail: Option<&str>,
+    ) -> Result<Option<BlobRetirementStatus>> {
         document_storage_unavailable()
     }
 
