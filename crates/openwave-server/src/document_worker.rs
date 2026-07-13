@@ -922,7 +922,8 @@ mod tests {
     async fn parse_job_rejects_source_bytes_that_do_not_match_the_descriptor() {
         let (_dir, store, retrieval, _embedder, worker) = harness().await;
         let raw = b"tampered source bytes".to_vec();
-        let blob_id = uuid::Uuid::new_v4();
+        let source_blob = DocumentSourceBlob::from_digest([0x77; 32], raw.len() as u64);
+        let blob_id = source_blob.id;
         worker
             .blobs
             .put(&blob_id.to_string(), raw.clone())
@@ -934,11 +935,7 @@ mod tests {
             source_uri: Some("file:///tampered.txt".into()),
             media_type: "text/plain".into(),
             title: None,
-            source_blob: DocumentSourceBlob {
-                id: blob_id,
-                sha256: [0x77; 32],
-                byte_len: raw.len() as u64,
-            },
+            source_blob,
             updated_at: Utc::now(),
         };
         let (_, parse_job) = store

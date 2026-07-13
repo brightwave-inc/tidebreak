@@ -179,11 +179,26 @@ impl DocumentSourceBlob {
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let sha256: [u8; 32] = Sha256::digest(bytes).into();
+        Self::from_digest(
+            sha256,
+            u64::try_from(bytes.len()).expect("source byte length exceeds u64"),
+        )
+    }
+
+    /// Describe retained source from its already-computed digest and byte length.
+    #[must_use]
+    pub fn from_digest(sha256: [u8; 32], byte_len: u64) -> Self {
         Self {
             id: Uuid::new_v5(&Self::CONTENT_NAMESPACE, &sha256),
             sha256,
-            byte_len: u64::try_from(bytes.len()).expect("source byte length exceeds u64"),
+            byte_len,
         }
+    }
+
+    /// Whether the blob key is the canonical content address for its digest.
+    #[must_use]
+    pub fn has_content_addressed_id(&self) -> bool {
+        self.id == Uuid::new_v5(&Self::CONTENT_NAMESPACE, &self.sha256)
     }
 }
 
@@ -596,6 +611,14 @@ mod tests {
             first.id,
             Uuid::parse_str("bb06b189-790a-5087-89fd-767534773c0f").unwrap()
         );
+        assert!(first.has_content_addressed_id());
+        assert_eq!(
+            first,
+            DocumentSourceBlob::from_digest(first.sha256, first.byte_len)
+        );
+        let mut invalid = first.clone();
+        invalid.id = Uuid::new_v4();
+        assert!(!invalid.has_content_addressed_id());
         assert_ne!(first.id, DocumentSourceBlob::from_bytes(b"other").id);
     }
 

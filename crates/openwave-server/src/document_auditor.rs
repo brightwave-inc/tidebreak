@@ -373,11 +373,7 @@ mod tests {
             source_uri: Some("file:///audited-source.txt".into()),
             media_type: "text/plain".into(),
             title: None,
-            source_blob: DocumentSourceBlob {
-                id: uuid::Uuid::new_v4(),
-                sha256: [0x55; 32],
-                byte_len: 128,
-            },
+            source_blob: DocumentSourceBlob::from_digest([0x55; 32], 128),
             updated_at: Utc::now(),
         }
     }

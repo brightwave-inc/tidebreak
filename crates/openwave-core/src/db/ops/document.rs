@@ -14,7 +14,7 @@ use super::super::{
     document_job_active_model, document_job_from_model, document_job_lease_is_live,
     ensure_live_document_generation_on, ensure_resolution_document_matches, entities,
     source_regions_to_db, store_err, try_advance_document_generation_on,
-    validate_document_source_regions, DbStore,
+    validate_document_source_blob, validate_document_source_regions, DbStore,
 };
 
 pub(in crate::db) async fn accept_source_and_enqueue_parse(
@@ -684,8 +684,7 @@ fn validate_source_input(
     if source.media_type.is_empty() || source.source_uri.as_deref() == Some("") {
         return Err(AgentError::Store("invalid document source metadata".into()));
     }
-    i64::try_from(source.source_blob.byte_len)
-        .map_err(|_| AgentError::Store("document source is too large".into()))?;
+    validate_document_source_blob(&source.source_blob)?;
     validate_job_input(parser_fingerprint, max_attempts)
 }
 
