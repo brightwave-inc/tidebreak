@@ -11,7 +11,9 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR heads can stop immediately. Main runs must finish so their
+  # trusted compiler artifacts become available to the next PR in a merge train.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
@@ -110,14 +112,14 @@ jobs:
           # target archive that previously exhausted a hosted runner. sccache
           # reuses individual compiler outputs without pre-filling target/.
           cache-targets: false
-          # PR-scoped registry caches cannot help later PRs. Both Rust lanes
+          # PR-scoped registry caches cannot help later PRs. All compiler lanes
           # restore the trusted main cache and only main refreshes it.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-  test:
-    name: build · test
+  build:
+    name: build
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
@@ -154,19 +156,57 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: build
         run: cargo build --workspace --locked
+
+  test:
+    name: test
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: v0.16.0
+      - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-registry
+          add-job-id-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: test
         run: cargo test --workspace --locked
 
   rust:
     name: fmt · clippy · build · test
     if: ${{ always() }}
-    needs: [changes, fmt, lint, test]
+    needs: [changes, fmt, lint, build, test]
     runs-on: ubuntu-latest
     steps:
       - name: Require every Rust lane
         env:
           FMT_RESULT: ${{ needs.fmt.result }}
           LINT_RESULT: ${{ needs.lint.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
           TEST_RESULT: ${{ needs.test.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUST_CHANGED: ${{ needs.changes.outputs.rust }}
@@ -176,11 +216,13 @@ jobs:
             true)
               test "$FMT_RESULT" = success
               test "$LINT_RESULT" = success
+              test "$BUILD_RESULT" = success
               test "$TEST_RESULT" = success
               ;;
             false)
               test "$FMT_RESULT" = skipped
               test "$LINT_RESULT" = skipped
+              test "$BUILD_RESULT" = skipped
               test "$TEST_RESULT" = skipped
               ;;
             *)
