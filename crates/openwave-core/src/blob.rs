@@ -17,10 +17,11 @@ use crate::{AgentError, BlobStore, Result};
 /// Filesystem-backed opaque byte storage.
 ///
 /// Blob ids are UUIDs and become flat filenames under `root`; caller-controlled
-/// paths never participate in path resolution. Writes use an adjacent temporary
-/// file followed by rename, so readers see either the previous complete value or
-/// the replacement, never a partial write. Clones share an in-process lock; the
-/// server owns one instance per data directory.
+/// paths never participate in path resolution. Writes sync an adjacent temporary
+/// file before atomically publishing a new destination, so readers never observe
+/// partial bytes. Existing ids accept identical bytes idempotently and reject
+/// replacement. Clones share an in-process lock; atomic no-replace publication
+/// also coordinates independent instances using the same directory.
 #[derive(Clone)]
 pub struct FsBlobStore {
     root: Arc<PathBuf>,
@@ -78,12 +79,33 @@ impl BlobStore for FsBlobStore {
                 let _guard = access
                     .write()
                     .map_err(|_| AgentError::Store("blob store lock poisoned".into()))?;
-                replace_file(&temporary, &destination)?;
-                sync_directory(&root)?;
-                Ok(())
+                match publish_new_file(&temporary, &destination) {
+                    Ok(()) => {
+                        // The destination must be durable before best-effort
+                        // temporary-name cleanup can report or fail.
+                        sync_directory(&root)
+                    }
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                        let existing = fs::read(&destination)
+                            .map_err(|error| blob_error("read immutable file", error))?;
+                        if existing == bytes {
+                            // A retry may be observing a link published just
+                            // before a prior process crashed. Re-establish the
+                            // namespace durability barrier before acknowledging.
+                            sync_directory(&root)
+                        } else {
+                            Err(AgentError::Store(
+                                "immutable blob id already contains different bytes".into(),
+                            ))
+                        }
+                    }
+                    Err(error) => Err(blob_error("publish immutable file", error)),
+                }
             })();
-            if result.is_err() {
-                let _ = fs::remove_file(&temporary);
+            if fs::remove_file(&temporary).is_ok() {
+                // Publication is already durable. Failure to persist removal
+                // can only leave an unreferenced, hidden temporary file.
+                let _ = sync_directory(&root);
             }
             result
         })
@@ -128,16 +150,14 @@ impl BlobStore for FsBlobStore {
 }
 
 #[cfg(not(windows))]
-fn replace_file(temporary: &Path, destination: &Path) -> Result<()> {
-    fs::rename(temporary, destination).map_err(|error| blob_error("publish file", error))
+fn publish_new_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::hard_link(temporary, destination)
 }
 
 #[cfg(windows)]
-fn replace_file(temporary: &Path, destination: &Path) -> Result<()> {
+fn publish_new_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 
     let temporary: Vec<u16> = temporary
         .as_os_str()
@@ -155,11 +175,11 @@ fn replace_file(temporary: &Path, destination: &Path) -> Result<()> {
         MoveFileExW(
             temporary.as_ptr(),
             destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            MOVEFILE_WRITE_THROUGH,
         )
     };
     if published == 0 {
-        Err(blob_error("publish file", std::io::Error::last_os_error()))
+        Err(std::io::Error::last_os_error())
     } else {
         Ok(())
     }
@@ -186,7 +206,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn roundtrips_overwrites_reopens_and_deletes_idempotently() {
+    async fn roundtrips_reopens_and_deletes_idempotently() {
         let directory = tempfile::tempdir().unwrap();
         let id = Uuid::new_v4().to_string();
         let store = FsBlobStore::new(directory.path());
@@ -206,12 +226,12 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        store.put(&id, b"second".to_vec()).await.unwrap();
+        store.put(&id, b"first".to_vec()).await.unwrap();
 
         let reopened = FsBlobStore::new(directory.path());
         assert_eq!(
             reopened.get(&id).await.unwrap().as_deref(),
-            Some(&b"second"[..])
+            Some(&b"first"[..])
         );
         reopened.delete(&id).await.unwrap();
         reopened.delete(&id).await.unwrap();
@@ -219,20 +239,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_overwrites_leave_one_complete_value() {
+    async fn immutable_publication_is_idempotent_and_rejects_replacement() {
         let directory = tempfile::tempdir().unwrap();
         let id = Uuid::new_v4().to_string();
         let store = FsBlobStore::new(directory.path());
+
+        store.put(&id, b"retained source".to_vec()).await.unwrap();
+        store.put(&id, b"retained source".to_vec()).await.unwrap();
+        assert!(store.put(&id, b"different source".to_vec()).await.is_err());
+        assert_eq!(
+            store.get(&id).await.unwrap().as_deref(),
+            Some(&b"retained source"[..])
+        );
+    }
+
+    #[tokio::test]
+    async fn independent_stores_choose_one_complete_immutable_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4().to_string();
+        let left_store = FsBlobStore::new(directory.path());
+        let right_store = FsBlobStore::new(directory.path());
         let first = vec![b'a'; 128 * 1024];
         let second = vec![b'b'; 128 * 1024];
 
         let (left, right) = tokio::join!(
-            store.put(&id, first.clone()),
-            store.put(&id, second.clone())
+            left_store.put(&id, first.clone()),
+            right_store.put(&id, second.clone())
         );
-        left.unwrap();
-        right.unwrap();
-        let stored = store.get(&id).await.unwrap().unwrap();
+        assert_ne!(left.is_ok(), right.is_ok());
+        let stored = left_store.get(&id).await.unwrap().unwrap();
         assert!(stored == first || stored == second);
     }
 

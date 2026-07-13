@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::num::NonZeroU32;
 use uuid::Uuid;
 
@@ -169,6 +170,21 @@ pub struct DocumentSourceBlob {
     pub sha256: [u8; 32],
     /// Exact source byte length.
     pub byte_len: u64,
+}
+
+impl DocumentSourceBlob {
+    const CONTENT_NAMESPACE: Uuid = Uuid::from_u128(0xd262_91eb_f9f7_5b4d_a65d_4a44_70f8_081f);
+
+    /// Describe source bytes using a deterministic content-addressed UUID.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let sha256: [u8; 32] = Sha256::digest(bytes).into();
+        Self {
+            id: Uuid::new_v5(&Self::CONTENT_NAMESPACE, &sha256),
+            sha256,
+            byte_len: u64::try_from(bytes.len()).expect("source byte length exceeds u64"),
+        }
+    }
 }
 
 /// Metadata and immutable bytes accepted for asynchronous document parsing.
@@ -565,6 +581,22 @@ mod tests {
         );
         assert!(DocumentJobStatus::Succeeded.is_terminal());
         assert!(!DocumentJobStatus::Running.is_terminal());
+    }
+
+    #[test]
+    fn source_blob_identity_is_deterministic_and_content_addressed() {
+        let first = DocumentSourceBlob::from_bytes(b"same source bytes");
+        assert_eq!(first, DocumentSourceBlob::from_bytes(b"same source bytes"));
+        assert_eq!(first.byte_len, 17);
+        assert_eq!(
+            first.sha256,
+            <[u8; 32]>::from(Sha256::digest(b"same source bytes"))
+        );
+        assert_eq!(
+            first.id,
+            Uuid::parse_str("bb06b189-790a-5087-89fd-767534773c0f").unwrap()
+        );
+        assert_ne!(first.id, DocumentSourceBlob::from_bytes(b"other").id);
     }
 
     fn page_region(start: usize, end: usize, page: u32) -> SourceRegion {
