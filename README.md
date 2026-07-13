@@ -50,29 +50,32 @@ box, so it works on your machine from the first run.
 Most agentic tools are cloud services that hold your data and meter your usage.
 OpenWave is the opposite: a slim desktop app (plus a headless mode) that runs the
 agent loop **on your machine**, keeps your data local, and lets you bring your
-own model — hosted or fully offline. It speaks [MCP](https://modelcontextprotocol.io),
-so it works with the agents and tools you already use.
+own model — hosted or fully offline. Its MCP server foundation can expose the
+same tool registry to external agents; CLI lifecycle wiring and the MCP client
+remain in development.
 
 ## Principles
 
 - **Local-first & private.** Your files, keys, and history stay on your machine.
-- **Bring your own keys.** Configure the models (Anthropic, OpenAI, Google, or
-  anything OpenAI-compatible — vLLM, LM Studio, Ollama, OpenRouter), embedding
-  services, and document parsers you want — with local-friendly defaults. We
+- **Bring your own keys.** Configure Anthropic, OpenAI, or an OpenAI-compatible
+  endpoint (vLLM, LM Studio, Ollama, OpenRouter), along with the embedding
+  services and document parsers you want — with local-friendly defaults. We
   never meter tokens.
 - **Slim by default.** Small install; no bundled model weights or language
   runtimes — fetched on first use, cached locally.
-- **Works with any agent.** An MCP server _and_ a client — OpenWave both exposes
-  tools and consumes them.
+- **Composable tool surface.** The MCP server foundation exposes OpenWave's
+  tools; mounting external MCP servers as a client is planned.
 - **Open core.** The runtime is Apache-2.0 and complete on its own.
 
 ## Status
 
-Pre-alpha, built in the open. The walking skeleton runs today: projects and
-chats, local file tools, a turn engine, and live event streaming over WebSocket,
-all behind `openwave serve`. Desktop UI, connectors, and retrieval come next.
-Expect rapid change and rough edges — and see [CONTRIBUTING](CONTRIBUTING.md) if
-you'd like to help.
+Pre-alpha, built in the open. The current stack includes projects and chats,
+local file tools, multi-provider model routing, a turn engine with live journaled
+WebSocket events, a baseline desktop UI, and durable asynchronous document
+ingestion/retrieval with grounded citations — all behind `openwave serve`.
+Connectors, richer document parsers, and complete MCP lifecycle wiring remain in
+development. Expect rapid change and rough edges — and see
+[CONTRIBUTING](CONTRIBUTING.md) if you'd like to help.
 
 ## Building
 
@@ -107,15 +110,14 @@ walkthrough of each crate, see [`docs/crates.md`](docs/crates.md).
 | Crate | What it is |
 | --- | --- |
 | [`openwave-core`](crates/openwave-core) | agent loop, tools, event stream, storage traits |
+| [`openwave-router`](crates/openwave-router) | Anthropic and OpenAI-compatible providers + model routing |
+| [`openwave-server`](crates/openwave-server) | authenticated local HTTP/WebSocket API + durable workers |
 | [`openwave-connectors`](crates/openwave-connectors) | OAuth + source connectors |
-| [`openwave-retrieval`](crates/openwave-retrieval) | embeddings, vector search, citations |
-| [`openwave-mcp`](crates/openwave-mcp) | MCP server & client |
+| [`openwave-retrieval`](crates/openwave-retrieval) | parsing, embeddings, hybrid search, citations |
+| [`openwave-mcp`](crates/openwave-mcp) | partial MCP server surface (client planned) |
 | [`openwave-desktop`](crates/openwave-desktop) | desktop app (Tauri) |
-| [`openwave-cli`](crates/openwave-cli) | headless daemon + CLI |
+| [`openwave-cli`](crates/openwave-cli) | headless `openwave serve` command |
 | [`openwave-slack`](crates/openwave-slack) | Slack adapter |
-
-_Model-provider adapters and routing/failover live in a planned `openwave-router`
-crate — see [`docs/crates.md`](docs/crates.md)._
 
 ## License
 
