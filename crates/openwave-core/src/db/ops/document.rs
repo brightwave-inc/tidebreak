@@ -7,6 +7,7 @@ use crate::model::{
     DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentParseOutput,
     DocumentProcessingStatus, DocumentRecord, DocumentSourceUpsert,
 };
+use crate::storage::EnsureDocumentParseJobOutcome;
 
 use super::super::{
     acquire_document_write_lock, cancel_live_document_jobs_on, document_from_model,
@@ -292,6 +293,201 @@ pub(in crate::db) async fn complete_parse_and_enqueue_index(
     let record = document_from_model(record)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some((record, index_job)))
+}
+
+pub(in crate::db) async fn ensure_parse_job(
+    store: &DbStore,
+    document_id: DocumentId,
+    expected_generation: DocumentGeneration,
+    pipeline_fingerprint: &str,
+    max_attempts: i32,
+) -> Result<EnsureDocumentParseJobOutcome> {
+    validate_job_input(pipeline_fingerprint, max_attempts)?;
+
+    loop {
+        let transaction = store.conn.begin().await.map_err(store_err)?;
+        acquire_document_write_lock(&transaction, document_id).await?;
+        let Some(document) = entities::document::Entity::find_by_id(document_id.0)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+        else {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(EnsureDocumentParseJobOutcome::MissingDocument);
+        };
+        ensure_live_document_generation_on(&transaction, &document).await?;
+        let current_generation = DocumentGeneration {
+            content_revision: document.content_revision,
+            revision_token: document.revision_token,
+        };
+
+        if current_generation != expected_generation {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(EnsureDocumentParseJobOutcome::GenerationChanged(
+                current_generation,
+            ));
+        }
+        if document.canonical_fingerprint.as_deref() == Some(pipeline_fingerprint) {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(EnsureDocumentParseJobOutcome::CanonicalCurrent);
+        }
+        if document.source_blob_id.is_none() {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(EnsureDocumentParseJobOutcome::SourceUnavailable);
+        }
+        if let Some(candidate) = find_exact_parse_job_on(
+            &transaction,
+            document_id,
+            current_generation,
+            pipeline_fingerprint,
+        )
+        .await?
+        {
+            let job = document_job_from_model(candidate)?;
+            let outcome = if job.status == DocumentJobStatus::Failed {
+                EnsureDocumentParseJobOutcome::Failed(job)
+            } else if matches!(
+                job.status,
+                DocumentJobStatus::Queued
+                    | DocumentJobStatus::Running
+                    | DocumentJobStatus::RetryWait
+            ) {
+                EnsureDocumentParseJobOutcome::Existing(job)
+            } else {
+                return Err(AgentError::Store(format!(
+                    "document {document_id} has desired parse job {} in terminal state {} without matching canonical output",
+                    job.id,
+                    job.status.as_str()
+                )));
+            };
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(outcome);
+        }
+
+        let has_current_parse_job = entities::document_job::Entity::find()
+            .filter(entities::document_job::Column::DocumentId.eq(document_id.0))
+            .filter(
+                entities::document_job::Column::ContentRevision
+                    .eq(current_generation.content_revision),
+            )
+            .filter(
+                entities::document_job::Column::RevisionToken.eq(current_generation.revision_token),
+            )
+            .filter(entities::document_job::Column::Kind.eq(DocumentJobKind::Parse.as_str()))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some();
+        let advances_generation = document.canonical_fingerprint.is_some() || has_current_parse_job;
+        let target_generation = if advances_generation {
+            let Some(advanced) =
+                try_advance_document_generation_on(&transaction, document_id, false).await?
+            else {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            };
+            if advanced.previous != Some(current_generation) {
+                return Err(AgentError::Store(format!(
+                    "document {document_id} does not match its retained generation clock"
+                )));
+            }
+            advanced.current
+        } else {
+            current_generation
+        };
+
+        let mut update = entities::document::Entity::update_many()
+            .col_expr(
+                entities::document::Column::CanonicalText,
+                sea_orm::sea_query::Expr::value(String::new()),
+            )
+            .col_expr(
+                entities::document::Column::CanonicalFingerprint,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                entities::document::Column::SourceRegions,
+                sea_orm::sea_query::Expr::value(source_regions_to_db(&[])),
+            )
+            .col_expr(
+                entities::document::Column::ProcessingStatus,
+                sea_orm::sea_query::Expr::value(DocumentProcessingStatus::Queued.as_str()),
+            )
+            .col_expr(
+                entities::document::Column::IndexedRevision,
+                sea_orm::sea_query::Expr::value(Option::<i64>::None),
+            )
+            .col_expr(
+                entities::document::Column::IndexFingerprint,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                entities::document::Column::IndexedAt,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            );
+        if advances_generation {
+            update = update
+                .col_expr(
+                    entities::document::Column::ContentRevision,
+                    sea_orm::sea_query::Expr::value(target_generation.content_revision),
+                )
+                .col_expr(
+                    entities::document::Column::RevisionToken,
+                    sea_orm::sea_query::Expr::value(target_generation.revision_token),
+                );
+        }
+        let updated = update
+            .filter(entities::document::Column::Id.eq(document_id.0))
+            .filter(
+                entities::document::Column::ContentRevision.eq(current_generation.content_revision),
+            )
+            .filter(entities::document::Column::RevisionToken.eq(current_generation.revision_token))
+            .filter(entities::document::Column::SourceBlobId.is_not_null())
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+        if updated.rows_affected != 1 {
+            transaction.rollback().await.map_err(store_err)?;
+            continue;
+        }
+
+        let now = Utc::now();
+        cancel_live_document_jobs_on(&transaction, document_id, now).await?;
+        let job = new_job(
+            document_id,
+            target_generation,
+            DocumentJobKind::Parse,
+            pipeline_fingerprint,
+            max_attempts,
+            now,
+        );
+        document_job_active_model(&job)
+            .insert(&transaction)
+            .await
+            .map_err(store_err)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(EnsureDocumentParseJobOutcome::Enqueued(job));
+    }
+}
+
+async fn find_exact_parse_job_on<C>(
+    connection: &C,
+    document_id: DocumentId,
+    generation: DocumentGeneration,
+    pipeline_fingerprint: &str,
+) -> Result<Option<entities::document_job::Model>>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    entities::document_job::Entity::find()
+        .filter(entities::document_job::Column::DocumentId.eq(document_id.0))
+        .filter(entities::document_job::Column::ContentRevision.eq(generation.content_revision))
+        .filter(entities::document_job::Column::RevisionToken.eq(generation.revision_token))
+        .filter(entities::document_job::Column::Kind.eq(DocumentJobKind::Parse.as_str()))
+        .filter(entities::document_job::Column::PipelineFingerprint.eq(pipeline_fingerprint))
+        .one(connection)
+        .await
+        .map_err(store_err)
 }
 
 pub(in crate::db) async fn retry_document_job(

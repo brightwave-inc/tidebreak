@@ -31,7 +31,9 @@ use crate::model::{
     DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
     Project, SourceRegion, ToolCallRecord,
 };
-use crate::storage::{DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, Store};
+use crate::storage::{
+    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, Store,
+};
 
 mod ops;
 
@@ -881,6 +883,23 @@ impl Store for DbStore {
             transaction.commit().await.map_err(store_err)?;
             return Ok(EnsureDocumentIndexJobOutcome::Enqueued(job));
         }
+    }
+
+    async fn ensure_document_parse_job(
+        &self,
+        document_id: DocumentId,
+        expected_generation: DocumentGeneration,
+        pipeline_fingerprint: &str,
+        max_attempts: i32,
+    ) -> Result<EnsureDocumentParseJobOutcome> {
+        ops::document::ensure_parse_job(
+            self,
+            document_id,
+            expected_generation,
+            pipeline_fingerprint,
+            max_attempts,
+        )
+        .await
     }
 
     async fn list_document_jobs(&self, document_id: DocumentId) -> Result<Vec<DocumentJob>> {
