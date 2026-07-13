@@ -26,10 +26,10 @@ use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
-    Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
-    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
-    Project, SourceRegion, ToolCallRecord,
+    BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
+    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
+    DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
+    DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord,
 };
 use crate::storage::{
     DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, Store,
@@ -171,6 +171,9 @@ impl Store for DbStore {
         .insert(&transaction)
         .await
         .map_err(store_err)?;
+        if let Some(source_blob) = document.source_blob.as_ref() {
+            ops::blob::cancel_on(&transaction, source_blob.id).await?;
+        }
         transaction.commit().await.map_err(store_err)?;
         Ok(())
     }
@@ -283,6 +286,10 @@ impl Store for DbStore {
             .into_iter()
             .map(DocumentId)
             .collect())
+    }
+
+    async fn get_blob_retirement(&self, blob_id: uuid::Uuid) -> Result<Option<BlobRetirement>> {
+        ops::blob::get(self, blob_id).await
     }
 
     async fn get_document_generation(&self, id: DocumentId) -> Result<Option<DocumentGeneration>> {
@@ -446,6 +453,9 @@ impl Store for DbStore {
                 if deleted.rows_affected != 1 {
                     transaction.rollback().await.map_err(store_err)?;
                     continue;
+                }
+                if let Some(blob_id) = document.source_blob_id {
+                    ops::blob::enqueue_on(&transaction, blob_id).await?;
                 }
             }
             transaction.commit().await.map_err(store_err)?;

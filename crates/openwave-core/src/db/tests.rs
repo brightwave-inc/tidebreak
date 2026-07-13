@@ -31,6 +31,22 @@ fn sample_project() -> Project {
     }
 }
 
+fn sample_raw_source(
+    id: DocumentId,
+    uri: &str,
+    source_blob: DocumentSourceBlob,
+) -> DocumentSourceUpsert {
+    DocumentSourceUpsert {
+        id,
+        project_id: None,
+        source_uri: Some(uri.into()),
+        media_type: "application/octet-stream".into(),
+        title: None,
+        source_blob,
+        updated_at: Utc::now(),
+    }
+}
+
 fn sample_document(project_id: Option<ProjectId>) -> DocumentRecord {
     let created_at = DateTime::<Utc>::from_timestamp(1_700_000_100, 0).unwrap();
     DocumentRecord {
@@ -716,6 +732,264 @@ async fn raw_source_parse_completion_atomically_enqueues_index() {
             .status,
         DocumentJobStatus::Cancelled
     );
+}
+
+#[tokio::test]
+async fn blob_retirement_coalesces_candidates_and_live_writes_cancel_episodes() {
+    let (_dir, store) = temp_store().await;
+    let shared_blob = DocumentSourceBlob::from_digest([0x51; 32], 51);
+    let source_a = sample_raw_source(
+        DocumentId::new(),
+        "file:///shared-a.bin",
+        shared_blob.clone(),
+    );
+    let source_b = sample_raw_source(
+        DocumentId::new(),
+        "file:///shared-b.bin",
+        shared_blob.clone(),
+    );
+    let (_, job_a) = store
+        .accept_document_source_and_enqueue_parse(&source_a, "parser-v1", 3)
+        .await
+        .unwrap();
+    store
+        .accept_document_source_and_enqueue_parse(&source_b, "parser-v1", 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_blob_retirement(shared_blob.id).await.unwrap(),
+        None
+    );
+
+    let replacement_b = sample_raw_source(
+        source_b.id,
+        source_b.source_uri.as_deref().unwrap(),
+        DocumentSourceBlob::from_digest([0x52; 32], 52),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&replacement_b, "parser-v1", 3)
+        .await
+        .unwrap();
+    let queued = store
+        .get_blob_retirement(shared_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    // A dropped reference creates a candidate even while another document
+    // still shares the blob. Claim must perform the authoritative indexed
+    // reference check before this candidate can become running.
+    assert_eq!(queued.status, BlobRetirementStatus::Queued);
+    assert_eq!(queued.attempt_count, 0);
+    assert_eq!(queued.max_attempts, BlobRetirement::DEFAULT_MAX_ATTEMPTS);
+    assert_eq!(queued.lease_token, None);
+    assert_eq!(queued.finished_at, None);
+
+    let repeated = store
+        .accept_document_source_and_enqueue_parse(&source_a, "parser-v1", 9)
+        .await
+        .unwrap();
+    assert_eq!(repeated.1, job_a);
+    let cancelled = store
+        .get_blob_retirement(shared_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.status, BlobRetirementStatus::Cancelled);
+    assert_eq!(cancelled.created_at, queued.created_at);
+    assert!(cancelled.finished_at.is_some());
+
+    let replacement_a = sample_raw_source(
+        source_a.id,
+        source_a.source_uri.as_deref().unwrap(),
+        DocumentSourceBlob::from_digest([0x53; 32], 53),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&replacement_a, "parser-v1", 3)
+        .await
+        .unwrap();
+    let requeued = store
+        .get_blob_retirement(shared_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(requeued.status, BlobRetirementStatus::Queued);
+    assert_eq!(requeued.created_at, queued.created_at);
+    assert_eq!(requeued.attempt_count, 0);
+    assert_eq!(requeued.started_at, None);
+    assert_eq!(requeued.finished_at, None);
+
+    store.delete_document(replacement_a.id).await.unwrap();
+    let replacement_retirement = store
+        .get_blob_retirement(replacement_a.source_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replacement_retirement.status, BlobRetirementStatus::Queued);
+    let source_c = sample_raw_source(
+        DocumentId::new(),
+        "file:///shared-c.bin",
+        replacement_a.source_blob.clone(),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&source_c, "parser-v1", 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_blob_retirement(replacement_a.source_blob.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        BlobRetirementStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn source_replacement_rolls_back_blob_retirement_with_job_insert_failure() {
+    let (_dir, store) = temp_store().await;
+    let original = sample_raw_source(
+        DocumentId::new(),
+        "file:///rollback-source.bin",
+        DocumentSourceBlob::from_digest([0x61; 32], 61),
+    );
+    let (original_record, original_job) = store
+        .accept_document_source_and_enqueue_parse(&original, "parser-v1", 3)
+        .await
+        .unwrap();
+    let replacement = sample_raw_source(
+        original.id,
+        original.source_uri.as_deref().unwrap(),
+        DocumentSourceBlob::from_digest([0x62; 32], 62),
+    );
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_replacement_parse_insert
+             BEFORE INSERT ON document_job
+             WHEN NEW.kind = 'parse'
+             BEGIN SELECT RAISE(FAIL, 'injected replacement failure'); END",
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .accept_document_source_and_enqueue_parse(&replacement, "parser-v1", 3)
+        .await
+        .is_err());
+    store
+        .conn
+        .execute_unprepared("DROP TRIGGER fail_replacement_parse_insert")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.get_document(original.id).await.unwrap(),
+        Some(original_record)
+    );
+    assert_eq!(
+        store.get_document_job(original_job.id).await.unwrap(),
+        Some(original_job)
+    );
+    assert_eq!(
+        store
+            .get_blob_retirement(original.source_blob.id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .get_blob_retirement(replacement.source_blob.id)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn document_delete_rolls_back_when_blob_retirement_cannot_be_enqueued() {
+    let (_dir, store) = temp_store().await;
+    let source = sample_raw_source(
+        DocumentId::new(),
+        "file:///rollback-delete.bin",
+        DocumentSourceBlob::from_digest([0x63; 32], 63),
+    );
+    let (record, _) = store
+        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
+        .await
+        .unwrap();
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_blob_retirement_insert
+             BEFORE INSERT ON blob_retirement
+             BEGIN SELECT RAISE(FAIL, 'injected retirement failure'); END",
+        )
+        .await
+        .unwrap();
+    assert!(store.delete_document(source.id).await.is_err());
+    assert_eq!(store.get_document(source.id).await.unwrap(), Some(record));
+    assert_eq!(
+        store
+            .get_blob_retirement(source.source_blob.id)
+            .await
+            .unwrap(),
+        None
+    );
+    store
+        .conn
+        .execute_unprepared("DROP TRIGGER fail_blob_retirement_insert")
+        .await
+        .unwrap();
+    store.delete_document(source.id).await.unwrap();
+    assert_eq!(
+        store
+            .get_blob_retirement(source.source_blob.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        BlobRetirementStatus::Queued
+    );
+}
+
+#[tokio::test]
+async fn blob_retirement_constraints_reject_impossible_delivery_state() {
+    let (_dir, store) = temp_store().await;
+    let now = Utc::now();
+    let invalid_queued_lease = entities::blob_retirement::ActiveModel {
+        blob_id: Set(uuid::Uuid::new_v4()),
+        status: Set(BlobRetirementStatus::Queued.as_str().into()),
+        attempt_count: Set(0),
+        max_attempts: Set(BlobRetirement::DEFAULT_MAX_ATTEMPTS),
+        available_at: Set(now),
+        lease_token: Set(Some(uuid::Uuid::new_v4())),
+        lease_expires_at: Set(Some(now + chrono::Duration::minutes(1))),
+        started_at: Set(None),
+        finished_at: Set(None),
+        last_error_code: Set(None),
+        last_error_detail: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    };
+    assert!(invalid_queued_lease.insert(&store.conn).await.is_err());
+
+    let exhausted_retry = entities::blob_retirement::ActiveModel {
+        blob_id: Set(uuid::Uuid::new_v4()),
+        status: Set(BlobRetirementStatus::RetryWait.as_str().into()),
+        attempt_count: Set(BlobRetirement::DEFAULT_MAX_ATTEMPTS),
+        max_attempts: Set(BlobRetirement::DEFAULT_MAX_ATTEMPTS),
+        available_at: Set(now),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        started_at: Set(Some(now)),
+        finished_at: Set(None),
+        last_error_code: Set(Some("transient_delete".into())),
+        last_error_detail: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    };
+    assert!(exhausted_retry.insert(&store.conn).await.is_err());
 }
 
 #[tokio::test]

@@ -22,8 +22,8 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
 use crate::model::{
-    Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceUpsert,
+    BlobRetirement, Chat, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus,
+    DocumentListCursor, DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceUpsert,
     DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
 };
 
@@ -152,6 +152,11 @@ pub trait Store: Send + Sync {
             .into_iter()
             .map(|document| document.id)
             .collect())
+    }
+
+    /// Read the coalesced retirement state for one source blob.
+    async fn get_blob_retirement(&self, _blob_id: uuid::Uuid) -> Result<Option<BlobRetirement>> {
+        document_storage_unavailable()
     }
 
     /// Read the newest durable generation, including a hard-delete tombstone.

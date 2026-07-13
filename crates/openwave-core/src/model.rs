@@ -408,6 +408,96 @@ impl DocumentJob {
     pub const MAX_ERROR_DETAIL_LEN: usize = 4096;
 }
 
+/// Durable deletion state for one content-addressed source blob.
+///
+/// Rows are coalesced by `blob_id`: dropping another reference resets the row
+/// to queued, while establishing any live reference cancels it. Queued rows are
+/// candidates, not deletion authorization: claim must atomically recheck the
+/// indexed authoritative document references and cancel any referenced blob.
+/// Exact worker leases fence a previous retirement episode from completing
+/// after either transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobRetirement {
+    /// Globally content-addressed blob identity.
+    pub blob_id: Uuid,
+    /// Durable delivery state.
+    pub status: BlobRetirementStatus,
+    /// Claims already made, including the current claim when running.
+    pub attempt_count: i32,
+    /// Maximum claims before a retryable deletion failure becomes terminal.
+    pub max_attempts: i32,
+    /// Earliest time this retirement may be claimed.
+    pub available_at: DateTime<Utc>,
+    /// Exact claim identity required for heartbeat/completion writes.
+    pub lease_token: Option<Uuid>,
+    /// When the current claim becomes recoverably stale.
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    /// When the current retirement episode was first claimed.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When this retirement entered a terminal state.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Stable machine-readable failure category.
+    pub last_error_code: Option<String>,
+    /// Bounded diagnostic detail for local operators.
+    pub last_error_detail: Option<String>,
+    /// When this blob first became a retirement candidate.
+    pub created_at: DateTime<Utc>,
+    /// When its durable state last changed.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl BlobRetirement {
+    /// Default number of deletion claims before explicit intervention.
+    pub const DEFAULT_MAX_ATTEMPTS: i32 = 5;
+    /// Maximum persisted stable failure-code length.
+    pub const MAX_ERROR_CODE_LEN: usize = 128;
+    /// Maximum persisted local diagnostic-detail length.
+    pub const MAX_ERROR_DETAIL_LEN: usize = 4096;
+}
+
+/// Durable delivery state for one coalesced blob retirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BlobRetirementStatus {
+    /// Due for authoritative reference validation at `available_at`; only an
+    /// unreferenced candidate may become running.
+    Queued,
+    /// Currently owned by the exact lease token and expiry on the row.
+    Running,
+    /// Failed transiently and becomes claimable again at `available_at`.
+    RetryWait,
+    /// The unreferenced blob was deleted or was already absent.
+    Succeeded,
+    /// Deletion exhausted retries or failed permanently.
+    Failed,
+    /// A live-reference write or claim-time check cancelled this episode. This
+    /// does not assert that the blob remains referenced forever; a later final
+    /// reference drop may reset the coalesced row to queued.
+    Cancelled,
+}
+
+impl BlobRetirementStatus {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::RetryWait => "retry_wait",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Whether no worker may claim this row without an explicit requeue.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+}
+
 /// Metadata returned by bounded document listings.
 ///
 /// This deliberately excludes canonical content and the revision token so list
@@ -594,8 +684,14 @@ mod tests {
             serde_json::to_string(&DocumentJobStatus::RetryWait).unwrap(),
             "\"retry_wait\""
         );
+        assert_eq!(
+            serde_json::to_string(&BlobRetirementStatus::RetryWait).unwrap(),
+            "\"retry_wait\""
+        );
         assert!(DocumentJobStatus::Succeeded.is_terminal());
         assert!(!DocumentJobStatus::Running.is_terminal());
+        assert!(BlobRetirementStatus::Cancelled.is_terminal());
+        assert!(!BlobRetirementStatus::Queued.is_terminal());
     }
 
     #[test]

@@ -1,3 +1,31 @@
+pub mod blob_retirement {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "blob_retirement")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub blob_id: Uuid,
+        pub status: String,
+        pub attempt_count: i32,
+        pub max_attempts: i32,
+        pub available_at: DateTimeUtc,
+        pub lease_token: Option<Uuid>,
+        pub lease_expires_at: Option<DateTimeUtc>,
+        pub started_at: Option<DateTimeUtc>,
+        pub finished_at: Option<DateTimeUtc>,
+        pub last_error_code: Option<String>,
+        pub last_error_detail: Option<String>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod document_generation {
     use sea_orm::entity::prelude::*;
 

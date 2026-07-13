@@ -1,6 +1,6 @@
 use sea_orm_migration::prelude::*;
 
-use super::{DocumentJobKind, DocumentJobStatus, DocumentProcessingStatus};
+use super::{BlobRetirementStatus, DocumentJobKind, DocumentJobStatus, DocumentProcessingStatus};
 
 pub struct Migrator;
 
@@ -520,6 +520,195 @@ impl MigrationTrait for AddDocuments {
             )
             .await?;
 
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_document_source_blob")
+                    .table(Document::Table)
+                    .col(Document::SourceBlobId)
+                    .to_owned(),
+            )
+            .await?;
+
+        let valid_blob_status = Expr::col(BlobRetirement::Status).is_in([
+            BlobRetirementStatus::Queued.as_str(),
+            BlobRetirementStatus::Running.as_str(),
+            BlobRetirementStatus::RetryWait.as_str(),
+            BlobRetirementStatus::Succeeded.as_str(),
+            BlobRetirementStatus::Failed.as_str(),
+            BlobRetirementStatus::Cancelled.as_str(),
+        ]);
+        let blob_running_lease = Expr::col(BlobRetirement::Status)
+            .eq(BlobRetirementStatus::Running.as_str())
+            .and(Expr::col(BlobRetirement::LeaseToken).is_not_null())
+            .and(Expr::col(BlobRetirement::LeaseExpiresAt).is_not_null());
+        let blob_no_lease = Expr::col(BlobRetirement::Status)
+            .ne(BlobRetirementStatus::Running.as_str())
+            .and(Expr::col(BlobRetirement::LeaseToken).is_null())
+            .and(Expr::col(BlobRetirement::LeaseExpiresAt).is_null());
+        let blob_terminal_finished = Expr::col(BlobRetirement::Status)
+            .is_in([
+                BlobRetirementStatus::Succeeded.as_str(),
+                BlobRetirementStatus::Failed.as_str(),
+                BlobRetirementStatus::Cancelled.as_str(),
+            ])
+            .and(Expr::col(BlobRetirement::FinishedAt).is_not_null());
+        let blob_nonterminal_unfinished = Expr::col(BlobRetirement::Status)
+            .is_in([
+                BlobRetirementStatus::Queued.as_str(),
+                BlobRetirementStatus::Running.as_str(),
+                BlobRetirementStatus::RetryWait.as_str(),
+            ])
+            .and(Expr::col(BlobRetirement::FinishedAt).is_null());
+        let blob_queued_attempt = Expr::col(BlobRetirement::Status)
+            .eq(BlobRetirementStatus::Queued.as_str())
+            .and(Expr::col(BlobRetirement::AttemptCount).eq(0))
+            .and(Expr::col(BlobRetirement::StartedAt).is_null());
+        let blob_running_attempt = Expr::col(BlobRetirement::Status)
+            .eq(BlobRetirementStatus::Running.as_str())
+            .and(Expr::col(BlobRetirement::AttemptCount).gte(1))
+            .and(Expr::col(BlobRetirement::StartedAt).is_not_null());
+        let blob_retryable_attempt = Expr::col(BlobRetirement::Status)
+            .eq(BlobRetirementStatus::RetryWait.as_str())
+            .and(Expr::col(BlobRetirement::AttemptCount).gte(1))
+            .and(Expr::col(BlobRetirement::AttemptCount).lt(Expr::col(BlobRetirement::MaxAttempts)))
+            .and(Expr::col(BlobRetirement::StartedAt).is_not_null());
+        let blob_completed_attempt = Expr::col(BlobRetirement::Status)
+            .is_in([
+                BlobRetirementStatus::Succeeded.as_str(),
+                BlobRetirementStatus::Failed.as_str(),
+            ])
+            .and(Expr::col(BlobRetirement::AttemptCount).gte(1))
+            .and(Expr::col(BlobRetirement::StartedAt).is_not_null());
+        let blob_cancelled_attempt = Expr::col(BlobRetirement::Status)
+            .eq(BlobRetirementStatus::Cancelled.as_str())
+            .and(
+                Expr::col(BlobRetirement::AttemptCount)
+                    .eq(0)
+                    .and(Expr::col(BlobRetirement::StartedAt).is_null())
+                    .or(Expr::col(BlobRetirement::AttemptCount)
+                        .gte(1)
+                        .and(Expr::col(BlobRetirement::StartedAt).is_not_null())),
+            );
+        manager
+            .create_table(
+                Table::create()
+                    .table(BlobRetirement::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(BlobRetirement::BlobId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(BlobRetirement::Status)
+                            .string_len(32)
+                            .not_null()
+                            .default(BlobRetirementStatus::Queued.as_str()),
+                    )
+                    .col(
+                        ColumnDef::new(BlobRetirement::AttemptCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(BlobRetirement::MaxAttempts)
+                            .integer()
+                            .not_null()
+                            .default(crate::model::BlobRetirement::DEFAULT_MAX_ATTEMPTS),
+                    )
+                    .col(
+                        ColumnDef::new(BlobRetirement::AvailableAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(BlobRetirement::LeaseToken).uuid())
+                    .col(ColumnDef::new(BlobRetirement::LeaseExpiresAt).timestamp_with_time_zone())
+                    .col(ColumnDef::new(BlobRetirement::StartedAt).timestamp_with_time_zone())
+                    .col(ColumnDef::new(BlobRetirement::FinishedAt).timestamp_with_time_zone())
+                    .col(
+                        ColumnDef::new(BlobRetirement::LastErrorCode)
+                            .string_len(crate::model::BlobRetirement::MAX_ERROR_CODE_LEN as u32),
+                    )
+                    .col(
+                        ColumnDef::new(BlobRetirement::LastErrorDetail)
+                            .string_len(crate::model::BlobRetirement::MAX_ERROR_DETAIL_LEN as u32),
+                    )
+                    .col(
+                        ColumnDef::new(BlobRetirement::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(BlobRetirement::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .check(valid_blob_status)
+                    .check(
+                        Expr::col(BlobRetirement::AttemptCount)
+                            .gte(0)
+                            .and(Expr::col(BlobRetirement::MaxAttempts).gte(1))
+                            .and(
+                                Expr::col(BlobRetirement::AttemptCount)
+                                    .lte(Expr::col(BlobRetirement::MaxAttempts)),
+                            ),
+                    )
+                    .check(blob_running_lease.or(blob_no_lease))
+                    .check(blob_terminal_finished.or(blob_nonterminal_unfinished))
+                    .check(
+                        blob_queued_attempt
+                            .or(blob_running_attempt)
+                            .or(blob_retryable_attempt)
+                            .or(blob_completed_attempt)
+                            .or(blob_cancelled_attempt),
+                    )
+                    .check(
+                        Expr::col(BlobRetirement::LastErrorCode)
+                            .is_null()
+                            .or(Func::char_length(Expr::col(BlobRetirement::LastErrorCode))
+                                .between(
+                                    1,
+                                    crate::model::BlobRetirement::MAX_ERROR_CODE_LEN as i32,
+                                )),
+                    )
+                    .check(
+                        Expr::col(BlobRetirement::LastErrorDetail)
+                            .is_null()
+                            .or(
+                                Func::char_length(Expr::col(BlobRetirement::LastErrorDetail))
+                                    .between(
+                                        1,
+                                        crate::model::BlobRetirement::MAX_ERROR_DETAIL_LEN as i32,
+                                    ),
+                            ),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_blob_retirement_due")
+                    .table(BlobRetirement::Table)
+                    .col(BlobRetirement::Status)
+                    .col(BlobRetirement::AvailableAt)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_blob_retirement_stale_lease")
+                    .table(BlobRetirement::Table)
+                    .col(BlobRetirement::Status)
+                    .col(BlobRetirement::LeaseExpiresAt)
+                    .to_owned(),
+            )
+            .await?;
+
         let valid_job_status = Expr::col(DocumentJob::Status).is_in([
             DocumentJobStatus::Queued.as_str(),
             DocumentJobStatus::Running.as_str(),
@@ -775,6 +964,9 @@ impl MigrationTrait for AddDocuments {
             .drop_table(Table::drop().table(DocumentJob::Table).to_owned())
             .await?;
         manager
+            .drop_table(Table::drop().table(BlobRetirement::Table).to_owned())
+            .await?;
+        manager
             .drop_table(Table::drop().table(Document::Table).to_owned())
             .await?;
         manager
@@ -827,6 +1019,24 @@ enum DocumentGeneration {
     RetirementPending,
     RetirementContentRevision,
     RetirementRevisionToken,
+}
+
+#[derive(DeriveIden)]
+enum BlobRetirement {
+    Table,
+    BlobId,
+    Status,
+    AttemptCount,
+    MaxAttempts,
+    AvailableAt,
+    LeaseToken,
+    LeaseExpiresAt,
+    StartedAt,
+    FinishedAt,
+    LastErrorCode,
+    LastErrorDetail,
+    CreatedAt,
+    UpdatedAt,
 }
 
 #[derive(DeriveIden)]
