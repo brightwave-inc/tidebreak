@@ -704,6 +704,303 @@ async fn raw_source_parse_completion_atomically_enqueues_index() {
 }
 
 #[tokio::test]
+async fn ensure_parse_job_advances_parser_changes_and_reuses_the_transition() {
+    let (_dir, store) = temp_store().await;
+    let source = DocumentSourceUpsert {
+        id: DocumentId::new(),
+        project_id: None,
+        source_uri: Some("file:///parser-upgrade.txt".into()),
+        media_type: "text/plain".into(),
+        title: None,
+        source_blob: DocumentSourceBlob {
+            id: uuid::Uuid::new_v4(),
+            sha256: [0x22; 32],
+            byte_len: 128,
+        },
+        updated_at: Utc::now(),
+    };
+    let (accepted, parse_job) = store
+        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .ensure_document_parse_job(source.id, accepted.generation(), "parser-v1", 9)
+            .await
+            .unwrap(),
+        EnsureDocumentParseJobOutcome::Existing(parse_job.clone())
+    );
+
+    let repair_source = DocumentSourceUpsert {
+        id: DocumentId::new(),
+        source_uri: Some("file:///repair-missing-parse.txt".into()),
+        source_blob: DocumentSourceBlob {
+            id: uuid::Uuid::new_v4(),
+            sha256: [0x33; 32],
+            byte_len: 64,
+        },
+        ..source.clone()
+    };
+    let (pending, missing_parse_job) = store
+        .accept_document_source_and_enqueue_parse(&repair_source, "parser-v1", 3)
+        .await
+        .unwrap();
+    assert_eq!(pending.canonical_fingerprint, None);
+    assert_eq!(
+        entities::document_job::Entity::delete_by_id(missing_parse_job.id.0)
+            .exec(&store.conn)
+            .await
+            .unwrap()
+            .rows_affected,
+        1
+    );
+    let repaired = store
+        .ensure_document_parse_job(repair_source.id, pending.generation(), "parser-v1", 7)
+        .await
+        .unwrap();
+    let EnsureDocumentParseJobOutcome::Enqueued(repaired) = repaired else {
+        panic!("expected missing Parse work to be repaired, got {repaired:?}");
+    };
+    assert_eq!(repaired.generation(), pending.generation());
+    assert_eq!(repaired.pipeline_fingerprint, "parser-v1");
+    assert_eq!(repaired.max_attempts, 7);
+
+    let claim_at = parse_job.available_at + chrono::Duration::seconds(1);
+    let running = store
+        .claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let (parsed, index_job) = store
+        .complete_document_parse_job_and_enqueue_index(
+            running.id,
+            running.lease_token.unwrap(),
+            claim_at + chrono::Duration::seconds(1),
+            &DocumentParseOutput {
+                canonical_text: "canonical v1".into(),
+                source_regions: Vec::new(),
+            },
+            "index-v1",
+            5,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .ensure_document_parse_job(source.id, parsed.generation(), "parser-v1", 3)
+            .await
+            .unwrap(),
+        EnsureDocumentParseJobOutcome::CanonicalCurrent
+    );
+
+    let outcome = store
+        .ensure_document_parse_job(source.id, parsed.generation(), "parser-v2", 4)
+        .await
+        .unwrap();
+    let EnsureDocumentParseJobOutcome::Enqueued(reparse_job) = outcome else {
+        panic!("expected a parser-change reparse job, got {outcome:?}");
+    };
+    assert_eq!(reparse_job.kind, DocumentJobKind::Parse);
+    assert_eq!(reparse_job.pipeline_fingerprint, "parser-v2");
+    assert_eq!(reparse_job.max_attempts, 4);
+    assert_eq!(reparse_job.content_revision, parsed.content_revision + 1);
+    assert_ne!(reparse_job.revision_token, parsed.revision_token);
+    let reparsing = store.get_document(source.id).await.unwrap().unwrap();
+    assert_eq!(reparsing.generation(), reparse_job.generation());
+    assert_eq!(reparsing.source_blob, parsed.source_blob);
+    assert!(reparsing.canonical_text.is_empty());
+    assert_eq!(reparsing.canonical_fingerprint, None);
+    assert!(reparsing.source_regions.is_empty());
+    assert_eq!(
+        reparsing.processing_status,
+        DocumentProcessingStatus::Queued
+    );
+    assert_eq!(reparsing.indexed_revision, None);
+    assert_eq!(reparsing.index_fingerprint, None);
+    assert_eq!(reparsing.indexed_at, None);
+    assert_eq!(
+        store
+            .get_document_job(index_job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        DocumentJobStatus::Cancelled
+    );
+    assert_eq!(
+        store
+            .ensure_document_parse_job(source.id, parsed.generation(), "parser-v2", 8)
+            .await
+            .unwrap(),
+        EnsureDocumentParseJobOutcome::GenerationChanged(reparse_job.generation())
+    );
+    assert_eq!(
+        store
+            .ensure_document_parse_job(source.id, reparse_job.generation(), "parser-v2", 8)
+            .await
+            .unwrap(),
+        EnsureDocumentParseJobOutcome::Existing(reparse_job)
+    );
+
+    let canonical = DocumentUpsert {
+        id: DocumentId::new(),
+        project_id: None,
+        source_uri: None,
+        media_type: "text/plain".into(),
+        title: None,
+        canonical_text: "inline canonical".into(),
+        source_regions: Vec::new(),
+        updated_at: Utc::now(),
+    };
+    let (canonical, _) = store
+        .upsert_document_and_enqueue_index(&canonical, "index-v1", 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .ensure_document_parse_job(canonical.id, canonical.generation(), "parser-v2", 3)
+            .await
+            .unwrap(),
+        EnsureDocumentParseJobOutcome::SourceUnavailable
+    );
+
+    let before_failure = store.get_document(source.id).await.unwrap().unwrap();
+    let jobs_before_failure = store.list_document_jobs(source.id).await.unwrap();
+    let clock_before_failure = store
+        .get_document_generation(source.id)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_ensure_parse_job_insert
+                 BEFORE INSERT ON document_job
+                 BEGIN
+                     SELECT RAISE(FAIL, 'injected ensure Parse job failure');
+                 END;",
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .ensure_document_parse_job(source.id, before_failure.generation(), "parser-v3", 3)
+        .await
+        .is_err());
+    assert_eq!(
+        store.get_document(source.id).await.unwrap(),
+        Some(before_failure)
+    );
+    assert_eq!(
+        store.list_document_jobs(source.id).await.unwrap(),
+        jobs_before_failure
+    );
+    assert_eq!(
+        store.get_document_generation(source.id).await.unwrap(),
+        Some(clock_before_failure)
+    );
+}
+
+#[tokio::test]
+async fn concurrent_ensure_parse_advances_once_and_fences_stale_callers() {
+    let (_dir, store) = temp_store().await;
+    let source = DocumentSourceUpsert {
+        id: DocumentId::new(),
+        project_id: None,
+        source_uri: Some("file:///concurrent-parser-upgrade.txt".into()),
+        media_type: "text/plain".into(),
+        title: None,
+        source_blob: DocumentSourceBlob {
+            id: uuid::Uuid::new_v4(),
+            sha256: [0x44; 32],
+            byte_len: 96,
+        },
+        updated_at: Utc::now(),
+    };
+    let (accepted, parse_job) = store
+        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
+        .await
+        .unwrap();
+    let claim_at = parse_job.available_at + chrono::Duration::seconds(1);
+    let running = store
+        .claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let (parsed, _) = store
+        .complete_document_parse_job_and_enqueue_index(
+            running.id,
+            running.lease_token.unwrap(),
+            claim_at + chrono::Duration::seconds(1),
+            &DocumentParseOutput {
+                canonical_text: "canonical v1".into(),
+                source_regions: Vec::new(),
+            },
+            "index-v1",
+            3,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(parsed.generation(), accepted.generation());
+
+    let document_id = source.id;
+    let observed_generation = parsed.generation();
+    let store = std::sync::Arc::new(store);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .ensure_document_parse_job(document_id, observed_generation, "parser-v2", 5)
+                .await
+                .unwrap()
+        }));
+    }
+
+    let mut enqueued = None;
+    let mut fenced = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            EnsureDocumentParseJobOutcome::Enqueued(job) => {
+                assert!(enqueued.replace(job).is_none());
+            }
+            EnsureDocumentParseJobOutcome::GenerationChanged(generation) => {
+                assert_eq!(
+                    generation.content_revision,
+                    observed_generation.content_revision + 1
+                );
+                fenced += 1;
+            }
+            outcome => panic!("unexpected concurrent ensure outcome: {outcome:?}"),
+        }
+    }
+    assert_eq!(fenced, 7);
+    let enqueued = enqueued.expect("one caller must enqueue the parser upgrade");
+    let current = store.get_document(document_id).await.unwrap().unwrap();
+    assert_eq!(current.generation(), enqueued.generation());
+    assert_eq!(
+        current.content_revision,
+        observed_generation.content_revision + 1
+    );
+    let jobs = store.list_document_jobs(document_id).await.unwrap();
+    assert_eq!(jobs.len(), 3);
+    assert_eq!(
+        jobs.iter()
+            .filter(|job| {
+                job.generation() == current.generation()
+                    && job.kind == DocumentJobKind::Parse
+                    && job.pipeline_fingerprint == "parser-v2"
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn document_job_schema_enforces_delivery_and_idempotency_invariants() {
     let (_dir, store) = temp_store().await;
     let document = sample_document(None);
@@ -2133,6 +2430,15 @@ async fn explicit_retry_revives_only_the_pending_parse_stage() {
             .await
             .unwrap(),
         Some(DocumentJobStatus::Failed)
+    );
+    assert_eq!(
+        store
+            .ensure_document_parse_job(source.id, document.generation(), "parser=pdf-v1", 5,)
+            .await
+            .unwrap(),
+        EnsureDocumentParseJobOutcome::Failed(
+            store.get_document_job(queued.id).await.unwrap().unwrap()
+        )
     );
 
     assert_eq!(

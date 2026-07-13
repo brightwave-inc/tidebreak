@@ -64,6 +64,25 @@ pub enum EnsureDocumentIndexJobOutcome {
     GenerationChanged(DocumentGeneration),
 }
 
+/// Result of atomically ensuring canonical output from one parser pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnsureDocumentParseJobOutcome {
+    /// A new Parse job was inserted for the desired generation.
+    Enqueued(DocumentJob),
+    /// The desired current Parse job already exists and remains live.
+    Existing(DocumentJob),
+    /// The desired current Parse job exhausted its attempts.
+    Failed(DocumentJob),
+    /// Canonical output already came from the desired parser.
+    CanonicalCurrent,
+    /// Reparse was requested for a document without retained source bytes.
+    SourceUnavailable,
+    /// The source document no longer exists.
+    MissingDocument,
+    /// The caller inspected an obsolete source generation.
+    GenerationChanged(DocumentGeneration),
+}
+
 fn document_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "document storage is not implemented by this Store".into(),
@@ -262,6 +281,23 @@ pub trait Store: Send + Sync {
         _max_attempts: i32,
         _reason: DocumentIndexJobReason,
     ) -> Result<EnsureDocumentIndexJobOutcome> {
+        document_storage_unavailable()
+    }
+
+    /// Atomically establish the desired Parse job for retained source bytes.
+    ///
+    /// The caller's observed generation is a compare-and-swap fence. Missing
+    /// work for pending canonical output is repaired in that generation; a
+    /// parser change advances the generation once, clears derived canonical and
+    /// index state, and enqueues Parse without changing retained source fields.
+    /// Failed work remains failed until an explicit retry.
+    async fn ensure_document_parse_job(
+        &self,
+        _document_id: DocumentId,
+        _expected_generation: DocumentGeneration,
+        _pipeline_fingerprint: &str,
+        _max_attempts: i32,
+    ) -> Result<EnsureDocumentParseJobOutcome> {
         document_storage_unavailable()
     }
 
@@ -1034,6 +1070,119 @@ mod tests {
             };
             state.jobs.insert(job.id, job.clone());
             Ok(EnsureDocumentIndexJobOutcome::Enqueued(job))
+        }
+        async fn ensure_document_parse_job(
+            &self,
+            document_id: DocumentId,
+            expected_generation: DocumentGeneration,
+            pipeline_fingerprint: &str,
+            max_attempts: i32,
+        ) -> Result<EnsureDocumentParseJobOutcome> {
+            if pipeline_fingerprint.is_empty()
+                || pipeline_fingerprint.chars().count() > DocumentJob::MAX_PIPELINE_FINGERPRINT_LEN
+                || max_attempts < 1
+            {
+                return Err(AgentError::Store(
+                    "invalid document parse-job maintenance request".into(),
+                ));
+            }
+
+            let mut state = self.document_state.lock().unwrap();
+            let Some(mut document) = state.documents.get(&document_id).cloned() else {
+                return Ok(EnsureDocumentParseJobOutcome::MissingDocument);
+            };
+            if document.generation() != expected_generation {
+                return Ok(EnsureDocumentParseJobOutcome::GenerationChanged(
+                    document.generation(),
+                ));
+            }
+            if document.canonical_fingerprint.as_deref() == Some(pipeline_fingerprint) {
+                return Ok(EnsureDocumentParseJobOutcome::CanonicalCurrent);
+            }
+            if document.source_blob.is_none() {
+                return Ok(EnsureDocumentParseJobOutcome::SourceUnavailable);
+            }
+            if let Some(job) = state.jobs.values().find(|job| {
+                job.document_id == document_id
+                    && job.generation() == document.generation()
+                    && job.kind == DocumentJobKind::Parse
+                    && job.pipeline_fingerprint == pipeline_fingerprint
+            }) {
+                return Ok(if job.status == DocumentJobStatus::Failed {
+                    EnsureDocumentParseJobOutcome::Failed(job.clone())
+                } else if matches!(
+                    job.status,
+                    DocumentJobStatus::Queued
+                        | DocumentJobStatus::Running
+                        | DocumentJobStatus::RetryWait
+                ) {
+                    EnsureDocumentParseJobOutcome::Existing(job.clone())
+                } else {
+                    return Err(AgentError::Store(format!(
+                        "document {document_id} has desired parse job {} in terminal state {} without matching canonical output",
+                        job.id,
+                        job.status.as_str()
+                    )));
+                });
+            }
+
+            let has_current_parse_job = state.jobs.values().any(|job| {
+                job.document_id == document_id
+                    && job.generation() == document.generation()
+                    && job.kind == DocumentJobKind::Parse
+            });
+            if document.canonical_fingerprint.is_some() || has_current_parse_job {
+                let generation = allocate_mem_generation(&mut state, document_id)?;
+                document.content_revision = generation.content_revision;
+                document.revision_token = generation.revision_token;
+            }
+            document.canonical_text.clear();
+            document.canonical_fingerprint = None;
+            document.source_regions.clear();
+            document.processing_status = DocumentProcessingStatus::Queued;
+            document.indexed_revision = None;
+            document.index_fingerprint = None;
+            document.indexed_at = None;
+            state.documents.insert(document_id, document.clone());
+
+            let now = chrono::Utc::now();
+            for job in state.jobs.values_mut().filter(|job| {
+                job.document_id == document_id
+                    && matches!(
+                        job.status,
+                        DocumentJobStatus::Queued
+                            | DocumentJobStatus::Running
+                            | DocumentJobStatus::RetryWait
+                    )
+            }) {
+                job.status = DocumentJobStatus::Cancelled;
+                job.lease_token = None;
+                job.lease_expires_at = None;
+                job.finished_at = Some(now);
+                job.updated_at = now;
+            }
+            let job = DocumentJob {
+                id: DocumentJobId::new(),
+                document_id,
+                content_revision: document.content_revision,
+                revision_token: document.revision_token,
+                kind: DocumentJobKind::Parse,
+                status: DocumentJobStatus::Queued,
+                pipeline_fingerprint: pipeline_fingerprint.into(),
+                attempt_count: 0,
+                max_attempts,
+                available_at: now,
+                lease_token: None,
+                lease_expires_at: None,
+                started_at: None,
+                finished_at: None,
+                last_error_code: None,
+                last_error_detail: None,
+                created_at: now,
+                updated_at: now,
+            };
+            state.jobs.insert(job.id, job.clone());
+            Ok(EnsureDocumentParseJobOutcome::Enqueued(job))
         }
         async fn get_document_job(&self, id: DocumentJobId) -> Result<Option<DocumentJob>> {
             Ok(self.document_state.lock().unwrap().jobs.get(&id).cloned())
@@ -2028,6 +2177,107 @@ mod tests {
     }
 
     #[test]
+    fn mem_store_ensure_parse_job_advances_parser_changes_once() {
+        let store = MemStore::default();
+        let now = chrono::Utc::now();
+        let document_id = DocumentId::new();
+        let generation = DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+        };
+        let index_job = DocumentJob {
+            id: DocumentJobId::new(),
+            document_id,
+            content_revision: generation.content_revision,
+            revision_token: generation.revision_token,
+            kind: DocumentJobKind::Index,
+            status: DocumentJobStatus::Queued,
+            pipeline_fingerprint: "index-v1".into(),
+            attempt_count: 0,
+            max_attempts: 3,
+            available_at: now,
+            lease_token: None,
+            lease_expires_at: None,
+            started_at: None,
+            finished_at: None,
+            last_error_code: None,
+            last_error_detail: None,
+            created_at: now,
+            updated_at: now,
+        };
+        {
+            let mut state = store.document_state.lock().unwrap();
+            state.generations.insert(document_id, generation);
+            state.documents.insert(
+                document_id,
+                DocumentRecord {
+                    id: document_id,
+                    project_id: None,
+                    source_uri: Some("file:///parser-upgrade.txt".into()),
+                    media_type: "text/plain".into(),
+                    title: None,
+                    source_blob: Some(crate::model::DocumentSourceBlob {
+                        id: uuid::Uuid::new_v4(),
+                        sha256: [0x22; 32],
+                        byte_len: 128,
+                    }),
+                    canonical_text: "canonical v1".into(),
+                    canonical_fingerprint: Some("parser-v1".into()),
+                    source_regions: Vec::new(),
+                    content_revision: generation.content_revision,
+                    revision_token: generation.revision_token,
+                    processing_status: DocumentProcessingStatus::Queued,
+                    indexed_revision: None,
+                    index_fingerprint: None,
+                    created_at: now,
+                    updated_at: now,
+                    indexed_at: None,
+                },
+            );
+            state.jobs.insert(index_job.id, index_job.clone());
+        }
+
+        let outcome =
+            block_on(store.ensure_document_parse_job(document_id, generation, "parser-v2", 4))
+                .unwrap();
+        let EnsureDocumentParseJobOutcome::Enqueued(reparse_job) = outcome else {
+            panic!("expected a parser-change reparse job, got {outcome:?}");
+        };
+        assert_eq!(reparse_job.content_revision, 2);
+        assert_eq!(reparse_job.kind, DocumentJobKind::Parse);
+        assert_eq!(
+            block_on(store.get_document_job(index_job.id))
+                .unwrap()
+                .unwrap()
+                .status,
+            DocumentJobStatus::Cancelled
+        );
+        let reparsing = block_on(store.get_document(document_id)).unwrap().unwrap();
+        assert_eq!(reparsing.generation(), reparse_job.generation());
+        assert!(reparsing.canonical_text.is_empty());
+        assert_eq!(reparsing.canonical_fingerprint, None);
+        assert_eq!(
+            reparsing.processing_status,
+            DocumentProcessingStatus::Queued
+        );
+        assert_eq!(
+            block_on(store.ensure_document_parse_job(document_id, generation, "parser-v2", 8,))
+                .unwrap(),
+            EnsureDocumentParseJobOutcome::GenerationChanged(reparse_job.generation())
+        );
+        assert_eq!(
+            block_on(store.ensure_document_parse_job(
+                document_id,
+                reparse_job.generation(),
+                "parser-v2",
+                8,
+            ))
+            .unwrap(),
+            EnsureDocumentParseJobOutcome::Existing(reparse_job)
+        );
+    }
+
+    #[test]
     fn mem_store_explicit_retry_only_revives_current_failed_index_job() {
         let store = MemStore::default();
         let source = DocumentUpsert {
@@ -2279,6 +2529,12 @@ mod tests {
             );
             state.jobs.insert(job.id, job.clone());
         }
+
+        assert_eq!(
+            block_on(store.ensure_document_parse_job(document_id, generation, "parser=pdf-v1", 5,))
+                .unwrap(),
+            EnsureDocumentParseJobOutcome::Failed(job.clone())
+        );
 
         assert_eq!(
             block_on(store.retry_document_job(
