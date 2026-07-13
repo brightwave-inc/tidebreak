@@ -316,9 +316,9 @@ impl DocumentWorker {
                 )
                 .await;
         };
-        let blob_id = descriptor.id.to_string();
+        let blob_id = descriptor.id;
         let bytes = match self
-            .supervise(&job, lease_token, self.blobs.get(&blob_id))
+            .supervise(&job, lease_token, self.blobs.get(blob_id))
             .await
         {
             Supervised::LeaseLost => return Ok(WorkerOutcome::LeaseLost(job.id)),
@@ -924,11 +924,7 @@ mod tests {
         let raw = b"tampered source bytes".to_vec();
         let source_blob = DocumentSourceBlob::from_digest([0x77; 32], raw.len() as u64);
         let blob_id = source_blob.id;
-        worker
-            .blobs
-            .put(&blob_id.to_string(), raw.clone())
-            .await
-            .unwrap();
+        worker.blobs.put(blob_id, raw.clone()).await.unwrap();
         let source = DocumentSourceUpsert {
             id: DocumentId::new(),
             project_id: None,

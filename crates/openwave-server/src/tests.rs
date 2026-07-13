@@ -100,7 +100,7 @@ struct FirstPutGatedBlobStore {
 
 #[async_trait]
 impl BlobStore for FirstPutGatedBlobStore {
-    async fn put(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
+    async fn put(&self, id: uuid::Uuid, bytes: Vec<u8>) -> Result<()> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             self.entered.notify_one();
             self.release.notified().await;
@@ -108,11 +108,11 @@ impl BlobStore for FirstPutGatedBlobStore {
         self.inner.put(id, bytes).await
     }
 
-    async fn get(&self, id: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, id: uuid::Uuid) -> Result<Option<Vec<u8>>> {
         self.inner.get(id).await
     }
 
-    async fn delete(&self, id: &str) -> Result<()> {
+    async fn delete(&self, id: uuid::Uuid) -> Result<()> {
         self.inner.delete(id).await
     }
 }
@@ -699,16 +699,12 @@ async fn app_state_roots_blob_storage_under_the_data_directory() {
         retrieval,
         AgentConfig::default(),
     );
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = uuid::Uuid::new_v4();
 
-    state
-        .blobs
-        .put(&id, b"source bytes".to_vec())
-        .await
-        .unwrap();
+    state.blobs.put(id, b"source bytes".to_vec()).await.unwrap();
 
     assert_eq!(
-        state.blobs.get(&id).await.unwrap().as_deref(),
+        state.blobs.get(id).await.unwrap().as_deref(),
         Some(&b"source bytes"[..])
     );
     assert!(dir
@@ -1375,7 +1371,7 @@ async fn explicit_retry_selects_the_failed_parse_stage() {
     let source_blob = openwave_core::DocumentSourceBlob::from_bytes(&raw);
     let blob_id = source_blob.id;
     let blobs = openwave_core::FsBlobStore::new(dir.path().join("blobs"));
-    openwave_core::BlobStore::put(&blobs, &blob_id.to_string(), raw.clone())
+    openwave_core::BlobStore::put(&blobs, blob_id, raw.clone())
         .await
         .unwrap();
     let source = openwave_core::DocumentSourceUpsert {
