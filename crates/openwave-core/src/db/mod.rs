@@ -310,6 +310,36 @@ impl Store for DbStore {
         ops::blob::heartbeat(self, blob_id, lease_token, now, lease_expires_at).await
     }
 
+    async fn complete_blob_retirement(
+        &self,
+        blob_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        completed_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        ops::blob::complete(self, blob_id, lease_token, completed_at).await
+    }
+
+    async fn record_blob_retirement_failure(
+        &self,
+        blob_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        failed_at: chrono::DateTime<Utc>,
+        retry_at: Option<chrono::DateTime<Utc>>,
+        error_code: &str,
+        error_detail: Option<&str>,
+    ) -> Result<Option<BlobRetirementStatus>> {
+        ops::blob::record_failure(
+            self,
+            blob_id,
+            lease_token,
+            failed_at,
+            retry_at,
+            error_code,
+            error_detail,
+        )
+        .await
+    }
+
     async fn get_document_generation(&self, id: DocumentId) -> Result<Option<DocumentGeneration>> {
         Ok(entities::document_generation::Entity::find_by_id(id.0)
             .one(&self.conn)
