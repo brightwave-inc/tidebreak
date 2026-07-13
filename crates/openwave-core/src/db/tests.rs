@@ -4573,6 +4573,175 @@ async fn chats_and_messages_roundtrip() {
 }
 
 #[tokio::test]
+async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let now = DateTime::<Utc>::from_timestamp(1_752_408_000, 0).unwrap();
+    let make_turn = |chat_id: ChatId, model: &str| entities::turn_run::ActiveModel {
+        id: Set(TurnId::new().0),
+        chat_id: Set(chat_id.0),
+        model: Set(model.into()),
+        status: Set(TurnRunStatus::Queued.as_str().into()),
+        attempt_count: Set(0),
+        max_attempts: Set(crate::model::TurnRun::DEFAULT_MAX_ATTEMPTS),
+        available_at: Set(now),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        started_at: Set(None),
+        finished_at: Set(None),
+        last_error_code: Set(None),
+        last_error_detail: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    };
+
+    let first = make_turn(chat.id, "claude-sonnet-4-5")
+        .insert(&store.conn)
+        .await
+        .unwrap();
+    let stored = store.get_turn_run(TurnId(first.id)).await.unwrap().unwrap();
+    assert_eq!(stored.id, TurnId(first.id));
+    assert_eq!(stored.chat_id, chat.id);
+    assert_eq!(stored.model, "claude-sonnet-4-5");
+    assert_eq!(stored.status, TurnRunStatus::Queued);
+    assert_eq!(store.list_turn_runs(chat.id).await.unwrap(), vec![stored]);
+
+    // The database, not a process-local map, owns the one-live-turn invariant.
+    assert!(make_turn(chat.id, "gpt-5")
+        .insert(&store.conn)
+        .await
+        .is_err());
+
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::Status,
+            sea_orm::sea_query::Expr::value(TurnRunStatus::Completed.as_str()),
+        )
+        .col_expr(
+            entities::turn_run::Column::AttemptCount,
+            sea_orm::sea_query::Expr::value(1),
+        )
+        .col_expr(
+            entities::turn_run::Column::StartedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            entities::turn_run::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .filter(entities::turn_run::Column::Id.eq(first.id))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    make_turn(chat.id, "gpt-5")
+        .insert(&store.conn)
+        .await
+        .unwrap();
+
+    let invalid_chat = sample_chat();
+    store.create_chat(&invalid_chat).await.unwrap();
+
+    let mut running_without_lease = make_turn(invalid_chat.id, "gpt-5");
+    running_without_lease.status = Set(TurnRunStatus::Running.as_str().into());
+    running_without_lease.attempt_count = Set(1);
+    running_without_lease.started_at = Set(Some(now));
+    assert!(running_without_lease.insert(&store.conn).await.is_err());
+
+    let mut retry_without_error = make_turn(invalid_chat.id, "gpt-5");
+    retry_without_error.status = Set(TurnRunStatus::RetryWait.as_str().into());
+    retry_without_error.attempt_count = Set(1);
+    retry_without_error.max_attempts = Set(2);
+    retry_without_error.started_at = Set(Some(now));
+    assert!(retry_without_error.insert(&store.conn).await.is_err());
+
+    let mut failed_without_finish = make_turn(invalid_chat.id, "gpt-5");
+    failed_without_finish.status = Set(TurnRunStatus::Failed.as_str().into());
+    failed_without_finish.attempt_count = Set(1);
+    failed_without_finish.started_at = Set(Some(now));
+    failed_without_finish.last_error_code = Set(Some("provider_error".into()));
+    assert!(failed_without_finish.insert(&store.conn).await.is_err());
+
+    let mut unknown_status = make_turn(invalid_chat.id, "gpt-5");
+    unknown_status.status = Set("waiting_for_magic".into());
+    assert!(unknown_status.insert(&store.conn).await.is_err());
+    assert!(make_turn(invalid_chat.id, "")
+        .insert(&store.conn)
+        .await
+        .is_err());
+    assert!(make_turn(
+        invalid_chat.id,
+        &"m".repeat(crate::model::TurnRun::MAX_MODEL_LEN + 1),
+    )
+    .insert(&store.conn)
+    .await
+    .is_err());
+
+    let mut oversized_error = make_turn(invalid_chat.id, "gpt-5");
+    oversized_error.status = Set(TurnRunStatus::Failed.as_str().into());
+    oversized_error.attempt_count = Set(1);
+    oversized_error.started_at = Set(Some(now));
+    oversized_error.finished_at = Set(Some(now));
+    oversized_error.last_error_code = Set(Some(
+        "e".repeat(crate::model::TurnRun::MAX_ERROR_CODE_LEN + 1),
+    ));
+    assert!(oversized_error.insert(&store.conn).await.is_err());
+
+    // The turn identity is global and cannot be replayed against another chat.
+    let other = sample_chat();
+    store.create_chat(&other).await.unwrap();
+    let mut duplicate_identity = make_turn(other.id, "gpt-5");
+    duplicate_identity.id = Set(first.id);
+    assert!(duplicate_identity.insert(&store.conn).await.is_err());
+
+    // Every valid non-queued state is representable; later transition methods
+    // must reach these shapes atomically under exact predicates.
+    let running_chat = sample_chat();
+    store.create_chat(&running_chat).await.unwrap();
+    let mut running = make_turn(running_chat.id, "gpt-5");
+    running.status = Set(TurnRunStatus::Running.as_str().into());
+    running.attempt_count = Set(1);
+    running.started_at = Set(Some(now));
+    running.lease_token = Set(Some(uuid::Uuid::new_v4()));
+    running.lease_expires_at = Set(Some(now + chrono::Duration::minutes(1)));
+    running.insert(&store.conn).await.unwrap();
+
+    let retry_chat = sample_chat();
+    store.create_chat(&retry_chat).await.unwrap();
+    let mut retry_wait = make_turn(retry_chat.id, "gpt-5");
+    retry_wait.status = Set(TurnRunStatus::RetryWait.as_str().into());
+    retry_wait.attempt_count = Set(1);
+    retry_wait.max_attempts = Set(2);
+    retry_wait.started_at = Set(Some(now));
+    retry_wait.last_error_code = Set(Some("provider_unavailable".into()));
+    retry_wait.insert(&store.conn).await.unwrap();
+
+    let failed_chat = sample_chat();
+    store.create_chat(&failed_chat).await.unwrap();
+    let mut failed = make_turn(failed_chat.id, "gpt-5");
+    failed.status = Set(TurnRunStatus::Failed.as_str().into());
+    failed.attempt_count = Set(1);
+    failed.started_at = Set(Some(now));
+    failed.finished_at = Set(Some(now));
+    failed.last_error_code = Set(Some("unsafe_to_retry".into()));
+    failed.last_error_detail = Set(Some("tool outcome is ambiguous".into()));
+    failed.insert(&store.conn).await.unwrap();
+
+    for started in [false, true] {
+        let cancelled_chat = sample_chat();
+        store.create_chat(&cancelled_chat).await.unwrap();
+        let mut cancelled = make_turn(cancelled_chat.id, "gpt-5");
+        cancelled.status = Set(TurnRunStatus::Cancelled.as_str().into());
+        cancelled.finished_at = Set(Some(now));
+        if started {
+            cancelled.attempt_count = Set(1);
+            cancelled.started_at = Set(Some(now));
+        }
+        cancelled.insert(&store.conn).await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn settings_roundtrip_and_overwrite() {
     let (_dir, store) = temp_store().await;
     assert_eq!(store.get_setting("model").await.unwrap(), None);

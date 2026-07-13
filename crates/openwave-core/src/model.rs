@@ -1,12 +1,10 @@
 //! The persisted conversation model.
 //!
-//! Mirrors the `chat` and `message` tables of `Store` schema v1. A
+//! Mirrors the conversation tables of `Store` schema v1. A
 //! [`Chat`] is a durable conversation that owns a workspace directory; a
-//! [`Message`] is one user input or assistant answer within it.
-//!
-//! Turns and steps are runtime concepts of the agent loop (schema v1 has no
-//! table for them — they are referenced by `turn_id`), so they live with the
-//! loop, not here.
+//! [`TurnRun`] is one durably scheduled agent turn, and a [`Message`] is one
+//! user input or assistant answer within it. Steps remain runtime concepts of
+//! the agent loop.
 
 use std::path::PathBuf;
 
@@ -611,6 +609,98 @@ pub struct Chat {
     pub created_at: DateTime<Utc>,
 }
 
+/// Durable execution state of one user turn.
+///
+/// A turn is accepted once under its stable [`TurnId`], then claimed under an
+/// exact lease before model or tool work begins. Keeping this state separate
+/// from messages lets API acceptance, worker ownership, and terminal resolution
+/// be fenced without treating append-only conversation content as a job queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnRun {
+    /// Stable turn and idempotency identity.
+    pub id: TurnId,
+    /// Conversation this turn belongs to.
+    pub chat_id: ChatId,
+    /// Model selected when the turn was accepted.
+    pub model: String,
+    /// Durable delivery state.
+    pub status: TurnRunStatus,
+    /// Claims already made, including the current claim when running.
+    pub attempt_count: i32,
+    /// Maximum claims permitted for this turn.
+    pub max_attempts: i32,
+    /// Earliest time queued or retry-wait work may be claimed.
+    pub available_at: DateTime<Utc>,
+    /// Exact claim identity required for heartbeat and resolution writes.
+    pub lease_token: Option<Uuid>,
+    /// When the current claim becomes stale.
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    /// When the first claim began.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When this turn entered a terminal state.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Stable machine-readable failure category.
+    pub last_error_code: Option<String>,
+    /// Bounded diagnostic detail for local operators.
+    pub last_error_detail: Option<String>,
+    /// When this turn was accepted.
+    pub created_at: DateTime<Utc>,
+    /// When its durable state last changed.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl TurnRun {
+    /// New turns are not automatically replayed after an ambiguous side effect.
+    /// A later resumable-checkpoint slice may opt specific turns into more.
+    pub const DEFAULT_MAX_ATTEMPTS: i32 = 1;
+    /// Maximum persisted model identifier length.
+    pub const MAX_MODEL_LEN: usize = 512;
+    /// Maximum persisted machine-readable error code length.
+    pub const MAX_ERROR_CODE_LEN: usize = 128;
+    /// Maximum persisted diagnostic detail length.
+    pub const MAX_ERROR_DETAIL_LEN: usize = 4096;
+}
+
+/// Durable delivery state of a [`TurnRun`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TurnRunStatus {
+    /// Accepted durably and eligible to be claimed at `available_at`.
+    Queued,
+    /// Currently owned by the exact lease token and expiry on the turn.
+    Running,
+    /// Failed safely before an ambiguous side effect and awaits another claim.
+    RetryWait,
+    /// Produced a final answer successfully.
+    Completed,
+    /// Failed permanently or cannot be replayed safely.
+    Failed,
+    /// Cancelled before producing a final answer.
+    Cancelled,
+}
+
+impl TurnRunStatus {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::RetryWait => "retry_wait",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Whether no worker may claim this turn without an explicit transition.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
 /// One message in a chat: user input or assistant text.
 ///
 /// Tool calls are not messages; they persist separately (the `tool_call` table)
@@ -692,6 +782,12 @@ mod tests {
         assert!(!DocumentJobStatus::Running.is_terminal());
         assert!(BlobRetirementStatus::Cancelled.is_terminal());
         assert!(!BlobRetirementStatus::Queued.is_terminal());
+        assert_eq!(
+            serde_json::to_string(&TurnRunStatus::RetryWait).unwrap(),
+            "\"retry_wait\""
+        );
+        assert!(TurnRunStatus::Completed.is_terminal());
+        assert!(!TurnRunStatus::Running.is_terminal());
     }
 
     #[test]

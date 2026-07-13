@@ -21,15 +21,15 @@ use serde_json::Value;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
-use crate::id::{CallId, MessageId, TurnId};
-use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
+use crate::id::{CallId, MessageId};
+use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId, TurnId};
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
     BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
     DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
-    DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord,
+    DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, TurnRun, TurnRunStatus,
 };
 use crate::storage::{
     DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, Store,
@@ -1640,6 +1640,14 @@ impl Store for DbStore {
 
     async fn list_chats(&self) -> Result<Vec<Chat>> {
         ops::conversation::list_chats(self).await
+    }
+
+    async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {
+        ops::conversation::get_turn_run(self, id).await
+    }
+
+    async fn list_turn_runs(&self, chat_id: ChatId) -> Result<Vec<TurnRun>> {
+        ops::conversation::list_turn_runs(self, chat_id).await
     }
 
     async fn append_message(&self, message: &Message) -> Result<()> {

@@ -7,7 +7,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrde
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, ChatId, MessageId, ProjectId, TurnId};
-use crate::model::{Chat, Message, Role, ToolCallRecord};
+use crate::model::{Chat, Message, Role, ToolCallRecord, TurnRun, TurnRunStatus};
 
 use super::super::{entities, store_err, DbStore};
 
@@ -60,6 +60,31 @@ pub(in crate::db) async fn list_chats(store: &DbStore) -> Result<Vec<Chat>> {
         .into_iter()
         .map(chat_from_model)
         .collect())
+}
+
+pub(in crate::db) async fn get_turn_run(store: &DbStore, id: TurnId) -> Result<Option<TurnRun>> {
+    entities::turn_run::Entity::find_by_id(id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .map(turn_run_from_model)
+        .transpose()
+}
+
+pub(in crate::db) async fn list_turn_runs(
+    store: &DbStore,
+    chat_id: ChatId,
+) -> Result<Vec<TurnRun>> {
+    entities::turn_run::Entity::find()
+        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+        .order_by_asc(entities::turn_run::Column::CreatedAt)
+        .order_by_asc(entities::turn_run::Column::Id)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(turn_run_from_model)
+        .collect()
 }
 
 pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) -> Result<()> {
@@ -207,6 +232,40 @@ fn message_from_model(model: entities::message::Model) -> Result<Message> {
         content: model.content,
         created_at: model.created_at,
     })
+}
+
+fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
+    Ok(TurnRun {
+        id: TurnId(model.id),
+        chat_id: ChatId(model.chat_id),
+        model: model.model,
+        status: turn_run_status_from_db(&model.status)?,
+        attempt_count: model.attempt_count,
+        max_attempts: model.max_attempts,
+        available_at: model.available_at,
+        lease_token: model.lease_token,
+        lease_expires_at: model.lease_expires_at,
+        started_at: model.started_at,
+        finished_at: model.finished_at,
+        last_error_code: model.last_error_code,
+        last_error_detail: model.last_error_detail,
+        created_at: model.created_at,
+        updated_at: model.updated_at,
+    })
+}
+
+fn turn_run_status_from_db(text: &str) -> Result<TurnRunStatus> {
+    match text {
+        "queued" => Ok(TurnRunStatus::Queued),
+        "running" => Ok(TurnRunStatus::Running),
+        "retry_wait" => Ok(TurnRunStatus::RetryWait),
+        "completed" => Ok(TurnRunStatus::Completed),
+        "failed" => Ok(TurnRunStatus::Failed),
+        "cancelled" => Ok(TurnRunStatus::Cancelled),
+        other => Err(AgentError::Store(format!(
+            "unknown durable turn status: {other}"
+        ))),
+    }
 }
 
 fn tool_call_from_model(model: entities::tool_call::Model) -> ToolCallRecord {
