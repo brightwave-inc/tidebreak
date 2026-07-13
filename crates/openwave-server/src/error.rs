@@ -43,6 +43,18 @@ impl ServerError {
         }
     }
 
+    /// A `413 Payload Too Large` for a request that exceeds an endpoint's
+    /// explicit body-size limit.
+    pub fn payload_too_large(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            info: AgentErrorInfo {
+                kind: "payload_too_large".to_string(),
+                message: message.into(),
+            },
+        }
+    }
+
     /// A `409 Conflict` for a request that clashes with current state (e.g. a
     /// turn is already running for the chat).
     pub fn conflict(message: impl Into<String>) -> Self {

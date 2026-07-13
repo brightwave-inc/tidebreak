@@ -6,14 +6,39 @@
 //! unparseable body, wrong/absent `Content-Type` — answers with the same
 //! `{ kind, message }` JSON a client can always parse.
 
-use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::body::Bytes;
+use axum::extract::rejection::{BytesRejection, JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts, Request};
-use axum::http::request::Parts;
+use axum::http::{request::Parts, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::error::ServerError;
+
+/// Raw request bytes with Axum's body failures mapped into the API's stable
+/// JSON error envelope.
+pub struct RawBytes(pub Bytes);
+
+impl<S> FromRequest<S> for RawBytes
+where
+    S: Send + Sync,
+{
+    type Rejection = ServerError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes =
+            Bytes::from_request(req, state)
+                .await
+                .map_err(|rejection: BytesRejection| match rejection.status() {
+                    StatusCode::PAYLOAD_TOO_LARGE => ServerError::payload_too_large(
+                        "request body exceeds the raw document upload limit",
+                    ),
+                    _ => ServerError::bad_request(rejection.body_text()),
+                })?;
+        Ok(Self(bytes))
+    }
+}
 
 /// Like [`axum::Json`], but a parse or content-type failure becomes a `400` with
 /// a JSON `{ kind, message }` body. Also serializes as a JSON response body, so

@@ -1001,6 +1001,145 @@ async fn post_json(
         .unwrap()
 }
 
+/// POST exact bytes to a raw document route.
+async fn post_raw(
+    router: &Router,
+    bearer: &str,
+    uri: &str,
+    content_type: Option<&str>,
+    body: Vec<u8>,
+) -> axum::response::Response {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::AUTHORIZATION, bearer);
+    if let Some(content_type) = content_type {
+        request = request.header(header::CONTENT_TYPE, content_type);
+    }
+    router
+        .clone()
+        .oneshot(request.body(Body::from(body)).unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn raw_ingest_retains_exact_bytes_and_runs_the_async_pipeline() {
+    let (router, token, store, dir, worker) = test_app_with_worker().await;
+    let bearer = format!("Bearer {token}");
+    let raw = b"raw \xff source\n".to_vec();
+    let response = post_raw(
+        &router,
+        &bearer,
+        "/documents/raw?uri=file%3A%2F%2F%2Fraw.txt",
+        Some("text/plain; charset=utf-8"),
+        raw.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let accepted: serde_json::Value = json_body(response).await;
+    let document_id: openwave_core::DocumentId =
+        accepted["document_id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        document_id,
+        openwave_core::DocumentId::derive("file:///raw.txt")
+    );
+
+    let pending = store.get_document(document_id).await.unwrap().unwrap();
+    assert_eq!(pending.media_type, "text/plain; charset=utf-8");
+    let source_blob = pending.source_blob.unwrap();
+    let blobs = openwave_core::FsBlobStore::new(dir.path().join("blobs"));
+    assert_eq!(blobs.get(source_blob.id).await.unwrap().unwrap(), raw);
+
+    run_parse_and_index(&worker).await;
+    let ready = store.get_document(document_id).await.unwrap().unwrap();
+    assert_eq!(ready.canonical_text, String::from_utf8_lossy(&raw));
+    assert_eq!(
+        ready.processing_status,
+        openwave_core::DocumentProcessingStatus::Ready
+    );
+}
+
+#[tokio::test]
+async fn raw_ingest_enforces_media_type_body_and_project_scope() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let missing_type = post_raw(&router, &bearer, "/documents/raw", None, b"body".to_vec()).await;
+    assert_eq!(missing_type.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(missing_type).await;
+    assert_eq!(error.kind, "bad_request");
+
+    let empty = post_raw(
+        &router,
+        &bearer,
+        "/documents/raw",
+        Some("text/plain"),
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+    let unsupported = post_raw(
+        &router,
+        &bearer,
+        "/documents/raw",
+        Some("application/octet-stream"),
+        b"binary".to_vec(),
+    )
+    .await;
+    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
+
+    let project = make_project(&router, &bearer).await;
+    let response = post_raw(
+        &router,
+        &bearer,
+        &format!("/projects/{}/documents/raw", project.id),
+        Some("text/markdown"),
+        b"# scoped".to_vec(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let accepted: serde_json::Value = json_body(response).await;
+    let document_id = accepted["document_id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        store
+            .get_document(document_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .project_id,
+        Some(project.id)
+    );
+}
+
+#[tokio::test]
+async fn raw_ingest_has_an_explicit_limit_and_preserves_payload_too_large() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let boundary = post_raw(
+        &router,
+        &bearer,
+        "/documents/raw",
+        Some("text/plain"),
+        vec![b'x'; MAX_RAW_DOCUMENT_BYTES],
+    )
+    .await;
+    assert_eq!(boundary.status(), StatusCode::ACCEPTED);
+
+    let too_large = post_raw(
+        &router,
+        &bearer,
+        "/documents/raw",
+        Some("text/plain"),
+        vec![b'x'; MAX_RAW_DOCUMENT_BYTES + 1],
+    )
+    .await;
+    assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let error: AgentErrorInfo = json_body(too_large).await;
+    assert_eq!(error.kind, "payload_too_large");
+}
+
 #[tokio::test]
 async fn ingest_then_search_finds_the_passage() {
     let (router, token, store, _dir, worker) = test_app_with_worker().await;

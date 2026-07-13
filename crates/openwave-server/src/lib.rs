@@ -31,6 +31,7 @@ mod state;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::http::{header, Method};
 use axum::routing::{get, post};
 use axum::Router;
@@ -51,6 +52,8 @@ use resolver::KeyedResolver;
 pub use error::ServerError;
 pub use state::AppState;
 
+const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+
 /// Build the router: unauthenticated health check plus the token-guarded API.
 pub fn app(state: AppState) -> Router {
     // `route_layer` applies the token check to matched API routes only, so an
@@ -68,6 +71,11 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/projects/{project_id}/documents",
             post(routes::ingest_project_document).get(routes::list_project_documents),
+        )
+        .route(
+            "/projects/{project_id}/documents/raw",
+            post(routes::ingest_raw_project_document)
+                .layer(DefaultBodyLimit::max(MAX_RAW_DOCUMENT_BYTES)),
         )
         .route(
             "/projects/{project_id}/documents/{document_id}",
@@ -94,6 +102,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/documents",
             post(routes::ingest_document).get(routes::list_documents),
+        )
+        .route(
+            "/documents/raw",
+            post(routes::ingest_raw_document).layer(DefaultBodyLimit::max(MAX_RAW_DOCUMENT_BYTES)),
         )
         .route(
             "/documents/{id}",
