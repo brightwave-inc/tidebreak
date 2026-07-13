@@ -159,6 +159,30 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
+    /// Claim the oldest effective-due blob retirement under a fresh lease.
+    ///
+    /// `lease_expires_at` must be after `now`. Expired running work is reclaimed
+    /// with a new token and attempt; an expired final attempt becomes failed and
+    /// the claim scan continues to the next candidate.
+    async fn claim_blob_retirement(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+        _lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<BlobRetirement>> {
+        document_storage_unavailable()
+    }
+
+    /// Extend one exact live blob-retirement lease monotonically.
+    async fn heartbeat_blob_retirement(
+        &self,
+        _blob_id: uuid::Uuid,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+        _lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        document_storage_unavailable()
+    }
+
     /// Read the newest durable generation, including a hard-delete tombstone.
     async fn get_document_generation(&self, _id: DocumentId) -> Result<Option<DocumentGeneration>> {
         document_storage_unavailable()

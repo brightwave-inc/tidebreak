@@ -292,6 +292,24 @@ impl Store for DbStore {
         ops::blob::get(self, blob_id).await
     }
 
+    async fn claim_blob_retirement(
+        &self,
+        now: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<Option<BlobRetirement>> {
+        ops::blob::claim(self, now, lease_expires_at).await
+    }
+
+    async fn heartbeat_blob_retirement(
+        &self,
+        blob_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        ops::blob::heartbeat(self, blob_id, lease_token, now, lease_expires_at).await
+    }
+
     async fn get_document_generation(&self, id: DocumentId) -> Result<Option<DocumentGeneration>> {
         Ok(entities::document_generation::Entity::find_by_id(id.0)
             .one(&self.conn)
