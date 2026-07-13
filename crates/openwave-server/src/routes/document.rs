@@ -1,7 +1,7 @@
 //! Document ingestion, catalog, lifecycle, and search HTTP handlers.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use openwave_retrieval::{
 
 use crate::document_stage::{retry_document_job_spec, MAX_PARSE_ATTEMPTS};
 use crate::error::ServerError;
-use crate::extract::{Json, Path, Query};
+use crate::extract::{Json, Path, Query, RawBytes};
 use crate::state::AppState;
 
 /// Body of `POST /documents`.
@@ -31,6 +31,13 @@ pub struct IngestDocument {
     /// Media (MIME) type; defaults to `text/plain` when omitted.
     #[serde(default)]
     pub media_type: Option<String>,
+}
+
+/// Query parameters for raw-byte document ingestion.
+#[derive(Debug, Default, Deserialize)]
+pub struct RawDocumentQuery {
+    /// Optional source URI used for provenance and idempotent document identity.
+    pub uri: Option<String>,
 }
 
 /// Result of `POST /documents`.
@@ -214,23 +221,93 @@ async fn ingest_document_in_scope(
     if body.content.trim().is_empty() {
         return Err(ServerError::bad_request("content must not be empty"));
     }
-    let source_uri = match body.uri.as_deref().map(str::trim) {
+    publish_document_source(
+        state,
+        project_id,
+        body.uri,
+        body.media_type.unwrap_or_else(|| "text/plain".to_owned()),
+        body.content.into_bytes(),
+    )
+    .await
+}
+
+/// `POST /documents/raw` — retain the exact request body under its required
+/// `Content-Type` and enqueue asynchronous parsing.
+pub async fn ingest_raw_document(
+    State(state): State<AppState>,
+    Query(query): Query<RawDocumentQuery>,
+    headers: HeaderMap,
+    RawBytes(bytes): RawBytes,
+) -> Result<impl IntoResponse, ServerError> {
+    ingest_raw_document_in_scope(&state, None, query, &headers, bytes.to_vec()).await
+}
+
+/// `POST /projects/{project_id}/documents/raw` — retain exact bytes in one
+/// project corpus and enqueue asynchronous parsing.
+pub async fn ingest_raw_project_document(
+    State(state): State<AppState>,
+    Path(project_id): Path<ProjectId>,
+    Query(query): Query<RawDocumentQuery>,
+    headers: HeaderMap,
+    RawBytes(bytes): RawBytes,
+) -> Result<impl IntoResponse, ServerError> {
+    require_project(&state, project_id).await?;
+    ingest_raw_document_in_scope(&state, Some(project_id), query, &headers, bytes.to_vec()).await
+}
+
+async fn ingest_raw_document_in_scope(
+    state: &AppState,
+    project_id: Option<ProjectId>,
+    query: RawDocumentQuery,
+    headers: &HeaderMap,
+    source_bytes: Vec<u8>,
+) -> Result<(StatusCode, Json<IngestResult>), ServerError> {
+    if source_bytes.is_empty() {
+        return Err(ServerError::bad_request("content must not be empty"));
+    }
+    let media_type = headers
+        .get(header::CONTENT_TYPE)
+        .ok_or_else(|| ServerError::bad_request("Content-Type header is required"))?
+        .to_str()
+        .map_err(|_| ServerError::bad_request("Content-Type header is not valid text"))?
+        .trim();
+    if media_type.is_empty() {
+        return Err(ServerError::bad_request(
+            "Content-Type header must not be empty",
+        ));
+    }
+    publish_document_source(
+        state,
+        project_id,
+        query.uri,
+        media_type.to_owned(),
+        source_bytes,
+    )
+    .await
+}
+
+async fn publish_document_source(
+    state: &AppState,
+    project_id: Option<ProjectId>,
+    source_uri: Option<String>,
+    media_type: String,
+    source_bytes: Vec<u8>,
+) -> Result<(StatusCode, Json<IngestResult>), ServerError> {
+    let source_uri = match source_uri.as_deref().map(str::trim) {
         // Trim before deriving the document id: a padded URI must resolve to the
         // same document as its unpadded form, or idempotent re-ingest breaks.
         Some(uri) if !uri.is_empty() => Some(uri.to_owned()),
         _ => None,
     };
-    let media_type = body.media_type.as_deref().unwrap_or("text/plain");
     let parser_fingerprint = state
         .retrieval
-        .canonical_fingerprint_for(media_type)
+        .canonical_fingerprint_for(&media_type)
         .map_err(retrieval_error)?;
     let document_id = match (project_id, source_uri.as_deref()) {
         (Some(project_id), Some(uri)) => DocumentId::derive_for_project(project_id, uri),
         (None, Some(uri)) => DocumentId::derive(uri),
         (_, None) => DocumentId::new(),
     };
-    let source_bytes = body.content.into_bytes();
     let source_blob = DocumentSourceBlob::from_bytes(&source_bytes);
     // Serialize the entire source publication boundary for one document. If
     // the first accepted request blocks on blob I/O, a later request cannot
@@ -251,7 +328,7 @@ async fn ingest_document_in_scope(
                 id: document_id,
                 project_id,
                 source_uri,
-                media_type: media_type.to_owned(),
+                media_type,
                 title: None,
                 source_blob,
                 updated_at: Utc::now(),
