@@ -1369,12 +1369,11 @@ async fn explicit_retry_revives_the_exact_terminal_job() {
 
 #[tokio::test]
 async fn explicit_retry_selects_the_failed_parse_stage() {
-    use sha2::{Digest, Sha256};
-
     let (router, token, store, dir, worker) = test_app_with_worker().await;
     let bearer = format!("Bearer {token}");
     let raw = b"parse retry succeeds through the durable worker".to_vec();
-    let blob_id = uuid::Uuid::new_v4();
+    let source_blob = openwave_core::DocumentSourceBlob::from_bytes(&raw);
+    let blob_id = source_blob.id;
     let blobs = openwave_core::FsBlobStore::new(dir.path().join("blobs"));
     openwave_core::BlobStore::put(&blobs, &blob_id.to_string(), raw.clone())
         .await
@@ -1385,11 +1384,7 @@ async fn explicit_retry_selects_the_failed_parse_stage() {
         source_uri: Some("file:///parse-retry.txt".into()),
         media_type: "text/plain".into(),
         title: None,
-        source_blob: openwave_core::DocumentSourceBlob {
-            id: blob_id,
-            sha256: Sha256::digest(&raw).into(),
-            byte_len: raw.len() as u64,
-        },
+        source_blob,
         updated_at: chrono::Utc::now(),
     };
     let (_, parse_job) = store

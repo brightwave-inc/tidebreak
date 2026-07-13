@@ -157,11 +157,7 @@ async fn documents_roundtrip_and_list_by_corpus_scope() {
     in_a.indexed_at = Some(DateTime::<Utc>::from_timestamp(2_001, 0).unwrap());
     let mut in_b = sample_document(Some(project_b.id));
     in_b.created_at = DateTime::<Utc>::from_timestamp(3_000, 0).unwrap();
-    in_b.source_blob = Some(DocumentSourceBlob {
-        id: uuid::Uuid::new_v4(),
-        sha256: [0x5a; 32],
-        byte_len: 8_192,
-    });
+    in_b.source_blob = Some(DocumentSourceBlob::from_digest([0x5a; 32], 8_192));
     in_b.canonical_fingerprint = Some("parser=markdown-v1".into());
 
     for document in [&unscoped, &in_a, &in_b] {
@@ -417,12 +413,18 @@ async fn document_constraints_reject_invalid_catalog_state() {
     assert!(store.create_document(&invalid_regions).await.is_err());
 
     let mut oversized_source = sample_document(None);
-    oversized_source.source_blob = Some(DocumentSourceBlob {
-        id: uuid::Uuid::new_v4(),
-        sha256: [0; 32],
-        byte_len: u64::MAX,
-    });
+    oversized_source.source_blob = Some(DocumentSourceBlob::from_digest([0; 32], u64::MAX));
     assert!(store.create_document(&oversized_source).await.is_err());
+
+    let mut invalid_source_id = sample_document(None);
+    let mut invalid_blob = DocumentSourceBlob::from_digest([0x11; 32], 512);
+    invalid_blob.id = uuid::Uuid::new_v4();
+    invalid_source_id.source_blob = Some(invalid_blob);
+    assert!(store.create_document(&invalid_source_id).await.is_err());
+    assert_eq!(
+        store.get_document(invalid_source_id.id).await.unwrap(),
+        None
+    );
 
     let mut empty_parser_fingerprint = sample_document(None);
     empty_parser_fingerprint.canonical_fingerprint = Some(String::new());
@@ -432,11 +434,7 @@ async fn document_constraints_reject_invalid_catalog_state() {
         .is_err());
 
     let mut valid_source = sample_document(None);
-    valid_source.source_blob = Some(DocumentSourceBlob {
-        id: uuid::Uuid::new_v4(),
-        sha256: [0x22; 32],
-        byte_len: 512,
-    });
+    valid_source.source_blob = Some(DocumentSourceBlob::from_digest([0x22; 32], 512));
     store.create_document(&valid_source).await.unwrap();
     assert!(entities::document::Entity::update_many()
         .col_expr(
@@ -447,6 +445,16 @@ async fn document_constraints_reject_invalid_catalog_state() {
         .exec(&store.conn)
         .await
         .is_err());
+    entities::document::Entity::update_many()
+        .col_expr(
+            entities::document::Column::SourceBlobId,
+            sea_orm::sea_query::Expr::value(Some(uuid::Uuid::new_v4())),
+        )
+        .filter(entities::document::Column::Id.eq(valid_source.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert!(store.get_document(valid_source.id).await.is_err());
 }
 
 #[tokio::test]
@@ -509,13 +517,20 @@ async fn raw_source_parse_completion_atomically_enqueues_index() {
         source_uri: Some("file:///report.pdf".into()),
         media_type: "application/pdf".into(),
         title: Some("Report".into()),
-        source_blob: DocumentSourceBlob {
-            id: uuid::Uuid::new_v4(),
-            sha256: [0x33; 32],
-            byte_len: 4_096,
-        },
+        source_blob: DocumentSourceBlob::from_digest([0x33; 32], 4_096),
         updated_at: Utc::now(),
     };
+
+    let mut invalid = source.clone();
+    invalid.source_blob.id = uuid::Uuid::new_v4();
+    let error = store
+        .accept_document_source_and_enqueue_parse(&invalid, "parser=pdf-v1", 3)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("blob id does not match its SHA-256 digest"));
+    assert_eq!(store.get_document(source.id).await.unwrap(), None);
 
     let (accepted, parse_job) = store
         .accept_document_source_and_enqueue_parse(&source, "parser=pdf-v1", 3)
@@ -712,11 +727,7 @@ async fn ensure_parse_job_advances_parser_changes_and_reuses_the_transition() {
         source_uri: Some("file:///parser-upgrade.txt".into()),
         media_type: "text/plain".into(),
         title: None,
-        source_blob: DocumentSourceBlob {
-            id: uuid::Uuid::new_v4(),
-            sha256: [0x22; 32],
-            byte_len: 128,
-        },
+        source_blob: DocumentSourceBlob::from_digest([0x22; 32], 128),
         updated_at: Utc::now(),
     };
     let (accepted, parse_job) = store
@@ -734,11 +745,7 @@ async fn ensure_parse_job_advances_parser_changes_and_reuses_the_transition() {
     let repair_source = DocumentSourceUpsert {
         id: DocumentId::new(),
         source_uri: Some("file:///repair-missing-parse.txt".into()),
-        source_blob: DocumentSourceBlob {
-            id: uuid::Uuid::new_v4(),
-            sha256: [0x33; 32],
-            byte_len: 64,
-        },
+        source_blob: DocumentSourceBlob::from_digest([0x33; 32], 64),
         ..source.clone()
     };
     let (pending, missing_parse_job) = store
@@ -910,11 +917,7 @@ async fn concurrent_ensure_parse_advances_once_and_fences_stale_callers() {
         source_uri: Some("file:///concurrent-parser-upgrade.txt".into()),
         media_type: "text/plain".into(),
         title: None,
-        source_blob: DocumentSourceBlob {
-            id: uuid::Uuid::new_v4(),
-            sha256: [0x44; 32],
-            byte_len: 96,
-        },
+        source_blob: DocumentSourceBlob::from_digest([0x44; 32], 96),
         updated_at: Utc::now(),
     };
     let (accepted, parse_job) = store
@@ -1034,11 +1037,7 @@ async fn document_job_schema_enforces_delivery_and_idempotency_invariants() {
         .unwrap();
 
     let mut parse_document = sample_document(None);
-    parse_document.source_blob = Some(DocumentSourceBlob {
-        id: uuid::Uuid::new_v4(),
-        sha256: [0x11; 32],
-        byte_len: 1_024,
-    });
+    parse_document.source_blob = Some(DocumentSourceBlob::from_digest([0x11; 32], 1_024));
     store.create_document(&parse_document).await.unwrap();
     let parse_document = store
         .get_document(parse_document.id)
@@ -2400,11 +2399,7 @@ async fn explicit_retry_revives_only_the_pending_parse_stage() {
         source_uri: Some("file:///retry-report.pdf".into()),
         media_type: "application/pdf".into(),
         title: Some("Retry report".into()),
-        source_blob: DocumentSourceBlob {
-            id: uuid::Uuid::new_v4(),
-            sha256: [0x44; 32],
-            byte_len: 4_096,
-        },
+        source_blob: DocumentSourceBlob::from_digest([0x44; 32], 4_096),
         updated_at: Utc::now(),
     };
     let (document, queued) = store

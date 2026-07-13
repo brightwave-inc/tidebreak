@@ -124,6 +124,11 @@ impl Store for DbStore {
 
     async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
         validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
+        let source_byte_len = document
+            .source_blob
+            .as_ref()
+            .map(validate_document_source_blob)
+            .transpose()?;
         let transaction = self.conn.begin().await.map_err(store_err)?;
         acquire_document_write_lock(&transaction, document.id).await?;
         let revision_token = uuid::Uuid::new_v4();
@@ -150,12 +155,7 @@ impl Store for DbStore {
                 .source_blob
                 .as_ref()
                 .map(|blob| blob.sha256.to_vec())),
-            source_byte_len: Set(document
-                .source_blob
-                .as_ref()
-                .map(|blob| i64::try_from(blob.byte_len))
-                .transpose()
-                .map_err(|_| AgentError::Store("document source is too large".into()))?),
+            source_byte_len: Set(source_byte_len),
             canonical_text: Set(document.canonical_text.clone()),
             canonical_fingerprint: Set(document.canonical_fingerprint.clone()),
             source_regions: Set(source_regions_to_db(&document.source_regions)),
@@ -2295,6 +2295,16 @@ fn validate_document_source_regions(text: &str, regions: &[SourceRegion]) -> Res
         .map_err(|message| AgentError::Store(format!("invalid document source regions: {message}")))
 }
 
+fn validate_document_source_blob(blob: &DocumentSourceBlob) -> Result<i64> {
+    if !blob.has_content_addressed_id() {
+        return Err(AgentError::Store(
+            "document source blob id does not match its SHA-256 digest".into(),
+        ));
+    }
+    i64::try_from(blob.byte_len)
+        .map_err(|_| AgentError::Store("document source is too large".into()))
+}
+
 fn source_regions_to_db(regions: &[SourceRegion]) -> Value {
     serde_json::to_value(regions).expect("SourceRegion serialization is infallible")
 }
@@ -2319,11 +2329,17 @@ fn source_blob_from_model(
             let byte_len = u64::try_from(byte_len).map_err(|_| {
                 AgentError::Store("stored document source length must be nonnegative".into())
             })?;
-            Ok(Some(DocumentSourceBlob {
+            let blob = DocumentSourceBlob {
                 id,
                 sha256,
                 byte_len,
-            }))
+            };
+            if !blob.has_content_addressed_id() {
+                return Err(AgentError::Store(
+                    "stored document source blob id does not match its SHA-256 digest".into(),
+                ));
+            }
+            Ok(Some(blob))
         }
         _ => Err(AgentError::Store(
             "stored document source descriptor is incomplete".into(),
