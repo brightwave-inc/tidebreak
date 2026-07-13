@@ -494,13 +494,13 @@ pub trait BlobStore: Send + Sync {
     /// Repeating the same publication is a no-op; publishing different bytes
     /// under an existing id fails without changing the stored value. Callers
     /// allocate a new id when content changes.
-    async fn put(&self, id: &str, bytes: Vec<u8>) -> Result<()>;
+    async fn put(&self, id: uuid::Uuid, bytes: Vec<u8>) -> Result<()>;
 
     /// Fetch bytes by `id`, or `None` if absent.
-    async fn get(&self, id: &str) -> Result<Option<Vec<u8>>>;
+    async fn get(&self, id: uuid::Uuid) -> Result<Option<Vec<u8>>>;
 
     /// Delete a blob; a no-op if it doesn't exist.
-    async fn delete(&self, id: &str) -> Result<()>;
+    async fn delete(&self, id: uuid::Uuid) -> Result<()>;
 }
 
 #[cfg(test)]

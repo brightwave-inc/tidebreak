@@ -241,10 +241,7 @@ async fn ingest_document_in_scope(
     // failure may leave an unreferenced content-addressed blob; it must be
     // reclaimed by a grace-period sweep, not eagerly deleted, because another
     // document may already share the same blob id.
-    state
-        .blobs
-        .put(&source_blob.id.to_string(), source_bytes)
-        .await?;
+    state.blobs.put(source_blob.id, source_bytes).await?;
 
     let (revision, job) = state
         .store

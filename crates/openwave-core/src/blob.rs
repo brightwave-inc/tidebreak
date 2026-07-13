@@ -44,17 +44,15 @@ impl FsBlobStore {
         &self.root
     }
 
-    fn blob_path(&self, id: &str) -> Result<PathBuf> {
-        let id =
-            Uuid::parse_str(id).map_err(|_| AgentError::Store("blob id must be a UUID".into()))?;
-        Ok(self.root.join(format!("{id}.blob")))
+    fn blob_path(&self, id: Uuid) -> PathBuf {
+        self.root.join(format!("{id}.blob"))
     }
 }
 
 #[async_trait]
 impl BlobStore for FsBlobStore {
-    async fn put(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
-        let destination = self.blob_path(id)?;
+    async fn put(&self, id: Uuid, bytes: Vec<u8>) -> Result<()> {
+        let destination = self.blob_path(id);
         let root = Arc::clone(&self.root);
         let access = Arc::clone(&self.access);
         tokio::task::spawn_blocking(move || {
@@ -113,8 +111,8 @@ impl BlobStore for FsBlobStore {
         .map_err(|error| AgentError::Store(format!("blob write task failed: {error}")))?
     }
 
-    async fn get(&self, id: &str) -> Result<Option<Vec<u8>>> {
-        let path = self.blob_path(id)?;
+    async fn get(&self, id: Uuid) -> Result<Option<Vec<u8>>> {
+        let path = self.blob_path(id);
         let access = Arc::clone(&self.access);
         tokio::task::spawn_blocking(move || {
             let _guard = access
@@ -130,8 +128,8 @@ impl BlobStore for FsBlobStore {
         .map_err(|error| AgentError::Store(format!("blob read task failed: {error}")))?
     }
 
-    async fn delete(&self, id: &str) -> Result<()> {
-        let path = self.blob_path(id)?;
+    async fn delete(&self, id: Uuid) -> Result<()> {
+        let path = self.blob_path(id);
         let root = Arc::clone(&self.root);
         let access = Arc::clone(&self.access);
         tokio::task::spawn_blocking(move || {
@@ -208,47 +206,44 @@ mod tests {
     #[tokio::test]
     async fn roundtrips_reopens_and_deletes_idempotently() {
         let directory = tempfile::tempdir().unwrap();
-        let id = Uuid::new_v4().to_string();
+        let id = Uuid::new_v4();
         let store = FsBlobStore::new(directory.path());
 
-        assert_eq!(store.get(&id).await.unwrap(), None);
-        store.put(&id, b"first".to_vec()).await.unwrap();
-        assert_eq!(
-            store.get(&id).await.unwrap().as_deref(),
-            Some(&b"first"[..])
-        );
+        assert_eq!(store.get(id).await.unwrap(), None);
+        store.put(id, b"first".to_vec()).await.unwrap();
+        assert_eq!(store.get(id).await.unwrap().as_deref(), Some(&b"first"[..]));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(store.blob_path(&id).unwrap())
+            let mode = fs::metadata(store.blob_path(id))
                 .unwrap()
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        store.put(&id, b"first".to_vec()).await.unwrap();
+        store.put(id, b"first".to_vec()).await.unwrap();
 
         let reopened = FsBlobStore::new(directory.path());
         assert_eq!(
-            reopened.get(&id).await.unwrap().as_deref(),
+            reopened.get(id).await.unwrap().as_deref(),
             Some(&b"first"[..])
         );
-        reopened.delete(&id).await.unwrap();
-        reopened.delete(&id).await.unwrap();
-        assert_eq!(reopened.get(&id).await.unwrap(), None);
+        reopened.delete(id).await.unwrap();
+        reopened.delete(id).await.unwrap();
+        assert_eq!(reopened.get(id).await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn immutable_publication_is_idempotent_and_rejects_replacement() {
         let directory = tempfile::tempdir().unwrap();
-        let id = Uuid::new_v4().to_string();
+        let id = Uuid::new_v4();
         let store = FsBlobStore::new(directory.path());
 
-        store.put(&id, b"retained source".to_vec()).await.unwrap();
-        store.put(&id, b"retained source".to_vec()).await.unwrap();
-        assert!(store.put(&id, b"different source".to_vec()).await.is_err());
+        store.put(id, b"retained source".to_vec()).await.unwrap();
+        store.put(id, b"retained source".to_vec()).await.unwrap();
+        assert!(store.put(id, b"different source".to_vec()).await.is_err());
         assert_eq!(
-            store.get(&id).await.unwrap().as_deref(),
+            store.get(id).await.unwrap().as_deref(),
             Some(&b"retained source"[..])
         );
     }
@@ -256,29 +251,18 @@ mod tests {
     #[tokio::test]
     async fn independent_stores_choose_one_complete_immutable_value() {
         let directory = tempfile::tempdir().unwrap();
-        let id = Uuid::new_v4().to_string();
+        let id = Uuid::new_v4();
         let left_store = FsBlobStore::new(directory.path());
         let right_store = FsBlobStore::new(directory.path());
         let first = vec![b'a'; 128 * 1024];
         let second = vec![b'b'; 128 * 1024];
 
         let (left, right) = tokio::join!(
-            left_store.put(&id, first.clone()),
-            right_store.put(&id, second.clone())
+            left_store.put(id, first.clone()),
+            right_store.put(id, second.clone())
         );
         assert_ne!(left.is_ok(), right.is_ok());
-        let stored = left_store.get(&id).await.unwrap().unwrap();
+        let stored = left_store.get(id).await.unwrap().unwrap();
         assert!(stored == first || stored == second);
-    }
-
-    #[tokio::test]
-    async fn rejects_non_uuid_ids_without_touching_the_filesystem() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("blobs");
-        let store = FsBlobStore::new(&root);
-
-        assert!(store.put("../escape", vec![1]).await.is_err());
-        assert!(store.get("").await.is_err());
-        assert!(!root.exists());
     }
 }
