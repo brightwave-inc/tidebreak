@@ -993,6 +993,266 @@ async fn blob_retirement_constraints_reject_impossible_delivery_state() {
 }
 
 #[tokio::test]
+async fn blob_retirement_claim_cancels_referenced_candidates() {
+    let (_dir, store) = temp_store().await;
+    let shared_blob = DocumentSourceBlob::from_digest([0x71; 32], 71);
+    let source_a = sample_raw_source(
+        DocumentId::new(),
+        "file:///claim-shared-a.bin",
+        shared_blob.clone(),
+    );
+    let source_b = sample_raw_source(
+        DocumentId::new(),
+        "file:///claim-shared-b.bin",
+        shared_blob.clone(),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&source_a, "parser-v1", 3)
+        .await
+        .unwrap();
+    store
+        .accept_document_source_and_enqueue_parse(&source_b, "parser-v1", 3)
+        .await
+        .unwrap();
+    let replacement = sample_raw_source(
+        source_a.id,
+        source_a.source_uri.as_deref().unwrap(),
+        DocumentSourceBlob::from_digest([0x72; 32], 72),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&replacement, "parser-v1", 3)
+        .await
+        .unwrap();
+
+    let queued = store
+        .get_blob_retirement(shared_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let now = queued.available_at + chrono::Duration::seconds(1);
+    assert_eq!(
+        store
+            .claim_blob_retirement(now, now + chrono::Duration::minutes(5))
+            .await
+            .unwrap(),
+        None
+    );
+    let cancelled = store
+        .get_blob_retirement(shared_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.status, BlobRetirementStatus::Cancelled);
+    assert_eq!(cancelled.attempt_count, 0);
+    assert_eq!(cancelled.lease_token, None);
+    assert_eq!(cancelled.finished_at, Some(now));
+}
+
+#[tokio::test]
+async fn blob_retirement_claim_and_heartbeat_require_the_live_lease() {
+    let (_dir, store) = temp_store().await;
+    let source = sample_raw_source(
+        DocumentId::new(),
+        "file:///retire-claim.bin",
+        DocumentSourceBlob::from_digest([0x73; 32], 73),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
+        .await
+        .unwrap();
+    store.delete_document(source.id).await.unwrap();
+    let queued = store
+        .get_blob_retirement(source.source_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let now = queued.available_at + chrono::Duration::seconds(1);
+    assert!(store.claim_blob_retirement(now, now).await.is_err());
+
+    let first_expiry = now + chrono::Duration::minutes(5);
+    let claimed = store
+        .claim_blob_retirement(now, first_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.blob_id, source.source_blob.id);
+    assert_eq!(claimed.status, BlobRetirementStatus::Running);
+    assert_eq!(claimed.attempt_count, 1);
+    assert_eq!(claimed.started_at, Some(now));
+    assert_eq!(claimed.lease_expires_at, Some(first_expiry));
+    let lease_token = claimed.lease_token.unwrap();
+    assert!(!store
+        .heartbeat_blob_retirement(
+            claimed.blob_id,
+            uuid::Uuid::new_v4(),
+            now + chrono::Duration::minutes(1),
+            first_expiry + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap());
+    assert!(!store
+        .heartbeat_blob_retirement(
+            claimed.blob_id,
+            lease_token,
+            now + chrono::Duration::minutes(1),
+            first_expiry,
+        )
+        .await
+        .unwrap());
+    assert!(store
+        .heartbeat_blob_retirement(claimed.blob_id, lease_token, now, now)
+        .await
+        .is_err());
+
+    let heartbeat_at = now + chrono::Duration::minutes(1);
+    let extended = first_expiry + chrono::Duration::minutes(5);
+    assert!(store
+        .heartbeat_blob_retirement(claimed.blob_id, lease_token, heartbeat_at, extended)
+        .await
+        .unwrap());
+    let heartbeated = store
+        .get_blob_retirement(claimed.blob_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(heartbeated.lease_expires_at, Some(extended));
+    assert_eq!(heartbeated.updated_at, heartbeat_at);
+    assert!(!store
+        .heartbeat_blob_retirement(
+            claimed.blob_id,
+            lease_token,
+            extended,
+            extended + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn expired_blob_retirement_leases_are_reclaimed_then_fail_at_the_attempt_limit() {
+    let (_dir, store) = temp_store().await;
+    let source = sample_raw_source(
+        DocumentId::new(),
+        "file:///retire-reclaim.bin",
+        DocumentSourceBlob::from_digest([0x74; 32], 74),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
+        .await
+        .unwrap();
+    store.delete_document(source.id).await.unwrap();
+    entities::blob_retirement::Entity::update_many()
+        .col_expr(
+            entities::blob_retirement::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(2_i32),
+        )
+        .filter(entities::blob_retirement::Column::BlobId.eq(source.source_blob.id))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+
+    let queued = store
+        .get_blob_retirement(source.source_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let first_at = queued.available_at + chrono::Duration::seconds(1);
+    let first_expiry = first_at + chrono::Duration::minutes(1);
+    let first = store
+        .claim_blob_retirement(first_at, first_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+    let second_expiry = first_expiry + chrono::Duration::minutes(1);
+    let second = store
+        .claim_blob_retirement(first_expiry, second_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.blob_id, first.blob_id);
+    assert_eq!(second.attempt_count, 2);
+    assert_eq!(second.started_at, first.started_at);
+    assert_ne!(second.lease_token, first.lease_token);
+    assert_eq!(second.last_error_code.as_deref(), Some("lease_expired"));
+    assert!(!store
+        .heartbeat_blob_retirement(
+            first.blob_id,
+            first.lease_token.unwrap(),
+            first_expiry,
+            second_expiry + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap());
+
+    let final_at = second_expiry + chrono::Duration::seconds(1);
+    assert_eq!(
+        store
+            .claim_blob_retirement(final_at, final_at + chrono::Duration::minutes(1))
+            .await
+            .unwrap(),
+        None
+    );
+    let failed = store
+        .get_blob_retirement(first.blob_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.status, BlobRetirementStatus::Failed);
+    assert_eq!(failed.attempt_count, 2);
+    assert_eq!(failed.lease_token, None);
+    assert_eq!(failed.lease_expires_at, None);
+    assert_eq!(failed.finished_at, Some(final_at));
+    assert_eq!(failed.last_error_code.as_deref(), Some("lease_expired"));
+}
+
+#[tokio::test]
+async fn concurrent_blob_retirement_claimers_never_share_a_blob() {
+    let (_dir, store) = temp_store().await;
+    let store = std::sync::Arc::new(store);
+    let mut latest_available_at = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+    for index in 0..6 {
+        let source = sample_raw_source(
+            DocumentId::new(),
+            &format!("file:///retire-concurrent-{index}.bin"),
+            DocumentSourceBlob::from_digest([0x80 + index as u8; 32], 80 + index),
+        );
+        store
+            .accept_document_source_and_enqueue_parse(&source, "parser-v1", 3)
+            .await
+            .unwrap();
+        store.delete_document(source.id).await.unwrap();
+        latest_available_at = latest_available_at.max(
+            store
+                .get_blob_retirement(source.source_blob.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .available_at,
+        );
+    }
+    let now = latest_available_at + chrono::Duration::seconds(1);
+    let claims = (0..12).map(|_| {
+        let store = store.clone();
+        tokio::spawn(async move {
+            store
+                .claim_blob_retirement(now, now + chrono::Duration::minutes(5))
+                .await
+        })
+    });
+
+    let mut claimed_ids = Vec::new();
+    for result in futures::future::join_all(claims).await {
+        if let Some(retirement) = result.unwrap().unwrap() {
+            claimed_ids.push(retirement.blob_id);
+        }
+    }
+    assert_eq!(claimed_ids.len(), 6);
+    claimed_ids.sort();
+    claimed_ids.dedup();
+    assert_eq!(claimed_ids.len(), 6);
+}
+
+#[tokio::test]
 async fn ensure_parse_job_advances_parser_changes_and_reuses_the_transition() {
     let (_dir, store) = temp_store().await;
     let source = DocumentSourceUpsert {
