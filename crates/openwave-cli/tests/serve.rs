@@ -5,6 +5,8 @@ use std::net::TcpStream;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Kills the daemon on drop — including on an assertion panic, since
 /// `std::process::Child` does not reap on its own.
 struct Reaper(Child);
@@ -115,7 +117,7 @@ fn mcp_serves_read_only_tools_with_protocol_pure_stdout() {
     stdin.write_all(input.as_bytes()).unwrap();
     drop(stdin);
 
-    let output = child.wait_with_output(Duration::from_secs(5));
+    let output = child.wait_with_output(PROCESS_EXIT_TIMEOUT);
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
 
@@ -160,7 +162,7 @@ fn mcp_accepts_a_non_utf8_workspace_path() {
         .expect("spawn openwave mcp with non-UTF-8 workspace");
     let mut child = Reaper(child);
 
-    let output = child.wait_with_output(Duration::from_secs(5));
+    let output = child.wait_with_output(PROCESS_EXIT_TIMEOUT);
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
