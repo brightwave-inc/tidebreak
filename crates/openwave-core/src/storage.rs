@@ -489,7 +489,11 @@ pub trait SecretProvider: Send + Sync {
 /// Opaque byte storage for documents, images, and exports.
 #[async_trait]
 pub trait BlobStore: Send + Sync {
-    /// Store bytes under `id`, overwriting any existing blob.
+    /// Publish immutable bytes under `id`.
+    ///
+    /// Repeating the same publication is a no-op; publishing different bytes
+    /// under an existing id fails without changing the stored value. Callers
+    /// allocate a new id when content changes.
     async fn put(&self, id: &str, bytes: Vec<u8>) -> Result<()>;
 
     /// Fetch bytes by `id`, or `None` if absent.
