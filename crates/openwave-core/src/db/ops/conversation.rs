@@ -2,12 +2,16 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
+};
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, ChatId, MessageId, ProjectId, TurnId};
 use crate::model::{Chat, Message, Role, ToolCallRecord, TurnRun, TurnRunStatus};
+use crate::storage::AcceptTurnOutcome;
 
 use super::super::{entities, store_err, DbStore};
 
@@ -85,6 +89,175 @@ pub(in crate::db) async fn list_turn_runs(
         .into_iter()
         .map(turn_run_from_model)
         .collect()
+}
+
+pub(in crate::db) async fn accept_turn(
+    store: &DbStore,
+    id: TurnId,
+    chat_id: ChatId,
+    model: &str,
+    content: &str,
+) -> Result<AcceptTurnOutcome> {
+    validate_turn_input(model, content)?;
+
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let chat_lock = entities::chat::Entity::update_many()
+        .col_expr(
+            entities::chat::Column::Title,
+            sea_orm::sea_query::Expr::col(entities::chat::Column::Title).into(),
+        )
+        .filter(entities::chat::Column::Id.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if chat_lock.rows_affected != 1 {
+        return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
+    }
+
+    if let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    {
+        let existing =
+            exact_accepted_turn_on(&transaction, existing, chat_id, model, content).await?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(AcceptTurnOutcome::Existing(existing));
+    }
+
+    if let Some(active) = find_active_turn_on(&transaction, chat_id).await? {
+        let active = turn_run_from_model(active)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(AcceptTurnOutcome::ChatBusy(active));
+    }
+
+    let now = Utc::now();
+    let input_message_id = MessageId::new();
+    let message = entities::message::ActiveModel {
+        id: Set(input_message_id.0),
+        chat_id: Set(chat_id.0),
+        turn_id: Set(id.0),
+        role: Set(role_to_db(Role::User).into()),
+        content: Set(content.into()),
+        created_at: Set(now),
+    };
+    if let Err(error) = message.insert(&transaction).await {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(store_err(error));
+    }
+
+    let run = entities::turn_run::ActiveModel {
+        id: Set(id.0),
+        chat_id: Set(chat_id.0),
+        input_message_id: Set(input_message_id.0),
+        model: Set(model.into()),
+        status: Set(TurnRunStatus::Queued.as_str().into()),
+        attempt_count: Set(0),
+        max_attempts: Set(TurnRun::DEFAULT_MAX_ATTEMPTS),
+        available_at: Set(now),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        started_at: Set(None),
+        finished_at: Set(None),
+        last_error_code: Set(None),
+        last_error_detail: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    };
+    let inserted = match run.insert(&transaction).await {
+        Ok(inserted) => inserted,
+        Err(error) => {
+            transaction.rollback().await.map_err(store_err)?;
+            if let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
+                .one(&store.conn)
+                .await
+                .map_err(store_err)?
+            {
+                let existing =
+                    exact_accepted_turn_on(&store.conn, existing, chat_id, model, content).await?;
+                return Ok(AcceptTurnOutcome::Existing(existing));
+            }
+            if let Some(active) = find_active_turn_on(&store.conn, chat_id).await? {
+                return Ok(AcceptTurnOutcome::ChatBusy(turn_run_from_model(active)?));
+            }
+            return Err(store_err(error));
+        }
+    };
+
+    transaction.commit().await.map_err(store_err)?;
+    Ok(AcceptTurnOutcome::Accepted(turn_run_from_model(inserted)?))
+}
+
+fn validate_turn_input(model: &str, content: &str) -> Result<()> {
+    if model.trim().is_empty()
+        || model.contains('\0')
+        || model.chars().count() > TurnRun::MAX_MODEL_LEN
+    {
+        return Err(AgentError::Store(format!(
+            "turn model must contain 1 to {} non-NUL characters",
+            TurnRun::MAX_MODEL_LEN
+        )));
+    }
+    if content.trim().is_empty() || content.contains('\0') {
+        return Err(AgentError::Store(
+            "turn content must be non-empty and contain no NUL characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn find_active_turn_on<C>(
+    conn: &C,
+    chat_id: ChatId,
+) -> Result<Option<entities::turn_run::Model>>
+where
+    C: ConnectionTrait,
+{
+    entities::turn_run::Entity::find()
+        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::turn_run::Column::Status.is_in([
+            TurnRunStatus::Queued.as_str(),
+            TurnRunStatus::Running.as_str(),
+            TurnRunStatus::RetryWait.as_str(),
+        ]))
+        .one(conn)
+        .await
+        .map_err(store_err)
+}
+
+async fn exact_accepted_turn_on<C>(
+    conn: &C,
+    existing: entities::turn_run::Model,
+    chat_id: ChatId,
+    model: &str,
+    content: &str,
+) -> Result<TurnRun>
+where
+    C: ConnectionTrait,
+{
+    let message = entities::message::Entity::find_by_id(existing.input_message_id)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "turn {} is missing its input message",
+                TurnId(existing.id)
+            ))
+        })?;
+    if existing.chat_id != chat_id.0
+        || existing.model != model
+        || message.chat_id != chat_id.0
+        || message.turn_id != existing.id
+        || message.role != role_to_db(Role::User)
+        || message.content != content
+    {
+        return Err(AgentError::Store(format!(
+            "turn {} was already accepted with different input",
+            TurnId(existing.id)
+        )));
+    }
+    turn_run_from_model(existing)
 }
 
 pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) -> Result<()> {
@@ -238,6 +411,7 @@ fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
     Ok(TurnRun {
         id: TurnId(model.id),
         chat_id: ChatId(model.chat_id),
+        input_message_id: MessageId(model.input_message_id),
         model: model.model,
         status: turn_run_status_from_db(&model.status)?,
         attempt_count: model.attempt_count,

@@ -84,6 +84,17 @@ pub enum EnsureDocumentParseJobOutcome {
     GenerationChanged(DocumentGeneration),
 }
 
+/// Result of atomically accepting one exact client turn request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptTurnOutcome {
+    /// The input message and queued turn were committed by this call.
+    Accepted(TurnRun),
+    /// This exact turn identity and request were already committed.
+    Existing(TurnRun),
+    /// Another nonterminal turn already owns the chat's single live slot.
+    ChatBusy(TurnRun),
+}
+
 fn document_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "document storage is not implemented by this Store".into(),
@@ -539,6 +550,22 @@ pub trait Store: Send + Sync {
 
     /// List a chat's durable turn history in deterministic creation-time order.
     async fn list_turn_runs(&self, _chat_id: ChatId) -> Result<Vec<TurnRun>> {
+        turn_storage_unavailable()
+    }
+
+    /// Atomically persist a user's initial message and queue its exact turn.
+    ///
+    /// `id` is the caller-visible idempotency identity. Repeating the same id,
+    /// chat, model, and byte-exact content returns [`AcceptTurnOutcome::Existing`]
+    /// without another message or turn. Reusing an id for different input is an
+    /// error. A different live turn for the chat returns `ChatBusy`.
+    async fn accept_turn(
+        &self,
+        _id: TurnId,
+        _chat_id: ChatId,
+        _model: &str,
+        _content: &str,
+    ) -> Result<AcceptTurnOutcome> {
         turn_storage_unavailable()
     }
 

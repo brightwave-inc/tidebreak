@@ -49,6 +49,54 @@ impl MigrationTrait for Init {
             )
             .await?;
 
+        manager
+            .create_table(
+                Table::create()
+                    .table(Message::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(Message::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Message::ChatId).uuid().not_null())
+                    .col(ColumnDef::new(Message::TurnId).uuid().not_null())
+                    .col(ColumnDef::new(Message::Role).text().not_null())
+                    .col(ColumnDef::new(Message::Content).text().not_null())
+                    .col(
+                        ColumnDef::new(Message::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_message_chat")
+                            .from(Message::Table, Message::ChatId)
+                            .to(Chat::Table, Chat::Id),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_message_chat")
+                    .table(Message::Table)
+                    .col(Message::ChatId)
+                    .col(Message::CreatedAt)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_message_turn_identity")
+                    .table(Message::Table)
+                    .col(Message::Id)
+                    .col(Message::ChatId)
+                    .col(Message::TurnId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+
         let valid_turn_status = Expr::col(TurnRun::Status).is_in([
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
@@ -132,6 +180,7 @@ impl MigrationTrait for Init {
                     .if_not_exists()
                     .col(ColumnDef::new(TurnRun::Id).uuid().not_null().primary_key())
                     .col(ColumnDef::new(TurnRun::ChatId).uuid().not_null())
+                    .col(ColumnDef::new(TurnRun::InputMessageId).uuid().not_null())
                     .col(
                         ColumnDef::new(TurnRun::Model)
                             .string_len(crate::model::TurnRun::MAX_MODEL_LEN as u32)
@@ -189,6 +238,19 @@ impl MigrationTrait for Init {
                             .to(Chat::Table, Chat::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_run_input_message")
+                            .from_tbl(TurnRun::Table)
+                            .from_col(TurnRun::InputMessageId)
+                            .from_col(TurnRun::ChatId)
+                            .from_col(TurnRun::Id)
+                            .to_tbl(Message::Table)
+                            .to_col(Message::Id)
+                            .to_col(Message::ChatId)
+                            .to_col(Message::TurnId)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
                     .check(
                         Func::char_length(Expr::col(TurnRun::Model))
                             .between(1, crate::model::TurnRun::MAX_MODEL_LEN as i32),
@@ -229,6 +291,16 @@ impl MigrationTrait for Init {
             )
             .await?;
 
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_turn_run_input_message")
+                    .table(TurnRun::Table)
+                    .col(TurnRun::InputMessageId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
         manager
             .create_index(
                 Index::create()
@@ -279,42 +351,6 @@ impl MigrationTrait for Init {
         manager
             .create_table(
                 Table::create()
-                    .table(Message::Table)
-                    .if_not_exists()
-                    .col(ColumnDef::new(Message::Id).uuid().not_null().primary_key())
-                    .col(ColumnDef::new(Message::ChatId).uuid().not_null())
-                    .col(ColumnDef::new(Message::TurnId).uuid().not_null())
-                    .col(ColumnDef::new(Message::Role).text().not_null())
-                    .col(ColumnDef::new(Message::Content).text().not_null())
-                    .col(
-                        ColumnDef::new(Message::CreatedAt)
-                            .timestamp_with_time_zone()
-                            .not_null(),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_message_chat")
-                            .from(Message::Table, Message::ChatId)
-                            .to(Chat::Table, Chat::Id),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_message_chat")
-                    .table(Message::Table)
-                    .col(Message::ChatId)
-                    .col(Message::CreatedAt)
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_table(
-                Table::create()
                     .table(Setting::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Setting::Key).text().not_null().primary_key())
@@ -328,13 +364,13 @@ impl MigrationTrait for Init {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(Message::Table).to_owned())
+            .drop_table(Table::drop().table(TurnRun::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(Setting::Table).to_owned())
             .await?;
         manager
-            .drop_table(Table::drop().table(TurnRun::Table).to_owned())
+            .drop_table(Table::drop().table(Message::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(Chat::Table).to_owned())
@@ -1322,6 +1358,7 @@ enum TurnRun {
     Table,
     Id,
     ChatId,
+    InputMessageId,
     Model,
     Status,
     AttemptCount,
