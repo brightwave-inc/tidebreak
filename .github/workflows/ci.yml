@@ -14,6 +14,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: change scope
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.rust.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Detect changes that require Rust validation
+        id: rust
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ "$EVENT_NAME" != pull_request ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed=false
+          git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" \
+            > "$RUNNER_TEMP/changed-files"
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              *.md|docs/*|assets/*|LICENSE|NOTICE) ;;
+              *) changed=true; break ;;
+            esac
+          done < "$RUNNER_TEMP/changed-files"
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
   secrets:
     name: secret scan (gitleaks)
     runs-on: ubuntu-latest
@@ -30,6 +62,8 @@ jobs:
 
   fmt:
     name: rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -40,6 +74,8 @@ jobs:
 
   lint:
     name: clippy
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: 0
@@ -82,6 +118,8 @@ jobs:
 
   test:
     name: build · test
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: 0
@@ -122,7 +160,7 @@ jobs:
   rust:
     name: fmt · clippy · build · test
     if: ${{ always() }}
-    needs: [fmt, lint, test]
+    needs: [changes, fmt, lint, test]
     runs-on: ubuntu-latest
     steps:
       - name: Require every Rust lane
@@ -130,7 +168,23 @@ jobs:
           FMT_RESULT: ${{ needs.fmt.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
         run: |
-          test "$FMT_RESULT" = success
-          test "$LINT_RESULT" = success
-          test "$TEST_RESULT" = success
+          test "$CHANGES_RESULT" = success
+          case "$RUST_CHANGED" in
+            true)
+              test "$FMT_RESULT" = success
+              test "$LINT_RESULT" = success
+              test "$TEST_RESULT" = success
+              ;;
+            false)
+              test "$FMT_RESULT" = skipped
+              test "$LINT_RESULT" = skipped
+              test "$TEST_RESULT" = skipped
+              ;;
+            *)
+              echo "invalid Rust change detector output: $RUST_CHANGED" >&2
+              exit 1
+              ;;
+          esac
