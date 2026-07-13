@@ -16,12 +16,14 @@ name = "openwave"
 path = "src/main.rs"
 
 [dependencies]
-# `default-features = false`: the CLI itself only needs `Config`/`Result`. The
-# store/tool features it runs on come from `openwave-server` and unify in; this
-# just avoids pulling core's other defaults (e.g. keychain) the CLI doesn't use.
-openwave-core = { path = "../openwave-core", default-features = false }
+# `default-features = false`: the CLI directly needs config/contracts plus the
+# built-in file tools for `openwave mcp`; server persistence features still come
+# through `openwave-server`. This avoids directly enabling unrelated defaults.
+openwave-core = { path = "../openwave-core", default-features = false, features = ["tools"] }
+openwave-mcp = { path = "../openwave-mcp" }
 openwave-server = { path = "../openwave-server" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tempfile = "3"
