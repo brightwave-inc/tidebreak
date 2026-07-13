@@ -1,11 +1,15 @@
 //! Shared application state handed to every request handler.
 
 use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use openwave_core::{
-    AgentConfig, BlobStore, CancelToken, ChatId, Config, DocumentId, FsBlobStore, SecretProvider,
-    SteerInbox, Store, ToolRegistry,
+    AgentConfig, AgentError, BlobStore, CancelToken, ChatId, Config, DocumentId, FsBlobStore,
+    Result, SecretProvider, SteerInbox, Store, ToolRegistry,
 };
 use openwave_retrieval::Retriever;
 use tokio::sync::Notify;
@@ -39,8 +43,12 @@ pub struct AppState {
     pub retrieval: Arc<Retriever>,
     /// Wakes the durable document worker after an enqueue commits.
     pub(crate) document_job_wake: Arc<Notify>,
+    /// Wakes the source-blob retirement worker after a reference drop commits.
+    pub(crate) blob_retirement_wake: Arc<Notify>,
     /// Serializes the final publish transition with source replacement/deletion.
     pub(crate) document_writes: Arc<DocumentWriteGuard>,
+    /// Coordinates source publication and retirement across server processes.
+    pub(crate) blob_writes: Arc<BlobWriteGuard>,
     /// Per-turn agent tuning (model, limits, …).
     pub agent_config: AgentConfig,
     /// The secret every request must present as `Authorization: Bearer <token>`.
@@ -67,6 +75,7 @@ impl AppState {
         agent_config: AgentConfig,
     ) -> Self {
         let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
+        let blob_writes = Arc::new(BlobWriteGuard::new(config.data_dir.join("blob-locks")));
         Self {
             config: Arc::new(config),
             store,
@@ -76,7 +85,9 @@ impl AppState {
             tools,
             retrieval,
             document_job_wake: Arc::new(Notify::new()),
+            blob_retirement_wake: Arc::new(Notify::new()),
             document_writes: Arc::new(DocumentWriteGuard::default()),
+            blob_writes,
             agent_config,
             token: Uuid::new_v4().to_string().into(),
             active_turns: Arc::new(TurnGuard::default()),
@@ -84,6 +95,48 @@ impl AppState {
             approvals: Arc::new(ApprovalBroker::new()),
         }
     }
+}
+
+/// Cross-process exclusion for one content-addressed blob lifecycle.
+///
+/// Lock files are permanent stable rendezvous points. Removing one could split
+/// waiters across different inodes, so the grace-period auditor must ignore this
+/// dedicated directory.
+pub(crate) struct BlobWriteGuard {
+    root: Arc<PathBuf>,
+}
+
+pub(crate) struct BlobWritePermit {
+    _file: File,
+}
+
+impl BlobWriteGuard {
+    pub(crate) fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: Arc::new(root.into()),
+        }
+    }
+
+    pub(crate) async fn acquire(&self, blob_id: Uuid) -> Result<BlobWritePermit> {
+        let root = Arc::clone(&self.root);
+        tokio::task::spawn_blocking(move || {
+            fs::create_dir_all(&*root).map_err(blob_lock_error)?;
+            let path = root.join(format!("{blob_id}.lock"));
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let file = options.open(path).map_err(blob_lock_error)?;
+            file.lock().map_err(blob_lock_error)?;
+            Ok(BlobWritePermit { _file: file })
+        })
+        .await
+        .map_err(|error| AgentError::Store(format!("blob lock task failed: {error}")))?
+    }
+}
+
+fn blob_lock_error(error: std::io::Error) -> AgentError {
+    AgentError::Store(format!("failed to acquire blob lifecycle lock: {error}"))
 }
 
 /// A bounded keyed async lock for document lifecycle transitions.

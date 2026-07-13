@@ -183,6 +183,20 @@ pub trait Store: Send + Sync {
         document_storage_unavailable()
     }
 
+    /// Revalidate one exact live retirement lease immediately before deletion.
+    ///
+    /// This atomically cancels the retirement if an authoritative document
+    /// reference exists. Callers must hold the same cross-process blob guard
+    /// used by source publishers until deletion and resolution finish.
+    async fn validate_blob_retirement_lease(
+        &self,
+        _blob_id: uuid::Uuid,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        document_storage_unavailable()
+    }
+
     /// Mark one exact live blob-retirement lease as successfully deleted.
     ///
     /// Returns `false` if the row is no longer running under the exact,
@@ -558,8 +572,12 @@ pub trait BlobStore: Send + Sync {
     /// Fetch bytes by `id`, or `None` if absent.
     async fn get(&self, id: uuid::Uuid) -> Result<Option<Vec<u8>>>;
 
-    /// Delete a blob; a no-op if it doesn't exist.
-    async fn delete(&self, id: uuid::Uuid) -> Result<()>;
+    /// Delete a blob synchronously; a no-op if it doesn't exist.
+    ///
+    /// Async callers must move this operation to a blocking executor. This
+    /// boundary lets a lifecycle guard remain owned by the blocking operation
+    /// even when its awaiting worker is cancelled.
+    fn delete(&self, id: uuid::Uuid) -> Result<()>;
 }
 
 #[cfg(test)]
