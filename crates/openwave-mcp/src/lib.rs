@@ -1,8 +1,9 @@
 //! OpenWave MCP — the Model Context Protocol server face.
 //!
-//! Exposes OpenWave's tools (the same `ToolRegistry` the agent uses) to an external
-//! MCP client, so any MCP-speaking host can drive OpenWave's capabilities — for
-//! example the `search` tool over a document index.
+//! Exposes OpenWave's read-only tools from the same `ToolRegistry` the agent uses
+//! to an external MCP client, so any MCP-speaking host can drive capabilities such
+//! as `search` over a document index. Workspace-mutating and sensitive tools stay
+//! hidden until an approval-aware MCP execution bridge exists.
 //!
 //! [`McpServer`] answers `initialize`, `tools/list`, and `tools/call` and is
 //! transport-agnostic; [`serve_stdio`] runs it over the standard newline-delimited

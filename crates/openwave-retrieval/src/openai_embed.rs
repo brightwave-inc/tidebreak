@@ -94,6 +94,10 @@ impl Embedder for OpenAiEmbedder {
         self.dimensions
     }
 
+    fn is_local(&self) -> bool {
+        false
+    }
+
     fn fingerprint(&self) -> String {
         format!(
             "openai-compatible-v1:endpoint={}:model={}:dimensions={}:projection={}",
