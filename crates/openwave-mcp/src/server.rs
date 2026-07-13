@@ -11,16 +11,23 @@
 //! (the MCP convention), not a JSON-RPC error; JSON-RPC errors are reserved for
 //! protocol-level problems (unknown method, bad params, an infrastructure fault).
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 
 use openwave_core::{ChatId, ToolCtx, ToolRegistry};
 use serde_json::Value;
 
 use crate::protocol::{
-    error_code, CallToolParams, CallToolResult, Content, InitializeResult, ListToolsResult,
-    Request, Response, RpcError, ServerCapabilities, ServerInfo, ToolDescriptor, ToolsCapability,
-    PROTOCOL_VERSION,
+    error_code, CallToolParams, CallToolResult, Content, InitializeParams, InitializeResult,
+    ListToolsResult, Request, Response, RpcError, ServerCapabilities, ServerInfo, ToolDescriptor,
+    ToolsCapability, PROTOCOL_VERSION,
 };
+
+const SESSION_UNINITIALIZED: u8 = 0;
+const SESSION_AWAITING_INITIALIZED: u8 = 1;
+const SESSION_READY: u8 = 2;
 
 /// An MCP server exposing a tool registry over the Model Context Protocol.
 pub struct McpServer {
@@ -28,6 +35,7 @@ pub struct McpServer {
     ctx: ToolCtx,
     server_name: String,
     server_version: String,
+    session_state: AtomicU8,
 }
 
 impl McpServer {
@@ -39,6 +47,7 @@ impl McpServer {
             ctx,
             server_name: "openwave".to_string(),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
+            session_state: AtomicU8::new(SESSION_UNINITIALIZED),
         }
     }
 
@@ -51,18 +60,19 @@ impl McpServer {
     /// Handle one request. Returns the response to send, or `None` for a
     /// notification (which by JSON-RPC gets no reply).
     pub async fn handle(&self, req: Request) -> Option<Response> {
-        if req.is_notification() {
-            // Accept lifecycle notifications (e.g. `notifications/initialized`)
-            // silently; nothing to reply.
-            return None;
-        }
-        let id = req.reply_id();
-
         // The version must be exactly "2.0"; anything else (including an absent
         // field) is a malformed request per JSON-RPC 2.0.
         if req.jsonrpc != "2.0" {
+            if req.is_notification() {
+                return None;
+            }
+            let id = req.reply_id();
             return Some(Response::error(
-                id,
+                if request_id_is_valid(&id) {
+                    id
+                } else {
+                    Value::Null
+                },
                 RpcError::new(
                     error_code::INVALID_REQUEST,
                     "jsonrpc must be \"2.0\"".to_string(),
@@ -70,16 +80,79 @@ impl McpServer {
             ));
         }
 
+        if req.is_notification() {
+            self.handle_notification(&req);
+            return None;
+        }
+        let id = req.reply_id();
+        if !request_id_is_valid(&id) {
+            return Some(Response::error(
+                Value::Null,
+                RpcError::new(
+                    error_code::INVALID_REQUEST,
+                    "request id must be a string or number",
+                ),
+            ));
+        }
+
         let outcome = match req.method.as_str() {
-            "initialize" => Ok(self.initialize_result()),
-            "tools/list" => Ok(self.list_tools_result()),
-            "tools/call" => self.call_tool(req.params).await,
+            "initialize" => self.initialize(req.params),
+            "ping" => validate_optional_object_params(req.params).map(|()| serde_json::json!({})),
+            "tools/list" => self.require_ready().map(|()| self.list_tools_result()),
+            "tools/call" => match self.require_ready() {
+                Ok(()) => self.call_tool(req.params).await,
+                Err(error) => Err(error),
+            },
             other => Err(RpcError::method_not_found(other)),
         };
         Some(match outcome {
             Ok(result) => Response::result(id, result),
             Err(error) => Response::error(id, error),
         })
+    }
+
+    fn handle_notification(&self, req: &Request) {
+        if req.method != "notifications/initialized"
+            || !(req.params.is_null() || req.params.is_object())
+        {
+            return;
+        }
+
+        let _ = self.session_state.compare_exchange(
+            SESSION_AWAITING_INITIALIZED,
+            SESSION_READY,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn initialize(&self, params: Value) -> Result<Value, RpcError> {
+        let _params: InitializeParams = serde_json::from_value(params)
+            .map_err(|e| RpcError::invalid_params(format!("invalid initialize params: {e}")))?;
+
+        self.session_state
+            .compare_exchange(
+                SESSION_UNINITIALIZED,
+                SESSION_AWAITING_INITIALIZED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| {
+                RpcError::new(error_code::INVALID_REQUEST, "session already initialized")
+            })?;
+
+        Ok(self.initialize_result())
+    }
+
+    fn require_ready(&self) -> Result<(), RpcError> {
+        if self.session_state.load(Ordering::Acquire) == SESSION_READY {
+            Ok(())
+        } else {
+            Err(RpcError::new(
+                error_code::INVALID_REQUEST,
+                "session is not initialized",
+            ))
+        }
     }
 
     fn initialize_result(&self) -> Value {
@@ -151,10 +224,23 @@ impl McpServer {
     }
 }
 
+fn request_id_is_valid(id: &Value) -> bool {
+    id.is_string() || id.is_number()
+}
+
+fn validate_optional_object_params(params: Value) -> Result<(), RpcError> {
+    if params.is_null() || params.is_object() {
+        Ok(())
+    } else {
+        Err(RpcError::invalid_params("params must be an object"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Barrier;
 
     use async_trait::async_trait;
     use openwave_core::{ApprovalClass, Tool, ToolOutput, ToolSpec};
@@ -206,10 +292,41 @@ mod tests {
         .unwrap()
     }
 
+    fn initialize_params() -> Value {
+        json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "test-client", "version": "1.0.0"}
+        })
+    }
+
+    fn initialized_notification(params: Value) -> Request {
+        serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": params
+        }))
+        .unwrap()
+    }
+
+    async fn initialized_server() -> McpServer {
+        let server = server();
+        let response = server
+            .handle(request(1, "initialize", initialize_params()))
+            .await
+            .unwrap();
+        assert!(response.error.is_none());
+        assert!(server
+            .handle(initialized_notification(Value::Null))
+            .await
+            .is_none());
+        server
+    }
+
     #[tokio::test]
     async fn initialize_reports_protocol_and_server_info() {
         let resp = server()
-            .handle(request(1, "initialize", Value::Null))
+            .handle(request(1, "initialize", initialize_params()))
             .await
             .unwrap();
         let result = resp.result.unwrap();
@@ -219,8 +336,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tools_remain_gated_until_initialized_notification() {
+        let server = server();
+
+        // An early acknowledgement cannot unlock a later session.
+        assert!(server
+            .handle(initialized_notification(Value::Null))
+            .await
+            .is_none());
+        let initialized = server
+            .handle(request(1, "initialize", initialize_params()))
+            .await
+            .unwrap();
+        assert!(initialized.error.is_none());
+
+        let early_list = server
+            .handle(request(2, "tools/list", Value::Null))
+            .await
+            .unwrap();
+        assert_eq!(early_list.error.unwrap().code, error_code::INVALID_REQUEST);
+
+        // A malformed lifecycle notification is ignored and cannot unlock tools.
+        assert!(server
+            .handle(initialized_notification(json!([])))
+            .await
+            .is_none());
+        let still_early = server
+            .handle(request(3, "tools/list", Value::Null))
+            .await
+            .unwrap();
+        assert_eq!(still_early.error.unwrap().code, error_code::INVALID_REQUEST);
+
+        // Notification params are optional and, when present, are an open object
+        // that may contain protocol metadata.
+        assert!(server
+            .handle(initialized_notification(
+                json!({"_meta": {"trace": "test"}})
+            ))
+            .await
+            .is_none());
+        let ready = server
+            .handle(request(4, "tools/list", Value::Null))
+            .await
+            .unwrap();
+        assert!(ready.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_initialize_does_not_consume_the_session() {
+        let server = server();
+        let invalid = server
+            .handle(request(1, "initialize", Value::Null))
+            .await
+            .unwrap();
+        assert_eq!(invalid.error.unwrap().code, error_code::INVALID_PARAMS);
+
+        let valid = server
+            .handle(request(2, "initialize", initialize_params()))
+            .await
+            .unwrap();
+        assert!(valid.error.is_none());
+    }
+
+    #[test]
+    fn only_one_concurrent_initialize_request_can_claim_the_session() {
+        let server = Arc::new(server());
+        let barrier = Arc::new(Barrier::new(3));
+        let results = std::thread::scope(|scope| {
+            let first_server = Arc::clone(&server);
+            let first_barrier = Arc::clone(&barrier);
+            let first = scope.spawn(move || {
+                first_barrier.wait();
+                first_server.initialize(initialize_params())
+            });
+            let second_server = Arc::clone(&server);
+            let second_barrier = Arc::clone(&barrier);
+            let second = scope.spawn(move || {
+                second_barrier.wait();
+                second_server.initialize(initialize_params())
+            });
+            barrier.wait();
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|r| r.is_err()).count(), 1);
+        assert_eq!(
+            results.iter().find_map(|r| r.as_ref().err()).unwrap().code,
+            error_code::INVALID_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn ping_is_available_throughout_the_session_lifecycle() {
+        let server = server();
+        for id in 1..=2 {
+            let response = server
+                .handle(request(id, "ping", Value::Null))
+                .await
+                .unwrap();
+            assert_eq!(response.result.unwrap(), json!({}));
+        }
+
+        server
+            .handle(request(3, "initialize", initialize_params()))
+            .await
+            .unwrap();
+        let awaiting = server.handle(request(4, "ping", json!({}))).await.unwrap();
+        assert_eq!(awaiting.result.unwrap(), json!({}));
+
+        server.handle(initialized_notification(Value::Null)).await;
+        let ready = server
+            .handle(request(5, "ping", Value::Null))
+            .await
+            .unwrap();
+        assert_eq!(ready.result.unwrap(), json!({}));
+
+        let invalid = server.handle(request(6, "ping", json!([]))).await.unwrap();
+        assert_eq!(invalid.error.unwrap().code, error_code::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn server_negotiates_unsupported_protocol_version() {
+        let server = server();
+        let mut params = initialize_params();
+        params["protocolVersion"] = json!("2099-01-01");
+        let response = server
+            .handle(request(1, "initialize", params))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.result.unwrap()["protocolVersion"],
+            PROTOCOL_VERSION
+        );
+    }
+
+    #[tokio::test]
     async fn tools_list_advertises_the_registry() {
-        let resp = server()
+        let resp = initialized_server()
+            .await
             .handle(request(2, "tools/list", Value::Null))
             .await
             .unwrap();
@@ -232,7 +486,8 @@ mod tests {
 
     #[tokio::test]
     async fn tools_call_runs_the_tool() {
-        let resp = server()
+        let resp = initialized_server()
+            .await
             .handle(request(
                 3,
                 "tools/call",
@@ -248,7 +503,8 @@ mod tests {
 
     #[tokio::test]
     async fn tool_failure_is_a_result_with_is_error_not_a_protocol_error() {
-        let resp = server()
+        let resp = initialized_server()
+            .await
             .handle(request(
                 4,
                 "tools/call",
@@ -262,7 +518,8 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tool_and_unknown_method_are_protocol_errors() {
-        let unknown_tool = server()
+        let server = initialized_server().await;
+        let unknown_tool = server
             .handle(request(
                 5,
                 "tools/call",
@@ -272,7 +529,7 @@ mod tests {
             .unwrap();
         assert_eq!(unknown_tool.error.unwrap().code, error_code::INVALID_PARAMS);
 
-        let unknown_method = server()
+        let unknown_method = server
             .handle(request(6, "does/not/exist", Value::Null))
             .await
             .unwrap();
@@ -284,7 +541,8 @@ mod tests {
 
     #[tokio::test]
     async fn structured_output_is_surfaced_as_structured_content() {
-        let resp = server()
+        let server = initialized_server().await;
+        let resp = server
             .handle(request(
                 7,
                 "tools/call",
@@ -295,7 +553,7 @@ mod tests {
         let result = resp.result.unwrap();
         assert_eq!(result["structuredContent"], json!({"n": 1}));
         // Tools without structured data omit the field entirely.
-        let plain = server()
+        let plain = server
             .handle(request(
                 8,
                 "tools/call",
@@ -307,15 +565,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_request_with_explicit_null_id_still_gets_a_reply() {
-        // Present-but-null id is a request (must be answered), not a notification.
+    async fn invalid_mcp_request_ids_get_an_invalid_request_response() {
+        let server = initialized_server().await;
+
+        // Present null is distinguishable from a notification, but MCP forbids it
+        // (along with non-string/non-number values).
         let req: Request =
             serde_json::from_value(json!({"jsonrpc": "2.0", "id": null, "method": "tools/list"}))
                 .unwrap();
         assert!(!req.is_notification());
-        let resp = server().handle(req).await.unwrap();
-        assert_eq!(resp.id, Value::Null);
-        assert!(resp.result.is_some());
+        let response = server.handle(req).await.unwrap();
+        assert_eq!(response.id, Value::Null);
+        assert_eq!(response.error.unwrap().code, error_code::INVALID_REQUEST);
+
+        for invalid_id in [json!(true), json!([]), json!({})] {
+            let req: Request = serde_json::from_value(json!({
+                "jsonrpc": "2.0",
+                "id": invalid_id,
+                "method": "tools/list"
+            }))
+            .unwrap();
+            let response = server.handle(req).await.unwrap();
+            assert_eq!(response.id, Value::Null);
+            assert_eq!(response.error.unwrap().code, error_code::INVALID_REQUEST);
+        }
+
+        let fractional: Request = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 1.5,
+            "method": "tools/list"
+        }))
+        .unwrap();
+        let response = server.handle(fractional).await.unwrap();
+        assert_eq!(response.id, json!(1.5));
+        assert!(response.result.is_some());
     }
 
     #[tokio::test]
@@ -328,11 +611,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_notification_gets_no_response() {
-        let note: Request = serde_json::from_value(
-            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
-        )
+    async fn malformed_notification_cannot_advance_the_session() {
+        let server = server();
+        let initialized = server
+            .handle(request(1, "initialize", initialize_params()))
+            .await
+            .unwrap();
+        assert!(initialized.error.is_none());
+
+        let note: Request = serde_json::from_value(json!({
+            "jsonrpc": "1.0",
+            "method": "notifications/initialized"
+        }))
         .unwrap();
+        assert!(server.handle(note).await.is_none());
+
+        let tools = server
+            .handle(request(2, "tools/list", Value::Null))
+            .await
+            .unwrap();
+        assert_eq!(tools.error.unwrap().code, error_code::INVALID_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_notification_gets_no_response() {
+        let note = initialized_notification(Value::Null);
         assert!(server().handle(note).await.is_none());
     }
 }

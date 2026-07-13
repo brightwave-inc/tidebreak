@@ -34,8 +34,9 @@ pub struct Request {
     #[serde(default)]
     pub jsonrpc: String,
     /// Request id. The outer option distinguishes an *absent* id (`None`, a
-    /// notification) from a present `null` id (`Some(Null)`, still a request), via
-    /// [`present_or_absent`] — serde's plain `Option` collapses both to `None`.
+    /// notification) from a present `null` id (`Some(Null)`, an invalid MCP
+    /// request), via [`present_or_absent`] — serde's plain `Option` collapses both
+    /// to `None`.
     #[serde(default, deserialize_with = "present_or_absent")]
     pub id: Option<Value>,
     /// The method name (e.g. `"tools/list"`).
@@ -52,8 +53,9 @@ impl Request {
         self.id.is_none()
     }
 
-    /// The id to echo in the response (the present value, or `null` if `id` was
-    /// the literal `null`). Only meaningful when this is not a notification.
+    /// The present id value. Only meaningful when this is not a notification;
+    /// the server validates the MCP string-or-number restriction before echoing
+    /// it in a response.
     #[must_use]
     pub fn reply_id(&self) -> Value {
         self.id.clone().unwrap_or(Value::Null)
@@ -152,6 +154,23 @@ pub struct InitializeResult {
     pub capabilities: ServerCapabilities,
     #[serde(rename = "serverInfo")]
     pub server_info: ServerInfo,
+}
+
+/// Params of `initialize`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InitializeParams {
+    #[serde(rename = "protocolVersion")]
+    pub protocol_version: String,
+    pub capabilities: serde_json::Map<String, Value>,
+    #[serde(rename = "clientInfo")]
+    pub client_info: ClientInfo,
+}
+
+/// Client identity supplied during `initialize`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClientInfo {
+    pub name: String,
+    pub version: String,
 }
 
 /// Advertised server capabilities. Only tools for now.
