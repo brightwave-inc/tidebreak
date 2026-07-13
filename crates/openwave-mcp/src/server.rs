@@ -317,11 +317,7 @@ mod tests {
     }
 
     fn server_with(tools: ToolRegistry) -> McpServer {
-        let ctx = ToolCtx {
-            chat_id: ChatId::new(),
-            project_id: None,
-            workspace_dir: PathBuf::from("/tmp/ws"),
-        };
+        let ctx = ToolCtx::new(ChatId::new(), None, PathBuf::from("/tmp/ws"));
         McpServer::new(Arc::new(tools), ctx)
     }
 

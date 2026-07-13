@@ -261,11 +261,7 @@ mod tests {
     }
 
     fn ctx_for(project_id: Option<ProjectId>) -> ToolCtx {
-        ToolCtx {
-            chat_id: ChatId::new(),
-            project_id,
-            workspace_dir: PathBuf::from("/tmp/unused"),
-        }
+        ToolCtx::new(ChatId::new(), project_id, PathBuf::from("/tmp/unused"))
     }
 
     struct SpyVectorStore {

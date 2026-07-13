@@ -19,6 +19,8 @@ all = { level = "warn", priority = -1 }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
+cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
 futures = "0.3"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }

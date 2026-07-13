@@ -2,25 +2,34 @@
 //!
 //! These are the M0 Workspace-class tools. Every path is resolved **relative to
 //! the chat's workspace directory** and may not escape it (no absolute paths,
-//! no `..`); there is no sandbox yet, so that lexical confinement is the only
-//! guard. Failures the model should see and react to (missing file, bad path)
+//! no `..`). Filesystem operations are relative to a pinned directory
+//! capability, so symlinks and path replacement cannot escape it. Failures the
+//! model should see and react to (missing file, bad path)
 //! come back as [`ToolOutput::error`], not `Err` — `Err` is reserved for
 //! unexpected infrastructure faults.
 //!
 //! Enabled by the `tools` feature.
 
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
+use cap_fs_ext::OpenOptionsSyncExt;
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt;
+use cap_std::fs::{Dir, OpenOptions};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::Result;
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 
-/// Resolve `rel` under `workspace`, rejecting absolute paths and any `..` that
-/// could escape. Returns the joined path, or an error message for the model.
-fn resolve_in_workspace(workspace: &Path, rel: &str) -> std::result::Result<PathBuf, String> {
+const MAX_READ_FILE_BYTES: usize = 64 * 1024;
+const MAX_LIST_DIR_BYTES: usize = 64 * 1024;
+const MAX_LIST_DIR_ENTRIES: usize = 4_096;
+
+/// Validate a workspace-relative path before handing it to the capability API.
+fn workspace_relative(rel: &str) -> std::result::Result<PathBuf, String> {
     let path = Path::new(rel);
     if path.is_absolute() {
         return Err(format!("path must be relative to the workspace: {rel}"));
@@ -36,38 +45,121 @@ fn resolve_in_workspace(workspace: &Path, rel: &str) -> std::result::Result<Path
             _ => {}
         }
     }
-    let candidate = workspace.join(path);
+    Ok(path.to_path_buf())
+}
 
-    // The lexical check above only stops `..`/absolute paths; it can't stop a
-    // symlink *inside* the workspace from pointing out. Canonicalize the root and
-    // the nearest existing ancestor of the target and require the target to stay
-    // under the root, and refuse a leaf that is itself a symlink (which a write
-    // would otherwise follow out of the workspace).
-    let root = workspace
-        .canonicalize()
-        .map_err(|e| format!("workspace directory unavailable: {e}"))?;
-    if std::fs::symlink_metadata(&candidate)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-    {
+fn read_utf8_file(workspace: &Dir, path: &Path) -> std::result::Result<String, String> {
+    let mut options = OpenOptions::new();
+    options.read(true).nonblock(true);
+    let file = workspace
+        .open_with(path, &options)
+        .map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("path is not a regular file".into());
+    }
+    if metadata.len() > MAX_READ_FILE_BYTES as u64 {
         return Err(format!(
-            "path is a symlink and may escape the workspace: {rel}"
+            "file is too large (maximum {MAX_READ_FILE_BYTES} bytes)"
         ));
     }
-    let mut probe: &Path = &candidate;
-    let real = loop {
-        if let Ok(canonical) = probe.canonicalize() {
-            break canonical;
-        }
-        match probe.parent() {
-            Some(parent) => probe = parent,
-            None => return Err(format!("path escapes the workspace: {rel}")),
-        }
-    };
-    if !real.starts_with(&root) {
-        return Err(format!("path escapes the workspace: {rel}"));
+
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take((MAX_READ_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_READ_FILE_BYTES {
+        return Err(format!(
+            "file is too large (maximum {MAX_READ_FILE_BYTES} bytes)"
+        ));
     }
-    Ok(candidate)
+    String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".into())
+}
+
+fn list_directory(workspace: &Dir, path: &Path) -> std::result::Result<String, String> {
+    let entries = workspace
+        .read_dir(path)
+        .map_err(|error| error.to_string())?;
+    let mut names = Vec::new();
+    let mut output_bytes = 0usize;
+    for entry in entries {
+        if names.len() == MAX_LIST_DIR_ENTRIES {
+            return Err(format!(
+                "directory has too many entries (maximum {MAX_LIST_DIR_ENTRIES})"
+            ));
+        }
+        let entry = entry.map_err(|error| error.to_string())?;
+        let mut name = entry.file_name().to_string_lossy().into_owned();
+        if entry
+            .file_type()
+            .map(|file_type| file_type.is_dir())
+            .unwrap_or(false)
+        {
+            name.push('/');
+        }
+        output_bytes = output_bytes.saturating_add(name.len() + usize::from(!names.is_empty()));
+        if output_bytes > MAX_LIST_DIR_BYTES {
+            return Err(format!(
+                "directory listing is too large (maximum {MAX_LIST_DIR_BYTES} bytes)"
+            ));
+        }
+        names.push(name);
+    }
+    names.sort();
+    Ok(names.join("\n"))
+}
+
+fn write_utf8_file(workspace: &Dir, path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let parent_path = path.parent().unwrap_or_else(|| Path::new(""));
+    workspace.create_dir_all(parent_path)?;
+    let parent = if parent_path.as_os_str().is_empty() {
+        workspace.try_clone()?
+    } else {
+        workspace.open_dir(parent_path)?
+    };
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path must name a file")
+    })?;
+    let permissions = match parent.symlink_metadata(file_name) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path is not a regular file",
+            ));
+        }
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+
+    let temp_name = format!(".openwave-{}.tmp", uuid::Uuid::new_v4());
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true).nonblock(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = parent.open_with(&temp_name, &options)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "temporary path is not a regular file",
+            ));
+        }
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        parent.rename(&temp_name, &parent, file_name)?;
+        #[cfg(unix)]
+        parent.open(".")?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = parent.remove_file(&temp_name);
+    }
+    result
 }
 
 /// Parse tool args, turning a bad shape into a model-facing error output.
@@ -108,14 +200,23 @@ impl Tool for ReadFile {
             Ok(args) => args,
             Err(output) => return Ok(output),
         };
-        let path = match resolve_in_workspace(&ctx.workspace_dir, &args.path) {
+        let path = match workspace_relative(&args.path) {
             Ok(path) => path,
             Err(message) => return Ok(ToolOutput::error(message)),
         };
-        match tokio::fs::read_to_string(&path).await {
-            Ok(content) => Ok(ToolOutput::text(content)),
-            Err(err) => Ok(ToolOutput::error(format!(
-                "could not read {}: {err}",
+        let workspace = match ctx.workspace() {
+            Ok(workspace) => workspace,
+            Err(message) => return Ok(ToolOutput::error(message)),
+        };
+        let result = tokio::task::spawn_blocking(move || read_utf8_file(&workspace, &path)).await;
+        match result {
+            Ok(Ok(content)) => Ok(ToolOutput::text(content)),
+            Ok(Err(error)) => Ok(ToolOutput::error(format!(
+                "could not read {}: {error}",
+                args.path
+            ))),
+            Err(error) => Ok(ToolOutput::error(format!(
+                "could not read {}: filesystem task failed: {error}",
                 args.path
             ))),
         }
@@ -156,28 +257,22 @@ impl Tool for ListDir {
             Err(output) => return Ok(output),
         };
         let rel = args.path.as_deref().unwrap_or(".");
-        let dir = match resolve_in_workspace(&ctx.workspace_dir, rel) {
+        let path = match workspace_relative(rel) {
             Ok(path) => path,
             Err(message) => return Ok(ToolOutput::error(message)),
         };
-        let mut entries = match tokio::fs::read_dir(&dir).await {
-            Ok(entries) => entries,
-            Err(err) => return Ok(ToolOutput::error(format!("could not list {rel}: {err}"))),
+        let workspace = match ctx.workspace() {
+            Ok(workspace) => workspace,
+            Err(message) => return Ok(ToolOutput::error(message)),
         };
-        let mut names = Vec::new();
-        loop {
-            match entries.next_entry().await {
-                Ok(Some(entry)) => {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
-                    names.push(if is_dir { format!("{name}/") } else { name });
-                }
-                Ok(None) => break,
-                Err(err) => return Ok(ToolOutput::error(format!("could not list {rel}: {err}"))),
-            }
+        let result = tokio::task::spawn_blocking(move || list_directory(&workspace, &path)).await;
+        match result {
+            Ok(Ok(listing)) => Ok(ToolOutput::text(listing)),
+            Ok(Err(error)) => Ok(ToolOutput::error(format!("could not list {rel}: {error}"))),
+            Err(error) => Ok(ToolOutput::error(format!(
+                "could not list {rel}: filesystem task failed: {error}"
+            ))),
         }
-        names.sort();
-        Ok(ToolOutput::text(names.join("\n")))
     }
 }
 
@@ -219,26 +314,29 @@ impl Tool for WriteFile {
             Ok(args) => args,
             Err(output) => return Ok(output),
         };
-        let path = match resolve_in_workspace(&ctx.workspace_dir, &args.path) {
+        let path = match workspace_relative(&args.path) {
             Ok(path) => path,
             Err(message) => return Ok(ToolOutput::error(message)),
         };
-        if let Some(parent) = path.parent() {
-            if let Err(err) = tokio::fs::create_dir_all(parent).await {
-                return Ok(ToolOutput::error(format!(
-                    "could not create parent of {}: {err}",
-                    args.path
-                )));
-            }
-        }
-        match tokio::fs::write(&path, args.content.as_bytes()).await {
-            Ok(()) => Ok(ToolOutput::text(format!(
+        let workspace = match ctx.workspace() {
+            Ok(workspace) => workspace,
+            Err(message) => return Ok(ToolOutput::error(message)),
+        };
+        let content = args.content.into_bytes();
+        let content_len = content.len();
+        let result =
+            tokio::task::spawn_blocking(move || write_utf8_file(&workspace, &path, &content)).await;
+        match result {
+            Ok(Ok(())) => Ok(ToolOutput::text(format!(
                 "wrote {} bytes to {}",
-                args.content.len(),
+                content_len, args.path
+            ))),
+            Ok(Err(error)) => Ok(ToolOutput::error(format!(
+                "could not write {}: {error}",
                 args.path
             ))),
-            Err(err) => Ok(ToolOutput::error(format!(
-                "could not write {}: {err}",
+            Err(error) => Ok(ToolOutput::error(format!(
+                "could not write {}: filesystem task failed: {error}",
                 args.path
             ))),
         }
@@ -251,11 +349,7 @@ mod tests {
     use crate::id::ChatId;
 
     fn ctx(dir: &std::path::Path) -> ToolCtx {
-        ToolCtx {
-            chat_id: ChatId::new(),
-            project_id: None,
-            workspace_dir: dir.to_path_buf(),
-        }
+        ToolCtx::try_new(ChatId::new(), None, dir.to_path_buf()).unwrap()
     }
 
     #[tokio::test]
@@ -331,6 +425,161 @@ mod tests {
             "symlinked-dir write should be rejected: {write:?}"
         );
         assert!(!outside.path().join("pwn.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_capability_survives_root_path_retargeting() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("note.txt"), "original").unwrap();
+        let ctx = ctx(&workspace);
+
+        let original = parent.path().join("original");
+        std::fs::rename(&workspace, &original).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("note.txt"), "replacement").unwrap();
+
+        let read = ReadFile
+            .execute(&ctx, json!({"path": "note.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(read.content, "original");
+        assert!(!read.is_error);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_rejects_a_fifo_without_blocking() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(dir.path().join("pipe"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let workspace = ctx(dir.path()).workspace().unwrap();
+        let (send, receive) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = read_utf8_file(&workspace, Path::new("pipe"));
+            let _ = send.send(result);
+        });
+
+        let result = receive
+            .recv_timeout(Duration::from_secs(2))
+            .expect("FIFO read must not block");
+        assert!(result.unwrap_err().contains("regular file"));
+        worker.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_rejects_a_fifo_without_blocking() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(dir.path().join("pipe"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let workspace = ctx(dir.path()).workspace().unwrap();
+        let (send, receive) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = write_utf8_file(&workspace, Path::new("pipe"), b"content");
+            let _ = send.send(result);
+        });
+
+        let error = receive
+            .recv_timeout(Duration::from_secs(2))
+            .expect("FIFO write must not block")
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        worker.join().unwrap();
+        assert!(dir.path().join("pipe").exists());
+    }
+
+    #[tokio::test]
+    async fn failed_atomic_write_preserves_the_target_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/keep.txt"), "keep").unwrap();
+
+        let write = WriteFile
+            .execute(
+                &ctx(dir.path()),
+                json!({"path": "target", "content": "replace"}),
+            )
+            .await
+            .unwrap();
+        assert!(write.is_error);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("target/keep.txt")).unwrap(),
+            "keep"
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("target")]);
+    }
+
+    #[tokio::test]
+    async fn atomic_write_replaces_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("note.txt"), "old").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut permissions = std::fs::metadata(dir.path().join("note.txt"))
+                .unwrap()
+                .permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(dir.path().join("note.txt"), permissions).unwrap();
+        }
+
+        let write = WriteFile
+            .execute(
+                &ctx(dir.path()),
+                json!({"path": "note.txt", "content": "new"}),
+            )
+            .await
+            .unwrap();
+        assert!(!write.is_error, "{write:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
+            "new"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.path().join("note.txt"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[tokio::test]
+    async fn read_rejects_files_over_the_output_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("large.txt"),
+            vec![b'x'; MAX_READ_FILE_BYTES + 1],
+        )
+        .unwrap();
+
+        let read = ReadFile
+            .execute(&ctx(dir.path()), json!({"path": "large.txt"}))
+            .await
+            .unwrap();
+        assert!(read.is_error);
+        assert!(read.content.contains("too large"), "{read:?}");
     }
 
     #[tokio::test]
