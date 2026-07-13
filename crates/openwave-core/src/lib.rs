@@ -55,7 +55,7 @@ pub use model::{
     DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
     DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
-    Project, Role, SourceLocation, SourceRegion, ToolCallRecord,
+    Project, Role, SourceLocation, SourceRegion, ToolCallRecord, TurnRun, TurnRunStatus,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,

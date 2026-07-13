@@ -20,11 +20,12 @@ use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId};
+use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId, TurnId};
 use crate::model::{
     BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentRecord, DocumentScope,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
+    TurnRun,
 };
 
 /// Why maintenance determined that a document needs an index job.
@@ -86,6 +87,12 @@ pub enum EnsureDocumentParseJobOutcome {
 fn document_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "document storage is not implemented by this Store".into(),
+    ))
+}
+
+fn turn_storage_unavailable<T>() -> Result<T> {
+    Err(AgentError::Store(
+        "durable turn storage is not implemented by this Store".into(),
     ))
 }
 
@@ -524,6 +531,16 @@ pub trait Store: Send + Sync {
     /// Set (or clear, with `None`) a chat's model override. A no-op if the chat
     /// doesn't exist.
     async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()>;
+
+    /// Fetch one durable turn by its exact idempotency identity.
+    async fn get_turn_run(&self, _id: TurnId) -> Result<Option<TurnRun>> {
+        turn_storage_unavailable()
+    }
+
+    /// List a chat's durable turn history in deterministic creation-time order.
+    async fn list_turn_runs(&self, _chat_id: ChatId) -> Result<Vec<TurnRun>> {
+        turn_storage_unavailable()
+    }
 
     /// Append a message to its chat.
     async fn append_message(&self, message: &Message) -> Result<()>;
