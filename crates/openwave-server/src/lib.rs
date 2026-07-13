@@ -15,6 +15,7 @@ mod approvals;
 mod auth;
 mod bus;
 mod document_auditor;
+mod document_stage;
 mod document_worker;
 mod error;
 mod extract;
@@ -212,6 +213,7 @@ pub async fn bind(config: Config) -> Result<Server> {
     let token = state.token.clone();
     let document_worker = document_worker::DocumentWorker::new(
         state.store.clone(),
+        state.blobs.clone(),
         state.retrieval.clone(),
         state.document_job_wake.clone(),
         state.document_writes.clone(),
