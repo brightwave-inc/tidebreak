@@ -42,41 +42,32 @@ impl ParserRegistry {
         self.push(Box::new(parser));
         self
     }
+
+    fn selected_parser(&self, media_type: &str) -> Option<&dyn DocumentParser> {
+        self.parsers
+            .iter()
+            .find(|parser| parser.supports(media_type))
+            .map(Box::as_ref)
+    }
 }
 
 #[async_trait::async_trait]
 impl DocumentParser for ParserRegistry {
-    fn fingerprint(&self) -> String {
-        // Length prefixes make the ordered composition unambiguous even when a
-        // child fingerprint contains punctuation used by other fingerprints.
-        let mut fingerprint = String::from("parser-registry-v1");
-        for parser in &self.parsers {
-            let child = parser.fingerprint();
-            fingerprint.push(':');
-            fingerprint.push_str(&child.len().to_string());
-            fingerprint.push(':');
-            fingerprint.push_str(&child);
-        }
-        let digest = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, fingerprint.as_bytes());
-        format!("parser-registry-v1:{digest}")
+    fn fingerprint_for(&self, media_type: &str) -> Option<String> {
+        self.selected_parser(media_type)?
+            .fingerprint_for(media_type)
     }
 
     fn supports(&self, media_type: &str) -> bool {
-        self.parsers
-            .iter()
-            .any(|parser| parser.supports(media_type))
+        self.selected_parser(media_type).is_some()
     }
 
     async fn parse(&self, raw: &[u8], media_type: &str) -> Result<ParsedDocument> {
-        let parser = self
-            .parsers
-            .iter()
-            .find(|parser| parser.supports(media_type))
-            .ok_or_else(|| {
-                RetrievalError::parse(format!(
-                    "no registered document parser supports media type `{media_type}`"
-                ))
-            })?;
+        let parser = self.selected_parser(media_type).ok_or_else(|| {
+            RetrievalError::parse(format!(
+                "no registered document parser supports media type `{media_type}`"
+            ))
+        })?;
         parser.parse(raw, media_type).await
     }
 }
@@ -115,13 +106,15 @@ impl ParsedDocument {
 /// configuration (naive today, liteparse-backed later).
 #[async_trait::async_trait]
 pub trait DocumentParser: Send + Sync {
-    /// Stable identity for canonical-text behavior used in index watermarks.
+    /// Stable identity for canonical-text behavior for `media_type`.
     ///
+    /// Returns `None` exactly when [`supports`](Self::supports) returns `false`.
     /// Custom parsers should override this whenever an implementation change can
     /// alter canonical text. The value must remain stable for this parser
     /// instance's lifetime; runtime reconfiguration requires a new instance.
-    fn fingerprint(&self) -> String {
-        format!("custom-parser:type={}", std::any::type_name::<Self>())
+    fn fingerprint_for(&self, media_type: &str) -> Option<String> {
+        self.supports(media_type)
+            .then(|| format!("custom-parser:type={}", std::any::type_name::<Self>()))
     }
 
     /// Whether this parser can handle the given media (MIME) type.
@@ -150,8 +143,9 @@ impl PlainTextParser {
 
 #[async_trait::async_trait]
 impl DocumentParser for PlainTextParser {
-    fn fingerprint(&self) -> String {
-        "plain-text-lossy-v1".to_string()
+    fn fingerprint_for(&self, media_type: &str) -> Option<String> {
+        self.supports(media_type)
+            .then(|| "plain-text-lossy-v1".to_string())
     }
 
     fn supports(&self, media_type: &str) -> bool {
@@ -184,8 +178,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DocumentParser for PrefixParser {
-        fn fingerprint(&self) -> String {
-            format!("prefix:{}:{}", self.media_type, self.prefix)
+        fn fingerprint_for(&self, media_type: &str) -> Option<String> {
+            self.supports(media_type)
+                .then(|| format!("prefix:{}:{}", self.media_type, self.prefix))
         }
 
         fn supports(&self, media_type: &str) -> bool {
@@ -223,8 +218,16 @@ mod tests {
             "first:pdf"
         );
         assert_eq!(
+            registry.fingerprint_for("application/pdf").as_deref(),
+            Some("prefix:application/pdf:first:")
+        );
+        assert_eq!(
             registry.parse(b"text", "text/plain").await.unwrap().text,
             "text"
+        );
+        assert_eq!(
+            registry.fingerprint_for("text/plain").as_deref(),
+            Some("plain-text-lossy-v1")
         );
     }
 
@@ -232,6 +235,7 @@ mod tests {
     async fn registry_rejects_unsupported_media_without_invoking_a_parser() {
         let registry = ParserRegistry::new().with_parser(PlainTextParser::new());
         assert!(!registry.supports("application/pdf"));
+        assert_eq!(registry.fingerprint_for("application/pdf"), None);
         let error = registry
             .parse(b"%PDF", "application/pdf")
             .await
@@ -240,29 +244,78 @@ mod tests {
     }
 
     #[test]
-    fn registry_fingerprint_captures_ordered_children_unambiguously() {
-        let first = ParserRegistry::new()
+    fn registry_fingerprint_ignores_unrelated_parser_changes() {
+        let plain_only = ParserRegistry::new().with_parser(PlainTextParser::new());
+        let with_unrelated = ParserRegistry::new()
             .with_parser(PrefixParser {
-                media_type: "a",
-                prefix: "b:c",
+                media_type: "application/pdf",
+                prefix: "pdf:",
+            })
+            .with_parser(PlainTextParser::new());
+        let with_two_unrelated = ParserRegistry::new()
+            .with_parser(PrefixParser {
+                media_type: "application/epub+zip",
+                prefix: "epub:",
             })
             .with_parser(PrefixParser {
-                media_type: "d",
-                prefix: "e",
+                media_type: "application/pdf",
+                prefix: "pdf:",
+            })
+            .with_parser(PlainTextParser::new());
+        let reversed_unrelated = ParserRegistry::new()
+            .with_parser(PrefixParser {
+                media_type: "application/pdf",
+                prefix: "pdf:",
+            })
+            .with_parser(PrefixParser {
+                media_type: "application/epub+zip",
+                prefix: "epub:",
+            })
+            .with_parser(PlainTextParser::new());
+
+        assert_eq!(
+            plain_only.fingerprint_for("text/plain"),
+            with_unrelated.fingerprint_for("text/plain")
+        );
+        assert_eq!(
+            plain_only.fingerprint_for("text/plain"),
+            with_two_unrelated.fingerprint_for("text/plain")
+        );
+        assert_eq!(
+            with_two_unrelated.fingerprint_for("text/plain"),
+            reversed_unrelated.fingerprint_for("text/plain")
+        );
+    }
+
+    #[test]
+    fn registry_fingerprint_changes_with_selected_parser_priority() {
+        let first = ParserRegistry::new()
+            .with_parser(PrefixParser {
+                media_type: "application/pdf",
+                prefix: "first:",
+            })
+            .with_parser(PrefixParser {
+                media_type: "application/pdf",
+                prefix: "second:",
             });
         let reversed = ParserRegistry::new()
             .with_parser(PrefixParser {
-                media_type: "d",
-                prefix: "e",
+                media_type: "application/pdf",
+                prefix: "second:",
             })
             .with_parser(PrefixParser {
-                media_type: "a",
-                prefix: "b:c",
+                media_type: "application/pdf",
+                prefix: "first:",
             });
 
-        assert_ne!(first.fingerprint(), reversed.fingerprint());
-        assert_eq!(first.fingerprint(), first.fingerprint());
-        assert_eq!(first.fingerprint().len(), 55);
+        assert_eq!(
+            first.fingerprint_for("application/pdf").as_deref(),
+            Some("prefix:application/pdf:first:")
+        );
+        assert_eq!(
+            reversed.fingerprint_for("application/pdf").as_deref(),
+            Some("prefix:application/pdf:second:")
+        );
     }
 
     #[test]
