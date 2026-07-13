@@ -30,6 +30,7 @@ pub(crate) struct DocumentWorkerConfig {
     idle_min: Duration,
     idle_cap: Duration,
     failure_delay: Duration,
+    max_concurrency: usize,
 }
 
 impl Default for DocumentWorkerConfig {
@@ -42,6 +43,7 @@ impl Default for DocumentWorkerConfig {
             idle_min: Duration::from_millis(250),
             idle_cap: Duration::from_secs(5),
             failure_delay: Duration::from_secs(1),
+            max_concurrency: 4,
         }
     }
 }
@@ -86,6 +88,7 @@ impl DocumentWorker {
         assert!(!config.lease.is_zero());
         assert!(!config.heartbeat.is_zero());
         assert!(config.heartbeat < config.lease);
+        assert!(config.max_concurrency > 0);
         Self {
             store,
             blobs,
@@ -99,6 +102,20 @@ impl DocumentWorker {
     }
 
     pub(crate) async fn run(self) {
+        let mut lanes = tokio::task::JoinSet::new();
+        for _ in 0..self.config.max_concurrency {
+            lanes.spawn(self.clone().run_lane());
+        }
+        while let Some(result) = lanes.join_next().await {
+            if let Err(error) = result {
+                eprintln!("openwave: document worker lane stopped: {error}");
+                tokio::time::sleep(self.config.failure_delay).await;
+            }
+            lanes.spawn(self.clone().run_lane());
+        }
+    }
+
+    async fn run_lane(self) {
         let mut idle_delay = self.config.idle_min;
         loop {
             match self.run_once().await {
@@ -131,6 +148,11 @@ impl DocumentWorker {
         let now = Utc::now();
         let lease_expires_at = now + chrono_duration(self.config.lease)?;
         if let Some(job) = self.store.claim_document_job(now, lease_expires_at).await? {
+            // A single producer notification should fill every available lane
+            // when durable work is already queued. Each successful claimant
+            // recruits one parked peer; the cascade stops naturally when a
+            // claimant observes no further job.
+            self.wake.notify_one();
             return self.process(job).await;
         }
         if !retirement_first {
@@ -696,6 +718,14 @@ mod tests {
         release: Notify,
     }
 
+    struct ConcurrencyEmbedder {
+        inner: HashEmbedder,
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        calls: AtomicUsize,
+        release: tokio::sync::Semaphore,
+    }
+
     struct GatedActivationVectorStore {
         inner: InMemoryVectorStore,
         gate_next: AtomicBool,
@@ -855,6 +885,33 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Embedder for ConcurrencyEmbedder {
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+
+        fn fingerprint(&self) -> String {
+            "worker-concurrency-v1".into()
+        }
+
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+        ) -> openwave_retrieval::Result<Vec<Embedding>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            self.release.acquire().await.unwrap().forget();
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            self.inner.embed_documents(texts).await
+        }
+
+        async fn embed_query(&self, text: &str) -> openwave_retrieval::Result<Embedding> {
+            self.inner.embed_query(text).await
+        }
+    }
+
     async fn harness() -> (
         tempfile::TempDir,
         Arc<dyn Store>,
@@ -902,6 +959,7 @@ mod tests {
             idle_min: Duration::from_millis(1),
             idle_cap: Duration::from_millis(5),
             failure_delay: Duration::from_millis(1),
+            max_concurrency: 1,
         }
     }
 
@@ -1003,6 +1061,105 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn run_processes_backlog_concurrently_up_to_the_configured_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("concurrent-worker.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let embedder = Arc::new(ConcurrencyEmbedder {
+            inner: HashEmbedder::new(32),
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let retrieval = Arc::new(Retriever::new(
+            Box::new(PlainTextParser::new()),
+            Box::new(TextChunker::new(90, 0)),
+            embedder.clone(),
+            Arc::new(InMemoryVectorStore::new(32)),
+        ));
+        let wake = Arc::new(Notify::new());
+        let worker = DocumentWorker::new(
+            store.clone(),
+            Arc::new(openwave_core::FsBlobStore::new(dir.path().join("blobs"))),
+            retrieval.clone(),
+            wake.clone(),
+            Arc::new(DocumentWriteGuard::default()),
+            DocumentWorkerConfig {
+                max_concurrency: 2,
+                idle_min: Duration::from_secs(30),
+                idle_cap: Duration::from_secs(30),
+                ..test_config()
+            },
+        );
+        let running = tokio::spawn(worker.run());
+        // Let both lanes observe an empty queue and park behind a timer far
+        // longer than this test's timeout. The single wake below must therefore
+        // recruit the second lane through the successful-claim cascade.
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let mut jobs = Vec::new();
+        for index in 0..3 {
+            let (_, job) = store
+                .upsert_document_and_enqueue_index(
+                    &source(DocumentId::new(), &format!("concurrent job {index}")),
+                    &retrieval.index_fingerprint(),
+                    3,
+                )
+                .await
+                .unwrap();
+            jobs.push(job.id);
+        }
+        wake.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while embedder.calls.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("two worker lanes did not fill");
+        assert_eq!(embedder.active.load(Ordering::SeqCst), 2);
+        assert_eq!(embedder.peak.load(Ordering::SeqCst), 2);
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 2);
+
+        embedder.release.add_permits(2);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while embedder.calls.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the queued job did not use a released lane");
+        assert_eq!(embedder.peak.load(Ordering::SeqCst), 2);
+        embedder.release.add_permits(1);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let mut complete = true;
+                for job_id in &jobs {
+                    complete &= store
+                        .get_document_job(*job_id)
+                        .await
+                        .unwrap()
+                        .is_some_and(|job| job.status == DocumentJobStatus::Succeeded);
+                }
+                if complete {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("bounded worker lanes did not drain the backlog");
+        running.abort();
     }
 
     #[tokio::test]
