@@ -93,9 +93,10 @@ revisions and Parse→Index jobs are coordinated by `openwave-core` and
 ## `openwave-mcp` — the MCP face 🟡
 
 The server half of [MCP](https://modelcontextprotocol.io): JSON-RPC
-`initialize`, `tools/list`, and `tools/call` over stdio, backed by OpenWave's
-tool registry. CLI/session lifecycle wiring and the client that mounts external
-MCP servers remain planned.
+`initialize`, `ping`, `tools/list`, and `tools/call` over stdio, backed by
+OpenWave's tool registry. Its atomic session lifecycle gates normal operations,
+and its execution boundary exposes only tools classified read-only. The client
+that mounts external MCP servers remains planned.
 
 **Depends on:** `openwave-core`.
 
@@ -123,9 +124,11 @@ retirement, and audit workers while core state transitions remain in
 ## `openwave-cli` — headless daemon + CLI 🟡
 
 The working headless daemon (`openwave serve`) over the same HTTP surface the
-desktop uses. Additional command-line client workflows remain in development.
+desktop uses, plus `openwave mcp <workspace>` for a read-only MCP stdio server
+confined to one explicit workspace. Indexed-document MCP search and additional
+command-line client workflows remain in development.
 
-**Depends on:** `openwave-core`, `openwave-server`.
+**Depends on:** `openwave-core`, `openwave-mcp`, `openwave-server`.
 
 ## `openwave-slack` — the Slack adapter ⚪
 

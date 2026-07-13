@@ -5726,7 +5726,9 @@ name = "openwave-cli"
 version = "0.0.0"
 dependencies = [
  "openwave-core",
+ "openwave-mcp",
  "openwave-server",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

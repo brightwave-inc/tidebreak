@@ -1,13 +1,42 @@
-//! End-to-end test of the `openwave serve` daemon: spawn the built binary, read
-//! the address it announces on stdout, and confirm the server actually answers.
+//! End-to-end tests of the `openwave` process surfaces.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 /// Kills the daemon on drop — including on an assertion panic, since
 /// `std::process::Child` does not reap on its own.
 struct Reaper(Child);
+
+impl Reaper {
+    fn wait_with_output(&mut self, timeout: Duration) -> Output {
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = self.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child did not exit within {timeout:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        if let Some(mut pipe) = self.0.stdout.take() {
+            pipe.read_to_end(&mut stdout).unwrap();
+        }
+        if let Some(mut pipe) = self.0.stderr.take() {
+            pipe.read_to_end(&mut stderr).unwrap();
+        }
+        Output {
+            status,
+            stdout,
+            stderr,
+        }
+    }
+}
 
 impl Drop for Reaper {
     fn drop(&mut self) {
@@ -56,4 +85,83 @@ fn serve_announces_its_address_and_answers_health() {
 
     assert!(response.contains("200 OK"), "response: {response}");
     assert!(response.trim_end().ends_with("ok"), "response: {response}");
+}
+
+#[test]
+fn mcp_serves_read_only_tools_with_protocol_pure_stdout() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("note.txt"), "workspace note").unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .arg("mcp")
+        .arg(workspace.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn openwave mcp");
+
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"note.txt"}}}"#,
+        "\n",
+    );
+    let mut child = Reaper(child);
+    let mut stdin = child.0.stdin.take().unwrap();
+    stdin.write_all(input.as_bytes()).unwrap();
+    drop(stdin);
+
+    let output = child.wait_with_output(Duration::from_secs(5));
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let responses: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 3, "stdout: {stdout}");
+    let tool_names: Vec<&str> = responses[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tool_names, ["list_dir", "read_file"]);
+    assert_eq!(
+        responses[2]["result"]["content"][0]["text"],
+        "workspace note"
+    );
+}
+
+// Linux filesystems accept arbitrary non-NUL byte paths; macOS commonly rejects
+// ill-formed UTF-8 names before the CLI can observe them.
+#[cfg(target_os = "linux")]
+#[test]
+fn mcp_accepts_a_non_utf8_workspace_path() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let parent = tempfile::tempdir().unwrap();
+    let workspace = parent
+        .path()
+        .join(std::ffi::OsString::from_vec(b"workspace-\xff".to_vec()));
+    std::fs::create_dir(&workspace).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .arg("mcp")
+        .arg(&workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn openwave mcp with non-UTF-8 workspace");
+    let mut child = Reaper(child);
+
+    let output = child.wait_with_output(Duration::from_secs(5));
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }
