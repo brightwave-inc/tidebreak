@@ -4,12 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openwave_core::{
-    DocumentId, DocumentIndexJobReason, DocumentJobStatus, DocumentProcessingStatus, DocumentScope,
-    EnsureDocumentIndexJobOutcome, Result, Store,
+    DocumentId, DocumentIndexJobReason, DocumentJobKind, DocumentJobStatus,
+    DocumentProcessingStatus, DocumentScope, EnsureDocumentIndexJobOutcome,
+    EnsureDocumentParseJobOutcome, Result, Store,
 };
 use openwave_retrieval::{Document, DocumentGenerationState, DocumentSource, Retriever};
 use tokio::sync::Notify;
 
+use crate::document_stage::MAX_PARSE_ATTEMPTS;
 use crate::document_worker::MAX_INDEX_ATTEMPTS;
 use crate::state::DocumentWriteGuard;
 
@@ -142,15 +144,58 @@ impl DocumentAuditor {
             report.skipped += 1;
             return Ok(());
         };
+
+        if document.source_blob.is_some() {
+            let parser_fingerprint = self
+                .retrieval
+                .canonical_fingerprint_for(&document.media_type);
+            let parser_fingerprint = match parser_fingerprint {
+                Ok(fingerprint) => Some(fingerprint),
+                Err(_) if document.canonical_fingerprint.is_some() => None,
+                Err(_) => {
+                    report.skipped += 1;
+                    return Ok(());
+                }
+            };
+            if let Some(parser_fingerprint) = parser_fingerprint {
+                match self
+                    .store
+                    .ensure_document_parse_job(
+                        document_id,
+                        document.generation(),
+                        &parser_fingerprint,
+                        MAX_PARSE_ATTEMPTS,
+                    )
+                    .await?
+                {
+                    EnsureDocumentParseJobOutcome::Enqueued(_) => {
+                        report.enqueued += 1;
+                        return Ok(());
+                    }
+                    EnsureDocumentParseJobOutcome::Failed(_) => {
+                        report.failed_jobs += 1;
+                        return Ok(());
+                    }
+                    EnsureDocumentParseJobOutcome::Existing(_)
+                    | EnsureDocumentParseJobOutcome::SourceUnavailable
+                    | EnsureDocumentParseJobOutcome::MissingDocument
+                    | EnsureDocumentParseJobOutcome::GenerationChanged(_) => {
+                        report.skipped += 1;
+                        return Ok(());
+                    }
+                    EnsureDocumentParseJobOutcome::CanonicalCurrent => {}
+                }
+            }
+        }
+
         let jobs = self.store.list_document_jobs(document_id).await?;
         let current_jobs: Vec<_> = jobs
             .iter()
             .filter(|job| job.generation() == document.generation())
             .collect();
-        let desired_job = current_jobs
-            .iter()
-            .copied()
-            .find(|job| job.pipeline_fingerprint == fingerprint);
+        let desired_job = current_jobs.iter().copied().find(|job| {
+            job.kind == DocumentJobKind::Index && job.pipeline_fingerprint == fingerprint
+        });
 
         if desired_job.is_some_and(|job| {
             matches!(
@@ -172,9 +217,12 @@ impl DocumentAuditor {
             .index_fingerprint
             .as_deref()
             .is_some_and(|indexed| indexed != fingerprint)
-            || (!current_jobs.is_empty()
+            || (current_jobs
+                .iter()
+                .any(|job| job.kind == DocumentJobKind::Index)
                 && current_jobs
                     .iter()
+                    .filter(|job| job.kind == DocumentJobKind::Index)
                     .all(|job| job.pipeline_fingerprint != fingerprint));
         let reason = if known_pipeline_changed {
             DocumentIndexJobReason::PipelineChanged
@@ -276,7 +324,8 @@ fn canonical_document(record: &openwave_core::DocumentRecord) -> Document {
 mod tests {
     use chrono::Utc;
     use openwave_core::{
-        ByteSpan, DbStore, DocumentJobStatus, DocumentProcessingStatus, DocumentUpsert,
+        ByteSpan, DbStore, DocumentJobKind, DocumentJobStatus, DocumentParseOutput,
+        DocumentProcessingStatus, DocumentSourceBlob, DocumentSourceUpsert, DocumentUpsert,
         SourceLocation, SourceRegion,
     };
     use openwave_retrieval::{
@@ -313,6 +362,22 @@ mod tests {
             title: None,
             canonical_text: text.into(),
             source_regions: Vec::new(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn raw_source(id: DocumentId) -> DocumentSourceUpsert {
+        DocumentSourceUpsert {
+            id,
+            project_id: None,
+            source_uri: Some("file:///audited-source.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            source_blob: DocumentSourceBlob {
+                id: uuid::Uuid::new_v4(),
+                sha256: [0x55; 32],
+                byte_len: 128,
+            },
             updated_at: Utc::now(),
         }
     }
@@ -423,6 +488,212 @@ mod tests {
         assert_eq!(
             store.get_document(id).await.unwrap().unwrap().generation(),
             advanced.generation()
+        );
+    }
+
+    #[tokio::test]
+    async fn parser_change_advances_once_and_enqueues_parse_before_index_audit() {
+        let (_dir, store, retrieval) = harness().await;
+        let id = DocumentId::new();
+        let source = raw_source(id);
+        let (accepted, parse_job) = store
+            .accept_document_source_and_enqueue_parse(&source, "old-parser", 3)
+            .await
+            .unwrap();
+        let claim_at = parse_job.available_at + chrono::Duration::seconds(1);
+        let running = store
+            .claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let (parsed, old_index_job) = store
+            .complete_document_parse_job_and_enqueue_index(
+                running.id,
+                running.lease_token.unwrap(),
+                claim_at + chrono::Duration::seconds(1),
+                &DocumentParseOutput {
+                    canonical_text: "old canonical output".into(),
+                    source_regions: Vec::new(),
+                },
+                &retrieval.index_fingerprint(),
+                3,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.generation(), accepted.generation());
+
+        let auditor = auditor(store.clone(), retrieval.clone());
+        let first = auditor.audit_once().await.unwrap();
+        assert_eq!(first.enqueued, 1);
+        assert_eq!(first.failed_jobs, 0);
+        let reparsing = store.get_document(id).await.unwrap().unwrap();
+        assert_eq!(reparsing.content_revision, parsed.content_revision + 1);
+        assert!(reparsing.canonical_text.is_empty());
+        assert_eq!(reparsing.canonical_fingerprint, None);
+        assert_eq!(
+            store
+                .get_document_job(old_index_job.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            DocumentJobStatus::Cancelled
+        );
+        let desired_parser = retrieval
+            .canonical_fingerprint_for(&source.media_type)
+            .unwrap();
+        let jobs = store.list_document_jobs(id).await.unwrap();
+        assert!(jobs.iter().any(|job| {
+            job.generation() == reparsing.generation()
+                && job.kind == DocumentJobKind::Parse
+                && job.pipeline_fingerprint == desired_parser
+                && job.status == DocumentJobStatus::Queued
+        }));
+
+        let second = auditor.audit_once().await.unwrap();
+        assert_eq!(second.enqueued, 0);
+        assert_eq!(second.skipped, 1);
+        assert_eq!(
+            store.get_document(id).await.unwrap().unwrap().generation(),
+            reparsing.generation()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_parse_remains_behind_explicit_retry() {
+        let (_dir, store, retrieval) = harness().await;
+        let source = raw_source(DocumentId::new());
+        let parser_fingerprint = retrieval
+            .canonical_fingerprint_for(&source.media_type)
+            .unwrap();
+        let (_, parse_job) = store
+            .accept_document_source_and_enqueue_parse(&source, &parser_fingerprint, 1)
+            .await
+            .unwrap();
+        let claim_at = parse_job.available_at + chrono::Duration::seconds(1);
+        let running = store
+            .claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .record_document_job_failure(
+                    running.id,
+                    running.lease_token.unwrap(),
+                    claim_at + chrono::Duration::seconds(1),
+                    None,
+                    "parse_failed",
+                    None,
+                )
+                .await
+                .unwrap(),
+            Some(DocumentJobStatus::Failed)
+        );
+
+        let report = auditor(store.clone(), retrieval)
+            .audit_once()
+            .await
+            .unwrap();
+        assert_eq!(report.enqueued, 0);
+        assert_eq!(report.failed_jobs, 1);
+        assert_eq!(
+            store
+                .get_document_job(parse_job.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            DocumentJobStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_retained_media_is_stable_and_does_not_block_canonical_index_repair() {
+        let (_dir, store, retrieval) = harness().await;
+        let canonical_id = DocumentId::new();
+        let mut canonical_source = raw_source(canonical_id);
+        canonical_source.media_type = "application/pdf".into();
+        let (_, parse_job) = store
+            .accept_document_source_and_enqueue_parse(&canonical_source, "removed-pdf-parser", 3)
+            .await
+            .unwrap();
+        let claim_at = parse_job.available_at + chrono::Duration::seconds(1);
+        let running = store
+            .claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let (canonical, old_index_job) = store
+            .complete_document_parse_job_and_enqueue_index(
+                running.id,
+                running.lease_token.unwrap(),
+                claim_at + chrono::Duration::seconds(1),
+                &DocumentParseOutput {
+                    canonical_text: "usable canonical PDF text".into(),
+                    source_regions: Vec::new(),
+                },
+                "old-index",
+                3,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let pending_id = DocumentId::new();
+        let mut pending_source = raw_source(pending_id);
+        pending_source.media_type = "application/pdf".into();
+        let (pending, pending_parse_job) = store
+            .accept_document_source_and_enqueue_parse(&pending_source, "removed-pdf-parser", 3)
+            .await
+            .unwrap();
+
+        let report = auditor(store.clone(), retrieval.clone())
+            .audit_once()
+            .await
+            .unwrap();
+        assert_eq!(report.scanned, 2);
+        assert_eq!(report.enqueued, 1);
+        assert_eq!(report.skipped, 1);
+        assert!(report.failures.is_empty());
+
+        let repaired = store.get_document(canonical_id).await.unwrap().unwrap();
+        assert_eq!(repaired.content_revision, canonical.content_revision + 1);
+        assert_eq!(repaired.canonical_text, canonical.canonical_text);
+        assert_eq!(
+            store
+                .get_document_job(old_index_job.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            DocumentJobStatus::Cancelled
+        );
+        assert!(store
+            .list_document_jobs(canonical_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|job| {
+                job.generation() == repaired.generation()
+                    && job.kind == DocumentJobKind::Index
+                    && job.pipeline_fingerprint == retrieval.index_fingerprint()
+                    && job.status == DocumentJobStatus::Queued
+            }));
+
+        assert_eq!(
+            store.get_document(pending_id).await.unwrap().unwrap(),
+            pending
+        );
+        assert_eq!(
+            store
+                .get_document_job(pending_parse_job.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            DocumentJobStatus::Queued
         );
     }
 
