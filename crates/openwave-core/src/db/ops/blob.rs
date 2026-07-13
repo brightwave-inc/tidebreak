@@ -2,7 +2,7 @@ use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
-    TransactionTrait,
+    TransactionTrait, TryInsertResult,
 };
 
 use crate::error::{AgentError, Result};
@@ -20,6 +20,61 @@ pub(in crate::db) async fn get(
         .map_err(store_err)?
         .map(from_model)
         .transpose()
+}
+
+pub(in crate::db) async fn ensure_orphan(store: &DbStore, blob_id: uuid::Uuid) -> Result<bool> {
+    loop {
+        let transaction = store.conn.begin().await.map_err(store_err)?;
+        acquire_write_lock(&transaction).await?;
+        let candidate = entities::blob_retirement::Entity::find_by_id(blob_id)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?;
+        let referenced = entities::document::Entity::find()
+            .select_only()
+            .column(entities::document::Column::Id)
+            .filter(entities::document::Column::SourceBlobId.eq(blob_id))
+            .into_tuple::<uuid::Uuid>()
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some();
+        if referenced {
+            if let Some(candidate) = candidate
+                .filter(|candidate| candidate.status != BlobRetirementStatus::Cancelled.as_str())
+            {
+                if !cancel_candidate_on(&transaction, &candidate, Utc::now()).await? {
+                    transaction.rollback().await.map_err(store_err)?;
+                    continue;
+                }
+            }
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(false);
+        }
+        let queued = match candidate.as_ref() {
+            None => matches!(
+                entities::blob_retirement::Entity::insert(retirement_model(blob_id, Utc::now()))
+                    .on_conflict_do_nothing()
+                    .exec_without_returning(&transaction)
+                    .await
+                    .map_err(store_err)?,
+                TryInsertResult::Inserted(1)
+            ),
+            Some(candidate) if matches!(candidate.status.as_str(), "succeeded" | "cancelled") => {
+                requeue_candidate_on(&transaction, candidate, Utc::now()).await?
+            }
+            Some(_) => {
+                transaction.commit().await.map_err(store_err)?;
+                return Ok(false);
+            }
+        };
+        if !queued {
+            transaction.rollback().await.map_err(store_err)?;
+            continue;
+        }
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(true);
+    }
 }
 
 /// Replace one document's blob reference using a global blob-id lock order.
@@ -540,6 +595,82 @@ where
     Ok(cancelled.rows_affected == 1)
 }
 
+/// Start a new retirement episode only if `candidate` is still the exact row
+/// observed by the orphan audit. This prevents a stale completed snapshot from
+/// fencing a worker that has since claimed a newer episode.
+pub(in crate::db) async fn requeue_candidate_on<C>(
+    conn: &C,
+    candidate: &entities::blob_retirement::Model,
+    now: chrono::DateTime<Utc>,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let requeued = entities::blob_retirement::Entity::update_many()
+        .col_expr(
+            entities::blob_retirement::Column::Status,
+            sea_orm::sea_query::Expr::value(BlobRetirementStatus::Queued.as_str()),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::AttemptCount,
+            sea_orm::sea_query::Expr::value(0),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(BlobRetirement::DEFAULT_MAX_ATTEMPTS),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::StartedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::blob_retirement::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::blob_retirement::Column::BlobId.eq(candidate.blob_id))
+        .filter(entities::blob_retirement::Column::Status.eq(&candidate.status))
+        .filter(entities::blob_retirement::Column::AttemptCount.eq(candidate.attempt_count))
+        .filter(entities::blob_retirement::Column::UpdatedAt.eq(candidate.updated_at))
+        .filter(match candidate.lease_token {
+            Some(lease_token) => entities::blob_retirement::Column::LeaseToken.eq(lease_token),
+            None => entities::blob_retirement::Column::LeaseToken.is_null(),
+        })
+        .filter(match candidate.lease_expires_at {
+            Some(lease_expires_at) => {
+                entities::blob_retirement::Column::LeaseExpiresAt.eq(lease_expires_at)
+            }
+            None => entities::blob_retirement::Column::LeaseExpiresAt.is_null(),
+        })
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(requeued.rows_affected == 1)
+}
+
 async fn acquire_write_lock<C>(conn: &C) -> Result<()>
 where
     C: ConnectionTrait,
@@ -624,7 +755,35 @@ where
     C: ConnectionTrait,
 {
     let now = Utc::now();
-    entities::blob_retirement::Entity::insert(entities::blob_retirement::ActiveModel {
+    entities::blob_retirement::Entity::insert(retirement_model(blob_id, now))
+        .on_conflict(
+            OnConflict::column(entities::blob_retirement::Column::BlobId)
+                .update_columns([
+                    entities::blob_retirement::Column::Status,
+                    entities::blob_retirement::Column::AttemptCount,
+                    entities::blob_retirement::Column::MaxAttempts,
+                    entities::blob_retirement::Column::AvailableAt,
+                    entities::blob_retirement::Column::LeaseToken,
+                    entities::blob_retirement::Column::LeaseExpiresAt,
+                    entities::blob_retirement::Column::StartedAt,
+                    entities::blob_retirement::Column::FinishedAt,
+                    entities::blob_retirement::Column::LastErrorCode,
+                    entities::blob_retirement::Column::LastErrorDetail,
+                    entities::blob_retirement::Column::UpdatedAt,
+                ])
+                .to_owned(),
+        )
+        .exec_without_returning(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+fn retirement_model(
+    blob_id: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+) -> entities::blob_retirement::ActiveModel {
+    entities::blob_retirement::ActiveModel {
         blob_id: Set(blob_id),
         status: Set(BlobRetirementStatus::Queued.as_str().into()),
         attempt_count: Set(0),
@@ -638,28 +797,7 @@ where
         last_error_detail: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
-    })
-    .on_conflict(
-        OnConflict::column(entities::blob_retirement::Column::BlobId)
-            .update_columns([
-                entities::blob_retirement::Column::Status,
-                entities::blob_retirement::Column::AttemptCount,
-                entities::blob_retirement::Column::MaxAttempts,
-                entities::blob_retirement::Column::AvailableAt,
-                entities::blob_retirement::Column::LeaseToken,
-                entities::blob_retirement::Column::LeaseExpiresAt,
-                entities::blob_retirement::Column::StartedAt,
-                entities::blob_retirement::Column::FinishedAt,
-                entities::blob_retirement::Column::LastErrorCode,
-                entities::blob_retirement::Column::LastErrorDetail,
-                entities::blob_retirement::Column::UpdatedAt,
-            ])
-            .to_owned(),
-    )
-    .exec_without_returning(conn)
-    .await
-    .map_err(store_err)?;
-    Ok(())
+    }
 }
 
 /// Cancel any retirement state when a transaction establishes a live reference.

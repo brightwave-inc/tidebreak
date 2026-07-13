@@ -993,6 +993,106 @@ async fn blob_retirement_constraints_reject_impossible_delivery_state() {
 }
 
 #[tokio::test]
+async fn orphan_blob_retirement_only_queues_missing_or_completed_episodes() {
+    let (_dir, store) = temp_store().await;
+    let blob_id = uuid::Uuid::new_v4();
+    assert!(store.ensure_orphan_blob_retirement(blob_id).await.unwrap());
+    assert!(!store.ensure_orphan_blob_retirement(blob_id).await.unwrap());
+    let queued = store.get_blob_retirement(blob_id).await.unwrap().unwrap();
+    let claimed_at = queued.available_at + chrono::Duration::seconds(1);
+    let claimed = store
+        .claim_blob_retirement(claimed_at, claimed_at + chrono::Duration::minutes(5))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(store
+        .complete_blob_retirement(
+            claimed.blob_id,
+            claimed.lease_token.unwrap(),
+            claimed_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap());
+    assert!(store.ensure_orphan_blob_retirement(blob_id).await.unwrap());
+    let requeued = store.get_blob_retirement(blob_id).await.unwrap().unwrap();
+    assert_eq!(requeued.status, BlobRetirementStatus::Queued);
+    assert_eq!(requeued.attempt_count, 0);
+    assert_eq!(requeued.started_at, None);
+    assert_eq!(requeued.finished_at, None);
+
+    let referenced = sample_raw_source(
+        DocumentId::new(),
+        "file:///referenced-orphan-audit.bin",
+        DocumentSourceBlob::from_digest([0x7b; 32], 81),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&referenced, "parser-v1", 3)
+        .await
+        .unwrap();
+    assert!(!store
+        .ensure_orphan_blob_retirement(referenced.source_blob.id)
+        .await
+        .unwrap());
+    assert_eq!(
+        store
+            .get_blob_retirement(referenced.source_blob.id)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn stale_orphan_snapshot_cannot_reset_a_new_worker_lease() {
+    let (_dir, store) = temp_store().await;
+    let blob_id = uuid::Uuid::new_v4();
+    assert!(store.ensure_orphan_blob_retirement(blob_id).await.unwrap());
+    let first_claim_at = Utc::now() + chrono::Duration::seconds(1);
+    let first = store
+        .claim_blob_retirement(
+            first_claim_at,
+            first_claim_at + chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(store
+        .complete_blob_retirement(
+            blob_id,
+            first.lease_token.unwrap(),
+            first_claim_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap());
+    let stale_completed = entities::blob_retirement::Entity::find_by_id(blob_id)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(store.ensure_orphan_blob_retirement(blob_id).await.unwrap());
+    let second_claim_at = first_claim_at + chrono::Duration::seconds(3);
+    let second = store
+        .claim_blob_retirement(
+            second_claim_at,
+            second_claim_at + chrono::Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        !ops::blob::requeue_candidate_on(&store.conn, &stale_completed, Utc::now())
+            .await
+            .unwrap()
+    );
+    let still_running = store.get_blob_retirement(blob_id).await.unwrap().unwrap();
+    assert_eq!(still_running.status, BlobRetirementStatus::Running);
+    assert_eq!(still_running.lease_token, second.lease_token);
+    assert_eq!(still_running.attempt_count, second.attempt_count);
+}
+
+#[tokio::test]
 async fn blob_retirement_claim_cancels_referenced_candidates() {
     let (_dir, store) = temp_store().await;
     let shared_blob = DocumentSourceBlob::from_digest([0x71; 32], 71);
