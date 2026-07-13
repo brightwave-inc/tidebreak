@@ -241,6 +241,7 @@ async fn ingest_document_in_scope(
     // failure may leave an unreferenced content-addressed blob; it must be
     // reclaimed by a grace-period sweep, not eagerly deleted, because another
     // document may already share the same blob id.
+    let _blob_write = state.blob_writes.acquire(source_blob.id).await?;
     state.blobs.put(source_blob.id, source_bytes).await?;
 
     let (revision, job) = state
@@ -260,6 +261,7 @@ async fn ingest_document_in_scope(
         )
         .await?;
     state.document_job_wake.notify_one();
+    state.blob_retirement_wake.notify_one();
     Ok((
         StatusCode::ACCEPTED,
         Json(IngestResult {
@@ -448,6 +450,7 @@ pub async fn delete_document(
     }
     state.store.delete_document(id).await?;
     state.document_job_wake.notify_one();
+    state.blob_retirement_wake.notify_one();
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -470,6 +473,7 @@ pub async fn delete_project_document(
     }
     state.store.delete_document(document_id).await?;
     state.document_job_wake.notify_one();
+    state.blob_retirement_wake.notify_one();
     Ok(StatusCode::ACCEPTED)
 }
 

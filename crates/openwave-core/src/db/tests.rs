@@ -1198,6 +1198,83 @@ async fn blob_retirement_completion_requires_the_exact_live_lease() {
 }
 
 #[tokio::test]
+async fn blob_retirement_final_validation_cancels_a_new_authoritative_reference() {
+    let (_dir, store) = temp_store().await;
+    let retired_source = sample_raw_source(
+        DocumentId::new(),
+        "file:///retire-final-check.bin",
+        DocumentSourceBlob::from_digest([0x79; 32], 79),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&retired_source, "parser-v1", 3)
+        .await
+        .unwrap();
+    store.delete_document(retired_source.id).await.unwrap();
+    let queued = store
+        .get_blob_retirement(retired_source.source_blob.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let claimed_at = queued.available_at + chrono::Duration::seconds(1);
+    let claimed = store
+        .claim_blob_retirement(claimed_at, claimed_at + chrono::Duration::minutes(5))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let live_source = sample_raw_source(
+        DocumentId::new(),
+        "file:///retire-final-check-live.bin",
+        DocumentSourceBlob::from_digest([0x7a; 32], 80),
+    );
+    store
+        .accept_document_source_and_enqueue_parse(&live_source, "parser-v1", 3)
+        .await
+        .unwrap();
+    // Simulate an uncoordinated external catalog writer to exercise the final
+    // indexed reference check itself, rather than the normal write-time cancel.
+    entities::document::Entity::update_many()
+        .col_expr(
+            entities::document::Column::SourceBlobId,
+            sea_orm::sea_query::Expr::value(Some(retired_source.source_blob.id)),
+        )
+        .col_expr(
+            entities::document::Column::SourceSha256,
+            sea_orm::sea_query::Expr::value(Some(retired_source.source_blob.sha256.to_vec())),
+        )
+        .col_expr(
+            entities::document::Column::SourceByteLen,
+            sea_orm::sea_query::Expr::value(Some(
+                i64::try_from(retired_source.source_blob.byte_len).unwrap(),
+            )),
+        )
+        .filter(entities::document::Column::Id.eq(live_source.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+
+    let validated_at = claimed_at + chrono::Duration::seconds(1);
+    assert!(
+        !store
+            .validate_blob_retirement_lease(
+                claimed.blob_id,
+                claimed.lease_token.unwrap(),
+                validated_at,
+            )
+            .await
+            .unwrap()
+    );
+    let cancelled = store
+        .get_blob_retirement(claimed.blob_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.status, BlobRetirementStatus::Cancelled);
+    assert_eq!(cancelled.finished_at, Some(validated_at));
+    assert_eq!(cancelled.lease_token, None);
+}
+
+#[tokio::test]
 async fn blob_retirement_failure_retries_then_exhausts_the_attempt_budget() {
     let (_dir, store) = temp_store().await;
     let source = sample_raw_source(

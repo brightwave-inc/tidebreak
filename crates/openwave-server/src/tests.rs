@@ -112,8 +112,8 @@ impl BlobStore for FirstPutGatedBlobStore {
         self.inner.get(id).await
     }
 
-    async fn delete(&self, id: uuid::Uuid) -> Result<()> {
-        self.inner.delete(id).await
+    fn delete(&self, id: uuid::Uuid) -> Result<()> {
+        self.inner.delete(id)
     }
 }
 

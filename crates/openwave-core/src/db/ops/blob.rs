@@ -298,6 +298,47 @@ pub(in crate::db) async fn heartbeat(
     Ok(updated.rows_affected == 1)
 }
 
+pub(in crate::db) async fn validate_lease(
+    store: &DbStore,
+    blob_id: uuid::Uuid,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+) -> Result<bool> {
+    loop {
+        let transaction = store.conn.begin().await.map_err(store_err)?;
+        acquire_write_lock(&transaction).await?;
+        let candidate = entities::blob_retirement::Entity::find_by_id(blob_id)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?;
+        let Some(candidate) =
+            candidate.filter(|candidate| lease_is_live(candidate, lease_token, now))
+        else {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(false);
+        };
+        let referenced = entities::document::Entity::find()
+            .select_only()
+            .column(entities::document::Column::Id)
+            .filter(entities::document::Column::SourceBlobId.eq(blob_id))
+            .into_tuple::<uuid::Uuid>()
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some();
+        if referenced {
+            if !cancel_candidate_on(&transaction, &candidate, now).await? {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            }
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(false);
+        }
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(true);
+    }
+}
+
 pub(in crate::db) async fn complete(
     store: &DbStore,
     blob_id: uuid::Uuid,

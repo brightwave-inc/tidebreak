@@ -310,6 +310,15 @@ impl Store for DbStore {
         ops::blob::heartbeat(self, blob_id, lease_token, now, lease_expires_at).await
     }
 
+    async fn validate_blob_retirement_lease(
+        &self,
+        blob_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        ops::blob::validate_lease(self, blob_id, lease_token, now).await
+    }
+
     async fn complete_blob_retirement(
         &self,
         blob_id: uuid::Uuid,

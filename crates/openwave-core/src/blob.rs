@@ -128,22 +128,18 @@ impl BlobStore for FsBlobStore {
         .map_err(|error| AgentError::Store(format!("blob read task failed: {error}")))?
     }
 
-    async fn delete(&self, id: Uuid) -> Result<()> {
+    fn delete(&self, id: Uuid) -> Result<()> {
         let path = self.blob_path(id);
         let root = Arc::clone(&self.root);
         let access = Arc::clone(&self.access);
-        tokio::task::spawn_blocking(move || {
-            let _guard = access
-                .write()
-                .map_err(|_| AgentError::Store("blob store lock poisoned".into()))?;
-            match fs::remove_file(path) {
-                Ok(()) => sync_directory(&root),
-                Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(blob_error("delete file", error)),
-            }
-        })
-        .await
-        .map_err(|error| AgentError::Store(format!("blob delete task failed: {error}")))?
+        let _guard = access
+            .write()
+            .map_err(|_| AgentError::Store("blob store lock poisoned".into()))?;
+        match fs::remove_file(path) {
+            Ok(()) => sync_directory(&root),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(blob_error("delete file", error)),
+        }
     }
 }
 
@@ -228,8 +224,8 @@ mod tests {
             reopened.get(id).await.unwrap().as_deref(),
             Some(&b"first"[..])
         );
-        reopened.delete(id).await.unwrap();
-        reopened.delete(id).await.unwrap();
+        reopened.delete(id).unwrap();
+        reopened.delete(id).unwrap();
         assert_eq!(reopened.get(id).await.unwrap(), None);
     }
 
