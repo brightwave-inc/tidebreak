@@ -7,10 +7,12 @@
 //! the *same* `Arc<dyn VectorStore>` the ingest side writes to and the agent
 //! searches a live index.
 //!
-//! It is `ReadOnly` (never mutates), so the agent may call it without an approval
-//! prompt. Recoverable problems (empty query, an embedder/store hiccup) come back
-//! as [`ToolOutput::error`] for the model to see and adapt to, per the tool
-//! convention; only genuinely unexpected faults would be an `Err`.
+//! It is `ReadOnly` when embedding and optional reranking are guaranteed local.
+//! A provider-backed query is `Sensitive` because query text crosses a network or
+//! external-service boundary. Recoverable problems (empty query, an
+//! embedder/store hiccup) come back as [`ToolOutput::error`] for the model to see
+//! and adapt to, per the tool convention; only genuinely unexpected faults would
+//! be an `Err`.
 //!
 //! Enabled by the `tool` feature.
 
@@ -148,7 +150,15 @@ impl Tool for SearchTool {
     }
 
     fn approval_class(&self) -> ApprovalClass {
-        ApprovalClass::ReadOnly
+        let reranker_is_local = self
+            .reranker
+            .as_ref()
+            .is_none_or(|reranker| reranker.is_local());
+        if self.embedder.is_local() && self.store.is_local() && reranker_is_local {
+            ApprovalClass::ReadOnly
+        } else {
+            ApprovalClass::Sensitive
+        }
     }
 
     async fn execute(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
@@ -267,6 +277,19 @@ mod tests {
 
     struct FixedReranker(Vec<f32>);
 
+    struct RemoteEmbedder(HashEmbedder);
+
+    #[async_trait]
+    impl Embedder for RemoteEmbedder {
+        fn dimensions(&self) -> usize {
+            self.0.dimensions()
+        }
+
+        async fn embed_documents(&self, texts: &[String]) -> crate::Result<Vec<crate::Embedding>> {
+            self.0.embed_documents(texts).await
+        }
+    }
+
     #[async_trait]
     impl Reranker for FailingReranker {
         async fn rerank(
@@ -333,16 +356,37 @@ mod tests {
     }
 
     #[test]
-    fn advertises_a_read_only_search_spec() {
+    fn search_approval_tracks_query_egress() {
         let store = Arc::new(InMemoryVectorStore::new(DIMS));
-        let tool = SearchTool::new(Arc::new(HashEmbedder::new(DIMS)), store);
-        assert_eq!(tool.spec().name, "search");
-        assert_eq!(tool.approval_class(), ApprovalClass::ReadOnly);
-        assert!(tool.spec().input_schema["required"]
+        let local = SearchTool::new(Arc::new(HashEmbedder::new(DIMS)), store.clone());
+        assert_eq!(local.spec().name, "search");
+        assert_eq!(local.approval_class(), ApprovalClass::ReadOnly);
+        assert!(local.spec().input_schema["required"]
             .as_array()
             .unwrap()
             .iter()
             .any(|v| v == "query"));
+
+        let remote = SearchTool::new(
+            Arc::new(RemoteEmbedder(HashEmbedder::new(DIMS))),
+            store.clone(),
+        );
+        assert_eq!(remote.approval_class(), ApprovalClass::Sensitive);
+
+        let remote_store = SearchTool::new(
+            Arc::new(HashEmbedder::new(DIMS)),
+            Arc::new(SpyVectorStore {
+                candidates: Vec::new(),
+                calls: Mutex::new(Vec::new()),
+            }),
+        );
+        assert_eq!(remote_store.approval_class(), ApprovalClass::Sensitive);
+
+        // Unknown/provider-backed rerankers also fail closed even with a local
+        // embedder because they receive the query and candidate text.
+        let reranked = SearchTool::new(Arc::new(HashEmbedder::new(DIMS)), store)
+            .with_reranker(Arc::new(FixedReranker(Vec::new())));
+        assert_eq!(reranked.approval_class(), ApprovalClass::Sensitive);
     }
 
     #[test]

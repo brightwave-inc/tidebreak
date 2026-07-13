@@ -60,6 +60,15 @@ pub trait Embedder: Send + Sync {
     /// The dimensionality every vector this embedder returns will have.
     fn dimensions(&self) -> usize;
 
+    /// Whether embedding is guaranteed to stay in-process without network or
+    /// external-service access.
+    ///
+    /// Defaults to `false` so new provider-backed implementations fail closed at
+    /// approval boundaries until they explicitly prove they are local.
+    fn is_local(&self) -> bool {
+        false
+    }
+
     /// Stable identity for document-vector behavior used in index watermarks.
     ///
     /// Custom embedders should override this when two configurations with the
@@ -142,6 +151,10 @@ impl Default for HashEmbedder {
 impl Embedder for HashEmbedder {
     fn dimensions(&self) -> usize {
         self.dims
+    }
+
+    fn is_local(&self) -> bool {
+        true
     }
 
     fn fingerprint(&self) -> String {

@@ -16,7 +16,7 @@ use std::sync::{
     Arc,
 };
 
-use openwave_core::{ChatId, ToolCtx, ToolRegistry};
+use openwave_core::{ApprovalClass, ChatId, ToolCtx, ToolRegistry};
 use serde_json::Value;
 
 use crate::protocol::{
@@ -30,6 +30,10 @@ const SESSION_AWAITING_INITIALIZED: u8 = 1;
 const SESSION_READY: u8 = 2;
 
 /// An MCP server exposing a tool registry over the Model Context Protocol.
+///
+/// Only [`ApprovalClass::ReadOnly`] tools cross this boundary. Workspace and
+/// sensitive tools require an approval-aware execution bridge and remain hidden
+/// until one is configured in a future slice.
 pub struct McpServer {
     tools: Arc<ToolRegistry>,
     ctx: ToolCtx,
@@ -39,7 +43,8 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    /// Build a server exposing `tools`, whose calls run within `ctx`.
+    /// Build a server exposing the read-only entries in `tools`, whose calls run
+    /// within `ctx`.
     #[must_use]
     pub fn new(tools: Arc<ToolRegistry>, ctx: ToolCtx) -> Self {
         Self {
@@ -174,6 +179,11 @@ impl McpServer {
             .tools
             .specs()
             .into_iter()
+            .filter(|spec| {
+                self.tools
+                    .get(&spec.name)
+                    .is_some_and(|tool| tool.approval_class() == ApprovalClass::ReadOnly)
+            })
             .map(|spec| ToolDescriptor {
                 name: spec.name,
                 description: spec.description,
@@ -194,6 +204,7 @@ impl McpServer {
         let tool = self
             .tools
             .get(&params.name)
+            .filter(|tool| tool.approval_class() == ApprovalClass::ReadOnly)
             .ok_or_else(|| RpcError::invalid_params(format!("unknown tool: {}", params.name)))?;
 
         // A tool's own failure is a result with isError = true, not a protocol
@@ -275,14 +286,43 @@ mod tests {
         }
     }
 
+    struct ClassifiedTool {
+        name: &'static str,
+        class: ApprovalClass,
+        ran: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Tool for ClassifiedTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.to_string(),
+                description: format!("{} test tool", self.name),
+                input_schema: json!({"type": "object"}),
+            }
+        }
+
+        fn approval_class(&self) -> ApprovalClass {
+            self.class
+        }
+
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> openwave_core::Result<ToolOutput> {
+            self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolOutput::text(self.name))
+        }
+    }
+
     fn server() -> McpServer {
-        let tools = Arc::new(ToolRegistry::new().with(Box::new(EchoTool)));
+        server_with(ToolRegistry::new().with(Box::new(EchoTool)))
+    }
+
+    fn server_with(tools: ToolRegistry) -> McpServer {
         let ctx = ToolCtx {
             chat_id: ChatId::new(),
             project_id: None,
             workspace_dir: PathBuf::from("/tmp/ws"),
         };
-        McpServer::new(tools, ctx)
+        McpServer::new(Arc::new(tools), ctx)
     }
 
     fn request(id: i64, method: &str, params: Value) -> Request {
@@ -309,8 +349,7 @@ mod tests {
         .unwrap()
     }
 
-    async fn initialized_server() -> McpServer {
-        let server = server();
+    async fn initialize_session(server: &McpServer) {
         let response = server
             .handle(request(1, "initialize", initialize_params()))
             .await
@@ -320,6 +359,11 @@ mod tests {
             .handle(initialized_notification(Value::Null))
             .await
             .is_none());
+    }
+
+    async fn initialized_server() -> McpServer {
+        let server = server();
+        initialize_session(&server).await;
         server
     }
 
@@ -482,6 +526,70 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "echo");
         assert!(tools[0]["inputSchema"]["properties"]["text"].is_object());
+    }
+
+    #[tokio::test]
+    async fn only_read_only_tools_are_advertised_or_executable() {
+        let read_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let workspace_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sensitive_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tools = ToolRegistry::new()
+            .with(Box::new(ClassifiedTool {
+                name: "read",
+                class: ApprovalClass::ReadOnly,
+                ran: Arc::clone(&read_ran),
+            }))
+            .with(Box::new(ClassifiedTool {
+                name: "write",
+                class: ApprovalClass::Workspace,
+                ran: Arc::clone(&workspace_ran),
+            }))
+            .with(Box::new(ClassifiedTool {
+                name: "external",
+                class: ApprovalClass::Sensitive,
+                ran: Arc::clone(&sensitive_ran),
+            }));
+        let server = server_with(tools);
+        initialize_session(&server).await;
+
+        let listed = server
+            .handle(request(2, "tools/list", Value::Null))
+            .await
+            .unwrap()
+            .result
+            .unwrap();
+        let names: Vec<&str> = listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["read"]);
+
+        for (id, name) in [(3, "write"), (4, "external")] {
+            let response = server
+                .handle(request(
+                    id,
+                    "tools/call",
+                    json!({"name": name, "arguments": {}}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.error.unwrap().code, error_code::INVALID_PARAMS);
+        }
+        assert!(!workspace_ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!sensitive_ran.load(std::sync::atomic::Ordering::SeqCst));
+
+        let response = server
+            .handle(request(
+                5,
+                "tools/call",
+                json!({"name": "read", "arguments": {}}),
+            ))
+            .await
+            .unwrap();
+        assert!(response.error.is_none());
+        assert!(read_ran.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]

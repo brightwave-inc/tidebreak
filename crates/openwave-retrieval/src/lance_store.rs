@@ -824,6 +824,10 @@ fn newest_generation(
 
 #[async_trait]
 impl VectorStore for LanceVectorStore {
+    fn is_local(&self) -> bool {
+        true
+    }
+
     async fn upsert(&self, records: Vec<VectorRecord>) -> Result<()> {
         self.validate_upsert_records(&records)?;
         let records = dedupe_by_chunk_id(records);

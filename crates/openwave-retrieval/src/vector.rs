@@ -128,6 +128,15 @@ impl DocumentGenerationState {
 /// `Arc<dyn VectorStore>`.
 #[async_trait]
 pub trait VectorStore: Send + Sync {
+    /// Whether queries are guaranteed to stay in-process without network or
+    /// external-service access.
+    ///
+    /// Defaults to `false` so new remote-capable backends fail closed at
+    /// approval boundaries until they explicitly prove they are local.
+    fn is_local(&self) -> bool {
+        false
+    }
+
     /// Insert or replace records, keyed by chunk id.
     ///
     /// Re-upserting a chunk with the same id overwrites it, so re-ingesting a
@@ -362,6 +371,10 @@ impl InMemoryVectorStore {
 
 #[async_trait]
 impl VectorStore for InMemoryVectorStore {
+    fn is_local(&self) -> bool {
+        true
+    }
+
     async fn upsert(&self, records: Vec<VectorRecord>) -> Result<()> {
         let mut scopes = HashMap::new();
         for record in &records {
