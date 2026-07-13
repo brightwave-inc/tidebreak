@@ -31,6 +31,10 @@ jobs:
   rust:
     name: fmt · clippy · build · test
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v7
       - name: Install toolchain (honors rust-toolchain.toml)
@@ -45,6 +49,10 @@ jobs:
             patchelf \
             protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The Lance/Arrow and Tauri artifacts can exhaust a hosted runner when
+          # a full target directory is restored before every workspace gate.
+          cache-targets: false
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
