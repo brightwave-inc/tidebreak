@@ -1,4 +1,4 @@
-//! Durable document-index job execution.
+//! Durable Parse and Index document-job execution.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use chrono::Utc;
 use openwave_core::{
-    AgentError, DocumentId, DocumentJob, DocumentJobId, DocumentJobKind, DocumentJobStatus, Result,
-    Store,
+    AgentError, BlobStore, DocumentId, DocumentJob, DocumentJobId, DocumentJobKind,
+    DocumentJobStatus, DocumentParseOutput, Result, Store,
 };
 use openwave_retrieval::{
     Document, DocumentSource, GenerationStageOutcome, RetrievalError, Retriever,
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 use crate::state::DocumentWriteGuard;
@@ -59,6 +60,7 @@ pub(crate) enum WorkerOutcome {
 #[derive(Clone)]
 pub(crate) struct DocumentWorker {
     store: Arc<dyn Store>,
+    blobs: Arc<dyn BlobStore>,
     retrieval: Arc<Retriever>,
     wake: Arc<Notify>,
     document_writes: Arc<DocumentWriteGuard>,
@@ -75,6 +77,7 @@ enum Supervised<T> {
 impl DocumentWorker {
     pub(crate) fn new(
         store: Arc<dyn Store>,
+        blobs: Arc<dyn BlobStore>,
         retrieval: Arc<Retriever>,
         wake: Arc<Notify>,
         document_writes: Arc<DocumentWriteGuard>,
@@ -85,6 +88,7 @@ impl DocumentWorker {
         assert!(config.heartbeat < config.lease);
         Self {
             store,
+            blobs,
             retrieval,
             wake,
             document_writes,
@@ -225,7 +229,7 @@ impl DocumentWorker {
     }
 
     async fn process(&self, job: DocumentJob) -> Result<WorkerOutcome> {
-        if job.kind != DocumentJobKind::Index || job.status != DocumentJobStatus::Running {
+        if job.status != DocumentJobStatus::Running {
             return Err(AgentError::msg(format!(
                 "claimed document job {} has an invalid execution state",
                 job.id
@@ -237,6 +241,194 @@ impl DocumentWorker {
                 job.id
             ))
         })?;
+        let Some(source) = self.store.get_document(job.document_id).await? else {
+            return Ok(WorkerOutcome::Superseded(job.id));
+        };
+        if source.generation() != job.generation() {
+            return Ok(WorkerOutcome::Superseded(job.id));
+        }
+        match job.kind {
+            DocumentJobKind::Parse => self.process_parse(job, lease_token, source).await,
+            DocumentJobKind::Index => self.process_index(job, lease_token, source).await,
+            _ => {
+                self.record_failure(
+                    &job,
+                    lease_token,
+                    false,
+                    "unsupported_job_kind",
+                    "document worker does not support this semantic job kind",
+                )
+                .await
+            }
+        }
+    }
+
+    async fn process_parse(
+        &self,
+        job: DocumentJob,
+        lease_token: uuid::Uuid,
+        source: openwave_core::DocumentRecord,
+    ) -> Result<WorkerOutcome> {
+        if source.canonical_fingerprint.is_some() {
+            return self
+                .record_failure(
+                    &job,
+                    lease_token,
+                    false,
+                    "invalid_document_stage",
+                    "parse job does not own a document with published canonical output",
+                )
+                .await;
+        }
+        let fingerprint = match self.retrieval.canonical_fingerprint_for(&source.media_type) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                return self
+                    .record_failure(
+                        &job,
+                        lease_token,
+                        false,
+                        "parser_unavailable",
+                        &error.to_string(),
+                    )
+                    .await;
+            }
+        };
+        if job.pipeline_fingerprint != fingerprint {
+            return self
+                .record_failure(
+                    &job,
+                    lease_token,
+                    false,
+                    "pipeline_changed",
+                    "job parser fingerprint does not match the active parser",
+                )
+                .await;
+        }
+        let Some(descriptor) = source.source_blob.as_ref() else {
+            return self
+                .record_failure(
+                    &job,
+                    lease_token,
+                    false,
+                    "source_blob_missing",
+                    "parse job has no retained source descriptor",
+                )
+                .await;
+        };
+        let blob_id = descriptor.id.to_string();
+        let bytes = match self
+            .supervise(&job, lease_token, self.blobs.get(&blob_id))
+            .await
+        {
+            Supervised::LeaseLost => return Ok(WorkerOutcome::LeaseLost(job.id)),
+            Supervised::Completed(Ok(Some(bytes))) => bytes,
+            Supervised::Completed(Ok(None)) => {
+                return self
+                    .record_failure(
+                        &job,
+                        lease_token,
+                        false,
+                        "source_blob_missing",
+                        "retained source blob does not exist",
+                    )
+                    .await;
+            }
+            Supervised::Completed(Err(error)) => {
+                return self
+                    .record_failure(
+                        &job,
+                        lease_token,
+                        true,
+                        "source_blob_read_failed",
+                        &error.to_string(),
+                    )
+                    .await;
+            }
+        };
+        if usize::try_from(descriptor.byte_len).ok() != Some(bytes.len()) {
+            return self
+                .record_failure(
+                    &job,
+                    lease_token,
+                    false,
+                    "source_blob_length_mismatch",
+                    "retained source byte length does not match its descriptor",
+                )
+                .await;
+        }
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if digest != descriptor.sha256 {
+            return self
+                .record_failure(
+                    &job,
+                    lease_token,
+                    false,
+                    "source_blob_digest_mismatch",
+                    "retained source digest does not match its descriptor",
+                )
+                .await;
+        }
+        let document_source = match source.source_uri.clone() {
+            Some(uri) => DocumentSource::uri(uri),
+            None => DocumentSource::Inline,
+        };
+        let parsed = match self
+            .supervise(
+                &job,
+                lease_token,
+                self.retrieval
+                    .parse_document(document_source, &source.media_type, &bytes),
+            )
+            .await
+        {
+            Supervised::LeaseLost => return Ok(WorkerOutcome::LeaseLost(job.id)),
+            Supervised::Completed(Ok(parsed)) => parsed,
+            Supervised::Completed(Err(error)) => {
+                let (retryable, code) = classify_retrieval_error(&error);
+                return self
+                    .record_failure(&job, lease_token, retryable, code, &error.to_string())
+                    .await;
+            }
+        };
+        let completed = self
+            .store
+            .complete_document_parse_job_and_enqueue_index(
+                job.id,
+                lease_token,
+                Utc::now(),
+                &DocumentParseOutput {
+                    canonical_text: parsed.text,
+                    source_regions: parsed.source_regions,
+                },
+                &self.retrieval.index_fingerprint(),
+                MAX_INDEX_ATTEMPTS,
+            )
+            .await?;
+        Ok(if completed.is_some() {
+            WorkerOutcome::Completed(job.id)
+        } else {
+            WorkerOutcome::LeaseLost(job.id)
+        })
+    }
+
+    async fn process_index(
+        &self,
+        job: DocumentJob,
+        lease_token: uuid::Uuid,
+        source: openwave_core::DocumentRecord,
+    ) -> Result<WorkerOutcome> {
+        if source.source_blob.is_some() && source.canonical_fingerprint.is_none() {
+            return self
+                .record_failure(
+                    &job,
+                    lease_token,
+                    false,
+                    "invalid_document_stage",
+                    "index job cannot consume canonical output that is still pending",
+                )
+                .await;
+        }
         // A recreated source can have a newer live generation while an older
         // tombstone still has to retire the prior corpus publication. Retire
         // that exact watermark before attempting to stage the recreated job;
@@ -248,12 +440,6 @@ impl DocumentWorker {
             .await?
         {
             self.retire(job.document_id, retirement).await?;
-        }
-        let Some(source) = self.store.get_document(job.document_id).await? else {
-            return Ok(WorkerOutcome::Superseded(job.id));
-        };
-        if source.generation() != job.generation() {
-            return Ok(WorkerOutcome::Superseded(job.id));
         }
         let fingerprint = self.retrieval.index_fingerprint();
         if job.pipeline_fingerprint != fingerprint {
@@ -488,8 +674,8 @@ mod tests {
 
     use async_trait::async_trait;
     use openwave_core::{
-        ByteSpan, DbStore, DocumentId, DocumentProcessingStatus, DocumentUpsert, Project,
-        ProjectId, SourceLocation, SourceRegion,
+        ByteSpan, DbStore, DocumentId, DocumentProcessingStatus, DocumentSourceBlob,
+        DocumentSourceUpsert, DocumentUpsert, Project, ProjectId, SourceLocation, SourceRegion,
     };
     use openwave_retrieval::{
         Embedder, Embedding, HashEmbedder, InMemoryVectorStore, PlainTextParser, ScoredChunk,
@@ -698,6 +884,7 @@ mod tests {
         ));
         let worker = DocumentWorker::new(
             store.clone(),
+            Arc::new(openwave_core::FsBlobStore::new(dir.path().join("blobs"))),
             retrieval.clone(),
             Arc::new(Notify::new()),
             Arc::new(DocumentWriteGuard::default()),
@@ -729,6 +916,55 @@ mod tests {
             source_regions: Vec::new(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[tokio::test]
+    async fn parse_job_rejects_source_bytes_that_do_not_match_the_descriptor() {
+        let (_dir, store, retrieval, _embedder, worker) = harness().await;
+        let raw = b"tampered source bytes".to_vec();
+        let blob_id = uuid::Uuid::new_v4();
+        worker
+            .blobs
+            .put(&blob_id.to_string(), raw.clone())
+            .await
+            .unwrap();
+        let source = DocumentSourceUpsert {
+            id: DocumentId::new(),
+            project_id: None,
+            source_uri: Some("file:///tampered.txt".into()),
+            media_type: "text/plain".into(),
+            title: None,
+            source_blob: DocumentSourceBlob {
+                id: blob_id,
+                sha256: [0x77; 32],
+                byte_len: raw.len() as u64,
+            },
+            updated_at: Utc::now(),
+        };
+        let (_, parse_job) = store
+            .accept_document_source_and_enqueue_parse(
+                &source,
+                &retrieval
+                    .canonical_fingerprint_for(&source.media_type)
+                    .unwrap(),
+                3,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            WorkerOutcome::Failed(parse_job.id)
+        );
+        let failed = store.get_document_job(parse_job.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, DocumentJobStatus::Failed);
+        assert_eq!(
+            failed.last_error_code.as_deref(),
+            Some("source_blob_digest_mismatch")
+        );
+        let document = store.get_document(source.id).await.unwrap().unwrap();
+        assert_eq!(document.processing_status, DocumentProcessingStatus::Failed);
+        assert_eq!(document.canonical_fingerprint, None);
     }
 
     #[tokio::test]
@@ -1027,6 +1263,7 @@ mod tests {
         ));
         let worker = DocumentWorker::new(
             store.clone(),
+            Arc::new(openwave_core::FsBlobStore::new(dir.path().join("blobs"))),
             retrieval.clone(),
             Arc::new(Notify::new()),
             Arc::new(DocumentWriteGuard::default()),
@@ -1114,6 +1351,7 @@ mod tests {
         let document_writes = Arc::new(DocumentWriteGuard::default());
         let worker = DocumentWorker::new(
             store.clone(),
+            Arc::new(openwave_core::FsBlobStore::new(dir.path().join("blobs"))),
             retrieval.clone(),
             Arc::new(Notify::new()),
             document_writes.clone(),
@@ -1191,6 +1429,7 @@ mod tests {
         ));
         let worker = DocumentWorker::new(
             store.clone(),
+            Arc::new(openwave_core::FsBlobStore::new(dir.path().join("blobs"))),
             retrieval,
             Arc::new(Notify::new()),
             Arc::new(DocumentWriteGuard::default()),

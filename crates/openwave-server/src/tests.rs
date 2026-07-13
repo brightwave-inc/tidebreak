@@ -628,6 +628,7 @@ async fn test_app_with_retrieval_and_worker(
     let token = state.token.clone();
     let worker = document_worker::DocumentWorker::new(
         store.clone(),
+        state.blobs.clone(),
         retrieval,
         state.document_job_wake.clone(),
         state.document_writes.clone(),
@@ -1353,6 +1354,97 @@ async fn explicit_retry_revives_the_exact_terminal_job() {
     assert_eq!(retried.status, openwave_core::DocumentJobStatus::Queued);
     assert_eq!(retried.attempt_count, 0);
     assert_eq!(retried.id, job_id);
+}
+
+#[tokio::test]
+async fn explicit_retry_selects_the_failed_parse_stage() {
+    use sha2::{Digest, Sha256};
+
+    let (router, token, store, dir, worker) = test_app_with_worker().await;
+    let bearer = format!("Bearer {token}");
+    let raw = b"parse retry succeeds through the durable worker".to_vec();
+    let blob_id = uuid::Uuid::new_v4();
+    let blobs = openwave_core::FsBlobStore::new(dir.path().join("blobs"));
+    openwave_core::BlobStore::put(&blobs, &blob_id.to_string(), raw.clone())
+        .await
+        .unwrap();
+    let source = openwave_core::DocumentSourceUpsert {
+        id: openwave_core::DocumentId::new(),
+        project_id: None,
+        source_uri: Some("file:///parse-retry.txt".into()),
+        media_type: "text/plain".into(),
+        title: None,
+        source_blob: openwave_core::DocumentSourceBlob {
+            id: blob_id,
+            sha256: Sha256::digest(&raw).into(),
+            byte_len: raw.len() as u64,
+        },
+        updated_at: chrono::Utc::now(),
+    };
+    let (_, parse_job) = store
+        .accept_document_source_and_enqueue_parse(&source, "plain-text-lossy-v1", 1)
+        .await
+        .unwrap();
+    let claim_at = parse_job.available_at + chrono::Duration::seconds(1);
+    let claimed = store
+        .claim_document_job(claim_at, claim_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, parse_job.id);
+    assert_eq!(
+        store
+            .record_document_job_failure(
+                claimed.id,
+                claimed.lease_token.unwrap(),
+                claim_at + chrono::Duration::seconds(1),
+                None,
+                "parse_failed",
+                None,
+            )
+            .await
+            .unwrap(),
+        Some(openwave_core::DocumentJobStatus::Failed)
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/documents/{}/retry", source.id))
+                .header(header::AUTHORIZATION, bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let retried = store.get_document_job(parse_job.id).await.unwrap().unwrap();
+    assert_eq!(retried.id, parse_job.id);
+    assert_eq!(retried.kind, openwave_core::DocumentJobKind::Parse);
+    assert_eq!(retried.status, openwave_core::DocumentJobStatus::Queued);
+    assert_eq!(retried.attempt_count, 0);
+    assert_eq!(retried.max_attempts, document_stage::MAX_PARSE_ATTEMPTS);
+
+    assert_eq!(
+        worker.run_once().await.unwrap(),
+        document_worker::WorkerOutcome::Completed(parse_job.id)
+    );
+    let jobs = store.list_document_jobs(source.id).await.unwrap();
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(jobs[0].status, openwave_core::DocumentJobStatus::Succeeded);
+    assert_eq!(jobs[1].kind, openwave_core::DocumentJobKind::Index);
+    assert_eq!(jobs[1].status, openwave_core::DocumentJobStatus::Queued);
+    assert_eq!(
+        worker.run_once().await.unwrap(),
+        document_worker::WorkerOutcome::Completed(jobs[1].id)
+    );
+    let document = store.get_document(source.id).await.unwrap().unwrap();
+    assert_eq!(document.canonical_text.as_bytes(), raw);
+    assert_eq!(
+        document.processing_status,
+        openwave_core::DocumentProcessingStatus::Ready
+    );
 }
 
 #[tokio::test]

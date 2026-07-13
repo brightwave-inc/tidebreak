@@ -24,6 +24,7 @@ use openwave_retrieval::{
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
+use crate::document_stage::retry_document_job_spec;
 use crate::document_worker::MAX_INDEX_ATTEMPTS;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
@@ -551,7 +552,7 @@ async fn ingest_document_in_scope(
 }
 
 /// `POST /documents/{id}/retry` — explicitly revive the current exact failed
-/// index job without mutating canonical source content or its generation.
+/// semantic job without mutating source content or its generation.
 pub async fn retry_document(
     State(state): State<AppState>,
     Path(id): Path<DocumentId>,
@@ -560,7 +561,7 @@ pub async fn retry_document(
 }
 
 /// `POST /projects/{project_id}/documents/{document_id}/retry` — revive an owned
-/// document's current exact failed index job.
+/// document's current exact failed semantic job.
 pub async fn retry_project_document(
     State(state): State<AppState>,
     Path((project_id, document_id)): Path<(ProjectId, DocumentId)>,
@@ -583,15 +584,15 @@ async fn retry_document_in_scope(
     else {
         return Err(ServerError::not_found(format!("document {id} not found")));
     };
-    let fingerprint = state.retrieval.index_fingerprint();
+    let desired = retry_document_job_spec(&document, &state.retrieval).map_err(retrieval_error)?;
     let Some(job) = state
         .store
         .retry_document_job(
             id,
             document.generation(),
-            openwave_core::DocumentJobKind::Index,
-            &fingerprint,
-            MAX_INDEX_ATTEMPTS,
+            desired.kind,
+            &desired.pipeline_fingerprint,
+            desired.max_attempts,
         )
         .await?
     else {
