@@ -15,17 +15,15 @@ use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
     Agent, ApprovalDecision, CallId, Chat, ChatId, DocumentJobId, DocumentListCursor,
-    DocumentRecord, DocumentScope, DocumentSummaryRecord, DocumentUpsert, Project, ProjectId,
-    SecretProvider, SequencedEvent, Store,
+    DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
+    Project, ProjectId, SecretProvider, SequencedEvent, Store,
 };
 use openwave_retrieval::{
-    Citation, DocumentId, DocumentSource, RetrievalError, SearchScope, SearchTool,
-    MAX_SEARCH_RESULTS,
+    Citation, DocumentId, RetrievalError, SearchScope, SearchTool, MAX_SEARCH_RESULTS,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
-use crate::document_stage::retry_document_job_spec;
-use crate::document_worker::MAX_INDEX_ATTEMPTS;
+use crate::document_stage::{retry_document_job_spec, MAX_PARSE_ATTEMPTS};
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
@@ -317,7 +315,7 @@ pub struct IngestDocument {
 pub struct IngestResult {
     /// The ingested document's id (derived from the URI when one is given).
     pub document_id: DocumentId,
-    /// Durable job that will index this exact source generation.
+    /// Durable semantic job for this exact source generation.
     pub job_id: DocumentJobId,
     /// Monotonic authoritative source revision accepted by the store.
     pub content_revision: i64,
@@ -466,9 +464,8 @@ fn retrieval_error(err: RetrievalError) -> ServerError {
     }
 }
 
-/// `POST /documents` — atomically persist canonical source content and enqueue an
-/// exact-generation index job. Parsing remains synchronous validation; embedding
-/// and vector publication run durably in the background.
+/// `POST /documents` — durably retain source bytes and enqueue exact-generation
+/// asynchronous parsing.
 pub async fn ingest_document(
     State(state): State<AppState>,
     Json(body): Json<IngestDocument>,
@@ -494,56 +491,59 @@ async fn ingest_document_in_scope(
     if body.content.trim().is_empty() {
         return Err(ServerError::bad_request("content must not be empty"));
     }
-    let source = match body.uri.as_deref().map(str::trim) {
+    let source_uri = match body.uri.as_deref().map(str::trim) {
         // Trim before deriving the document id: a padded URI must resolve to the
         // same document as its unpadded form, or idempotent re-ingest breaks.
-        Some(uri) if !uri.is_empty() => DocumentSource::uri(uri),
-        _ => DocumentSource::Inline,
-    };
-    let media_type = body.media_type.as_deref().unwrap_or("text/plain");
-    // Pipeline components promise a stable fingerprint for their lifetime. Take
-    // one snapshot and use it for the exact parse/index operation below.
-    let index_fingerprint = state.retrieval.index_fingerprint();
-    let mut document = state
-        .retrieval
-        .parse_document(source, media_type, body.content.as_bytes())
-        .await
-        .map_err(retrieval_error)?;
-    let source_uri = match &document.source {
-        DocumentSource::Uri { uri } => Some(uri.clone()),
-        DocumentSource::Inline => None,
+        Some(uri) if !uri.is_empty() => Some(uri.to_owned()),
         _ => None,
     };
-    if let Some(project_id) = project_id {
-        document.id = source_uri
-            .as_deref()
-            .map(|uri| DocumentId::derive_for_project(project_id, uri))
-            .unwrap_or(document.id);
-        document.project_id = Some(project_id);
-    }
-    let _document_write = state.document_writes.acquire(document.id).await;
+    let media_type = body.media_type.as_deref().unwrap_or("text/plain");
+    let parser_fingerprint = state
+        .retrieval
+        .canonical_fingerprint_for(media_type)
+        .map_err(retrieval_error)?;
+    let document_id = match (project_id, source_uri.as_deref()) {
+        (Some(project_id), Some(uri)) => DocumentId::derive_for_project(project_id, uri),
+        (None, Some(uri)) => DocumentId::derive(uri),
+        (_, None) => DocumentId::new(),
+    };
+    let source_bytes = body.content.into_bytes();
+    let source_blob = DocumentSourceBlob::from_bytes(&source_bytes);
+    // Serialize the entire source publication boundary for one document. If
+    // the first accepted request blocks on blob I/O, a later request cannot
+    // commit its descriptor and then be overwritten by the older source.
+    let _document_write = state.document_writes.acquire(document_id).await;
+    // Publication intentionally precedes the catalog transaction so an
+    // accepted descriptor can never reference missing bytes. A later catalog
+    // failure may leave an unreferenced content-addressed blob; it must be
+    // reclaimed by a grace-period sweep, not eagerly deleted, because another
+    // document may already share the same blob id.
+    state
+        .blobs
+        .put(&source_blob.id.to_string(), source_bytes)
+        .await?;
+
     let (revision, job) = state
         .store
-        .upsert_document_and_enqueue_index(
-            &DocumentUpsert {
-                id: document.id,
+        .accept_document_source_and_enqueue_parse(
+            &DocumentSourceUpsert {
+                id: document_id,
                 project_id,
                 source_uri,
-                media_type: document.media_type.clone(),
+                media_type: media_type.to_owned(),
                 title: None,
-                canonical_text: document.text.clone(),
-                source_regions: document.source_regions.clone(),
+                source_blob,
                 updated_at: Utc::now(),
             },
-            &index_fingerprint,
-            MAX_INDEX_ATTEMPTS,
+            &parser_fingerprint,
+            MAX_PARSE_ATTEMPTS,
         )
         .await?;
     state.document_job_wake.notify_one();
     Ok((
         StatusCode::ACCEPTED,
         Json(IngestResult {
-            document_id: document.id,
+            document_id,
             job_id: job.id,
             content_revision: revision.content_revision,
             processing_status: revision.processing_status,

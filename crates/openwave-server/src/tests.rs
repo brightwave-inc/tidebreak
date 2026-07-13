@@ -9,9 +9,9 @@ use axum::http::{header, Request, StatusCode};
 use futures::stream::{self, BoxStream, StreamExt};
 // Tests use the in-memory store; production wires LanceDB in `bind`.
 use openwave_core::{
-    AgentErrorInfo, AgentEvent, ApprovalClass, Chat, ChatId, ChatRequest, Message, ModelProvider,
-    Project, ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent, StopReason,
-    Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
+    AgentErrorInfo, AgentEvent, ApprovalClass, BlobStore, Chat, ChatId, ChatRequest, Message,
+    ModelProvider, Project, ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent,
+    StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -89,38 +89,31 @@ impl ModelProvider for GatedProvider {
     }
 }
 
-/// An embedder that pauses its first document batch, exposing same-document
-/// ingest interleavings to the route tests.
-struct FirstBatchGatedEmbedder {
-    inner: HashEmbedder,
+/// A blob store that pauses its first publication so a second same-document
+/// request can prove the route holds its document write guard across blob I/O.
+struct FirstPutGatedBlobStore {
+    inner: openwave_core::FsBlobStore,
     calls: AtomicUsize,
     entered: Notify,
     release: Notify,
 }
 
 #[async_trait]
-impl Embedder for FirstBatchGatedEmbedder {
-    fn dimensions(&self) -> usize {
-        self.inner.dimensions()
-    }
-
-    fn fingerprint(&self) -> String {
-        "test-gated-hash-v1".into()
-    }
-
-    async fn embed_documents(
-        &self,
-        texts: &[String],
-    ) -> openwave_retrieval::Result<Vec<Embedding>> {
+impl BlobStore for FirstPutGatedBlobStore {
+    async fn put(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             self.entered.notify_one();
             self.release.notified().await;
         }
-        self.inner.embed_documents(texts).await
+        self.inner.put(id, bytes).await
     }
 
-    async fn embed_query(&self, text: &str) -> openwave_retrieval::Result<Embedding> {
-        self.inner.embed_query(text).await
+    async fn get(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.get(id).await
+    }
+
+    async fn delete(&self, id: &str) -> Result<()> {
+        self.inner.delete(id).await
     }
 }
 
@@ -419,6 +412,16 @@ impl Store for PauseTerminalStore {
             .upsert_document_and_enqueue_index(document, pipeline_fingerprint, max_attempts)
             .await
     }
+    async fn accept_document_source_and_enqueue_parse(
+        &self,
+        source: &openwave_core::DocumentSourceUpsert,
+        parser_fingerprint: &str,
+        max_attempts: i32,
+    ) -> Result<(openwave_core::DocumentRecord, openwave_core::DocumentJob)> {
+        self.inner
+            .accept_document_source_and_enqueue_parse(source, parser_fingerprint, max_attempts)
+            .await
+    }
     async fn get_document_job(
         &self,
         id: openwave_core::DocumentJobId,
@@ -635,6 +638,15 @@ async fn test_app_with_retrieval_and_worker(
         document_worker::DocumentWorkerConfig::default(),
     );
     (app(state), token, store, dir, worker)
+}
+
+async fn run_parse_and_index(worker: &document_worker::DocumentWorker) {
+    for _ in 0..2 {
+        assert!(matches!(
+            worker.run_once().await.unwrap(),
+            document_worker::WorkerOutcome::Completed(_)
+        ));
+    }
 }
 
 fn test_app_from_parts(
@@ -1019,10 +1031,8 @@ async fn ingest_then_search_finds_the_passage() {
         .await
         .unwrap()
         .expect("source record should be durable before the response");
-    assert_eq!(
-        record.canonical_text,
-        "Jupiter is the largest planet in the Solar System, a gas giant."
-    );
+    assert!(record.canonical_text.is_empty());
+    assert!(record.source_blob.is_some());
     assert_eq!(record.content_revision, 1);
     assert_eq!(record.indexed_revision, None);
     assert_eq!(
@@ -1030,10 +1040,7 @@ async fn ingest_then_search_finds_the_passage() {
         openwave_core::DocumentProcessingStatus::Queued
     );
 
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Completed(_)
-    ));
+    run_parse_and_index(&worker).await;
 
     // The worker's activated generation is searchable over the shared index.
     let search = post_json(
@@ -1108,7 +1115,7 @@ async fn project_document_routes_enforce_corpus_identity_and_ownership() {
     assert_ne!(root["document_id"], a["document_id"]);
     assert_ne!(a["document_id"], b["document_id"]);
 
-    for _ in 0..3 {
+    for _ in 0..6 {
         assert!(matches!(
             worker.run_once().await.unwrap(),
             document_worker::WorkerOutcome::Completed(_)
@@ -1273,6 +1280,10 @@ async fn failed_indexing_leaves_authoritative_source_stale_for_retry() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        document_worker::WorkerOutcome::Completed(_)
+    ));
     assert!(matches!(
         worker.run_once().await.unwrap(),
         document_worker::WorkerOutcome::RetryScheduled(_)
@@ -1569,10 +1580,7 @@ async fn failed_update_keeps_the_prior_active_generation_searchable() {
         .status(),
         StatusCode::ACCEPTED
     );
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Completed(_)
-    ));
+    run_parse_and_index(&worker).await;
     assert_eq!(
         post_json(
             &router,
@@ -1584,6 +1592,10 @@ async fn failed_update_keeps_the_prior_active_generation_searchable() {
         .status(),
         StatusCode::ACCEPTED
     );
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        document_worker::WorkerOutcome::Completed(_)
+    ));
     assert!(matches!(
         worker.run_once().await.unwrap(),
         document_worker::WorkerOutcome::RetryScheduled(_)
@@ -1657,7 +1669,8 @@ async fn update_enqueues_without_calling_legacy_vector_retirement() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(record.canonical_text, "must not publish");
+    assert!(record.canonical_text.is_empty());
+    assert!(record.source_blob.is_some());
     assert_eq!(record.content_revision, 2);
     assert_eq!(record.indexed_revision, None);
     assert_eq!(record.index_fingerprint, None);
@@ -1695,7 +1708,8 @@ async fn first_ingest_persists_source_without_attempting_vector_retirement() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(record.canonical_text, "source comes first");
+    assert!(record.canonical_text.is_empty());
+    assert!(record.source_blob.is_some());
     assert_eq!(record.indexed_revision, None);
     assert_eq!(
         record.processing_status,
@@ -1823,7 +1837,7 @@ async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
     let detail = get(format!("/documents/{id}")).await;
     assert_eq!(detail.status(), StatusCode::OK);
     let detail: serde_json::Value = json_body(detail).await;
-    assert_eq!(detail["content"], "# Catalog\n\nDurable source");
+    assert_eq!(detail["content"], "");
     assert_eq!(detail["document_id"], id);
     assert!(detail.get("revision_token").is_none());
 
@@ -1915,51 +1929,106 @@ async fn document_catalog_cursor_preserves_nanosecond_ordering() {
 
 #[tokio::test]
 async fn concurrent_same_document_ingests_publish_in_request_order() {
-    let embedder = Arc::new(FirstBatchGatedEmbedder {
-        inner: HashEmbedder::default(),
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("concurrent-ingest.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let blobs = Arc::new(FirstPutGatedBlobStore {
+        inner: openwave_core::FsBlobStore::new(dir.path().join("blobs")),
         calls: AtomicUsize::new(0),
         entered: Notify::new(),
         release: Notify::new(),
     });
-    let retrieval = Arc::new(Retriever::new(
-        Box::new(PlainTextParser::new()),
-        Box::new(TextChunker::default()),
-        embedder.clone(),
-        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
-    ));
-    let (router, token, store, _dir, worker) =
-        test_app_with_retrieval_and_worker(Arc::new(FakeProvider), retrieval).await;
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval.clone(),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.blobs = blobs.clone();
+    let token = state.token.clone();
+    let worker = document_worker::DocumentWorker::new(
+        store.clone(),
+        state.blobs.clone(),
+        retrieval,
+        state.document_job_wake.clone(),
+        state.document_writes.clone(),
+        document_worker::DocumentWorkerConfig::default(),
+    );
+    let router = app(state);
     let bearer = format!("Bearer {token}");
 
-    let first = post_json(
-        &router,
-        &bearer,
-        "/documents",
-        serde_json::json!({
-            "uri": "file:///concurrent.txt",
-            "content": "first version",
-        }),
-    )
-    .await;
-    let second = post_json(
-        &router,
-        &bearer,
-        "/documents",
-        serde_json::json!({
-            "uri": "file:///concurrent.txt",
-            "content": "second version",
-        }),
-    )
-    .await;
+    let first_router = router.clone();
+    let first_bearer = bearer.clone();
+    let first = tokio::spawn(async move {
+        post_json(
+            &first_router,
+            &first_bearer,
+            "/documents",
+            serde_json::json!({
+                "uri": "file:///concurrent.txt",
+                "content": "first version",
+            }),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), blobs.entered.notified())
+        .await
+        .expect("first request did not reach blob publication");
+
+    let second_router = router.clone();
+    let second_bearer = bearer.clone();
+    let mut second = tokio::spawn(async move {
+        post_json(
+            &second_router,
+            &second_bearer,
+            "/documents",
+            serde_json::json!({
+                "uri": "file:///concurrent.txt",
+                "content": "second version",
+            }),
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut second)
+            .await
+            .is_err(),
+        "later request must not complete while the first publication is blocked"
+    );
+    assert_eq!(
+        blobs.calls.load(Ordering::SeqCst),
+        1,
+        "later request must block before publishing its blob"
+    );
+    blobs.release.notify_one();
+    let first = first.await.unwrap();
+    let second = second.await.unwrap();
     assert_eq!(first.status(), StatusCode::ACCEPTED);
     assert_eq!(second.status(), StatusCode::ACCEPTED);
-    assert_eq!(embedder.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(blobs.calls.load(Ordering::SeqCst), 2);
     let record = store
         .get_document(openwave_core::DocumentId::derive("file:///concurrent.txt"))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(record.canonical_text, "second version");
+    assert!(record.canonical_text.is_empty());
+    assert!(record.source_blob.is_some());
     assert_eq!(record.content_revision, 2);
     assert_eq!(record.indexed_revision, None);
     let jobs = store.list_document_jobs(record.id).await.unwrap();
@@ -1967,17 +2036,9 @@ async fn concurrent_same_document_ingests_publish_in_request_order() {
     assert_eq!(jobs[0].status, openwave_core::DocumentJobStatus::Cancelled);
     assert_eq!(jobs[1].status, openwave_core::DocumentJobStatus::Queued);
 
-    let run = tokio::spawn(async move { worker.run_once().await.unwrap() });
-    tokio::time::timeout(Duration::from_secs(1), embedder.entered.notified())
-        .await
-        .expect("worker did not reach embedding");
-    assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
-    embedder.release.notify_one();
-    assert!(matches!(
-        run.await.unwrap(),
-        document_worker::WorkerOutcome::Completed(_)
-    ));
+    run_parse_and_index(&worker).await;
     let record = store.get_document(record.id).await.unwrap().unwrap();
+    assert_eq!(record.canonical_text, "second version");
     assert_eq!(record.indexed_revision, Some(2));
 }
 
@@ -1996,10 +2057,7 @@ async fn deleting_a_document_removes_it_from_the_index() {
     )
     .await;
     let id = ingest["document_id"].as_str().unwrap().to_string();
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Completed(_)
-    ));
+    run_parse_and_index(&worker).await;
 
     let delete = |id: String| {
         let router = router.clone();
@@ -2067,10 +2125,7 @@ async fn durable_worker_retries_a_failed_tombstone_publication() {
         .await,
     )
     .await;
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Completed(_)
-    ));
+    run_parse_and_index(&worker).await;
     let id = ingest["document_id"].as_str().unwrap();
     vector_store.fail_next_delete();
 
@@ -2127,7 +2182,7 @@ async fn durable_worker_retries_a_failed_tombstone_publication() {
 
 #[tokio::test]
 async fn re_ingesting_the_same_uri_is_idempotent() {
-    let (router, token, _store, _dir, worker) = test_app_with_worker().await;
+    let (router, token, store, _dir, worker) = test_app_with_worker().await;
     let bearer = format!("Bearer {token}");
     let doc = serde_json::json!({
         "uri": "file:///notes.txt",
@@ -2140,10 +2195,14 @@ async fn re_ingesting_the_same_uri_is_idempotent() {
         json_body(post_json(&router, &bearer, "/documents", doc).await).await;
     // Same URI => same derived document id => replaced in place.
     assert_eq!(first["document_id"], second["document_id"]);
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        document_worker::WorkerOutcome::Completed(_)
-    ));
+    assert_eq!(first["job_id"], second["job_id"]);
+    assert_eq!(first["content_revision"], second["content_revision"]);
+    let document_id = first["document_id"].as_str().unwrap().parse().unwrap();
+    let jobs = store.list_document_jobs(document_id).await.unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].kind, openwave_core::DocumentJobKind::Parse);
+    assert_eq!(jobs[0].status, openwave_core::DocumentJobStatus::Queued);
+    run_parse_and_index(&worker).await;
 
     // A broad search still returns each chunk once, not doubled.
     let results: serde_json::Value = json_body(
@@ -2366,7 +2425,8 @@ async fn catalog_delete_failure_leaves_source_stale_and_repairable() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(record.canonical_text, "rebuildable source");
+    assert!(record.canonical_text.is_empty());
+    assert!(record.source_blob.is_some());
     assert_eq!(record.indexed_revision, None);
     assert_eq!(record.index_fingerprint, None);
     assert_eq!(record.indexed_at, None);
