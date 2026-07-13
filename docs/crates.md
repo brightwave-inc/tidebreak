@@ -7,15 +7,20 @@ one rule that keeps it clean: **dependencies only flow downward toward
 libraries.
 
 ```
-      client binaries        openwave-desktop   openwave-cli   openwave-slack
-                                     │               │              │
-                                     └───────────────┼──────────────┘
-      libraries                    openwave-mcp  openwave-connectors  openwave-retrieval  openwave-router
-                                     └───────────────┴──────────────┴──────────────┘
-      the seam                                     openwave-core
+      clients            openwave-desktop   openwave-cli   openwave-slack (stub)
+                               │                 │
+                               └────── openwave-server
+                                            │
+      libraries          openwave-mcp   openwave-retrieval   openwave-router
+                               │             │                   │
+                               └─────────────┴───────────────────┘
+                                            │
+      the seam                         openwave-core
+
+      scaffold                         openwave-connectors (stub)
 ```
 
-**Status legend:** 🟢 in progress · 🔵 planned · ⚪ stub (scaffold only).
+**Status legend:** 🟢 built/in active development · 🟡 partial baseline · ⚪ stub.
 
 ---
 
@@ -31,37 +36,38 @@ client renders from, and the trait **contracts** — `Tool`, `ModelProvider`,
 implementations (SQLite, the local filesystem, the OS keychain). Concrete
 model-provider adapters do **not** live here; they live in `openwave-router`.
 
-Present today:
+Major surfaces present today:
 
 | Module | What it is |
 | --- | --- |
 | `id` | Typed identifiers (`ChatId`, `TurnId`, `CallId`, …) — newtypes so the compiler stops you mixing them up. |
 | `error` | The crate-wide `AgentError` + `Result`. |
-| `model` | The persisted conversation model (`Chat`, `Message`, `Role`). |
+| `model` | Persisted chats, projects, documents, jobs, leases, and lifecycle state. |
 | `tool` | The tool contract (`Tool`, `ToolSpec`, `ToolOutput`, `ToolCtx`, `ApprovalClass`). |
 | `provider` | The model-provider contract (`ModelProvider`, `ChatRequest`, `ProviderEvent`, `Usage`). |
+| `agent` | The cancellable/steerable multi-step turn loop and durable event journal integration. |
+| `db` / `storage` | SQLite/PostgreSQL-capable state transitions plus in-memory implementations. |
+| `blob` / `keychain` | Immutable local blob storage and OS-backed secret storage. |
 
 **Depends on:** nothing in the workspace.
 
 ---
 
-## `openwave-router` — model providers & routing 🔵
+## `openwave-router` — model providers & routing 🟢
 
-Owns the concrete model-provider adapters (Anthropic, OpenAI, an
-OpenAI-compatible adapter that covers Fireworks / OpenRouter / vLLM / LM Studio,
-and more) plus a composite `Router`.
+Owns the concrete Anthropic and OpenAI-compatible provider adapters (including
+OpenAI, Fireworks, OpenRouter, vLLM, and LM Studio endpoints) plus a composite
+`Router`.
 
-The `Router` is itself a `ModelProvider`, so the agent loop just holds one
-provider and never knows whether it's a single backend, a failover pool, or a
-remote gateway. Two things define it:
+The `Router` is itself a `ModelProvider`, so the agent loop holds one provider
+contract and does not depend on a concrete backend. Two things define it:
 
-- **Two deployment modes, one crate.** It runs **embedded** (local-first, keys on
-  the device) or as a **central gateway service** (keys stay server-side; clients
-  and sandboxes call it over the network via a thin `RemoteProvider`).
+- **Embedded local routing.** Provider credentials remain on the device and the
+  selected model determines the adapter used for each request.
 - **No default provider = fail-closed egress.** It calls no model until one is
   explicitly configured *and* enabled — nothing leaves your machine by accident.
 
-Health-based failover (circuit breaker + retry) rounds it out.
+Health-based failover remains planned.
 
 **Depends on:** `openwave-core`.
 
@@ -69,23 +75,27 @@ Health-based failover (circuit breaker + retry) rounds it out.
 
 ## `openwave-connectors` — OAuth & source connectors ⚪
 
-Loopback OAuth (RFC 8252 + PKCE), token refresh, and the connector tools that
-list and fetch from sources like Drive and Box.
+Scaffold reserved for loopback OAuth (RFC 8252 + PKCE), token refresh, and
+connector tools that list and fetch from sources like Drive and Box.
+
+**Depends on:** nothing in the workspace yet.
+
+## `openwave-retrieval` — parsing, search, citations 🟢
+
+Asynchronous parsing, structural chunking, embeddings, scoped hybrid
+lexical+dense search, reranking, and grounded citations behind a `VectorStore`
+seam with in-memory and durable embedded LanceDB backends. Durable source
+revisions and Parse→Index jobs are coordinated by `openwave-core` and
+`openwave-server`.
 
 **Depends on:** `openwave-core`.
 
-## `openwave-retrieval` — embeddings, vector search, citations ⚪
+## `openwave-mcp` — the MCP face 🟡
 
-Embeddings, chunking, hybrid lexical+dense search, and grounded citations behind
-a `VectorStore` seam with in-memory and durable embedded LanceDB backends.
-
-**Depends on:** `openwave-core`.
-
-## `openwave-mcp` — the MCP face ⚪
-
-Both halves of [MCP](https://modelcontextprotocol.io): a **server** that exposes
-OpenWave's core tools to external agents (Claude Code, Codex, Cursor…), and a
-**client** that mounts external MCP tool servers into the agent, namespaced.
+The server half of [MCP](https://modelcontextprotocol.io): JSON-RPC
+`initialize`, `tools/list`, and `tools/call` over stdio, backed by OpenWave's
+tool registry. CLI/session lifecycle wiring and the client that mounts external
+MCP servers remain planned.
 
 **Depends on:** `openwave-core`.
 
@@ -101,16 +111,25 @@ local run instructions.
 
 **Depends on:** `openwave-core`, `openwave-server` (+ Tauri).
 
-## `openwave-cli` — headless daemon + CLI ⚪
+## `openwave-server` — local API and workers 🟢
 
-The headless daemon (`openwave serve`) and a command-line client, over the same
-HTTP surface the desktop uses. For servers, scripts, and power users.
+The authenticated loopback HTTP/WebSocket surface shared by desktop and
+headless clients. It owns route orchestration and the durable document,
+retirement, and audit workers while core state transitions remain in
+`openwave-core`.
 
-**Depends on:** `openwave-core`.
+**Depends on:** `openwave-core`, `openwave-router`, `openwave-retrieval`.
+
+## `openwave-cli` — headless daemon + CLI 🟡
+
+The working headless daemon (`openwave serve`) over the same HTTP surface the
+desktop uses. Additional command-line client workflows remain in development.
+
+**Depends on:** `openwave-core`, `openwave-server`.
 
 ## `openwave-slack` — the Slack adapter ⚪
 
-A Socket Mode adapter (outbound WebSocket, no inbound ports) that drives the
-agent from a Slack workspace.
+A scaffold for a Socket Mode adapter (outbound WebSocket, no inbound ports) that
+will drive the agent from a Slack workspace.
 
-**Depends on:** `openwave-core`.
+**Depends on:** nothing in the workspace yet.
