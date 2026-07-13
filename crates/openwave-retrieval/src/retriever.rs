@@ -81,9 +81,12 @@ impl Retriever {
     ///
     /// Canonical text cannot be regenerated from this identity alone; parser
     /// upgrades require retained original bytes.
-    #[must_use]
-    pub fn canonical_fingerprint(&self) -> String {
-        self.parser.fingerprint()
+    pub fn canonical_fingerprint_for(&self, media_type: &str) -> Result<String> {
+        self.parser.fingerprint_for(media_type).ok_or_else(|| {
+            RetrievalError::parse(format!(
+                "no document parser supports media type `{media_type}`"
+            ))
+        })
     }
 
     /// Stable identity for the chunker and embedder configuration that produced
@@ -333,8 +336,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DocumentParser for StaticParser {
-        fn fingerprint(&self) -> String {
-            "static-parser-v1".into()
+        fn fingerprint_for(&self, media_type: &str) -> Option<String> {
+            self.supports(media_type).then(|| "static-parser-v1".into())
         }
 
         fn supports(&self, _media_type: &str) -> bool {
@@ -929,7 +932,11 @@ The Great Barrier Reef is the world's largest coral reef system.";
     #[test]
     fn index_fingerprint_captures_the_pipeline_configuration() {
         let r = retriever();
-        assert_eq!(r.canonical_fingerprint(), "plain-text-lossy-v1");
+        assert_eq!(
+            r.canonical_fingerprint_for("text/plain").unwrap(),
+            "plain-text-lossy-v1"
+        );
+        assert!(r.canonical_fingerprint_for("application/pdf").is_err());
         assert_eq!(
             r.index_fingerprint(),
             "chunker=text-window-v3:markdown=atx-heading-context:max_chars=90:overlap=0;embedder=hash-fnv1a-v1:512d"
