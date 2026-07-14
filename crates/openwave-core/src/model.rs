@@ -678,6 +678,10 @@ pub enum TurnRunStatus {
     Queued,
     /// Currently owned by the exact lease token and expiry on the turn.
     Running,
+    /// Cancellation was requested while a worker still owns the exact lease.
+    /// The chat remains occupied until that worker acknowledges quiescence or
+    /// the expired lease is cleaned up.
+    Cancelling,
     /// Failed safely before an ambiguous side effect and awaits another claim.
     RetryWait,
     /// Produced a final answer successfully.
@@ -695,6 +699,7 @@ impl TurnRunStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Cancelling => "cancelling",
             Self::RetryWait => "retry_wait",
             Self::Completed => "completed",
             Self::Failed => "failed",

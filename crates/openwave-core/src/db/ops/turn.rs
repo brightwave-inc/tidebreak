@@ -7,7 +7,10 @@ use sea_orm::{
 use crate::error::{AgentError, Result};
 use crate::id::{ChatId, MessageId, TurnId};
 use crate::model::{Message, Role, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus};
-use crate::storage::{AcceptTurnOutcome, CompleteTurnRunOutcome, RecordTurnFailureOutcome};
+use crate::storage::{
+    AcceptTurnOutcome, CompleteTurnRunOutcome, FinishTurnCancellationOutcome,
+    RecordTurnFailureOutcome, RequestTurnCancellationOutcome,
+};
 
 use super::super::{entities, store_err, DbStore};
 
@@ -195,7 +198,10 @@ pub(in crate::db) async fn claim_turn_run(
             .await
             .map_err(store_err)?;
         let expired = entities::turn_run::Entity::find()
-            .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
+            .filter(entities::turn_run::Column::Status.is_in([
+                TurnRunStatus::Running.as_str(),
+                TurnRunStatus::Cancelling.as_str(),
+            ]))
             .filter(entities::turn_run::Column::LeaseExpiresAt.lte(now))
             .filter(entities::turn_run::Column::UpdatedAt.lte(now))
             .order_by_asc(entities::turn_run::Column::LeaseExpiresAt)
@@ -219,6 +225,47 @@ pub(in crate::db) async fn claim_turn_run(
             transaction.commit().await.map_err(store_err)?;
             return Ok(None);
         };
+
+        if candidate.status == TurnRunStatus::Cancelling.as_str() {
+            let cancelled = entities::turn_run::Entity::update_many()
+                .col_expr(
+                    entities::turn_run::Column::Status,
+                    sea_orm::sea_query::Expr::value(TurnRunStatus::Cancelled.as_str()),
+                )
+                .col_expr(
+                    entities::turn_run::Column::LeaseToken,
+                    sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+                )
+                .col_expr(
+                    entities::turn_run::Column::LeaseExpiresAt,
+                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+                )
+                .col_expr(
+                    entities::turn_run::Column::FinishedAt,
+                    sea_orm::sea_query::Expr::value(Some(now)),
+                )
+                .col_expr(
+                    entities::turn_run::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(now),
+                )
+                .filter(entities::turn_run::Column::Id.eq(candidate.id))
+                .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelling.as_str()))
+                .filter(entities::turn_run::Column::AttemptCount.eq(candidate.attempt_count))
+                .filter(entities::turn_run::Column::LeaseToken.eq(candidate.lease_token))
+                .filter(entities::turn_run::Column::LeaseExpiresAt.eq(candidate.lease_expires_at))
+                .filter(entities::turn_run::Column::LeaseExpiresAt.lte(now))
+                .filter(entities::turn_run::Column::UpdatedAt.eq(candidate.updated_at))
+                .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+            if cancelled.rows_affected != 1 {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            }
+            transaction.commit().await.map_err(store_err)?;
+            continue;
+        }
 
         let reclaiming = candidate.status == TurnRunStatus::Running.as_str();
         if reclaiming && candidate.attempt_count >= candidate.max_attempts {
@@ -714,6 +761,199 @@ pub(in crate::db) async fn record_turn_run_failure(
     Ok(Some(RecordTurnFailureOutcome::Recorded(receipt)))
 }
 
+pub(in crate::db) async fn request_turn_cancellation(
+    store: &DbStore,
+    id: TurnId,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<RequestTurnCancellationOutcome>> {
+    let now = canonical_db_timestamp(now)?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_exact_turn_write_lock(&transaction, id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(turn) = entities::turn_run::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let status = turn_run_status_from_db(&turn.status)?;
+    match status {
+        TurnRunStatus::Cancelling | TurnRunStatus::Cancelled => {
+            let turn = turn_run_from_model(turn)?;
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(RequestTurnCancellationOutcome::Existing(turn)));
+        }
+        TurnRunStatus::Completed | TurnRunStatus::Failed => {
+            let turn = turn_run_from_model(turn)?;
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(RequestTurnCancellationOutcome::AlreadyTerminal(turn)));
+        }
+        TurnRunStatus::Queued | TurnRunStatus::Running | TurnRunStatus::RetryWait => {}
+    }
+    if turn.updated_at > now {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    let next_status = if status == TurnRunStatus::Running {
+        TurnRunStatus::Cancelling
+    } else {
+        TurnRunStatus::Cancelled
+    };
+    let update = entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::Status,
+            sea_orm::sea_query::Expr::value(next_status.as_str()),
+        )
+        .col_expr(
+            entities::turn_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        );
+    let update = if next_status == TurnRunStatus::Cancelled {
+        update
+            .col_expr(
+                entities::turn_run::Column::FinishedAt,
+                sea_orm::sea_query::Expr::value(Some(now)),
+            )
+            .col_expr(
+                entities::turn_run::Column::LastErrorCode,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                entities::turn_run::Column::LastErrorDetail,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+    } else {
+        update
+    };
+    let update = update
+        .filter(entities::turn_run::Column::Id.eq(id.0))
+        .filter(entities::turn_run::Column::Status.eq(&turn.status))
+        .filter(entities::turn_run::Column::AttemptCount.eq(turn.attempt_count))
+        .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
+        .filter(entities::turn_run::Column::UpdatedAt.lte(now));
+    let update = if status == TurnRunStatus::Running {
+        update
+            .filter(entities::turn_run::Column::LeaseToken.eq(turn.lease_token))
+            .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+    } else {
+        update
+    };
+    let cancelled = update.exec(&transaction).await.map_err(store_err)?;
+    if cancelled.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let updated = entities::turn_run::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("cancelled turn {id} disappeared")))
+        .and_then(turn_run_from_model)?;
+    transaction.commit().await.map_err(store_err)?;
+    if next_status == TurnRunStatus::Cancelling {
+        Ok(Some(RequestTurnCancellationOutcome::Requested(updated)))
+    } else {
+        Ok(Some(RequestTurnCancellationOutcome::Cancelled(updated)))
+    }
+}
+
+pub(in crate::db) async fn finish_turn_cancellation(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<FinishTurnCancellationOutcome>> {
+    if lease_token.is_nil() {
+        return Err(AgentError::Store("turn lease token must not be nil".into()));
+    }
+    let now = canonical_db_timestamp(now)?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_exact_turn_write_lock(&transaction, id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .filter(|claim| claim.turn_id == id.0)
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let Some(turn) = entities::turn_run::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if turn.status == TurnRunStatus::Cancelled.as_str() && turn.attempt_count == claim.attempt_count
+    {
+        let turn = turn_run_from_model(turn)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(FinishTurnCancellationOutcome::Existing(turn)));
+    }
+    if turn.status != TurnRunStatus::Cancelling.as_str()
+        || turn.attempt_count != claim.attempt_count
+        || turn.lease_token != Some(lease_token)
+        || turn.updated_at > now
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    let cancelled = entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::Status,
+            sea_orm::sea_query::Expr::value(TurnRunStatus::Cancelled.as_str()),
+        )
+        .col_expr(
+            entities::turn_run::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::turn_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::turn_run::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            entities::turn_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::turn_run::Column::Id.eq(id.0))
+        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelling.as_str()))
+        .filter(entities::turn_run::Column::AttemptCount.eq(claim.attempt_count))
+        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
+        .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+        .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
+        .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if cancelled.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let cancelled = entities::turn_run::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("cancelled turn {id} disappeared")))
+        .and_then(turn_run_from_model)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(FinishTurnCancellationOutcome::Cancelled(cancelled)))
+}
+
 async fn acquire_exact_turn_write_lock<C>(conn: &C, id: TurnId) -> Result<bool>
 where
     C: ConnectionTrait,
@@ -911,7 +1151,9 @@ fn turn_run_due_order(
     right: &entities::turn_run::Model,
 ) -> std::cmp::Ordering {
     let due_at = |run: &entities::turn_run::Model| {
-        if run.status == TurnRunStatus::Running.as_str() {
+        if run.status == TurnRunStatus::Running.as_str()
+            || run.status == TurnRunStatus::Cancelling.as_str()
+        {
             run.lease_expires_at.unwrap_or(run.available_at)
         } else {
             run.available_at
@@ -953,6 +1195,7 @@ where
         .filter(entities::turn_run::Column::Status.is_in([
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
+            TurnRunStatus::Cancelling.as_str(),
             TurnRunStatus::RetryWait.as_str(),
         ]))
         .one(conn)
@@ -1021,6 +1264,7 @@ fn turn_run_status_from_db(text: &str) -> Result<TurnRunStatus> {
     match text {
         "queued" => Ok(TurnRunStatus::Queued),
         "running" => Ok(TurnRunStatus::Running),
+        "cancelling" => Ok(TurnRunStatus::Cancelling),
         "retry_wait" => Ok(TurnRunStatus::RetryWait),
         "completed" => Ok(TurnRunStatus::Completed),
         "failed" => Ok(TurnRunStatus::Failed),

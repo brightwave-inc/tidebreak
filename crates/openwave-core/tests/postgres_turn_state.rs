@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use openwave_core::{
-    AcceptTurnOutcome, Chat, ChatId, CompleteTurnRunOutcome, DbStore, Message, MessageId,
-    RecordTurnFailureOutcome, Role, Store, TurnFailureRetry, TurnId, TurnRunStatus,
+    AcceptTurnOutcome, Chat, ChatId, CompleteTurnRunOutcome, DbStore,
+    FinishTurnCancellationOutcome, Message, MessageId, RecordTurnFailureOutcome,
+    RequestTurnCancellationOutcome, Role, Store, TurnFailureRetry, TurnId, TurnRunStatus,
 };
 
 fn sample_chat() -> Chat {
@@ -245,5 +246,85 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             .unwrap()
             .status,
         TurnRunStatus::Failed
+    );
+
+    let cancellation_chat = sample_chat();
+    store.create_chat(&cancellation_chat).await.unwrap();
+    let cancellation_turn = match store
+        .accept_turn(
+            TurnId::new(),
+            cancellation_chat.id,
+            "gpt-5",
+            "postgres cancellation",
+        )
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let cancellation_token = uuid::Uuid::new_v4();
+    let cancellation_claimed_at = cancellation_turn.available_at + Duration::seconds(1);
+    let cancellation_expiry = cancellation_claimed_at + Duration::minutes(1);
+    let cancellation_requested_at = cancellation_claimed_at + Duration::seconds(1);
+    store
+        .claim_turn_run(
+            cancellation_token,
+            cancellation_claimed_at,
+            cancellation_expiry,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut cancellations = Vec::new();
+    for _ in 0..2 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        cancellations.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .request_turn_cancellation(cancellation_turn.id, cancellation_requested_at)
+                .await
+                .unwrap()
+                .unwrap()
+        }));
+    }
+    let mut requested = 0;
+    let mut cancellation_existing = 0;
+    for cancellation in cancellations {
+        match cancellation.await.unwrap() {
+            RequestTurnCancellationOutcome::Requested(turn) => {
+                requested += 1;
+                assert_eq!(turn.status, TurnRunStatus::Cancelling);
+            }
+            RequestTurnCancellationOutcome::Existing(turn) => {
+                cancellation_existing += 1;
+                assert_eq!(turn.status, TurnRunStatus::Cancelling);
+            }
+            outcome => panic!("unexpected cancellation outcome: {outcome:?}"),
+        }
+    }
+    assert_eq!((requested, cancellation_existing), (1, 1));
+    let acknowledged_at = cancellation_expiry + Duration::seconds(1);
+    let FinishTurnCancellationOutcome::Cancelled(cancelled) = store
+        .finish_turn_cancellation(cancellation_turn.id, cancellation_token, acknowledged_at)
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("exact PostgreSQL cancellation acknowledgement must commit")
+    };
+    assert_eq!(cancelled.status, TurnRunStatus::Cancelled);
+    assert_eq!(
+        store
+            .finish_turn_cancellation(
+                cancellation_turn.id,
+                cancellation_token,
+                acknowledged_at + Duration::hours(1),
+            )
+            .await
+            .unwrap(),
+        Some(FinishTurnCancellationOutcome::Existing(cancelled))
     );
 }

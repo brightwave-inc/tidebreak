@@ -152,17 +152,22 @@ impl MigrationTrait for Init {
         let valid_turn_status = Expr::col(TurnRun::Status).is_in([
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
+            TurnRunStatus::Cancelling.as_str(),
             TurnRunStatus::RetryWait.as_str(),
             TurnRunStatus::Completed.as_str(),
             TurnRunStatus::Failed.as_str(),
             TurnRunStatus::Cancelled.as_str(),
         ]);
-        let running_lease = Expr::col(TurnRun::Status)
-            .eq(TurnRunStatus::Running.as_str())
+        let active_lease = Expr::col(TurnRun::Status)
+            .is_in([
+                TurnRunStatus::Running.as_str(),
+                TurnRunStatus::Cancelling.as_str(),
+            ])
             .and(Expr::col(TurnRun::LeaseToken).is_not_null())
             .and(Expr::col(TurnRun::LeaseExpiresAt).is_not_null());
         let no_lease = Expr::col(TurnRun::Status)
             .ne(TurnRunStatus::Running.as_str())
+            .and(Expr::col(TurnRun::Status).ne(TurnRunStatus::Cancelling.as_str()))
             .and(Expr::col(TurnRun::LeaseToken).is_null())
             .and(Expr::col(TurnRun::LeaseExpiresAt).is_null());
         let completed_output = Expr::col(TurnRun::Status)
@@ -182,6 +187,7 @@ impl MigrationTrait for Init {
             .is_in([
                 TurnRunStatus::Queued.as_str(),
                 TurnRunStatus::Running.as_str(),
+                TurnRunStatus::Cancelling.as_str(),
                 TurnRunStatus::RetryWait.as_str(),
             ])
             .and(Expr::col(TurnRun::FinishedAt).is_null());
@@ -189,8 +195,11 @@ impl MigrationTrait for Init {
             .eq(TurnRunStatus::Queued.as_str())
             .and(Expr::col(TurnRun::AttemptCount).eq(0))
             .and(Expr::col(TurnRun::StartedAt).is_null());
-        let running_attempt = Expr::col(TurnRun::Status)
-            .eq(TurnRunStatus::Running.as_str())
+        let leased_attempt = Expr::col(TurnRun::Status)
+            .is_in([
+                TurnRunStatus::Running.as_str(),
+                TurnRunStatus::Cancelling.as_str(),
+            ])
             .and(Expr::col(TurnRun::AttemptCount).gte(1))
             .and(Expr::col(TurnRun::StartedAt).is_not_null());
         let retryable_attempt = Expr::col(TurnRun::Status)
@@ -225,6 +234,7 @@ impl MigrationTrait for Init {
             .is_in([
                 TurnRunStatus::Queued.as_str(),
                 TurnRunStatus::Running.as_str(),
+                TurnRunStatus::Cancelling.as_str(),
                 TurnRunStatus::Completed.as_str(),
                 TurnRunStatus::Cancelled.as_str(),
             ])
@@ -350,12 +360,12 @@ impl MigrationTrait for Init {
                                     .lte(Expr::col(TurnRun::MaxAttempts)),
                             ),
                     )
-                    .check(running_lease.or(no_lease))
+                    .check(active_lease.or(no_lease))
                     .check(completed_output.or(no_output))
                     .check(terminal_finished.or(nonterminal_unfinished))
                     .check(
                         queued_attempt
-                            .or(running_attempt)
+                            .or(leased_attempt)
                             .or(retryable_attempt)
                             .or(resolved_attempt)
                             .or(cancelled_attempt),
@@ -397,6 +407,7 @@ impl MigrationTrait for Init {
                     .and_where(Expr::col(TurnRun::Status).is_in([
                         TurnRunStatus::Queued.as_str(),
                         TurnRunStatus::Running.as_str(),
+                        TurnRunStatus::Cancelling.as_str(),
                         TurnRunStatus::RetryWait.as_str(),
                     ]))
                     .to_owned(),
