@@ -1775,6 +1775,27 @@ impl Store for DbStore {
         ops::conversation::append_event(self, chat_id, event).await
     }
 
+    async fn append_turn_event(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        attempt_event_ordinal: i32,
+        now: chrono::DateTime<Utc>,
+        event: &AgentEvent,
+    ) -> Result<Option<i64>> {
+        ops::conversation::append_turn_event(
+            self,
+            chat_id,
+            turn_id,
+            lease_token,
+            attempt_event_ordinal,
+            now,
+            event,
+        )
+        .await
+    }
+
     async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
         ops::conversation::list_events(self, chat_id, after).await
     }

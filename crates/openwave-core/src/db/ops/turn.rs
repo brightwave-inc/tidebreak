@@ -459,7 +459,9 @@ pub(in crate::db) async fn heartbeat_turn_run(
     Ok(heartbeat.rows_affected == 1)
 }
 
-fn canonical_db_timestamp(timestamp: chrono::DateTime<Utc>) -> Result<chrono::DateTime<Utc>> {
+pub(in crate::db) fn canonical_db_timestamp(
+    timestamp: chrono::DateTime<Utc>,
+) -> Result<chrono::DateTime<Utc>> {
     chrono::DateTime::from_timestamp_micros(timestamp.timestamp_micros()).ok_or_else(|| {
         AgentError::Store("turn output timestamp is outside the database range".into())
     })

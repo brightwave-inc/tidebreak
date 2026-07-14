@@ -730,10 +730,32 @@ pub trait Store: Send + Sync {
     /// Write a setting.
     async fn set_setting(&self, key: &str, value: &Value) -> Result<()>;
 
-    /// Append an event to a chat's journal, returning its assigned sequence
-    /// number. Sequence numbers are per-chat and monotonic (starting at 1),
-    /// so a client can replay the stream with [`list_events`](Self::list_events).
+    /// Append an event for the legacy direct-execution path.
+    ///
+    /// Sequence numbers are per-chat and monotonic (starting at 1). This method
+    /// rejects a chat once it has any durable turn history; durable workers must
+    /// use [`append_turn_event`](Self::append_turn_event) so stale attempts are
+    /// fenced and ambiguous retries recover the original sequence.
     async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64>;
+
+    /// Append a nonterminal event owned by an exact live turn attempt.
+    ///
+    /// `(lease_token, attempt_event_ordinal)` is the idempotency identity. An
+    /// exact retry returns the original sequence even after lease loss; reusing
+    /// it with different data is an error. A first append succeeds only while
+    /// the matching attempt still owns a live running lease. Completed, failed,
+    /// and cancelled events are reserved for atomic turn resolution.
+    async fn append_turn_event(
+        &self,
+        _chat_id: ChatId,
+        _turn_id: TurnId,
+        _lease_token: uuid::Uuid,
+        _attempt_event_ordinal: i32,
+        _now: chrono::DateTime<chrono::Utc>,
+        _event: &AgentEvent,
+    ) -> Result<Option<i64>> {
+        turn_storage_unavailable()
+    }
 
     /// List a chat's journaled events with `seq` greater than `after`, in
     /// sequence order. Pass `0` to replay from the start.

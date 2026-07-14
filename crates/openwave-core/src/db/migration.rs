@@ -148,6 +148,17 @@ impl MigrationTrait for Init {
                     .to_owned(),
             )
             .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_turn_claim_turn_token")
+                    .table(TurnClaim::Table)
+                    .col(TurnClaim::TurnId)
+                    .col(TurnClaim::Token)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
 
         let valid_turn_status = Expr::col(TurnRun::Status).is_in([
             TurnRunStatus::Queued.as_str(),
@@ -390,6 +401,17 @@ impl MigrationTrait for Init {
         manager
             .create_index(
                 Index::create()
+                    .name("idx_turn_run_chat_identity")
+                    .table(TurnRun::Table)
+                    .col(TurnRun::ChatId)
+                    .col(TurnRun::Id)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
                     .name("idx_turn_run_input_message")
                     .table(TurnRun::Table)
                     .col(TurnRun::InputMessageId)
@@ -591,6 +613,15 @@ impl MigrationTrait for AddEventJournal {
                     .if_not_exists()
                     .col(ColumnDef::new(Event::ChatId).uuid().not_null())
                     .col(ColumnDef::new(Event::Seq).big_integer().not_null())
+                    .col(ColumnDef::new(Event::TurnId).uuid())
+                    .col(ColumnDef::new(Event::LeaseToken).uuid())
+                    .col(ColumnDef::new(Event::AttemptEventOrdinal).integer())
+                    .col(
+                        ColumnDef::new(Event::Terminal)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
                     .col(ColumnDef::new(Event::Payload).json_binary().not_null())
                     .col(
                         ColumnDef::new(Event::CreatedAt)
@@ -604,6 +635,76 @@ impl MigrationTrait for AddEventJournal {
                             .from(Event::Table, Event::ChatId)
                             .to(Chat::Table, Chat::Id),
                     )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_event_turn")
+                            .from_tbl(Event::Table)
+                            .from_col(Event::ChatId)
+                            .from_col(Event::TurnId)
+                            .to_tbl(TurnRun::Table)
+                            .to_col(TurnRun::ChatId)
+                            .to_col(TurnRun::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_event_turn_claim")
+                            .from_tbl(Event::Table)
+                            .from_col(Event::TurnId)
+                            .from_col(Event::LeaseToken)
+                            .to_tbl(TurnClaim::Table)
+                            .to_col(TurnClaim::TurnId)
+                            .to_col(TurnClaim::Token)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(
+                        Expr::col(Event::Terminal)
+                            .eq(false)
+                            .or(Expr::col(Event::TurnId).is_not_null()),
+                    )
+                    .check(
+                        Expr::col(Event::LeaseToken)
+                            .is_null()
+                            .and(Expr::col(Event::AttemptEventOrdinal).is_null())
+                            .or(Expr::col(Event::LeaseToken).is_not_null().and(
+                                Expr::col(Event::AttemptEventOrdinal)
+                                    .is_not_null()
+                                    .and(Expr::col(Event::TurnId).is_not_null()),
+                            )),
+                    )
+                    .check(
+                        Expr::col(Event::AttemptEventOrdinal)
+                            .is_null()
+                            .or(Expr::col(Event::AttemptEventOrdinal).gte(1)),
+                    )
+                    .check(
+                        Expr::col(Event::TurnId)
+                            .is_null()
+                            .or(Expr::col(Event::Terminal).eq(true))
+                            .or(Expr::col(Event::LeaseToken).is_not_null()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_event_attempt_ordinal")
+                    .table(Event::Table)
+                    .col(Event::LeaseToken)
+                    .col(Event::AttemptEventOrdinal)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_event_one_terminal_per_turn")
+                    .table(Event::Table)
+                    .col(Event::TurnId)
+                    .unique()
+                    .and_where(Expr::col(Event::Terminal).eq(true))
                     .to_owned(),
             )
             .await?;
@@ -1618,6 +1719,10 @@ enum Event {
     Table,
     ChatId,
     Seq,
+    TurnId,
+    LeaseToken,
+    AttemptEventOrdinal,
+    Terminal,
     Payload,
     CreatedAt,
 }

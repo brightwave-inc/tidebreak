@@ -3,16 +3,18 @@ use std::path::PathBuf;
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
 };
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, ChatId, MessageId, ProjectId, TurnId};
-use crate::model::{Chat, Message, Role, ToolCallRecord};
+use crate::model::{Chat, Message, Role, ToolCallRecord, TurnRunStatus};
 
 use super::super::{entities, store_err, DbStore};
-use super::acquire_chat_write_lock;
+use super::turn::canonical_db_timestamp;
+use super::{acquire_chat_write_lock, acquire_turn_write_lock};
 
 pub(in crate::db) async fn create_chat(store: &DbStore, chat: &Chat) -> Result<()> {
     entities::chat::ActiveModel {
@@ -149,28 +151,190 @@ pub(in crate::db) async fn append_event(
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
         return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
     }
+    if entities::turn_run::Entity::find()
+        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some()
+    {
+        return Err(AgentError::Store(format!(
+            "chat {chat_id} uses durable turns; append through an exact claim"
+        )));
+    }
 
+    let seq = append_event_on(&transaction, chat_id, None, None, None, event).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(seq)
+}
+
+pub(in crate::db) async fn append_turn_event(
+    store: &DbStore,
+    chat_id: ChatId,
+    turn_id: TurnId,
+    lease_token: uuid::Uuid,
+    attempt_event_ordinal: i32,
+    now: chrono::DateTime<Utc>,
+    event: &AgentEvent,
+) -> Result<Option<i64>> {
+    if turn_id.0.is_nil() {
+        return Err(AgentError::Store("event turn id must not be nil".into()));
+    }
+    if lease_token.is_nil() {
+        return Err(AgentError::Store(
+            "event lease token must not be nil".into(),
+        ));
+    }
+    if attempt_event_ordinal < 1 {
+        return Err(AgentError::Store(
+            "attempt event ordinal must be positive".into(),
+        ));
+    }
+    if matches!(
+        event,
+        AgentEvent::TurnCompleted { .. }
+            | AgentEvent::TurnFailed { .. }
+            | AgentEvent::TurnCancelled { .. }
+    ) {
+        return Err(AgentError::Store(
+            "terminal turn events must be committed by turn resolution".into(),
+        ));
+    }
+    if let AgentEvent::TurnStarted {
+        turn_id: payload_turn_id,
+    } = event
+    {
+        if *payload_turn_id != turn_id {
+            return Err(AgentError::Store(format!(
+                "turn-started event names {payload_turn_id}, not authoritative turn {turn_id}"
+            )));
+        }
+    }
+    let now = canonical_db_timestamp(now)?;
+
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
+    }
+    if !acquire_turn_write_lock(&transaction, turn_id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    if let Some(existing) = entities::event::Entity::find()
+        .filter(entities::event::Column::LeaseToken.eq(lease_token))
+        .filter(entities::event::Column::AttemptEventOrdinal.eq(attempt_event_ordinal))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    {
+        let payload = serde_json::from_value::<AgentEvent>(existing.payload.clone())?;
+        if existing.chat_id != chat_id.0
+            || existing.turn_id != Some(turn_id.0)
+            || existing.lease_token != Some(lease_token)
+            || existing.attempt_event_ordinal != Some(attempt_event_ordinal)
+            || existing.terminal
+            || payload != *event
+        {
+            return Err(AgentError::Store(format!(
+                "turn event identity ({lease_token}, {attempt_event_ordinal}) was reused with different data"
+            )));
+        }
+        let seq = existing.seq;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(seq));
+    }
+
+    let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .filter(|claim| claim.turn_id == turn_id.0)
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let Some(turn) = entities::turn_run::Entity::find_by_id(turn_id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if turn.chat_id != chat_id.0 {
+        return Err(AgentError::Store(format!(
+            "turn {turn_id} does not belong to chat {chat_id}"
+        )));
+    }
+    if turn.status != TurnRunStatus::Running.as_str()
+        || turn.attempt_count != claim.attempt_count
+        || turn.lease_token != Some(lease_token)
+        || turn
+            .lease_expires_at
+            .is_none_or(|lease_expires_at| lease_expires_at <= now)
+        || turn.updated_at > now
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    let seq = append_event_on(
+        &transaction,
+        chat_id,
+        Some(turn_id),
+        Some(lease_token),
+        Some(attempt_event_ordinal),
+        event,
+    )
+    .await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(seq))
+}
+
+pub(in crate::db::ops) async fn append_event_on<C>(
+    conn: &C,
+    chat_id: ChatId,
+    turn_id: Option<TurnId>,
+    lease_token: Option<uuid::Uuid>,
+    attempt_event_ordinal: Option<i32>,
+    event: &AgentEvent,
+) -> Result<i64>
+where
+    C: ConnectionTrait,
+{
     let last = entities::event::Entity::find()
         .filter(entities::event::Column::ChatId.eq(chat_id.0))
         .order_by_desc(entities::event::Column::Seq)
-        .one(&transaction)
+        .one(conn)
         .await
         .map_err(store_err)?;
     let seq = last
         .map_or(Some(1), |model| model.seq.checked_add(1))
         .ok_or_else(|| AgentError::Store(format!("event sequence exhausted for chat {chat_id}")))?;
-
     entities::event::ActiveModel {
         chat_id: Set(chat_id.0),
         seq: Set(seq),
+        turn_id: Set(turn_id.map(|id| id.0)),
+        lease_token: Set(lease_token),
+        attempt_event_ordinal: Set(attempt_event_ordinal),
+        terminal: Set(turn_id.is_some() && is_terminal_event(event)),
         payload: Set(serde_json::to_value(event)?),
         created_at: Set(Utc::now()),
     }
-    .insert(&transaction)
+    .insert(conn)
     .await
     .map_err(store_err)?;
-    transaction.commit().await.map_err(store_err)?;
     Ok(seq)
+}
+
+fn is_terminal_event(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::TurnCompleted { .. }
+            | AgentEvent::TurnFailed { .. }
+            | AgentEvent::TurnCancelled { .. }
+    )
 }
 
 pub(in crate::db) async fn list_events(
