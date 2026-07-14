@@ -2067,6 +2067,7 @@ async fn document_job_schema_enforces_delivery_and_idempotency_invariants() {
     running_without_lease.attempt_count = Set(1);
     running_without_lease.started_at = Set(Some(now));
     assert!(running_without_lease.insert(&store.conn).await.is_err());
+
     let mut running_without_attempt = make_job(&another_document, "pipeline-v1");
     running_without_attempt.status = Set(DocumentJobStatus::Running.as_str().into());
     running_without_attempt.lease_token = Set(Some(uuid::Uuid::new_v4()));
@@ -4692,6 +4693,13 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     running_without_lease.started_at = Set(Some(now));
     assert!(running_without_lease.insert(&store.conn).await.is_err());
 
+    let mut cancelling_without_lease =
+        make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
+    cancelling_without_lease.status = Set(TurnRunStatus::Cancelling.as_str().into());
+    cancelling_without_lease.attempt_count = Set(1);
+    cancelling_without_lease.started_at = Set(Some(now));
+    assert!(cancelling_without_lease.insert(&store.conn).await.is_err());
+
     let mut retry_without_error = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     retry_without_error.status = Set(TurnRunStatus::RetryWait.as_str().into());
     retry_without_error.attempt_count = Set(1);
@@ -4789,6 +4797,20 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     .await
     .unwrap();
     running.insert(&store.conn).await.unwrap();
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::Status,
+            sea_orm::sea_query::Expr::value(TurnRunStatus::Cancelling.as_str()),
+        )
+        .filter(entities::turn_run::Column::Id.eq(running_turn_id))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert!(make_queued_turn(&store, running_chat.id, "gpt-5", now)
+        .await
+        .insert(&store.conn)
+        .await
+        .is_err());
 
     let valid_failure = entities::turn_failure::ActiveModel {
         lease_token: Set(running_token),
@@ -5829,6 +5851,446 @@ async fn permanent_turn_failure_uses_the_heartbeated_lease_and_rejects_expiry() 
             .status,
         TurnRunStatus::Running
     );
+}
+
+#[tokio::test]
+async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
+    let (_dir, store) = temp_store().await;
+    let queued_chat = sample_chat();
+    store.create_chat(&queued_chat).await.unwrap();
+    let queued = match store
+        .accept_turn(TurnId::new(), queued_chat.id, "gpt-5", "queued")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    assert_eq!(
+        store
+            .request_turn_cancellation(queued.id, queued.updated_at - chrono::Duration::seconds(1))
+            .await
+            .unwrap(),
+        None
+    );
+    let cancelled_at = queued.updated_at + chrono::Duration::seconds(1);
+    let RequestTurnCancellationOutcome::Cancelled(cancelled) = store
+        .request_turn_cancellation(queued.id, cancelled_at)
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("queued cancellation must be immediate")
+    };
+    assert_eq!(cancelled.status, TurnRunStatus::Cancelled);
+    assert_eq!(cancelled.attempt_count, 0);
+    assert_eq!(cancelled.finished_at, Some(cancelled_at));
+    assert_eq!(
+        store
+            .request_turn_cancellation(queued.id, queued.updated_at)
+            .await
+            .unwrap(),
+        Some(RequestTurnCancellationOutcome::Existing(cancelled))
+    );
+    let after_cancel = match store
+        .accept_turn(TurnId::new(), queued_chat.id, "gpt-5", "after cancel")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    assert!(matches!(
+        store
+            .request_turn_cancellation(
+                after_cancel.id,
+                after_cancel.updated_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap(),
+        Some(RequestTurnCancellationOutcome::Cancelled(_))
+    ));
+
+    let retry_chat = sample_chat();
+    store.create_chat(&retry_chat).await.unwrap();
+    let retry_turn = match store
+        .accept_turn(TurnId::new(), retry_chat.id, "gpt-5", "retry")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(2),
+        )
+        .filter(entities::turn_run::Column::Id.eq(retry_turn.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let claimed_at = retry_turn.available_at + chrono::Duration::seconds(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(2))
+        .await
+        .unwrap()
+        .unwrap();
+    let failed_at = claimed_at + chrono::Duration::seconds(1);
+    let retry_at = failed_at + chrono::Duration::minutes(1);
+    let RecordTurnFailureOutcome::Recorded(receipt) = store
+        .record_turn_run_failure(
+            retry_turn.id,
+            token,
+            failed_at,
+            TurnFailureRetry::RetryAt(retry_at),
+            "provider_unavailable",
+            Some("temporary outage"),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("retryable failure must commit")
+    };
+    let retry_cancelled_at = failed_at + chrono::Duration::seconds(1);
+    let RequestTurnCancellationOutcome::Cancelled(cancelled) = store
+        .request_turn_cancellation(retry_turn.id, retry_cancelled_at)
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("retry-wait cancellation must be immediate")
+    };
+    assert_eq!(cancelled.status, TurnRunStatus::Cancelled);
+    assert_eq!(cancelled.finished_at, Some(retry_cancelled_at));
+    assert_eq!(cancelled.last_error_code, None);
+    assert_eq!(cancelled.last_error_detail, None);
+    assert_eq!(
+        store
+            .record_turn_run_failure(
+                retry_turn.id,
+                token,
+                retry_cancelled_at,
+                TurnFailureRetry::RetryAt(retry_at),
+                "provider_unavailable",
+                Some("temporary outage"),
+            )
+            .await
+            .unwrap(),
+        Some(RecordTurnFailureOutcome::Existing(receipt))
+    );
+}
+
+#[tokio::test]
+async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledgement() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "running")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = turn.available_at + chrono::Duration::seconds(1);
+    let expires_at = claimed_at + chrono::Duration::minutes(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, expires_at)
+        .await
+        .unwrap()
+        .unwrap();
+    let requested_at = claimed_at + chrono::Duration::seconds(1);
+    let RequestTurnCancellationOutcome::Requested(cancelling) = store
+        .request_turn_cancellation(turn.id, requested_at)
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("running cancellation must await worker acknowledgement")
+    };
+    assert_eq!(cancelling.status, TurnRunStatus::Cancelling);
+    assert_eq!(cancelling.lease_token, Some(token));
+    assert_eq!(cancelling.lease_expires_at, Some(expires_at));
+    assert_eq!(cancelling.finished_at, None);
+    assert!(!store
+        .heartbeat_turn_run(
+            turn.id,
+            token,
+            requested_at + chrono::Duration::seconds(1),
+            expires_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap());
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id: turn.id,
+        role: Role::Assistant,
+        content: "too late".into(),
+        created_at: requested_at + chrono::Duration::seconds(1),
+    };
+    assert_eq!(
+        store
+            .complete_turn_run(turn.id, token, output.created_at, &output)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .record_turn_run_failure(
+                turn.id,
+                token,
+                output.created_at,
+                TurnFailureRetry::Permanent,
+                "too_late",
+                None,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(matches!(
+        store
+            .accept_turn(TurnId::new(), chat.id, "gpt-5", "must remain busy")
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::ChatBusy(active) if active.status == TurnRunStatus::Cancelling
+    ));
+    assert_eq!(
+        store
+            .request_turn_cancellation(turn.id, claimed_at)
+            .await
+            .unwrap(),
+        Some(RequestTurnCancellationOutcome::Existing(cancelling))
+    );
+    assert!(store
+        .finish_turn_cancellation(turn.id, uuid::Uuid::nil(), requested_at)
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .finish_turn_cancellation(turn.id, uuid::Uuid::new_v4(), requested_at)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let acknowledged_at = expires_at + chrono::Duration::seconds(1);
+    let FinishTurnCancellationOutcome::Cancelled(cancelled) = store
+        .finish_turn_cancellation(turn.id, token, acknowledged_at)
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("exact worker acknowledgement must cancel")
+    };
+    assert_eq!(cancelled.status, TurnRunStatus::Cancelled);
+    assert_eq!(cancelled.lease_token, None);
+    assert_eq!(cancelled.lease_expires_at, None);
+    assert_eq!(cancelled.finished_at, Some(acknowledged_at));
+    assert_eq!(
+        store
+            .finish_turn_cancellation(turn.id, token, acknowledged_at + chrono::Duration::hours(1),)
+            .await
+            .unwrap(),
+        Some(FinishTurnCancellationOutcome::Existing(cancelled))
+    );
+    assert!(matches!(
+        store
+            .accept_turn(TurnId::new(), chat.id, "gpt-5", "after acknowledgement")
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::Accepted(_)
+    ));
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn claim_scan_terminalizes_an_expired_cancelling_lease() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "cancel and crash")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = turn.available_at + chrono::Duration::seconds(1);
+    let expires_at = claimed_at + chrono::Duration::minutes(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, expires_at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        store
+            .request_turn_cancellation(turn.id, claimed_at + chrono::Duration::seconds(1))
+            .await
+            .unwrap(),
+        Some(RequestTurnCancellationOutcome::Requested(_))
+    ));
+
+    assert_eq!(
+        store
+            .claim_turn_run(
+                uuid::Uuid::new_v4(),
+                expires_at,
+                expires_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    let cancelled = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    assert_eq!(cancelled.status, TurnRunStatus::Cancelled);
+    assert_eq!(cancelled.finished_at, Some(expires_at));
+    assert_eq!(cancelled.lease_token, None);
+    assert_eq!(
+        store
+            .finish_turn_cancellation(turn.id, token, expires_at + chrono::Duration::hours(1),)
+            .await
+            .unwrap(),
+        Some(FinishTurnCancellationOutcome::Existing(cancelled))
+    );
+    assert!(matches!(
+        store
+            .accept_turn(TurnId::new(), chat.id, "gpt-5", "slot recovered")
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::Accepted(_)
+    ));
+}
+
+#[tokio::test]
+async fn concurrent_cancellation_requests_converge_on_one_running_turn() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "cancel concurrently")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = turn.available_at + chrono::Duration::seconds(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let store = std::sync::Arc::new(store);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let requested_at = claimed_at + chrono::Duration::seconds(1);
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store.request_turn_cancellation(turn.id, requested_at).await
+        }));
+    }
+    let mut requested = 0;
+    let mut existing = 0;
+    for task in tasks {
+        match task.await.unwrap().unwrap().unwrap() {
+            RequestTurnCancellationOutcome::Requested(cancelling) => {
+                requested += 1;
+                assert_eq!(cancelling.lease_token, Some(token));
+            }
+            RequestTurnCancellationOutcome::Existing(cancelling) => {
+                existing += 1;
+                assert_eq!(cancelling.status, TurnRunStatus::Cancelling);
+                assert_eq!(cancelling.lease_token, Some(token));
+            }
+            outcome => panic!("unexpected concurrent cancellation outcome: {outcome:?}"),
+        }
+    }
+    assert_eq!((requested, existing), (1, 7));
+    assert_eq!(
+        store.get_turn_run(turn.id).await.unwrap().unwrap().status,
+        TurnRunStatus::Cancelling
+    );
+}
+
+#[tokio::test]
+async fn turn_completion_and_cancellation_serialize_to_one_decision() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "race cancellation")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = turn.available_at + chrono::Duration::seconds(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let decided_at = claimed_at + chrono::Duration::seconds(1);
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id: turn.id,
+        role: Role::Assistant,
+        content: "race answer".into(),
+        created_at: decided_at,
+    };
+    let store = std::sync::Arc::new(store);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let completion = {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .complete_turn_run(turn.id, token, decided_at, &output)
+                .await
+        })
+    };
+    let cancellation = {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store.request_turn_cancellation(turn.id, decided_at).await
+        })
+    };
+    let completion = completion.await.unwrap().unwrap();
+    let cancellation = cancellation.await.unwrap().unwrap().unwrap();
+    match (completion, cancellation) {
+        (
+            Some(CompleteTurnRunOutcome::Completed(completed)),
+            RequestTurnCancellationOutcome::AlreadyTerminal(observed),
+        ) => {
+            assert_eq!(observed, completed);
+            assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+        }
+        (None, RequestTurnCancellationOutcome::Requested(cancelling)) => {
+            assert_eq!(cancelling.status, TurnRunStatus::Cancelling);
+            assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+        }
+        outcomes => panic!("unexpected completion/cancellation race: {outcomes:?}"),
+    }
 }
 
 #[tokio::test]

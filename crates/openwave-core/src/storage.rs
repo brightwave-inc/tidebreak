@@ -113,6 +113,28 @@ pub enum RecordTurnFailureOutcome {
     Existing(TurnFailureReceipt),
 }
 
+/// Result of requesting durable cancellation for one exact turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestTurnCancellationOutcome {
+    /// Queued or retry-wait work was cancelled before a worker owned it.
+    Cancelled(TurnRun),
+    /// Running work entered the durable `cancelling` phase.
+    Requested(TurnRun),
+    /// This turn was already cancelling or cancelled.
+    Existing(TurnRun),
+    /// Successful completion or terminal failure won before cancellation.
+    AlreadyTerminal(TurnRun),
+}
+
+/// Result of a worker acknowledging that cancellation has quiesced execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishTurnCancellationOutcome {
+    /// This call committed the terminal cancellation transition.
+    Cancelled(TurnRun),
+    /// This exact claimed attempt already reached terminal cancellation.
+    Existing(TurnRun),
+}
+
 fn document_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "document storage is not implemented by this Store".into(),
@@ -657,6 +679,36 @@ pub trait Store: Send + Sync {
         _error_code: &str,
         _error_detail: Option<&str>,
     ) -> Result<Option<RecordTurnFailureOutcome>> {
+        turn_storage_unavailable()
+    }
+
+    /// Durably request cancellation for one exact turn.
+    ///
+    /// Queued and retry-wait work becomes terminal immediately. Running work
+    /// enters `cancelling` while retaining its exact lease, so the database's
+    /// one-live-turn-per-chat invariant remains held until the cooperative
+    /// worker actually stops. The empty-payload request converges on the exact
+    /// turn identity, so cancelling/cancelled retries return `Existing`.
+    async fn request_turn_cancellation(
+        &self,
+        _id: TurnId,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<RequestTurnCancellationOutcome>> {
+        turn_storage_unavailable()
+    }
+
+    /// Acknowledge that one exact cancelling worker has quiesced.
+    ///
+    /// The immutable claim receipt and terminal attempt make exact retries
+    /// recoverable after lease expiry. Returns `None` for a stale token, a turn
+    /// that is not cancelling, or a first-time acknowledgement with regressing
+    /// operational time.
+    async fn finish_turn_cancellation(
+        &self,
+        _id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<FinishTurnCancellationOutcome>> {
         turn_storage_unavailable()
     }
 

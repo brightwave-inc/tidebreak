@@ -34,7 +34,8 @@ use crate::model::{
 };
 use crate::storage::{
     AcceptTurnOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
-    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, RecordTurnFailureOutcome, Store,
+    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
+    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, Store,
 };
 
 mod ops;
@@ -1710,6 +1711,23 @@ impl Store for DbStore {
             error_detail,
         )
         .await
+    }
+
+    async fn request_turn_cancellation(
+        &self,
+        id: TurnId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<RequestTurnCancellationOutcome>> {
+        ops::turn::request_turn_cancellation(self, id, now).await
+    }
+
+    async fn finish_turn_cancellation(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<FinishTurnCancellationOutcome>> {
+        ops::turn::finish_turn_cancellation(self, id, lease_token, now).await
     }
 
     async fn append_message(&self, message: &Message) -> Result<()> {
