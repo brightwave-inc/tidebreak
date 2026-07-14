@@ -91,9 +91,14 @@ idempotent across restart through an atomically published, size-bounded private
 registry. Restart revalidates and pins every connected root before making it
 available, and ambiguous publication fails closed. List/read operations
 reauthorize before releasing bounded results so completed revocation fences
-in-flight work. Bounded audit, the sidecar adapter, and Tauri consent UI are the
-next slices; until those land, existing file tools do not use this boundary. See
-[Host access and connected folders](host-access.md).
+in-flight work. Every control/read attempt writes a bounded, de-sensitized local
+audit event naming its result and authorizing grant; synced JSONL rotation bounds
+local retention without recording absolute paths or contents. Partial writes
+are rolled back before retry, interrupted tails/rotations recover on restart,
+and degraded read-tier audit does not withhold the user's existing file access.
+The sidecar adapter and Tauri consent UI are the next slices; until those land,
+existing file tools do not use this boundary. See [Host access and connected
+folders](host-access.md).
 
 **Depends on:** no OpenWave client crate.
 

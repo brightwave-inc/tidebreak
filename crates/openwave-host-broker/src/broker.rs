@@ -24,6 +24,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    audit::{
+        AuditActor, AuditError, AuditEvent, AuditOperation, AuditOutcome, AuditSink, AuditTarget,
+        JsonlAuditSink, MemoryAuditSink, UnavailableAuditSink,
+    },
     protocol::{
         ControlEnvelope, ControlRequest, ControlResponseEnvelope, ControlResult, DirectoryEntry,
         EntryKind, ErrorCode, ErrorResponse, HelloResult, OperationEnvelope, OperationRequest,
@@ -76,6 +80,8 @@ pub enum BrokerError {
     RootPolicy(#[from] RootPolicyError),
     #[error(transparent)]
     InvalidGrant(#[from] GrantError),
+    #[error(transparent)]
+    Audit(#[from] AuditError),
     #[error("host filesystem operation failed: {0}")]
     Io(#[from] io::Error),
 }
@@ -102,7 +108,16 @@ struct Shared {
     policy: RootPolicy,
     state: Mutex<State>,
     state_file: Option<StateFile>,
+    audit: Arc<dyn AuditSink>,
     failed_closed: AtomicBool,
+}
+
+impl Shared {
+    fn record_audit(&self, event: &AuditEvent) {
+        if let Err(error) = self.audit.record(event) {
+            eprintln!("openwave host broker could not persist audit event: {error}");
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -161,6 +176,78 @@ struct PreparedRegistration {
     result: RegisterRootResult,
 }
 
+struct ControlAudit {
+    actor: AuditActor,
+    operation: AuditOperation,
+    operation_id: OperationId,
+    target: AuditTarget,
+}
+
+impl ControlAudit {
+    fn from_request(request: &ControlRequest) -> Option<Self> {
+        match request {
+            ControlRequest::Hello => None,
+            ControlRequest::RegisterRoot(request) => Some(Self {
+                actor: AuditActor::Control {
+                    subject: request.subject,
+                    conversation_id: Some(request.conversation_id),
+                },
+                operation: AuditOperation::RegisterRoot,
+                operation_id: request.operation_id,
+                target: AuditTarget::selected_folder(&request.path),
+            }),
+            ControlRequest::RevokeRoot(request) => Some(Self {
+                actor: AuditActor::Control {
+                    subject: request.subject,
+                    conversation_id: None,
+                },
+                operation: AuditOperation::RevokeRoot,
+                operation_id: request.operation_id,
+                target: AuditTarget::Root {
+                    root_id: request.root_id,
+                },
+            }),
+        }
+    }
+}
+
+struct OperationAudit {
+    actor: AuditActor,
+    operation: AuditOperation,
+    capability: Capability,
+    target: AuditTarget,
+}
+
+impl OperationAudit {
+    fn from_envelope(envelope: &OperationEnvelope) -> Self {
+        let (operation, capability, target) = match &envelope.request {
+            OperationRequest::ListRoots => (
+                AuditOperation::ListRoots,
+                Capability::ListRoots,
+                AuditTarget::Subject,
+            ),
+            OperationRequest::ListDirectory(request) => (
+                AuditOperation::ListDirectory,
+                Capability::ReadFiles,
+                AuditTarget::path(request.root_id, &request.path),
+            ),
+            OperationRequest::ReadFile(request) => (
+                AuditOperation::ReadFile,
+                Capability::ReadFiles,
+                AuditTarget::path(request.root_id, &request.path),
+            ),
+        };
+        Self {
+            actor: AuditActor::Operation {
+                context: envelope.context,
+            },
+            operation,
+            capability,
+            target,
+        }
+    }
+}
+
 impl Broker {
     /// Create an empty broker using the reviewed host-root policy.
     pub fn new(policy: RootPolicy) -> Self {
@@ -169,6 +256,20 @@ impl Broker {
                 policy,
                 state: Mutex::new(State::default()),
                 state_file: None,
+                audit: Arc::new(MemoryAuditSink::new()),
+                failed_closed: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// Create an ephemeral broker with an embedder-provided audit sink.
+    pub fn with_audit_sink(policy: RootPolicy, audit: Arc<dyn AuditSink>) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                policy,
+                state: Mutex::new(State::default()),
+                state_file: None,
+                audit,
                 failed_closed: AtomicBool::new(false),
             }),
         }
@@ -180,11 +281,19 @@ impl Broker {
     pub fn open(policy: RootPolicy, data_dir: &Path) -> Result<Self, BrokerError> {
         let state_file = StateFile::open(data_dir)?;
         let state = state_file.load(&policy)?;
+        let audit: Arc<dyn AuditSink> = match JsonlAuditSink::open(data_dir) {
+            Ok(audit) => Arc::new(audit),
+            Err(error) => {
+                eprintln!("openwave host broker audit unavailable at startup: {error}");
+                Arc::new(UnavailableAuditSink)
+            }
+        };
         Ok(Self {
             shared: Arc::new(Shared {
                 policy,
                 state: Mutex::new(state),
                 state_file: Some(state_file),
+                audit,
                 failed_closed: AtomicBool::new(false),
             }),
         })
@@ -210,8 +319,42 @@ impl Controller {
     /// transport-safe response.
     pub fn handle(&self, envelope: ControlEnvelope) -> ControlResponseEnvelope {
         let request_id = envelope.request_id;
+        let audit = ControlAudit::from_request(&envelope.request);
         let result = self.execute(envelope);
+        if let Some(audit) = audit {
+            self.record_audit(request_id, audit, &result);
+        }
         response_envelope(request_id, result)
+    }
+
+    fn record_audit(
+        &self,
+        request_id: crate::RequestId,
+        metadata: ControlAudit,
+        result: &Result<ControlResult, ErrorResponse>,
+    ) {
+        let error = result.as_ref().err();
+        let operation = if error.is_some_and(|error| error.code == ErrorCode::ProtocolVersion) {
+            AuditOperation::ProtocolVersionMismatch
+        } else {
+            metadata.operation
+        };
+        let event = AuditEvent {
+            event_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            request_id,
+            operation_id: Some(metadata.operation_id),
+            actor: metadata.actor,
+            operation,
+            target: metadata.target,
+            outcome: audit_outcome(error),
+            capability: None,
+            grant_id: None,
+            error_code: error.map(|error| error.code),
+            item_count: None,
+            bytes: None,
+        };
+        self.shared.record_audit(&event);
     }
 
     fn execute(&self, envelope: ControlEnvelope) -> Result<ControlResult, ErrorResponse> {
@@ -405,30 +548,83 @@ impl Operator {
     /// response rather than exposing raw host errors.
     pub fn handle(&self, envelope: OperationEnvelope) -> OperationResponseEnvelope {
         let request_id = envelope.request_id;
-        let result = self.execute(envelope).map_err(error_response);
+        let audit = OperationAudit::from_envelope(&envelope);
+        let (result, grant_id) = self.execute(envelope);
+        let result = result.map_err(error_response);
+        self.record_audit(request_id, audit, grant_id, &result);
         response_envelope(request_id, result)
     }
 
-    fn execute(&self, envelope: OperationEnvelope) -> Result<OperationResult, BrokerError> {
-        require_version(envelope.protocol_version)?;
-        match envelope.request {
-            OperationRequest::ListRoots => {
-                let state = self.lock_state()?;
-                list_roots(&state, envelope.context)
+    fn execute(
+        &self,
+        envelope: OperationEnvelope,
+    ) -> (Result<OperationResult, BrokerError>, Option<GrantId>) {
+        let mut grant_id = None;
+        let result = (|| {
+            require_version(envelope.protocol_version)?;
+            match envelope.request {
+                OperationRequest::ListRoots => {
+                    let state = self.lock_state()?;
+                    let (result, authorized_by) = list_roots(&state, envelope.context)?;
+                    grant_id = Some(authorized_by);
+                    Ok(result)
+                }
+                OperationRequest::ListDirectory(PathRequest { root_id, path }) => {
+                    let (directory, authorized_by) =
+                        self.authorized_root(envelope.context, root_id, &path)?;
+                    grant_id = Some(authorized_by);
+                    let result = list_directory(&directory, &path)?;
+                    grant_id = Some(self.reauthorize(envelope.context, root_id, &path)?);
+                    Ok(result)
+                }
+                OperationRequest::ReadFile(PathRequest { root_id, path }) => {
+                    let (directory, authorized_by) =
+                        self.authorized_root(envelope.context, root_id, &path)?;
+                    grant_id = Some(authorized_by);
+                    let result = read_file(&directory, &path)?;
+                    grant_id = Some(self.reauthorize(envelope.context, root_id, &path)?);
+                    Ok(result)
+                }
             }
-            OperationRequest::ListDirectory(PathRequest { root_id, path }) => {
-                let directory = self.authorized_root(envelope.context, root_id, &path)?;
-                let result = list_directory(&directory, &path)?;
-                self.reauthorize(envelope.context, root_id, &path)?;
-                Ok(result)
-            }
-            OperationRequest::ReadFile(PathRequest { root_id, path }) => {
-                let directory = self.authorized_root(envelope.context, root_id, &path)?;
-                let result = read_file(&directory, &path)?;
-                self.reauthorize(envelope.context, root_id, &path)?;
-                Ok(result)
-            }
-        }
+        })();
+        (result, grant_id)
+    }
+
+    fn record_audit(
+        &self,
+        request_id: crate::RequestId,
+        metadata: OperationAudit,
+        grant_id: Option<GrantId>,
+        result: &Result<OperationResult, ErrorResponse>,
+    ) {
+        let error = result.as_ref().err();
+        let operation = if error.is_some_and(|error| error.code == ErrorCode::ProtocolVersion) {
+            AuditOperation::ProtocolVersionMismatch
+        } else {
+            metadata.operation
+        };
+        let (item_count, bytes) = match result.as_ref().ok() {
+            Some(OperationResult::ListRoots { roots }) => (Some(roots.len()), None),
+            Some(OperationResult::ListDirectory { entries }) => (Some(entries.len()), None),
+            Some(OperationResult::ReadFile(result)) => (None, Some(result.bytes)),
+            None => (None, None),
+        };
+        let event = AuditEvent {
+            event_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            request_id,
+            operation_id: None,
+            actor: metadata.actor,
+            operation,
+            target: metadata.target,
+            outcome: audit_outcome(error),
+            capability: Some(metadata.capability),
+            grant_id,
+            error_code: error.map(|error| error.code),
+            item_count,
+            bytes,
+        };
+        self.shared.record_audit(&event);
     }
 
     fn authorized_root(
@@ -436,9 +632,9 @@ impl Operator {
         context: ExecutionContext,
         root_id: RootId,
         path: &RelativePath,
-    ) -> Result<Dir, BrokerError> {
+    ) -> Result<(Dir, GrantId), BrokerError> {
         let state = self.lock_state()?;
-        authorize(
+        let grant_id = authorize(
             &state,
             context,
             Capability::ReadFiles,
@@ -447,14 +643,15 @@ impl Operator {
                 relative: path,
             },
         )?;
-        state
+        let directory = state
             .roots
             .get(&root_id)
             .ok_or(BrokerError::Denied)?
             .root
             .directory()
             .try_clone()
-            .map_err(Into::into)
+            .map_err(BrokerError::from)?;
+        Ok((directory, grant_id))
     }
 
     fn reauthorize(
@@ -462,9 +659,9 @@ impl Operator {
         context: ExecutionContext,
         root_id: RootId,
         path: &RelativePath,
-    ) -> Result<(), BrokerError> {
+    ) -> Result<GrantId, BrokerError> {
         let state = self.lock_state()?;
-        authorize(
+        let grant_id = authorize(
             &state,
             context,
             Capability::ReadFiles,
@@ -474,7 +671,7 @@ impl Operator {
             },
         )?;
         state.roots.get(&root_id).ok_or(BrokerError::Denied)?;
-        Ok(())
+        Ok(grant_id)
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, State>, BrokerError> {
@@ -591,6 +788,11 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             "broker state publication is ambiguous; restart the broker",
             false,
         ),
+        BrokerError::Audit(_) => (
+            ErrorCode::Internal,
+            "broker audit storage is unavailable",
+            false,
+        ),
     };
     ErrorResponse {
         code,
@@ -612,6 +814,14 @@ fn transient_io_kind(kind: io::ErrorKind) -> bool {
         kind,
         io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
     )
+}
+
+fn audit_outcome(error: Option<&ErrorResponse>) -> AuditOutcome {
+    match error.map(|error| error.code) {
+        None => AuditOutcome::Allowed,
+        Some(ErrorCode::Denied) => AuditOutcome::Denied,
+        Some(_) => AuditOutcome::Failed,
+    }
 }
 
 enum Claim<T> {
@@ -727,8 +937,11 @@ fn complete_revoke(
     }
 }
 
-fn list_roots(state: &State, context: ExecutionContext) -> Result<OperationResult, BrokerError> {
-    authorize(state, context, Capability::ListRoots, Resource::Subject)?;
+fn list_roots(
+    state: &State,
+    context: ExecutionContext,
+) -> Result<(OperationResult, GrantId), BrokerError> {
+    let grant_id = authorize(state, context, Capability::ListRoots, Resource::Subject)?;
     let mut roots = state
         .roots
         .iter()
@@ -752,7 +965,7 @@ fn list_roots(state: &State, context: ExecutionContext) -> Result<OperationResul
             .cmp(&right.display_name)
             .then_with(|| left.root_id.to_string().cmp(&right.root_id.to_string()))
     });
-    Ok(OperationResult::ListRoots { roots })
+    Ok((OperationResult::ListRoots { roots }, grant_id))
 }
 
 fn list_directory(root: &Dir, path: &RelativePath) -> Result<OperationResult, BrokerError> {
@@ -897,6 +1110,26 @@ fn scope_targets_root(scope: &Scope, requested: RootId) -> bool {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct CollectingAudit {
+        events: Mutex<Vec<AuditEvent>>,
+    }
+
+    impl AuditSink for CollectingAudit {
+        fn record(&self, event: &AuditEvent) -> Result<(), AuditError> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    struct FailingAudit;
+
+    impl AuditSink for FailingAudit {
+        fn record(&self, _event: &AuditEvent) -> Result<(), AuditError> {
+            Err(AuditError::Io(io::Error::other("injected audit failure")))
+        }
+    }
+
     fn test_policy(temp: &tempfile::TempDir) -> RootPolicy {
         RootPolicy::for_test(
             temp.path().join("home"),
@@ -925,6 +1158,16 @@ mod tests {
         let state_dir = temp.path().join("app-data/host-broker");
         let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
         (temp, broker, root, state_dir)
+    }
+
+    fn audited_setup() -> (tempfile::TempDir, Broker, PathBuf, Arc<CollectingAudit>) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("home/Documents");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.txt"), "hello from broker").unwrap();
+        let audit = Arc::new(CollectingAudit::default());
+        let broker = Broker::with_audit_sink(test_policy(&temp), audit.clone());
+        (temp, broker, root, audit)
     }
 
     fn register(
@@ -1056,6 +1299,98 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn broker_audits_control_reads_denials_and_authorizing_grants() {
+        let (_temp, broker, path, audit) = audited_setup();
+        let hello = broker.controller().handle(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: ControlRequest::Hello,
+        });
+        assert!(matches!(hello.response, Response::Ok(_)));
+        assert!(audit.events.lock().unwrap().is_empty());
+
+        let conversation = Uuid::new_v4();
+        let subject = GrantSubject::conversation(conversation).unwrap();
+        let registered = register(
+            &broker.controller(),
+            subject,
+            conversation,
+            path,
+            OperationId::new(),
+        );
+        let request = OperationRequest::ReadFile(PathRequest {
+            root_id: registered.root.root_id,
+            path: RelativePath::parse("note.txt").unwrap(),
+        });
+        operate(
+            &broker.operator(),
+            ExecutionContext::standalone(conversation).unwrap(),
+            request.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            operate(
+                &broker.operator(),
+                ExecutionContext::standalone(Uuid::new_v4()).unwrap(),
+                request,
+            ),
+            Err(ErrorResponse {
+                code: ErrorCode::Denied,
+                ..
+            })
+        ));
+
+        let events = audit.events.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].operation, AuditOperation::RegisterRoot);
+        assert!(matches!(
+            &events[0].target,
+            AuditTarget::SelectedFolder { display_name } if display_name.as_str() == "Documents"
+        ));
+        assert_eq!(events[1].operation, AuditOperation::ReadFile);
+        assert_eq!(events[1].outcome, AuditOutcome::Allowed);
+        assert!(events[1].grant_id.is_some());
+        assert_eq!(events[1].bytes, Some(17));
+        assert!(matches!(
+            &events[1].target,
+            AuditTarget::Path { root_id, relative }
+                if *root_id == registered.root.root_id && relative.as_str() == "note.txt"
+        ));
+        assert_eq!(events[2].outcome, AuditOutcome::Denied);
+        assert_eq!(events[2].error_code, Some(ErrorCode::Denied));
+        assert!(events[2].grant_id.is_none());
+        let encoded = serde_json::to_string(&*events).unwrap();
+        assert!(!encoded.contains("home/Documents"));
+        assert!(!encoded.contains("hello from broker"));
+    }
+
+    #[test]
+    fn read_tier_audit_failure_does_not_block_user_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("home/Documents");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.txt"), "hello from broker").unwrap();
+        let broker = Broker::with_audit_sink(test_policy(&temp), Arc::new(FailingAudit));
+        let conversation = Uuid::new_v4();
+        let registered = register(
+            &broker.controller(),
+            GrantSubject::conversation(conversation).unwrap(),
+            conversation,
+            root,
+            OperationId::new(),
+        );
+        let result = operate(
+            &broker.operator(),
+            ExecutionContext::standalone(conversation).unwrap(),
+            OperationRequest::ReadFile(PathRequest {
+                root_id: registered.root.root_id,
+                path: RelativePath::parse("note.txt").unwrap(),
+            }),
+        );
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1290,7 +1625,7 @@ mod tests {
         let context = ExecutionContext::standalone(conversation).unwrap();
         let relative = RelativePath::parse("note.txt").unwrap();
         let operator = broker.operator();
-        let directory = operator
+        let (directory, _) = operator
             .authorized_root(context, registered.root.root_id, &relative)
             .unwrap();
         let buffered = read_file(&directory, &relative).unwrap();
@@ -1437,6 +1772,36 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn unavailable_audit_does_not_block_restart_or_read_access() {
+        let (temp, broker, path, state_dir) = durable_setup();
+        let conversation = Uuid::new_v4();
+        let registered = register(
+            &broker.controller(),
+            GrantSubject::conversation(conversation).unwrap(),
+            conversation,
+            path,
+            OperationId::new(),
+        );
+        drop(broker);
+        std::fs::write(
+            state_dir.join("host-broker-audit.previous.jsonl"),
+            vec![b'x'; 8 * 1024 * 1024 + 1],
+        )
+        .unwrap();
+
+        let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+        let result = operate(
+            &broker.operator(),
+            ExecutionContext::standalone(conversation).unwrap(),
+            OperationRequest::ReadFile(PathRequest {
+                root_id: registered.root.root_id,
+                path: RelativePath::parse("note.txt").unwrap(),
+            }),
+        );
+        assert!(result.is_ok());
     }
 
     #[test]
