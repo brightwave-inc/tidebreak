@@ -97,6 +97,58 @@ impl MigrationTrait for Init {
             )
             .await?;
 
+        manager
+            .create_table(
+                Table::create()
+                    .table(TurnClaim::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(TurnClaim::Token)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(TurnClaim::TurnId).uuid().not_null())
+                    .col(ColumnDef::new(TurnClaim::AttemptCount).integer().not_null())
+                    .col(
+                        ColumnDef::new(TurnClaim::ClaimedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnClaim::LeaseExpiresAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .check(Expr::col(TurnClaim::AttemptCount).gte(1))
+                    .check(Expr::col(TurnClaim::LeaseExpiresAt).gt(Expr::col(TurnClaim::ClaimedAt)))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_turn_claim_identity")
+                    .table(TurnClaim::Table)
+                    .col(TurnClaim::Token)
+                    .col(TurnClaim::TurnId)
+                    .col(TurnClaim::AttemptCount)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_turn_claim_attempt")
+                    .table(TurnClaim::Table)
+                    .col(TurnClaim::TurnId)
+                    .col(TurnClaim::AttemptCount)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+
         let valid_turn_status = Expr::col(TurnRun::Status).is_in([
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
@@ -251,6 +303,19 @@ impl MigrationTrait for Init {
                             .to_col(Message::TurnId)
                             .on_delete(ForeignKeyAction::Restrict),
                     )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_run_live_claim")
+                            .from_tbl(TurnRun::Table)
+                            .from_col(TurnRun::LeaseToken)
+                            .from_col(TurnRun::Id)
+                            .from_col(TurnRun::AttemptCount)
+                            .to_tbl(TurnClaim::Table)
+                            .to_col(TurnClaim::Token)
+                            .to_col(TurnClaim::TurnId)
+                            .to_col(TurnClaim::AttemptCount)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
                     .check(
                         Func::char_length(Expr::col(TurnRun::Model))
                             .between(1, crate::model::TurnRun::MAX_MODEL_LEN as i32),
@@ -330,6 +395,16 @@ impl MigrationTrait for Init {
         manager
             .create_index(
                 Index::create()
+                    .name("idx_turn_run_lease_token")
+                    .table(TurnRun::Table)
+                    .col(TurnRun::LeaseToken)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
                     .name("idx_turn_run_stale_lease")
                     .table(TurnRun::Table)
                     .col(TurnRun::Status)
@@ -371,6 +446,9 @@ impl MigrationTrait for Init {
             .await?;
         manager
             .drop_table(Table::drop().table(Message::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(TurnClaim::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(Chat::Table).to_owned())
@@ -1372,6 +1450,16 @@ enum TurnRun {
     LastErrorDetail,
     CreatedAt,
     UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum TurnClaim {
+    Table,
+    Token,
+    TurnId,
+    AttemptCount,
+    ClaimedAt,
+    LeaseExpiresAt,
 }
 
 #[derive(DeriveIden)]

@@ -569,6 +569,38 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Claim the oldest due turn under a fresh exact lease.
+    ///
+    /// `lease_token` is the caller's idempotency identity: retrying it while its
+    /// lease remains live returns the same running turn. Callers must retain it
+    /// across an ambiguous commit and use a fresh token for a new claim attempt.
+    /// A successful claim increments `attempt_count` and moves the turn to
+    /// `running`. Expired work is reclaimed only while another attempt is
+    /// permitted; an expired final attempt becomes terminally failed and the
+    /// scan continues. `lease_expires_at` must be after `now`.
+    async fn claim_turn_run(
+        &self,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+        _lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<TurnRun>> {
+        turn_storage_unavailable()
+    }
+
+    /// Extend one exact live turn lease monotonically.
+    ///
+    /// Returns `false` if the turn is not running, the token differs, the lease
+    /// already expired, or the proposed expiry does not extend the current one.
+    async fn heartbeat_turn_run(
+        &self,
+        _id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+        _lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        turn_storage_unavailable()
+    }
+
     /// Append a message to its chat.
     async fn append_message(&self, message: &Message) -> Result<()>;
 
