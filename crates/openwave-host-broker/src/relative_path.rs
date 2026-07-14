@@ -76,7 +76,6 @@ impl RelativePath {
         self.0 == "."
     }
 
-    #[cfg(test)]
     pub(crate) fn segments(&self) -> impl Iterator<Item = &str> {
         self.0.split('/').filter(|segment| *segment != ".")
     }

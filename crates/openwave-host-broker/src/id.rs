@@ -94,6 +94,10 @@ uuid_id!(
     OperationId,
     "Stable identity for an idempotent broker operation."
 );
+uuid_id!(
+    RequestId,
+    "Correlation identity for one broker request and response."
+);
 
 /// Product object to which standing host consent belongs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -202,7 +206,6 @@ impl ExecutionContext {
         self.project_id
     }
 
-    #[cfg(test)]
     pub(crate) fn grant_subject_matches(self, subject: GrantSubject) -> bool {
         match subject.kind() {
             SubjectKind::Project => self.project_id == Some(subject.id()),

@@ -63,7 +63,6 @@ pub struct ConsentRecord {
 }
 
 impl ConsentRecord {
-    #[cfg(test)]
     pub(crate) const fn new(method: ConsentMethod, granted_at: DateTime<Utc>) -> Self {
         Self { method, granted_at }
     }
