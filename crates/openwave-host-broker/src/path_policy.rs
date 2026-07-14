@@ -64,12 +64,10 @@ impl std::fmt::Debug for ValidatedRoot {
 }
 
 impl ValidatedRoot {
-    #[cfg(test)]
     pub(crate) fn canonical_path(&self) -> &Path {
         &self._canonical_path
     }
 
-    #[cfg(test)]
     pub(crate) fn directory(&self) -> &Dir {
         &self._directory
     }
@@ -205,7 +203,7 @@ impl RootPolicy {
     }
 
     #[cfg(test)]
-    fn for_test(
+    pub(crate) fn for_test(
         home: PathBuf,
         sensitive: Vec<PathBuf>,
         user_containers: Vec<PathBuf>,
