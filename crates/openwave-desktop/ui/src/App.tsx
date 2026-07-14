@@ -9,6 +9,13 @@ import {
   type ServerInfo,
 } from "./api";
 import { resolveServerInfo } from "./boot";
+import {
+  connectFolder,
+  disconnectFolder,
+  hasNativeHost,
+  listConnectedFolders,
+  type ConnectedFolder,
+} from "./host";
 import { Logomark } from "./Logomark";
 
 type Msg =
@@ -40,7 +47,9 @@ export default function App() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  const [settingsPanel, setSettingsPanel] = useState<
+    "providers" | "folders" | null
+  >(null);
   const [status, setStatus] = useState("starting…");
   const socketRef = useRef<WebSocket | null>(null);
   const lastSeqRef = useRef(0);
@@ -294,17 +303,34 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <span className="status">{status}</span>
+          {hasNativeHost() && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() =>
+                setSettingsPanel((panel) =>
+                  panel === "folders" ? null : "folders",
+                )
+              }
+            >
+              {settingsPanel === "folders" ? "Hide folders" : "Folders"}
+            </button>
+          )}
           <button
             type="button"
             className="btn"
-            onClick={() => setShowSettings((v) => !v)}
+            onClick={() =>
+              setSettingsPanel((panel) =>
+                panel === "providers" ? null : "providers",
+              )
+            }
           >
-            {showSettings ? "Hide providers" : "Providers"}
+            {settingsPanel === "providers" ? "Hide providers" : "Providers"}
           </button>
         </div>
       </header>
 
-      <div className={`main${showSettings ? " with-settings" : ""}`}>
+      <div className={`main${settingsPanel ? " with-settings" : ""}`}>
         <section className="chat-pane">
           <div className="chat-meta">
             <label>
@@ -417,13 +443,14 @@ export default function App() {
           </form>
         </section>
 
-        {showSettings && (
+        {settingsPanel === "providers" && (
           <ProvidersPanel
             providers={providers}
             client={client}
             onChanged={() => void refreshCatalog()}
           />
         )}
+        {settingsPanel === "folders" && <FoldersPanel chat={chat} />}
       </div>
     </div>
   );
@@ -433,6 +460,94 @@ function shortPath(path: string): string {
   const parts = path.split(/[/\\]/).filter(Boolean);
   if (parts.length <= 2) return path;
   return `…/${parts.slice(-2).join("/")}`;
+}
+
+function FoldersPanel({ chat }: { chat: Chat }) {
+  const [folders, setFolders] = useState<ConnectedFolder[]>([]);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const scopeLabel = chat.project_id ? "project" : "chat";
+
+  async function refresh() {
+    setError(null);
+    try {
+      setFolders(await listConnectedFolders(chat));
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, [chat.id, chat.project_id]);
+
+  async function addFolder() {
+    setWorking(true);
+    setError(null);
+    try {
+      const connected = await connectFolder(chat);
+      if (connected) await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function removeFolder(rootId: string) {
+    setWorking(true);
+    setError(null);
+    try {
+      await disconnectFolder(chat, rootId);
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <aside className="settings">
+      <h2>Connected folders</h2>
+      <p>
+        OpenWave can read only folders you choose for this {scopeLabel}. Folder
+        locations stay with the native host.
+      </p>
+      <button
+        type="button"
+        className="btn btn-primary"
+        disabled={working}
+        onClick={() => void addFolder()}
+      >
+        Choose folder…
+      </button>
+      <div className="folder-list">
+        {folders.length === 0 && !error && (
+          <div className="status">
+            No folders connected to this {scopeLabel}.
+          </div>
+        )}
+        {folders.map((folder) => (
+          <div className="folder" key={folder.rootId}>
+            <div>
+              <strong>{folder.displayName}</strong>
+              <div className="status">read access</div>
+            </div>
+            <button
+              type="button"
+              className="btn"
+              disabled={working}
+              onClick={() => void removeFolder(folder.rootId)}
+            >
+              Disconnect from {scopeLabel}
+            </button>
+          </div>
+        ))}
+      </div>
+      {error && <div className="folder-error">{error}</div>}
+    </aside>
+  );
 }
 
 function ProvidersPanel({

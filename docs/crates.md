@@ -98,9 +98,10 @@ are rolled back before retry, interrupted tails/rotations recover on restart,
 and degraded read-tier audit does not withhold the user's existing file access.
 A runnable sidecar exposes the same core over bounded, strict JSONL stdio,
 resynchronizes after oversized input, and protects its own app-data directory
-from ever becoming a connected root. The Tauri client and consent UI are the
-next slices; until those land, existing file tools do not use this boundary. See
-[Host access and connected folders](host-access.md).
+from ever becoming a connected root. The Tauri host owns its lifecycle and
+native folder consent behind narrow pick/list/revoke commands; the renderer sees
+only opaque summaries. Existing agent file tools do not use this boundary yet.
+See [Host access and connected folders](host-access.md).
 
 **Depends on:** no OpenWave client crate.
 
@@ -134,7 +135,7 @@ primary way most people will run OpenWave. See
 [`crates/openwave-desktop/README.md`](../crates/openwave-desktop/README.md) for
 local run instructions.
 
-**Depends on:** `openwave-core`, `openwave-server` (+ Tauri).
+**Depends on:** `openwave-core`, `openwave-host-broker`, `openwave-server` (+ Tauri).
 
 ## `openwave-server` — local API and workers 🟢
 

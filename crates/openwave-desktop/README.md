@@ -3,6 +3,8 @@
 Tauri shell for OpenWave. On launch it binds `openwave-server` to an ephemeral
 loopback port, mints a per-launch bearer token, and hosts the React chat UI in a
 webview. The UI talks to that local API over HTTP + WebSocket (subprotocol auth).
+The native host also owns the folder picker and a private host-broker sidecar;
+the renderer receives opaque folder IDs and display names, never absolute paths.
 
 ## Prerequisites
 
@@ -23,7 +25,15 @@ cargo tauri dev
 
 That starts Vite on `http://localhost:1420` and opens the OpenWave window. The
 Rust host boots the in-process API; the webview calls `server_info` to learn the
-base URL and token.
+base URL and token. The Tauri pre-dev command builds and stages the broker
+sidecar for the current target automatically.
+
+Create an installable bundle. The before-build hook compiles the target-specific
+broker and the default Tauri configuration includes it automatically:
+
+```sh
+cargo tauri build
+```
 
 ## Run locally (browser UI against `openwave serve`)
 
@@ -50,8 +60,10 @@ pnpm --dir ui dev
 
 | Path | Role |
 | --- | --- |
-| `src/` | Tauri host (`server_info`, private app-data/scratch, boot server) |
+| `src/` | Tauri host (server boot, sidecar lifecycle, native folder consent) |
 | `ui/` | React + Vite frontend |
-| `tauri.conf.json` | Window, icons, beforeDev/beforeBuild commands |
+| `scripts/` | Cross-platform sidecar staging for Tauri dev/build |
+| `binaries/` | Generated target-specific sidecar (gitignored) |
+| `tauri.conf.json` | Window, CSP, sidecar bundle, and build commands |
 | `icons/` | App icons (generated from the brand mark) |
 | `capabilities/` | Tauri ACL (loopback remote URLs for the local API) |

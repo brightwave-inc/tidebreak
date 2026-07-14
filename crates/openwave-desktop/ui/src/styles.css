@@ -244,6 +244,32 @@ button {
   text-transform: capitalize;
 }
 
+.folder-list {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 1rem;
+}
+
+.folder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.7rem;
+}
+
+.folder strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.folder-error {
+  margin-top: 0.75rem;
+  color: var(--danger);
+  font-size: 0.8rem;
+}
+
 .row {
   display: flex;
   flex-wrap: wrap;

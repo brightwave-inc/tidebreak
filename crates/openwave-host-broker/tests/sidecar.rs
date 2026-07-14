@@ -7,7 +7,7 @@ use std::{
 use openwave_host_broker::{
     ConsentMethod, ControlEnvelope, ControlRequest, ExecutionContext, GrantSubject,
     OperationEnvelope, OperationId, OperationRequest, RegisterRootRequest, RequestId,
-    PROTOCOL_VERSION,
+    RevokeRootRequest, RootId, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use tempfile::TempDir;
@@ -138,6 +138,36 @@ fn stdio_sidecar_persists_authority_and_audit_across_restart() {
         private_response["envelope"]["response"]["payload"]["code"],
         "invalid_root"
     );
+    let revoke = exchange(
+        &mut input,
+        &mut output,
+        "control",
+        &ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(),
+            request: ControlRequest::RevokeRoot(RevokeRootRequest {
+                operation_id: OperationId::new(),
+                subject,
+                root_id: root_id.parse::<RootId>().unwrap(),
+            }),
+        },
+    );
+    assert_eq!(revoke["envelope"]["response"]["payload"]["revoked"], true);
+    let after_revoke = exchange(
+        &mut input,
+        &mut output,
+        "operation",
+        &OperationEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(),
+            context: ExecutionContext::standalone(conversation_id).unwrap(),
+            request: OperationRequest::ListRoots,
+        },
+    );
+    assert_eq!(
+        after_revoke["envelope"]["response"]["payload"]["roots"],
+        serde_json::json!([])
+    );
     drop(input);
     assert!(child.wait().unwrap().success());
 
@@ -145,6 +175,7 @@ fn stdio_sidecar_persists_authority_and_audit_across_restart() {
         std::fs::read_to_string(temp.path().join("app-data/host-broker-audit.jsonl")).unwrap();
     assert!(audit.contains("register_root"));
     assert!(audit.contains("list_roots"));
+    assert!(audit.contains("revoke_root"));
     assert!(!audit.contains(root.to_str().unwrap()));
     assert!(!audit.contains("sidecar read"));
 }

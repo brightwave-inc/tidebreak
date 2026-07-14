@@ -9,42 +9,47 @@ use crate::{
     RequestId,
 };
 
-const MAX_REQUEST_BYTES: usize = 128 * 1024;
-const MAX_RESPONSE_BYTES: usize = 512 * 1024;
+pub const MAX_REQUEST_BYTES: usize = 128 * 1024;
+pub const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 
 /// One strictly typed request on the desktop-owned sidecar pipe.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(
     tag = "channel",
     content = "envelope",
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-enum SidecarRequest {
+pub enum SidecarRequest {
     Control(ControlEnvelope),
     Operation(OperationEnvelope),
 }
 
 /// One response for one non-empty input line.
-#[derive(Debug, Serialize)]
-#[serde(tag = "channel", content = "envelope", rename_all = "snake_case")]
-enum SidecarResponse {
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "channel",
+    content = "envelope",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum SidecarResponse {
     Control(ControlResponseEnvelope),
     Operation(OperationResponseEnvelope),
     TransportError(TransportError),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TransportError {
-    request_id: Option<RequestId>,
-    code: TransportErrorCode,
-    message: &'static str,
+pub struct TransportError {
+    pub request_id: Option<RequestId>,
+    pub code: TransportErrorCode,
+    pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TransportErrorCode {
+pub enum TransportErrorCode {
     MalformedRequest,
     RequestTooLarge,
     ResponseTooLarge,
@@ -60,7 +65,7 @@ pub fn serve(broker: &Broker, mut input: impl BufRead, mut output: impl Write) -
             BoundedLine::TooLarge => SidecarResponse::TransportError(TransportError {
                 request_id: None,
                 code: TransportErrorCode::RequestTooLarge,
-                message: "sidecar request exceeded its size limit",
+                message: "sidecar request exceeded its size limit".to_owned(),
             }),
         };
         let mut encoded = serde_json::to_vec(&response).map_err(io::Error::other)?;
@@ -68,7 +73,7 @@ pub fn serve(broker: &Broker, mut input: impl BufRead, mut output: impl Write) -
             encoded = serde_json::to_vec(&SidecarResponse::TransportError(TransportError {
                 request_id: response_request_id(&response),
                 code: TransportErrorCode::ResponseTooLarge,
-                message: "sidecar response exceeded its size limit",
+                message: "sidecar response exceeded its size limit".to_owned(),
             }))
             .map_err(io::Error::other)?;
         }
@@ -90,7 +95,7 @@ fn dispatch(broker: &Broker, line: &[u8]) -> SidecarResponse {
         Err(_) => SidecarResponse::TransportError(TransportError {
             request_id: None,
             code: TransportErrorCode::MalformedRequest,
-            message: "sidecar request was malformed",
+            message: "sidecar request was malformed".to_owned(),
         }),
     }
 }

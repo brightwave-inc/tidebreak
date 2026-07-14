@@ -168,6 +168,7 @@ async fn healthz() -> &'static str {
 pub struct Server {
     local_addr: SocketAddr,
     token: Arc<str>,
+    store: Arc<dyn Store>,
     listener: TcpListener,
     router: Router,
     _document_auditor: AbortTask,
@@ -227,6 +228,14 @@ impl Server {
     /// The bearer token clients must present.
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// The authoritative durable store used by this server instance.
+    ///
+    /// Native embedders use this to resolve renderer-supplied entity IDs back
+    /// to server-owned records before granting host capabilities.
+    pub fn store(&self) -> Arc<dyn Store> {
+        self.store.clone()
     }
 
     /// Run the accept loop until the process exits.
@@ -306,6 +315,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         state.agent_config.clone(),
         turn_worker::TurnWorkerConfig::default(),
     );
+    let server_store = state.store.clone();
     let router = app(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -324,6 +334,7 @@ pub async fn bind(config: Config) -> Result<Server> {
     Ok(Server {
         local_addr,
         token,
+        store: server_store,
         listener,
         router,
         _document_auditor: AbortTask(document_auditor),
