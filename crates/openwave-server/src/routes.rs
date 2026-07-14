@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
-    Agent, ApprovalDecision, CallId, Chat, ChatId, Project, ProjectId, SecretProvider,
-    SequencedEvent, Store,
+    AcceptTurnOutcome, ApprovalDecision, CallId, Chat, ChatId, Project, ProjectId,
+    RequestTurnCancellationOutcome, SecretProvider, SequencedEvent, Store, TurnId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -403,72 +403,107 @@ pub async fn get_chat(
 /// Body of `POST /chats/{id}/messages`.
 #[derive(Debug, Deserialize)]
 pub struct PostMessage {
+    /// Stable client-generated identity for acceptance and ambiguous retries.
+    pub turn_id: TurnId,
     /// The user's input for this turn.
     pub content: String,
 }
 
-/// `POST /chats/{id}/messages` — submit a message and start a turn.
+/// `POST /chats/{id}/messages` — durably accept a message and queue its turn.
 ///
-/// Returns `202 Accepted` immediately; the turn runs in the background and its
-/// events are journaled as they emit (a client watches them over the event
-/// stream). `404` if the chat doesn't exist, `409` if a turn is already running
-/// for it (one turn per chat at a time).
+/// Returns `202 Accepted` after the input and queued turn commit; a supervised
+/// worker claims it asynchronously and journals events for replay/live delivery.
+/// Repeating an exact `turn_id` and payload is idempotent. `404` if the chat
+/// doesn't exist, `409` if the identity names different input or another turn
+/// already owns the chat's single durable live slot.
 pub async fn post_message(
     State(state): State<AppState>,
     Path(id): Path<ChatId>,
     Json(body): Json<PostMessage>,
 ) -> Result<StatusCode, ServerError> {
+    if body.turn_id.0.is_nil() {
+        return Err(ServerError::bad_request("turn_id must not be nil"));
+    }
+    if body.content.trim().is_empty() || body.content.contains('\0') {
+        return Err(ServerError::bad_request(
+            "message content must be non-empty and contain no NUL characters",
+        ));
+    }
     let chat = state
         .store
         .get_chat(id)
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
 
-    // Claim the chat's single turn slot up front; a concurrent turn is refused.
-    let active = state.active_turns.try_acquire(id).ok_or_else(|| {
-        ServerError::conflict(format!("chat {id} already has a turn in progress"))
-    })?;
-
-    // Model resolution order: the chat's own selection wins, then the global
-    // default setting (PUT /settings), then the boot default in agent_config.
-    // Short-circuit: only read the setting when the chat has no model of its own,
-    // so a chat with a model doesn't pay (or fail on) the settings lookup.
-    let mut agent_config = state.agent_config.clone();
-    let model = match chat.model.clone() {
-        Some(model) => Some(model),
-        None => read_model(&*state.store).await?,
+    // An ambiguous HTTP retry names only its turn and content, not the resolved
+    // model snapshot. Reuse the first acceptance's immutable model so a settings
+    // change between attempts cannot turn the same request into a conflict.
+    let model = if let Some(existing) = state.store.get_turn_run(body.turn_id).await? {
+        if existing.chat_id != id {
+            return Err(ServerError::conflict(format!(
+                "turn {} was already accepted by another chat",
+                body.turn_id
+            )));
+        }
+        existing.model
+    } else {
+        // New-turn resolution order: chat override, global default, boot default.
+        match chat.model.clone() {
+            Some(model) => model,
+            None => read_model(&*state.store)
+                .await?
+                .unwrap_or_else(|| state.agent_config.model.clone()),
+        }
     };
-    if let Some(model) = model {
-        agent_config.model = model;
+    match state
+        .store
+        .accept_turn(body.turn_id, id, &model, &body.content)
+        .await?
+    {
+        AcceptTurnOutcome::Accepted(_) | AcceptTurnOutcome::Existing(_) => {
+            state.turn_job_wake.notify_one();
+            Ok(StatusCode::ACCEPTED)
+        }
+        AcceptTurnOutcome::IdentityConflict => {
+            // Concurrent identical requests can resolve different mutable model
+            // defaults before either commits. Retry against the winner's immutable
+            // model so the wire identity remains `(chat, turn_id, content)`.
+            let Some(existing) = state.store.get_turn_run(body.turn_id).await? else {
+                return Err(ServerError::conflict(format!(
+                    "turn {} was accepted with conflicting request data",
+                    body.turn_id
+                )));
+            };
+            if existing.chat_id == id
+                && matches!(
+                    state
+                        .store
+                        .accept_turn(body.turn_id, id, &existing.model, &body.content)
+                        .await?,
+                    AcceptTurnOutcome::Existing(_)
+                )
+            {
+                state.turn_job_wake.notify_one();
+                Ok(StatusCode::ACCEPTED)
+            } else {
+                Err(ServerError::conflict(format!(
+                    "turn {} was already accepted with different input",
+                    body.turn_id
+                )))
+            }
+        }
+        AcceptTurnOutcome::ChatBusy(active) => Err(ServerError::conflict(format!(
+            "chat {id} already has active turn {}",
+            active.id
+        ))),
     }
-    // Resolve the provider from currently-configured providers, so a key set via
-    // PUT /providers/{kind} (or the legacy /settings/api-key) takes effect on
-    // this turn. The composite router selects the adapter from the model name.
-    let provider = state.resolver.resolve().await;
-    let agent = Agent::new(
-        provider,
-        state.tools.clone(),
-        state.store.clone(),
-        agent_config,
-    )
-    .with_approvals(state.approvals.clone())
-    // Watch the slot's token so `POST /chats/{id}/cancel` can stop this turn.
-    .with_cancel(active.cancel_token())
-    // Drain the slot's inbox so `POST /chats/{id}/steer` can inject mid-turn.
-    .with_steer(active.steer_inbox());
-    let store = state.store.clone();
-    let events = state.events.clone();
-    tokio::spawn(async move {
-        // The hub holds the slot until the turn and its journal writes finish.
-        crate::hub::drive_and_journal(agent, chat, body.content, store, events, active).await;
-    });
-
-    Ok(StatusCode::ACCEPTED)
 }
 
 /// Body of `POST /chats/{id}/steer`.
 #[derive(Debug, Deserialize)]
 pub struct SteerBody {
+    /// Exact durable turn to steer.
+    pub turn_id: TurnId,
     /// User text to inject into the running turn.
     pub content: String,
     /// When true, preempt the provider stream immediately; otherwise the message
@@ -494,7 +529,10 @@ pub async fn post_steer(
     if state.store.get_chat(id).await?.is_none() {
         return Err(ServerError::not_found(format!("chat {id} not found")));
     }
-    if state.active_turns.steer(id, body.content, body.interrupt) {
+    if state
+        .active_turns
+        .steer(id, body.turn_id, body.content, body.interrupt)
+    {
         Ok(StatusCode::ACCEPTED)
     } else {
         Err(ServerError::conflict(format!(
@@ -503,29 +541,77 @@ pub async fn post_steer(
     }
 }
 
-/// `POST /chats/{id}/cancel` — stop the turn currently running for a chat.
+/// `POST /chats/{id}/cancel` — durably cancel one exact turn for a chat.
 ///
-/// `202 Accepted` once the running turn has been signalled to stop; it winds down
-/// asynchronously and emits `TurnCancelled` as its terminal event (watch the
-/// event stream for it). `404` if the chat doesn't exist, `409` if no turn is
-/// accepting cancel (idle, or the agent has finished and only the journal is
-/// still draining). Idempotent while the agent is still running — a repeat
-/// cancel simply re-trips the already-tripped token.
+/// Queued work becomes terminal atomically; running work enters `cancelling`
+/// until its exact worker acknowledges quiescence. `202 Accepted` is idempotent
+/// for cancelling/cancelled retries. `404` if the chat doesn't exist, `409` if
+/// the turn does not belong to the chat or can no longer accept cancellation.
+#[derive(Debug, Deserialize)]
+pub struct CancelBody {
+    /// Exact durable turn to cancel.
+    pub turn_id: TurnId,
+}
+
 pub async fn post_cancel(
     State(state): State<AppState>,
     Path(id): Path<ChatId>,
+    Json(body): Json<CancelBody>,
 ) -> Result<StatusCode, ServerError> {
     // Distinguish "unknown chat" (404) from "known chat, nothing running" (409).
     if state.store.get_chat(id).await?.is_none() {
         return Err(ServerError::not_found(format!("chat {id} not found")));
     }
-    if state.active_turns.cancel(id) {
-        Ok(StatusCode::ACCEPTED)
-    } else {
-        Err(ServerError::conflict(format!(
-            "chat {id} has no turn in progress"
-        )))
+    if !state
+        .store
+        .get_turn_run(body.turn_id)
+        .await?
+        .is_some_and(|turn| turn.chat_id == id)
+    {
+        return Err(ServerError::conflict(format!(
+            "turn {} does not belong to chat {id}",
+            body.turn_id
+        )));
     }
+    let resolution = loop {
+        if let Some(resolution) = state
+            .store
+            .request_turn_cancellation_and_append_event(body.turn_id, Utc::now())
+            .await?
+        {
+            break resolution;
+        }
+        // A heartbeat can advance `updated_at` after this request captures its
+        // operational timestamp. Retry the same empty command with fresh time;
+        // the store serializes it against the heartbeat and terminal decisions.
+        if !state
+            .store
+            .get_turn_run(body.turn_id)
+            .await?
+            .is_some_and(|turn| turn.chat_id == id)
+        {
+            return Err(ServerError::conflict(format!(
+                "turn {} is not cancellable",
+                body.turn_id
+            )));
+        }
+        tokio::task::yield_now().await;
+    };
+    if matches!(
+        resolution.outcome,
+        RequestTurnCancellationOutcome::AlreadyTerminal(_)
+    ) {
+        return Err(ServerError::conflict(format!(
+            "turn {} already finished before cancellation",
+            body.turn_id
+        )));
+    }
+    if let Some(event) = resolution.terminal_event {
+        let _ = state.events.sender(id).send(event);
+    }
+    state.active_turns.cancel(id, body.turn_id);
+    state.turn_job_wake.notify_one();
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// Body of `POST /chats/{id}/approvals/{call_id}`.

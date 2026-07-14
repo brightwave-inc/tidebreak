@@ -228,11 +228,12 @@ export default function App() {
   async function onSend() {
     if (!client || !chat || !draft.trim() || busy) return;
     const content = draft.trim();
+    const turnId = crypto.randomUUID();
     setDraft("");
     setMessages((prev) => [...prev, { id: nextId(), role: "user", text: content }]);
     setBusy(true);
     try {
-      await client.postMessage(chat.id, content);
+      await client.postMessage(chat.id, turnId, content);
     } catch (err) {
       setBusy(false);
       setMessages((prev) => [

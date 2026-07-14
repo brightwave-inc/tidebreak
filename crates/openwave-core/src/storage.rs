@@ -632,7 +632,7 @@ pub trait Store: Send + Sync {
 
     /// Atomically persist a user's initial message and queue its exact turn.
     ///
-    /// `id` is the caller-visible idempotency identity. Repeating the same id,
+    /// `id` is a non-nil caller-visible idempotency identity. Repeating the same id,
     /// chat, model, and byte-exact content returns [`AcceptTurnOutcome::Existing`]
     /// without another message or turn. Reusing an id with a different chat,
     /// model, or byte-exact content returns
@@ -859,6 +859,22 @@ pub trait Store: Send + Sync {
         _now: chrono::DateTime<chrono::Utc>,
         _event: &AgentEvent,
     ) -> Result<Option<i64>> {
+        turn_storage_unavailable()
+    }
+
+    /// Recover a terminal event only when it was committed by this exact lease
+    /// with the byte-equivalent payload.
+    ///
+    /// This distinguishes an ambiguous response after this worker's commit from
+    /// a claim scanner or competing terminal resolution that reached the same
+    /// status with a different immutable receipt. Returns `None` for any
+    /// different terminal identity.
+    async fn recover_exact_turn_terminal_event(
+        &self,
+        _turn_id: TurnId,
+        _lease_token: uuid::Uuid,
+        _event: &AgentEvent,
+    ) -> Result<Option<SequencedEvent>> {
         turn_storage_unavailable()
     }
 

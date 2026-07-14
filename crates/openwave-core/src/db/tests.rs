@@ -5020,6 +5020,10 @@ async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
         .await
         .is_err());
     assert!(store
+        .accept_turn(TurnId(uuid::Uuid::nil()), other.id, "gpt-5", "hello")
+        .await
+        .is_err());
+    assert!(store
         .accept_turn(TurnId::new(), other.id, "", "hello")
         .await
         .is_err());

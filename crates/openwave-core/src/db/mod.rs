@@ -1858,6 +1858,15 @@ impl Store for DbStore {
         .await
     }
 
+    async fn recover_exact_turn_terminal_event(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        event: &AgentEvent,
+    ) -> Result<Option<SequencedEvent>> {
+        ops::turn::recover_exact_terminal_event(self, turn_id, lease_token, event).await
+    }
+
     async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
         ops::conversation::list_events(self, chat_id, after).await
     }

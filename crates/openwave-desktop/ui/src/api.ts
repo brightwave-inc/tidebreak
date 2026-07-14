@@ -137,30 +137,32 @@ export class ApiClient {
     });
   }
 
-  postMessage(chatId: string, content: string): Promise<void> {
+  postMessage(chatId: string, turnId: string, content: string): Promise<void> {
     return this.json(`/chats/${chatId}/messages`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ turn_id: turnId, content }),
     });
   }
 
   steer(
     chatId: string,
+    turnId: string,
     content: string,
     interrupt = false,
   ): Promise<void> {
     return this.json(`/chats/${chatId}/steer`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ content, interrupt }),
+      body: JSON.stringify({ turn_id: turnId, content, interrupt }),
     });
   }
 
-  cancel(chatId: string): Promise<void> {
+  cancel(chatId: string, turnId: string): Promise<void> {
     return this.json(`/chats/${chatId}/cancel`, {
       method: "POST",
-      headers: this.headers(),
+      headers: this.headers(true),
+      body: JSON.stringify({ turn_id: turnId }),
     });
   }
 
