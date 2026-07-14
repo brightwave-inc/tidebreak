@@ -108,6 +108,10 @@ id_type!(
     TurnId
 );
 id_type!(
+    /// Identifies one idempotent steering instruction for a live turn.
+    TurnSteerId
+);
+id_type!(
     /// Identifies one step within a turn: a single LLM call and its tools.
     StepId
 );

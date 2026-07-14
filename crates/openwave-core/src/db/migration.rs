@@ -2,7 +2,7 @@ use sea_orm_migration::prelude::*;
 
 use super::{
     BlobRetirementStatus, DocumentJobKind, DocumentJobStatus, DocumentProcessingStatus,
-    TurnRunStatus,
+    TurnRunStatus, TurnSteerStatus,
 };
 
 pub struct Migrator;
@@ -588,10 +588,139 @@ impl MigrationTrait for Init {
             )
             .await?;
 
+        let pending_steer = Expr::col(TurnSteer::Status)
+            .eq(TurnSteerStatus::Pending.as_str())
+            .and(Expr::col(TurnSteer::AppliedLeaseToken).is_null())
+            .and(Expr::col(TurnSteer::MessageId).is_null())
+            .and(Expr::col(TurnSteer::ResolvedAt).is_null());
+        let applied_steer = Expr::col(TurnSteer::Status)
+            .eq(TurnSteerStatus::Applied.as_str())
+            .and(Expr::col(TurnSteer::AppliedLeaseToken).is_not_null())
+            .and(Expr::col(TurnSteer::MessageId).is_not_null())
+            .and(Expr::col(TurnSteer::ResolvedAt).is_not_null());
+        let rejected_steer = Expr::col(TurnSteer::Status)
+            .eq(TurnSteerStatus::Rejected.as_str())
+            .and(Expr::col(TurnSteer::AppliedLeaseToken).is_null())
+            .and(Expr::col(TurnSteer::MessageId).is_null())
+            .and(Expr::col(TurnSteer::ResolvedAt).is_not_null());
+        manager
+            .create_table(
+                Table::create()
+                    .table(TurnSteer::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(TurnSteer::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(TurnSteer::TurnId).uuid().not_null())
+                    .col(ColumnDef::new(TurnSteer::ChatId).uuid().not_null())
+                    .col(ColumnDef::new(TurnSteer::Content).text().not_null())
+                    .col(
+                        ColumnDef::new(TurnSteer::Interrupt)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(TurnSteer::Status)
+                            .string_len(16)
+                            .not_null()
+                            .default(TurnSteerStatus::Pending.as_str()),
+                    )
+                    .col(ColumnDef::new(TurnSteer::AppliedLeaseToken).uuid())
+                    .col(ColumnDef::new(TurnSteer::MessageId).uuid())
+                    .col(
+                        ColumnDef::new(TurnSteer::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(TurnSteer::ResolvedAt).timestamp_with_time_zone())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_steer_turn")
+                            .from_tbl(TurnSteer::Table)
+                            .from_col(TurnSteer::ChatId)
+                            .from_col(TurnSteer::TurnId)
+                            .to_tbl(TurnRun::Table)
+                            .to_col(TurnRun::ChatId)
+                            .to_col(TurnRun::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_steer_claim")
+                            .from_tbl(TurnSteer::Table)
+                            .from_col(TurnSteer::AppliedLeaseToken)
+                            .from_col(TurnSteer::TurnId)
+                            .to_tbl(TurnClaim::Table)
+                            .to_col(TurnClaim::Token)
+                            .to_col(TurnClaim::TurnId)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_steer_message")
+                            .from_tbl(TurnSteer::Table)
+                            .from_col(TurnSteer::MessageId)
+                            .from_col(TurnSteer::ChatId)
+                            .from_col(TurnSteer::TurnId)
+                            .to_tbl(Message::Table)
+                            .to_col(Message::Id)
+                            .to_col(Message::ChatId)
+                            .to_col(Message::TurnId)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(
+                        Func::char_length(Expr::col(TurnSteer::Content))
+                            .between(1, crate::model::TurnSteer::MAX_CONTENT_LEN as i32),
+                    )
+                    .check(pending_steer.or(applied_steer).or(rejected_steer))
+                    .check(
+                        Expr::col(TurnSteer::MessageId)
+                            .is_null()
+                            .or(Expr::col(TurnSteer::MessageId).eq(Expr::col(TurnSteer::Id))),
+                    )
+                    .check(
+                        Expr::col(TurnSteer::ResolvedAt)
+                            .is_null()
+                            .or(Expr::col(TurnSteer::ResolvedAt)
+                                .gte(Expr::col(TurnSteer::CreatedAt))),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_turn_steer_pending")
+                    .table(TurnSteer::Table)
+                    .col(TurnSteer::TurnId)
+                    .col(TurnSteer::Status)
+                    .col(TurnSteer::CreatedAt)
+                    .col(TurnSteer::Id)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_turn_steer_message")
+                    .table(TurnSteer::Table)
+                    .col(TurnSteer::MessageId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(TurnSteer::Table).to_owned())
+            .await?;
         manager
             .drop_table(Table::drop().table(TurnFailure::Table).to_owned())
             .await?;
@@ -1735,6 +1864,21 @@ enum TurnFailure {
     ErrorDetail,
     ResolvedAt,
     ResultStatus,
+}
+
+#[derive(DeriveIden)]
+enum TurnSteer {
+    Table,
+    Id,
+    TurnId,
+    ChatId,
+    Content,
+    Interrupt,
+    Status,
+    AppliedLeaseToken,
+    MessageId,
+    CreatedAt,
+    ResolvedAt,
 }
 
 #[derive(DeriveIden)]

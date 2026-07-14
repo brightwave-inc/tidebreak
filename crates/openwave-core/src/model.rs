@@ -714,6 +714,64 @@ impl TurnRunStatus {
     }
 }
 
+/// One durably accepted steering instruction for an active turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnSteer {
+    /// Caller-supplied idempotency identity.
+    pub id: crate::id::TurnSteerId,
+    /// Exact turn that receives this instruction.
+    pub turn_id: TurnId,
+    /// Owning chat, duplicated so the database can enforce turn/message scope.
+    pub chat_id: ChatId,
+    /// Byte-exact user instruction.
+    pub content: String,
+    /// Whether delivery should preempt the current model stream.
+    pub interrupt: bool,
+    /// Durable delivery state.
+    pub status: TurnSteerStatus,
+    /// Exact worker lease that applied the instruction.
+    pub applied_lease_token: Option<Uuid>,
+    /// User message committed atomically with application.
+    ///
+    /// When present, this carries the same UUID as `id`, so one caller identity
+    /// names both the instruction and its eventual conversation message.
+    pub message_id: Option<MessageId>,
+    /// When the instruction was accepted.
+    pub created_at: DateTime<Utc>,
+    /// When it was applied or rejected.
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+impl TurnSteer {
+    /// Maximum accepted instruction size in Unicode scalar values.
+    pub const MAX_CONTENT_LEN: usize = 65_536;
+}
+
+/// Durable delivery state of a [`TurnSteer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TurnSteerStatus {
+    /// Accepted and waiting for the exact live worker to apply it.
+    Pending,
+    /// User message and delivery receipt committed atomically.
+    Applied,
+    /// The turn terminalized before this instruction could be applied.
+    Rejected,
+}
+
+impl TurnSteerStatus {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
 /// Retry intent attached to one exact turn-attempt failure.
 ///
 /// Workers must retain this value across an ambiguous database commit. A new

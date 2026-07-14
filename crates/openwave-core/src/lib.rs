@@ -47,7 +47,9 @@ pub use config::{Config, Profile};
 pub use db::DbStore;
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
-pub use id::{CallId, ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, StepId, TurnId};
+pub use id::{
+    CallId, ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, StepId, TurnId, TurnSteerId,
+};
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
 pub use model::{
@@ -56,7 +58,7 @@ pub use model::{
     DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
     DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
     Project, Role, SourceLocation, SourceRegion, ToolCallRecord, TurnFailureReceipt,
-    TurnFailureRetry, TurnRun, TurnRunStatus,
+    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,

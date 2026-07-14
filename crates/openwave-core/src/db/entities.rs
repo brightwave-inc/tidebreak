@@ -245,6 +245,32 @@ pub mod turn_claim_lock {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+#[allow(dead_code)]
+pub mod turn_steer {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "turn_steer")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub turn_id: Uuid,
+        pub chat_id: Uuid,
+        pub content: String,
+        pub interrupt: bool,
+        pub status: String,
+        pub applied_lease_token: Option<Uuid>,
+        pub message_id: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+        pub resolved_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod turn_failure {
     use sea_orm::entity::prelude::*;
 
