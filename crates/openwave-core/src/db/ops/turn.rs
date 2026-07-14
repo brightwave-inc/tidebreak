@@ -47,6 +47,36 @@ pub(in crate::db) async fn list_turn_runs(
         .collect()
 }
 
+pub(in crate::db) async fn recover_exact_terminal_event(
+    store: &DbStore,
+    turn_id: TurnId,
+    lease_token: uuid::Uuid,
+    expected: &AgentEvent,
+) -> Result<Option<SequencedEvent>> {
+    let Some(stored) = entities::event::Entity::find()
+        .filter(entities::event::Column::TurnId.eq(turn_id.0))
+        .filter(entities::event::Column::Terminal.eq(true))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    if stored.lease_token != Some(lease_token) || stored.attempt_event_ordinal != Some(i32::MAX) {
+        return Ok(None);
+    }
+    let Ok(event) = serde_json::from_value::<AgentEvent>(stored.payload) else {
+        return Ok(None);
+    };
+    if event != *expected {
+        return Ok(None);
+    }
+    Ok(Some(SequencedEvent {
+        seq: stored.seq,
+        event,
+    }))
+}
+
 pub(in crate::db) async fn accept_turn(
     store: &DbStore,
     id: TurnId,
@@ -54,7 +84,7 @@ pub(in crate::db) async fn accept_turn(
     model: &str,
     content: &str,
 ) -> Result<AcceptTurnOutcome> {
-    validate_turn_input(model, content)?;
+    validate_turn_input(id, model, content)?;
 
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
@@ -660,7 +690,10 @@ fn turn_run_due_order(
         .then_with(|| left.id.cmp(&right.id))
 }
 
-fn validate_turn_input(model: &str, content: &str) -> Result<()> {
+fn validate_turn_input(id: TurnId, model: &str, content: &str) -> Result<()> {
+    if id.0.is_nil() {
+        return Err(AgentError::Store("turn id must not be nil".into()));
+    }
     if model.trim().is_empty()
         || model.contains('\0')
         || model.chars().count() > TurnRun::MAX_MODEL_LEN

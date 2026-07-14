@@ -23,7 +23,26 @@ pub struct ApprovalBroker {
 
 struct Pending {
     chat_id: ChatId,
+    registration_id: uuid::Uuid,
     tx: oneshot::Sender<ApprovalDecision>,
+}
+
+struct PendingRegistration<'a> {
+    broker: &'a ApprovalBroker,
+    call_id: CallId,
+    registration_id: uuid::Uuid,
+}
+
+impl Drop for PendingRegistration<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.broker.pending.lock().unwrap();
+        if pending
+            .get(&self.call_id)
+            .is_some_and(|entry| entry.registration_id == self.registration_id)
+        {
+            pending.remove(&self.call_id);
+        }
+    }
 }
 
 impl ApprovalBroker {
@@ -68,6 +87,7 @@ pub enum DecideError {
 impl ApprovalGate for ApprovalBroker {
     fn arm(&self, request: ApprovalRequest) -> ApprovalFuture<'_> {
         let (tx, rx) = oneshot::channel();
+        let registration_id = uuid::Uuid::new_v4();
         {
             let mut pending = self.pending.lock().unwrap();
             // A duplicate park for the same call_id shouldn't happen; if it
@@ -76,13 +96,20 @@ impl ApprovalGate for ApprovalBroker {
                 request.call_id,
                 Pending {
                     chat_id: request.chat_id,
+                    registration_id,
                     tx,
                 },
             );
         }
         // Entry is registered *before* this future is returned, so the agent
         // can safely emit ApprovalRequired and a client can resolve immediately.
+        let registration = PendingRegistration {
+            broker: self,
+            call_id: request.call_id,
+            registration_id,
+        };
         Box::pin(async move {
+            let _registration = registration;
             match rx.await {
                 Ok(decision) => decision,
                 // Turn dropped / broker cleared without a decision → reject.
@@ -139,6 +166,27 @@ mod tests {
         assert_eq!(
             broker.resolve(other, call_id, ApprovalDecision::Approve),
             Err(DecideError::WrongChat)
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_a_parked_turn_removes_its_pending_approval() {
+        let broker = ApprovalBroker::new();
+        let chat_id = ChatId::new();
+        let call_id = CallId::new();
+        let pending = broker.arm(ApprovalRequest {
+            call_id,
+            chat_id,
+            turn_id: TurnId::new(),
+            tool_name: "shell".into(),
+            class: ApprovalClass::Sensitive,
+            summary: "run shell".into(),
+        });
+
+        drop(pending);
+        assert_eq!(
+            broker.resolve(chat_id, call_id, ApprovalDecision::Approve),
+            Err(DecideError::NotPending)
         );
     }
 

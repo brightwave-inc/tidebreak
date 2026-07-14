@@ -1,7 +1,7 @@
 //! In-memory live event fan-out, keyed by chat.
 //!
 //! The journal (in the store) is the durable record a client replays on connect;
-//! this bus is the *live* tail. As a turn runs, the hub appends each event to the
+//! this bus is the *live* tail. As a turn runs, the worker appends each event to the
 //! journal and republishes it here with its assigned `seq`, so a connected
 //! WebSocket sees it immediately. A client that isn't connected misses nothing —
 //! it replays from the journal when it connects.

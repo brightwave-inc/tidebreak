@@ -21,13 +21,14 @@ mod document_stage;
 mod document_worker;
 mod error;
 mod extract;
-mod hub;
 mod provider;
 mod providers;
 mod resolver;
 mod routes;
 mod state;
+mod turn_worker;
 
+use std::fs::{OpenOptions, TryLockError};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -171,8 +172,42 @@ pub struct Server {
     router: Router,
     _document_auditor: AbortTask,
     _document_worker: AbortTask,
+    _turn_worker: AbortTask,
     _blob_retirement_worker: AbortTask,
     _blob_orphan_auditor: AbortTask,
+    _instance_lock: InstanceLock,
+}
+
+struct InstanceLock {
+    _file: std::fs::File,
+}
+
+impl InstanceLock {
+    fn acquire(config: &Config) -> Result<Self> {
+        std::fs::create_dir_all(&config.data_dir)
+            .map_err(|error| AgentError::config(format!("failed to create data dir: {error}")))?;
+        let path = config.data_dir.join("openwave.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| {
+                AgentError::config(format!("failed to open {}: {error}", path.display()))
+            })?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(TryLockError::WouldBlock) => Err(AgentError::config(format!(
+                "another OpenWave server already owns {}",
+                config.data_dir.display()
+            ))),
+            Err(TryLockError::Error(error)) => Err(AgentError::config(format!(
+                "failed to lock {}: {error}",
+                path.display()
+            ))),
+        }
+    }
 }
 
 struct AbortTask(tokio::task::JoinHandle<()>);
@@ -208,6 +243,10 @@ const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
 /// Wire the store from `config` and bind the API to an ephemeral loopback port.
 pub async fn bind(config: Config) -> Result<Server> {
+    // Desktop live delivery, steer, and approvals are process-local. Until the
+    // self-host control plane makes those paths durable, one process owns the
+    // complete data directory and its worker set.
+    let instance_lock = InstanceLock::acquire(&config)?;
     let store = connect_store(&config).await?;
     let secrets: Arc<dyn SecretProvider> = Arc::new(KeychainSecretProvider::new());
     // Pre-providers installs may only have an env/legacy key — enable Anthropic
@@ -256,6 +295,17 @@ pub async fn bind(config: Config) -> Result<Server> {
         state.blob_retirement_wake.clone(),
         blob_orphan_auditor::BlobOrphanAuditorConfig::default(),
     );
+    let turn_worker = turn_worker::TurnWorker::new(
+        state.store.clone(),
+        state.resolver.clone(),
+        state.tools.clone(),
+        state.approvals.clone(),
+        state.events.clone(),
+        state.active_turns.clone(),
+        state.turn_job_wake.clone(),
+        state.agent_config.clone(),
+        turn_worker::TurnWorkerConfig::default(),
+    );
     let router = app(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -267,6 +317,7 @@ pub async fn bind(config: Config) -> Result<Server> {
 
     let document_auditor = tokio::spawn(document_auditor.run());
     let document_worker = tokio::spawn(document_worker.run());
+    let turn_worker = tokio::spawn(turn_worker.run());
     let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
     let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
 
@@ -277,8 +328,10 @@ pub async fn bind(config: Config) -> Result<Server> {
         router,
         _document_auditor: AbortTask(document_auditor),
         _document_worker: AbortTask(document_worker),
+        _turn_worker: AbortTask(turn_worker),
         _blob_retirement_worker: AbortTask(blob_retirement_worker),
         _blob_orphan_auditor: AbortTask(blob_orphan_auditor),
+        _instance_lock: instance_lock,
     })
 }
 

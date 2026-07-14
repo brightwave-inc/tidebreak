@@ -11,7 +11,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use openwave_core::{
     AgentErrorInfo, AgentEvent, ApprovalClass, BlobStore, Chat, ChatId, ChatRequest, Message,
     ModelProvider, Project, ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent,
-    StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, Usage,
+    StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, TurnId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -300,6 +300,17 @@ struct PauseTerminalStore {
     entered: Arc<Notify>,
     release: Arc<Notify>,
     blocked: std::sync::atomic::AtomicBool,
+    pause_terminal: std::sync::atomic::AtomicBool,
+    fail_after_claim_commit: std::sync::atomic::AtomicBool,
+    pause_after_claim_commit: std::sync::atomic::AtomicBool,
+    fail_after_heartbeat_commit: std::sync::atomic::AtomicBool,
+    fail_after_completion_commit: std::sync::atomic::AtomicBool,
+    fail_terminal_recovery: std::sync::atomic::AtomicBool,
+    terminal_recovery_calls: AtomicUsize,
+    scan_before_failure_resolution: std::sync::atomic::AtomicBool,
+    scan_before_cancellation_ack: std::sync::atomic::AtomicBool,
+    pause_nonterminal_event: std::sync::atomic::AtomicBool,
+    pause_accept: std::sync::atomic::AtomicBool,
     fail_document_delete: std::sync::atomic::AtomicBool,
 }
 
@@ -310,12 +321,97 @@ impl PauseTerminalStore {
             entered,
             release,
             blocked: std::sync::atomic::AtomicBool::new(false),
+            pause_terminal: std::sync::atomic::AtomicBool::new(true),
+            fail_after_claim_commit: std::sync::atomic::AtomicBool::new(false),
+            pause_after_claim_commit: std::sync::atomic::AtomicBool::new(false),
+            fail_after_heartbeat_commit: std::sync::atomic::AtomicBool::new(false),
+            fail_after_completion_commit: std::sync::atomic::AtomicBool::new(false),
+            fail_terminal_recovery: std::sync::atomic::AtomicBool::new(false),
+            terminal_recovery_calls: AtomicUsize::new(0),
+            scan_before_failure_resolution: std::sync::atomic::AtomicBool::new(false),
+            scan_before_cancellation_ack: std::sync::atomic::AtomicBool::new(false),
+            pause_nonterminal_event: std::sync::atomic::AtomicBool::new(false),
+            pause_accept: std::sync::atomic::AtomicBool::new(false),
             fail_document_delete: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
+    fn do_not_pause_terminal(&self) {
+        self.pause_terminal.store(false, Ordering::SeqCst);
+    }
+
+    fn fail_after_next_claim_commit(&self) {
+        self.fail_after_claim_commit.store(true, Ordering::SeqCst);
+    }
+
+    fn pause_after_next_claim_commit(&self) {
+        self.pause_after_claim_commit.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_after_next_heartbeat_commit(&self) {
+        self.fail_after_heartbeat_commit
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn fail_after_next_completion_commit(&self) {
+        self.fail_after_completion_commit
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn fail_next_terminal_recovery(&self) {
+        self.fail_terminal_recovery.store(true, Ordering::SeqCst);
+    }
+
+    fn terminal_recovery_calls(&self) -> usize {
+        self.terminal_recovery_calls.load(Ordering::SeqCst)
+    }
+
+    fn let_scan_win_next_failure_resolution(&self) {
+        self.scan_before_failure_resolution
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn let_scan_win_next_cancellation_ack(&self) {
+        self.scan_before_cancellation_ack
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn pause_next_nonterminal_event(&self) {
+        self.pause_nonterminal_event.store(true, Ordering::SeqCst);
+    }
+
+    fn pause_next_acceptance(&self) {
+        self.pause_accept.store(true, Ordering::SeqCst);
+    }
+
     fn fail_next_document_delete(&self) {
         self.fail_document_delete.store(true, Ordering::SeqCst);
+    }
+
+    async fn terminalize_expired_turn(&self, id: TurnId) -> Result<()> {
+        let turn = self
+            .inner
+            .get_turn_run(id)
+            .await?
+            .ok_or_else(|| AgentError::Store("injected scan could not find turn".into()))?;
+        let now = turn
+            .lease_expires_at
+            .ok_or_else(|| AgentError::Store("injected scan found no lease".into()))?
+            + chrono::Duration::microseconds(1);
+        let outcome = self
+            .inner
+            .claim_turn_run(
+                uuid::Uuid::new_v4(),
+                now,
+                now + chrono::Duration::seconds(1),
+            )
+            .await?;
+        if outcome.terminal_event.is_none() {
+            return Err(AgentError::Store(
+                "injected scan did not terminalize the turn".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -516,6 +612,202 @@ impl Store for PauseTerminalStore {
     async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
         self.inner.set_chat_model(id, model).await
     }
+    async fn get_turn_run(&self, id: TurnId) -> Result<Option<openwave_core::TurnRun>> {
+        self.inner.get_turn_run(id).await
+    }
+    async fn list_turn_runs(&self, chat_id: ChatId) -> Result<Vec<openwave_core::TurnRun>> {
+        self.inner.list_turn_runs(chat_id).await
+    }
+    async fn accept_turn(
+        &self,
+        id: TurnId,
+        chat_id: ChatId,
+        model: &str,
+        content: &str,
+    ) -> Result<openwave_core::AcceptTurnOutcome> {
+        if self.pause_accept.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.accept_turn(id, chat_id, model, content).await
+    }
+    async fn claim_turn_run(
+        &self,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::ClaimTurnRunOutcome> {
+        let outcome = self
+            .inner
+            .claim_turn_run(lease_token, now, lease_expires_at)
+            .await?;
+        if outcome.turn.is_some() && self.pause_after_claim_commit.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+            return Err(AgentError::Store(
+                "injected delayed ambiguous claim response".into(),
+            ));
+        }
+        if outcome.turn.is_some() && self.fail_after_claim_commit.swap(false, Ordering::SeqCst) {
+            return Err(AgentError::Store(
+                "injected ambiguous claim response".into(),
+            ));
+        }
+        Ok(outcome)
+    }
+    async fn heartbeat_turn_run(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        let heartbeat = self
+            .inner
+            .heartbeat_turn_run(id, lease_token, now, lease_expires_at)
+            .await?;
+        if heartbeat
+            && self
+                .fail_after_heartbeat_commit
+                .swap(false, Ordering::SeqCst)
+        {
+            return Err(AgentError::Store(
+                "injected ambiguous heartbeat response".into(),
+            ));
+        }
+        Ok(heartbeat)
+    }
+    async fn complete_turn_run_and_append_event(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        output: &Message,
+        usage: Usage,
+        stop_reason: StopReason,
+    ) -> Result<Option<openwave_core::JournaledTurnOutcome<openwave_core::CompleteTurnRunOutcome>>>
+    {
+        if self.pause_terminal.load(Ordering::SeqCst)
+            && self
+                .blocked
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            self.entered.notify_waiters();
+            self.release.notified().await;
+        }
+        let outcome = self
+            .inner
+            .complete_turn_run_and_append_event(id, lease_token, now, output, usage, stop_reason)
+            .await?;
+        if outcome.is_some()
+            && self
+                .fail_after_completion_commit
+                .swap(false, Ordering::SeqCst)
+        {
+            return Err(AgentError::Store(
+                "injected ambiguous completion response".into(),
+            ));
+        }
+        Ok(outcome)
+    }
+    async fn record_turn_run_failure_and_append_event(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        retry: openwave_core::TurnFailureRetry,
+        error_code: &str,
+        error_detail: Option<&str>,
+    ) -> Result<Option<openwave_core::JournaledTurnOutcome<openwave_core::RecordTurnFailureOutcome>>>
+    {
+        if self
+            .scan_before_failure_resolution
+            .swap(false, Ordering::SeqCst)
+        {
+            self.terminalize_expired_turn(id).await?;
+        }
+        self.inner
+            .record_turn_run_failure_and_append_event(
+                id,
+                lease_token,
+                now,
+                retry,
+                error_code,
+                error_detail,
+            )
+            .await
+    }
+    async fn request_turn_cancellation_and_append_event(
+        &self,
+        id: TurnId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<
+        Option<openwave_core::JournaledTurnOutcome<openwave_core::RequestTurnCancellationOutcome>>,
+    > {
+        self.inner
+            .request_turn_cancellation_and_append_event(id, now)
+            .await
+    }
+    async fn finish_turn_cancellation_and_append_event(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        usage: Usage,
+    ) -> Result<
+        Option<openwave_core::JournaledTurnOutcome<openwave_core::FinishTurnCancellationOutcome>>,
+    > {
+        if self
+            .scan_before_cancellation_ack
+            .swap(false, Ordering::SeqCst)
+        {
+            self.terminalize_expired_turn(id).await?;
+        }
+        self.inner
+            .finish_turn_cancellation_and_append_event(id, lease_token, now, usage)
+            .await
+    }
+    async fn append_turn_event(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        attempt_event_ordinal: i32,
+        now: chrono::DateTime<chrono::Utc>,
+        event: &AgentEvent,
+    ) -> Result<Option<i64>> {
+        if attempt_event_ordinal > 1 && self.pause_nonterminal_event.swap(false, Ordering::SeqCst) {
+            self.entered.notify_waiters();
+            self.release.notified().await;
+        }
+        self.inner
+            .append_turn_event(
+                chat_id,
+                turn_id,
+                lease_token,
+                attempt_event_ordinal,
+                now,
+                event,
+            )
+            .await
+    }
+    async fn recover_exact_turn_terminal_event(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        event: &AgentEvent,
+    ) -> Result<Option<SequencedEvent>> {
+        self.terminal_recovery_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_terminal_recovery.swap(false, Ordering::SeqCst) {
+            return Err(AgentError::Store(
+                "injected transient terminal recovery failure".into(),
+            ));
+        }
+        self.inner
+            .recover_exact_turn_terminal_event(turn_id, lease_token, event)
+            .await
+    }
     async fn append_message(&self, message: &Message) -> Result<()> {
         self.inner.append_message(message).await
     }
@@ -637,6 +929,7 @@ async fn test_app_with_retrieval_and_worker(
         state.document_writes.clone(),
         document_worker::DocumentWorkerConfig::default(),
     );
+    spawn_turn_worker(&state);
     (app(state), token, store, dir, worker)
 }
 
@@ -668,7 +961,75 @@ fn test_app_from_parts(
         },
     );
     let token = state.token.clone();
+    spawn_turn_worker(&state);
     (app(state), token, store, dir)
+}
+
+async fn test_app_with_scanner_resolution_race(
+    provider: Arc<dyn ModelProvider>,
+    configure: impl FnOnce(&PauseTerminalStore),
+) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let injected = Arc::new(PauseTerminalStore::new(
+        inner,
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+    ));
+    injected.do_not_pause_terminal();
+    configure(&injected);
+    let store: Arc<dyn Store> = injected;
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(provider)),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker_with_config(
+        &state,
+        turn_worker::TurnWorkerConfig {
+            max_concurrency: 1,
+            ..turn_worker::TurnWorkerConfig::default()
+        },
+    );
+    (app(state), token, store, dir)
+}
+
+fn spawn_turn_worker(state: &AppState) {
+    spawn_turn_worker_with_config(state, turn_worker::TurnWorkerConfig::default());
+}
+
+fn spawn_turn_worker_with_config(state: &AppState, config: turn_worker::TurnWorkerConfig) {
+    let worker = turn_worker::TurnWorker::new(
+        state.store.clone(),
+        state.resolver.clone(),
+        state.tools.clone(),
+        state.approvals.clone(),
+        state.events.clone(),
+        state.active_turns.clone(),
+        state.turn_job_wake.clone(),
+        state.agent_config.clone(),
+        config,
+    );
+    tokio::spawn(worker.run());
 }
 
 async fn test_app() -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
@@ -742,6 +1103,16 @@ async fn make_chat(router: &Router, bearer: &str) -> Chat {
 
 /// POST a message to a chat, returning the response status.
 async fn send_message(router: &Router, bearer: &str, chat: ChatId, content: &str) -> StatusCode {
+    send_message_with_id(router, bearer, chat, TurnId::new(), content).await
+}
+
+async fn send_message_with_id(
+    router: &Router,
+    bearer: &str,
+    chat: ChatId,
+    turn_id: TurnId,
+    content: &str,
+) -> StatusCode {
     router
         .clone()
         .oneshot(
@@ -751,7 +1122,7 @@ async fn send_message(router: &Router, bearer: &str, chat: ChatId, content: &str
                 .header(header::AUTHORIZATION, bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"content": content}).to_string(),
+                    serde_json::json!({"turn_id": turn_id, "content": content}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -761,7 +1132,7 @@ async fn send_message(router: &Router, bearer: &str, chat: ChatId, content: &str
 }
 
 /// POST `/chats/{id}/cancel`, returning the response status.
-async fn cancel_turn(router: &Router, bearer: &str, chat: ChatId) -> StatusCode {
+async fn cancel_turn(router: &Router, bearer: &str, chat: ChatId, turn_id: TurnId) -> StatusCode {
     router
         .clone()
         .oneshot(
@@ -769,7 +1140,10 @@ async fn cancel_turn(router: &Router, bearer: &str, chat: ChatId) -> StatusCode 
                 .method("POST")
                 .uri(format!("/chats/{chat}/cancel"))
                 .header(header::AUTHORIZATION, bearer)
-                .body(Body::empty())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"turn_id": turn_id}).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -780,7 +1154,7 @@ async fn cancel_turn(router: &Router, bearer: &str, chat: ChatId) -> StatusCode 
 /// Poll the journal until the turn terminates (or time out), returning its
 /// events in sequence order.
 async fn wait_for_turn(store: &Arc<dyn Store>, chat: ChatId) -> Vec<SequencedEvent> {
-    for _ in 0..200 {
+    for _ in 0..500 {
         let events = store.list_events(chat, 0).await.unwrap();
         if events.iter().any(|e| {
             matches!(
@@ -806,17 +1180,21 @@ async fn cancel_stops_a_running_turn() {
         test_app_with(Arc::new(GatedProvider { gate: gate.clone() })).await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
 
     assert_eq!(
-        send_message(&router, &bearer, chat.id, "go").await,
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
         StatusCode::ACCEPTED
     );
 
-    // The slot is claimed synchronously before the turn is spawned, so a
-    // cancel arriving right after the 202 still finds the running turn.
+    // Acceptance is durable before 202, so cancellation works whether the
+    // asynchronous worker still sees queued work or already holds its lease.
+    let cancel_status = cancel_turn(&router, &bearer, chat.id, turn_id).await;
     assert_eq!(
-        cancel_turn(&router, &bearer, chat.id).await,
-        StatusCode::ACCEPTED
+        cancel_status,
+        StatusCode::ACCEPTED,
+        "turn after cancel response: {:?}",
+        store.get_turn_run(turn_id).await.unwrap()
     );
 
     // The turn preempts the blocked provider call and ends as cancelled —
@@ -836,14 +1214,42 @@ async fn cancel_without_a_running_turn_is_a_conflict_and_unknown_chat_is_404() {
 
     // Known chat, nothing running → 409.
     assert_eq!(
-        cancel_turn(&router, &bearer, chat.id).await,
+        cancel_turn(&router, &bearer, chat.id, TurnId::new()).await,
         StatusCode::CONFLICT
     );
     // Unknown chat → 404.
     assert_eq!(
-        cancel_turn(&router, &bearer, ChatId::new()).await,
+        cancel_turn(&router, &bearer, ChatId::new(), TurnId::new()).await,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn cancel_cannot_target_a_turn_through_another_chat() {
+    let gate = Arc::new(Notify::new());
+    let (router, token, store, _dir) = test_app_with(Arc::new(GatedProvider { gate })).await;
+    let bearer = format!("Bearer {token}");
+    let owner = make_chat(&router, &bearer).await;
+    let other = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+
+    assert_eq!(
+        send_message_with_id(&router, &bearer, owner.id, turn_id, "go").await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        cancel_turn(&router, &bearer, other.id, turn_id).await,
+        StatusCode::CONFLICT
+    );
+    assert_ne!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        openwave_core::TurnRunStatus::Cancelled
+    );
+    assert_eq!(
+        cancel_turn(&router, &bearer, owner.id, turn_id).await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turn(&store, owner.id).await;
 }
 
 /// POST `/chats/{id}/steer`, returning the response status.
@@ -851,6 +1257,7 @@ async fn steer_turn(
     router: &Router,
     bearer: &str,
     chat: ChatId,
+    turn_id: TurnId,
     content: &str,
     interrupt: bool,
 ) -> StatusCode {
@@ -863,7 +1270,12 @@ async fn steer_turn(
                 .header(header::AUTHORIZATION, bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"content": content, "interrupt": interrupt}).to_string(),
+                    serde_json::json!({
+                        "turn_id": turn_id,
+                        "content": content,
+                        "interrupt": interrupt
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -879,15 +1291,15 @@ async fn steer_without_a_running_turn_is_a_conflict_and_unknown_chat_is_404() {
     let chat = make_chat(&router, &bearer).await;
 
     assert_eq!(
-        steer_turn(&router, &bearer, chat.id, "hi", false).await,
+        steer_turn(&router, &bearer, chat.id, TurnId::new(), "hi", false).await,
         StatusCode::CONFLICT
     );
     assert_eq!(
-        steer_turn(&router, &bearer, ChatId::new(), "hi", false).await,
+        steer_turn(&router, &bearer, ChatId::new(), TurnId::new(), "hi", false,).await,
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        steer_turn(&router, &bearer, chat.id, "  ", false).await,
+        steer_turn(&router, &bearer, chat.id, TurnId::new(), "  ", false).await,
         StatusCode::BAD_REQUEST
     );
 }
@@ -928,15 +1340,16 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
     .await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
 
     assert_eq!(
-        send_message(&router, &bearer, chat.id, "go").await,
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
         StatusCode::ACCEPTED
     );
     // Give the turn a moment to enter the stalled stream.
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(
-        steer_turn(&router, &bearer, chat.id, "change course", true).await,
+        steer_turn(&router, &bearer, chat.id, turn_id, "change course", true,).await,
         StatusCode::ACCEPTED
     );
 
@@ -3710,6 +4123,632 @@ async fn post_message_runs_a_turn_and_journals_its_events() {
         .any(|e| matches!(e.event, AgentEvent::TurnCompleted { .. })));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_drains_a_turn_queued_before_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: None,
+        model: None,
+        workspace_dir: std::path::PathBuf::from("/tmp/ws"),
+        created_at: chrono::Utc::now(),
+    };
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    assert!(matches!(
+        store
+            .accept_turn(turn_id, chat.id, "fake", "queued before startup")
+            .await
+            .unwrap(),
+        openwave_core::AcceptTurnOutcome::Accepted(_)
+    ));
+
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    spawn_turn_worker(&state);
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(matches!(events[0].event, AgentEvent::TurnStarted { turn_id: id } if id == turn_id));
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_message_is_idempotent_by_turn_id_and_rejects_identity_reuse() {
+    let gate = Arc::new(Notify::new());
+    let (router, token, store, _dir) =
+        test_app_with(Arc::new(GatedProvider { gate: gate.clone() })).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "hello").await,
+        StatusCode::ACCEPTED
+    );
+    store
+        .set_setting("model", &serde_json::json!("changed-after-accept"))
+        .await
+        .unwrap();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "hello").await,
+        StatusCode::ACCEPTED,
+        "an ambiguous retry must converge even after model resolution changes"
+    );
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "different").await,
+        StatusCode::CONFLICT,
+        "one turn id cannot name different request data"
+    );
+    gate.notify_one();
+    wait_for_turn(&store, chat.id).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_message_retry_converges_across_a_model_setting_race() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let injected = Arc::new(PauseTerminalStore::new(
+        inner,
+        entered.clone(),
+        release.clone(),
+    ));
+    injected.do_not_pause_terminal();
+    injected.pause_next_acceptance();
+    let store: Arc<dyn Store> = injected;
+    store
+        .set_setting("model", &serde_json::json!("model-before"))
+        .await
+        .unwrap();
+    let gate = Arc::new(Notify::new());
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let (router, token, store, _dir) = test_app_from_parts(
+        Arc::new(GatedProvider { gate: gate.clone() }),
+        retrieval,
+        store,
+        dir,
+    );
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    let first_router = router.clone();
+    let first_bearer = bearer.clone();
+    let first = tokio::spawn(async move {
+        send_message_with_id(
+            &first_router,
+            &first_bearer,
+            chat.id,
+            turn_id,
+            "same request",
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("first request reached acceptance");
+
+    store
+        .set_setting("model", &serde_json::json!("model-after"))
+        .await
+        .unwrap();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "same request").await,
+        StatusCode::ACCEPTED
+    );
+    release.notify_one();
+    assert_eq!(first.await.unwrap(), StatusCode::ACCEPTED);
+    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+
+    gate.notify_one();
+    wait_for_turn(&store, chat.id).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_recovers_ambiguous_claim_and_completion_with_exact_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let injected = Arc::new(PauseTerminalStore::new(
+        inner,
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+    ));
+    injected.do_not_pause_terminal();
+    injected.fail_after_next_claim_commit();
+    injected.fail_after_next_completion_commit();
+    injected.fail_next_terminal_recovery();
+    let store: Arc<dyn Store> = injected.clone();
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let (router, token, store, _dir) =
+        test_app_from_parts(Arc::new(FakeProvider), retrieval, store, dir);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "recover me").await,
+        StatusCode::ACCEPTED
+    );
+    let events = wait_for_turn(&store, chat.id).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, AgentEvent::TurnStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, AgentEvent::TurnCompleted { .. }))
+            .count(),
+        1
+    );
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(messages.len(), 2, "input and exact terminal output only");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while injected.terminal_recovery_calls() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("transient exact-terminal recovery is retried");
+
+    let next_chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, next_chat.id, "lane is free").await,
+        StatusCode::ACCEPTED
+    );
+    let next_events = wait_for_turn(&store, next_chat.id).await;
+    assert!(matches!(
+        next_events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scanner_won_failure_does_not_wedge_the_only_worker_lane() {
+    struct FailOnceProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for FailOnceProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("fail-once")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(AgentError::Provider("injected first failure".into()));
+            }
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "recovered".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    let (router, token, store, _dir) = test_app_with_scanner_resolution_race(
+        Arc::new(FailOnceProvider {
+            calls: AtomicUsize::new(0),
+        }),
+        PauseTerminalStore::let_scan_win_next_failure_resolution,
+    )
+    .await;
+    let bearer = format!("Bearer {token}");
+    let failed_chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, failed_chat.id, "fail first").await,
+        StatusCode::ACCEPTED
+    );
+    let failed_events = wait_for_turn(&store, failed_chat.id).await;
+    assert!(matches!(
+        failed_events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnFailed { error }) if error.kind == "lease_expired"
+    ));
+
+    let next_chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, next_chat.id, "use freed lane").await,
+        StatusCode::ACCEPTED
+    );
+    let next_events = wait_for_turn(&store, next_chat.id).await;
+    assert!(matches!(
+        next_events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scanner_won_cancellation_does_not_wedge_the_only_worker_lane() {
+    struct UsageGatedProvider {
+        entered: Arc<Notify>,
+        gate: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for UsageGatedProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("usage-gated")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let entered = self.entered.clone();
+            let gate = self.gate.clone();
+            Ok(stream::iter(vec![ProviderEvent::Usage(Usage {
+                input_tokens: 7,
+                output_tokens: 3,
+                ..Usage::default()
+            })])
+            .chain(stream::once(async move {
+                entered.notify_one();
+                gate.notified().await;
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                }
+            }))
+            .boxed())
+        }
+    }
+
+    let entered = Arc::new(Notify::new());
+    let gate = Arc::new(Notify::new());
+    let (router, token, store, _dir) = test_app_with_scanner_resolution_race(
+        Arc::new(UsageGatedProvider {
+            entered: entered.clone(),
+            gate: gate.clone(),
+        }),
+        PauseTerminalStore::let_scan_win_next_cancellation_ack,
+    )
+    .await;
+    let bearer = format!("Bearer {token}");
+    let cancelled_chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, cancelled_chat.id, turn_id, "cancel first",).await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("provider consumed nonzero usage before parking");
+    assert_eq!(
+        cancel_turn(&router, &bearer, cancelled_chat.id, turn_id).await,
+        StatusCode::ACCEPTED
+    );
+    let cancelled_events = wait_for_turn(&store, cancelled_chat.id).await;
+    assert!(matches!(
+        cancelled_events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCancelled { usage }) if *usage == Usage::default()
+    ));
+
+    gate.notify_one();
+    let next_chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, next_chat.id, "use freed lane").await,
+        StatusCode::ACCEPTED
+    );
+    let next_events = wait_for_turn(&store, next_chat.id).await;
+    assert!(matches!(
+        next_events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let injected = Arc::new(PauseTerminalStore::new(
+        inner,
+        entered.clone(),
+        release.clone(),
+    ));
+    injected.do_not_pause_terminal();
+    injected.pause_after_next_claim_commit();
+    injected.fail_after_next_heartbeat_commit();
+    let store: Arc<dyn Store> = injected;
+    let gate = Arc::new(Notify::new());
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(GatedProvider {
+            gate: gate.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        build_retrieval(
+            Arc::new(HashEmbedder::default()),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        )
+        .0,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let worker = turn_worker::TurnWorker::new(
+        state.store.clone(),
+        state.resolver.clone(),
+        state.tools.clone(),
+        state.approvals.clone(),
+        state.events.clone(),
+        state.active_turns.clone(),
+        state.turn_job_wake.clone(),
+        state.agent_config.clone(),
+        turn_worker::TurnWorkerConfig {
+            lease: Duration::from_millis(600),
+            heartbeat: Duration::from_millis(200),
+            idle_min: Duration::from_millis(10),
+            idle_cap: Duration::from_millis(20),
+            failure_delay: Duration::from_millis(10),
+            max_concurrency: 1,
+        },
+    );
+    let token = state.token.clone();
+    tokio::spawn(worker.run());
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "renew before work").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("claim committed before its delayed response");
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    release.notify_one();
+    for _ in 0..100 {
+        if store
+            .list_events(chat.id, 0)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event.event, AgentEvent::TurnStarted { .. }))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    gate.notify_one();
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_heartbeats_while_event_journaling_is_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let injected = Arc::new(PauseTerminalStore::new(
+        inner,
+        entered.clone(),
+        release.clone(),
+    ));
+    injected.do_not_pause_terminal();
+    injected.pause_next_nonterminal_event();
+    let store: Arc<dyn Store> = injected;
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        build_retrieval(
+            Arc::new(HashEmbedder::default()),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        )
+        .0,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let worker = turn_worker::TurnWorker::new(
+        state.store.clone(),
+        state.resolver.clone(),
+        state.tools.clone(),
+        state.approvals.clone(),
+        state.events.clone(),
+        state.active_turns.clone(),
+        state.turn_job_wake.clone(),
+        state.agent_config.clone(),
+        turn_worker::TurnWorkerConfig {
+            lease: Duration::from_millis(250),
+            heartbeat: Duration::from_millis(50),
+            idle_min: Duration::from_millis(10),
+            idle_cap: Duration::from_millis(20),
+            failure_delay: Duration::from_millis(10),
+            max_concurrency: 1,
+        },
+    );
+    let token = state.token.clone();
+    tokio::spawn(worker.run());
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "keep alive").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("worker reached the blocked event append");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    release.notify_waiters();
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(
+        matches!(
+            events.last().map(|event| &event.event),
+            Some(AgentEvent::TurnCompleted { .. })
+        ),
+        "unexpected journal: {events:?}; turns: {:?}",
+        store.list_turn_runs(chat.id).await.unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_nul_agent_output_fails_without_wedging_the_worker() {
+    struct NulProvider;
+
+    #[async_trait]
+    impl ModelProvider for NulProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("nul")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "bad\0output".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    let (router, token, store, _dir) = test_app_with(Arc::new(NulProvider)).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "produce invalid output").await,
+        StatusCode::ACCEPTED
+    );
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnFailed { error }) if error.kind == "invalid_agent_output"
+    ));
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn post_message_rejects_blank_content_as_bad_request() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"turn_id": TurnId::new(), "content": " \n "}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "turn_id": uuid::Uuid::nil(),
+                        "content": "valid content"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn message_to_unknown_chat_is_404() {
     let (router, token, _store, _dir) = test_app().await;
@@ -3729,8 +4768,8 @@ async fn a_second_turn_on_the_same_chat_is_refused() {
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
 
-    // The handler claims the chat's slot synchronously before returning, so by
-    // the time this 202 is observed the turn is holding the slot.
+    // The database's live-turn constraint owns the slot before the 202, even if
+    // the worker has not claimed the queued turn yet.
     assert_eq!(
         send_message(&router, &bearer, chat.id, "one").await,
         StatusCode::ACCEPTED
@@ -3764,7 +4803,25 @@ async fn slot_frees_after_a_turn_completes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn slot_stays_held_until_journal_drains() {
+async fn cancellation_reports_conflict_after_completion_wins() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "finish first").await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turn(&store, chat.id).await;
+    assert_eq!(
+        cancel_turn(&router, &bearer, chat.id, turn_id).await,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn durable_slot_stays_held_and_cancel_can_win_terminal_commit_race() {
     let dir = tempfile::tempdir().unwrap();
     let inner: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
@@ -3798,36 +4855,42 @@ async fn slot_stays_held_until_journal_drains() {
         },
     );
     let token = state.token.clone();
+    spawn_turn_worker(&state);
     let router = app(state);
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
 
+    let turn_id = TurnId::new();
     assert_eq!(
-        send_message(&router, &bearer, chat.id, "one").await,
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "one").await,
         StatusCode::ACCEPTED
     );
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
-        .expect("turn reached blocked terminal journal append");
+        .expect("turn reached blocked atomic terminal commit");
 
     assert_eq!(
         send_message(&router, &bearer, chat.id, "two").await,
         StatusCode::CONFLICT,
-        "slot must remain held while terminal event is still being journaled"
+        "durable slot must remain held until the terminal transition commits"
     );
     assert_eq!(
-        steer_turn(&router, &bearer, chat.id, "late", false).await,
+        steer_turn(&router, &bearer, chat.id, turn_id, "late", false).await,
         StatusCode::CONFLICT,
-        "steer must not 202 after the agent finished (journal still draining)"
+        "steer must not reach an agent that has already quiesced"
     );
     assert_eq!(
-        cancel_turn(&router, &bearer, chat.id).await,
-        StatusCode::CONFLICT,
-        "cancel must not 202 after the agent finished (journal still draining)"
+        cancel_turn(&router, &bearer, chat.id, turn_id).await,
+        StatusCode::ACCEPTED,
+        "durable cancellation may win until completion commits"
     );
 
     release.notify_waiters();
-    wait_for_turn(&store, chat.id).await;
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCancelled { .. })
+    ));
     assert_eq!(
         send_message(&router, &bearer, chat.id, "two").await,
         StatusCode::ACCEPTED
@@ -3956,6 +5019,7 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
         },
     );
     let token = state.token.clone();
+    spawn_turn_worker(&state);
     let router = app(state);
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
@@ -4087,6 +5151,17 @@ async fn self_host_profile_is_not_yet_supported() {
     assert!(bind(config).await.is_err());
 }
 
+#[test]
+fn one_server_process_owns_a_desktop_data_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config::desktop(dir.path());
+    let first = InstanceLock::acquire(&config).unwrap();
+    assert!(InstanceLock::acquire(&config).is_err());
+
+    drop(first);
+    InstanceLock::acquire(&config).expect("dropping the server releases its directory lock");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn serve_answers_over_a_real_socket() {
     openwave_core::KeychainSecretProvider::use_mock();
@@ -4193,7 +5268,7 @@ async fn send_message_http(client: &reqwest::Client, addr: SocketAddr, token: &s
     let response = client
         .post(format!("http://{addr}/chats/{chat}/messages"))
         .bearer_auth(token)
-        .json(&serde_json::json!({"content": "hi"}))
+        .json(&serde_json::json!({"turn_id": TurnId::new(), "content": "hi"}))
         .send()
         .await
         .unwrap();
