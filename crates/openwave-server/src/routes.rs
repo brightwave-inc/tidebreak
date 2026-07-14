@@ -707,9 +707,10 @@ pub struct EventsQuery {
 ///
 /// On connect the client gets **snapshot → replay → live**: journaled events with
 /// `seq > after` are replayed, then live events stream as they occur. Subscribing
-/// to the live tail *before* replaying, and dropping any live event whose `seq`
-/// was already replayed, means nothing is missed or duplicated across the handoff.
-/// `404` if the chat doesn't exist.
+/// to the live tail *before* replaying, dropping any live event whose `seq` was
+/// already replayed, and replaying whenever the live cursor jumps means nothing
+/// is missed or duplicated across the handoff or a worker-ownership race. `404`
+/// if the chat doesn't exist.
 ///
 /// Auth is checked by the bearer middleware. Browser clients authenticate via
 /// `Sec-WebSocket-Protocol` (`openwave-token.<token>`). When the client offered
@@ -759,6 +760,19 @@ async fn stream_events(mut socket: WebSocket, state: AppState, chat: ChatId, aft
                 Ok(event) => {
                     if event.seq <= last_seq {
                         continue; // already covered by replay
+                    }
+                    if event.seq > last_seq.saturating_add(1) {
+                        // Durable commits can be published out of order across
+                        // lease owners. Fill the gap from the journal before
+                        // accepting this live tail; replay includes the current
+                        // event because publication always follows commit.
+                        if replay_after(&mut socket, &*state.store, chat, &mut last_seq)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
                     }
                     last_seq = event.seq;
                     if send_event(&mut socket, &event).await.is_err() {

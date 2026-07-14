@@ -6494,6 +6494,100 @@ async fn read_until_turn_end(
     read_until_turns_end(addr, token, chat, after, 1).await
 }
 
+fn decode_ws_event(message: WsMessage) -> SequencedEvent {
+    let WsMessage::Text(text) = message else {
+        panic!("expected a JSON text event frame");
+    };
+    serde_json::from_str(text.as_str()).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_replays_a_journal_gap_before_accepting_a_later_live_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig::default(),
+    );
+    let token = state.token.clone();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = app(state.clone());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    let client = reqwest::Client::new();
+    let chat = make_chat_http(&client, addr, &token).await;
+
+    let first = AgentEvent::TextDelta { text: "one".into() };
+    assert_eq!(store.append_event(chat.id, &first).await.unwrap(), 1);
+    let mut request = format!("ws://{addr}/chats/{}/events", chat.id)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let replayed_first = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("initial journal replay timed out")
+        .expect("event socket closed")
+        .unwrap();
+    assert_eq!(decode_ws_event(replayed_first).seq, 1);
+
+    let second = AgentEvent::TextDelta { text: "two".into() };
+    let third = AgentEvent::TextDelta {
+        text: "three".into(),
+    };
+    assert_eq!(store.append_event(chat.id, &second).await.unwrap(), 2);
+    assert_eq!(store.append_event(chat.id, &third).await.unwrap(), 3);
+    let _ = state.events.sender(chat.id).send(SequencedEvent {
+        seq: 3,
+        event: third,
+    });
+    let _ = state.events.sender(chat.id).send(SequencedEvent {
+        seq: 2,
+        event: second.clone(),
+    });
+
+    let mut recovered = Vec::new();
+    for _ in 0..2 {
+        let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("gap recovery timed out")
+            .expect("event socket closed")
+            .unwrap();
+        recovered.push(decode_ws_event(frame));
+    }
+    assert_eq!(
+        recovered.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(recovered[0].event, second);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), socket.next())
+            .await
+            .is_err(),
+        "the late live seq 2 must be deduplicated after journal replay"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ws_replays_a_finished_turn_from_the_journal() {
     let (addr, token, store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
