@@ -20,11 +20,20 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+serde_json = { workspace = true }
 
 [dependencies]
 openwave-core = { path = "../openwave-core", default-features = false }
+openwave-host-broker = { path = "../openwave-host-broker" }
 openwave-server = { path = "../openwave-server" }
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "process", "rt-multi-thread", "macros", "sync", "time"] }
+uuid = { workspace = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dependencies]
+tauri-plugin-single-instance = "2"

@@ -14,6 +14,9 @@ use tokio::sync::watch;
 
 use openwave_core::Config;
 
+mod broker;
+mod host_access;
+
 /// Connection details the webview needs to reach the in-process API.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +59,15 @@ fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn home_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|e| format!("home dir: {e}"))?;
+    home.canonicalize()
+        .map_err(|e| format!("resolve home dir: {e}"))
+}
+
 /// Private scratch for the current desktop profile. This is operational app
 /// data, not a connected user folder and never appears in a native picker.
 fn private_scratch(data_dir: &std::path::Path) -> Result<PathBuf, String> {
@@ -75,27 +87,56 @@ pub fn run() {
     let (info_tx, info_rx) = watch::channel(None);
     let state = Arc::new(AppState { info_rx });
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
+
+    let app = builder
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .manage(state)
-        .invoke_handler(tauri::generate_handler![server_info])
+        .invoke_handler(tauri::generate_handler![
+            server_info,
+            host_access::connect_folder,
+            host_access::list_connected_folders,
+            host_access::disconnect_folder
+        ])
         .setup(move |app| {
             let handle = app.handle().clone();
             let data = data_dir(&handle)?;
+            let home = home_dir(&handle)?;
             let scratch = private_scratch(&data)?;
+            app.manage(host_access::HostAccess::new(
+                handle.clone(),
+                data.clone(),
+                home,
+            ));
 
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = boot_server(info_tx, data, scratch).await {
+                if let Err(error) = boot_server(handle, info_tx, data, scratch).await {
                     eprintln!("openwave-desktop: {error}");
                 }
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running OpenWave");
+        .build(tauri::generate_context!())
+        .expect("error while building OpenWave");
+    app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            tauri::async_runtime::block_on(app.state::<host_access::HostAccess>().shutdown());
+        }
+    });
 }
 
 /// Bind the local API and park the accept loop for the life of the process.
 async fn boot_server(
+    app: tauri::AppHandle,
     info_tx: watch::Sender<Option<ServerInfo>>,
     data_dir: PathBuf,
     scratch_dir: PathBuf,
@@ -103,6 +144,8 @@ async fn boot_server(
     let server = openwave_server::bind(Config::desktop(data_dir))
         .await
         .map_err(|e| e.to_string())?;
+    app.state::<host_access::HostAccess>()
+        .initialize_store(server.store())?;
     let info = ServerInfo {
         base_url: format!("http://{}", server.local_addr()),
         token: server.token().to_string(),

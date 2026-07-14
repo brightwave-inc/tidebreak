@@ -81,19 +81,27 @@ defense in depth, not a substitute for authorization: the broker validates every
 operation even when its caller is local.
 
 The sidecar adapter is a small `openwave-host-broker` process owned by the
-desktop host. The host supplies absolute app-data and home-directory paths at
-spawn time; the broker never guesses them from an agent request. Its stdio wire
-format is strict, bounded newline-delimited JSON with an explicit control or
-operation channel and exactly one safe response per non-empty input line.
+desktop host. The desktop builds and bundles it by default, starts one lazy
+process for the application profile, and restarts it after a bounded transport
+failure. The host supplies absolute app-data and home-directory paths at spawn
+time; the broker never guesses them from an agent request. Its stdio wire format
+is strict, bounded newline-delimited JSON with an explicit control or operation
+channel and exactly one safe response per non-empty input line.
 Oversized lines are drained without unbounded allocation so the next request can
 still be parsed; whitespace-only or malformed non-empty frames receive a safe
 transport error rather than hanging a request/response client. Root counts,
 display names, directory results, and file bytes are bounded before response
 serialization, so the response cap is also an allocation bound. The app-private
 broker directory is added to root policy as a protected location, so it and any
-ancestor containing it cannot be connected.
-This process adapter does not itself grant the renderer access to the trusted
-control handle—the forthcoming Tauri client owns that routing distinction.
+ancestor containing it cannot be connected. Queue admission is bounded and
+fails fast when full, and the desktop runs as a single instance so two native
+shells cannot contend for the same broker state.
+
+The Tauri host—not the renderer—owns the control handle. It opens the native
+folder picker, resolves the renderer's chat ID against the server's authoritative
+store, derives project or standalone ownership from that record, and forwards
+the picker result. Re-registering the same pinned filesystem object for the same
+subject reuses the root and only adds a missing conversation attachment.
 
 The **renderer** presents connected folders and permission choices. It receives
 safe summaries, not the broker's persisted absolute-path registry.
@@ -254,18 +262,19 @@ This will land in independently reviewable pieces:
    local two-generation retention.
 5. Expose the same contract through a bounded, versioned sidecar adapter with
    strict control/operation wire variants and app-private-directory protection.
-6. Add the Tauri sidecar client, connected-folder UI, and the durable
-   agent-request → native-picker → grant → retry workflow. Broker state, audit,
-   scratch, and handoffs live under OpenWave's application data directory;
-   remove the automatic `Documents/OpenWave` folder.
-7. Replace project/chat `workspace_dir` with persisted host-access context
+6. Add the native Tauri sidecar lifecycle and connected-folder UI. The renderer
+   can request only pick/list/revoke for its current conversation; it never
+   receives a raw control surface or absolute path. Broker state, audit, and
+   scratch live under the protected OpenWave application-data directory.
+7. Add the durable agent-request → native-picker → grant → retry workflow.
+8. Replace project/chat `workspace_dir` with persisted host-access context
    identity and connected-root APIs. This can update the pre-v1 baseline schema
    directly.
-8. Route built-in file tools through the operation interface and remove direct
+9. Route built-in file tools through the operation interface and remove direct
    ambient host-directory opening from `ToolCtx`.
-9. Port bounded imports, writes, approvals, and confined command execution as
+10. Port bounded imports, writes, approvals, and confined command execution as
    separate capability slices.
-10. Adapt the explicit-workspace MCP command to the same broker policy instead of
+11. Adapt the explicit-workspace MCP command to the same broker policy instead of
    maintaining a second filesystem authority model.
 
 Each intermediate state must fail closed. In particular, adding the data model

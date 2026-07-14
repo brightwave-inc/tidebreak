@@ -6265,6 +6265,7 @@ async fn bind_yields_a_loopback_addr_and_token() {
     let server = bind(Config::desktop(dir.path())).await.unwrap();
     assert!(server.local_addr().ip().is_loopback());
     assert!(!server.token().is_empty());
+    assert!(server.store().list_chats().await.unwrap().is_empty());
 }
 
 #[tokio::test]

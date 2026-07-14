@@ -21,6 +21,7 @@ dist/
 
 # Tauri codegen (regenerated on build)
 crates/openwave-desktop/gen/
+crates/openwave-desktop/binaries/openwave-host-broker-*
 
 # OS / editor cruft
 .DS_Store

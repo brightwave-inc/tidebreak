@@ -73,7 +73,9 @@ must not mean losing the source document.
 
 ## Startup, configuration, and local data
 
-Both the desktop and `openwave serve` use the same boot path. Startup acquires
+Both the desktop and `openwave serve` use the same server boot path. The native
+desktop additionally enforces one application instance, owns folder consent,
+and lazily starts its bundled host-broker sidecar. Server startup acquires
 exclusive ownership of the data directory, opens the operational database and
 Lance index, loads provider configuration, registers tools, starts the turn and
 document workers, and finally binds an ephemeral loopback port with a fresh
@@ -156,14 +158,15 @@ The built-in server registry currently contains:
 - `search`, which queries the indexed corpus and requires approval only when its
   embedder, store, or reranker can send data outside the machine.
 
-Today these file tools operate inside one directly opened workspace directory
-stored on the chat. That is a temporary pre-alpha boundary, not the intended
-product model. Projects and conversations will instead resolve to distinct
-host-access contexts containing user-approved roots, and file operations will go
-through a capability-gated host-broker sidecar. See [Host access and connected
-folders](host-access.md). An agent may ask the desktop to connect another folder,
-but the request only opens a native consent flow; it never grants a named path by
-itself. The model router supports Anthropic, OpenAI, and
+Today these file tools still operate inside one directly opened workspace
+directory stored on the chat. That temporary tool path is not the intended
+product boundary. The desktop can now connect, list, and revoke multiple folders
+through a native picker and capability-gated host-broker sidecar; it exposes only
+opaque root IDs and display names to the renderer. The next tool-routing slice
+will resolve file operations through those roots instead of the legacy workspace.
+See [Host access and connected folders](host-access.md). An agent may later ask
+the desktop to connect another folder, but the request only opens a native consent
+flow; it never grants a named path by itself. The model router supports Anthropic, OpenAI, and
 OpenAI-compatible endpoints. It fails closed: if no enabled provider with a
 usable credential can serve the selected model, no model request is sent.
 
@@ -386,13 +389,14 @@ The browser-facing API is not exposed on a public network interface.
 
 The current UI is a walking skeleton, not the complete product. It creates a new
 loose chat on each launch and supports provider setup, model selection, basic
-chat streaming, and approval prompts. It also creates and assigns one
-`Documents/OpenWave` directory automatically. That single-directory behavior is
-temporary: the desktop should keep OpenWave's private data in app storage and
-let each project or conversation connect user-chosen folders through the host
-broker. The UI does not yet provide a chat picker, history reconstruction,
-projects, document ingestion, document search, cancel, or steer controls, even
-though much of that backend API already exists.
+chat streaming, approval prompts, and native connected-folder pick/list/revoke.
+OpenWave's operational scratch stays in private app storage; user-selected paths
+cross only the native host-to-broker control boundary, while the renderer sees
+opaque folder summaries. Built-in agent file tools still use the temporary
+private scratch path and are not yet routed through those connected roots. The
+UI does not yet provide a chat picker, history reconstruction, projects,
+document ingestion, document search, cancel, or steer controls, even though much
+of that backend API already exists.
 
 Because that chat is projectless, its `search` tool can see only the unscoped
 document corpus. Project-scoped documents are not reachable through the current

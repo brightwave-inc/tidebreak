@@ -173,11 +173,11 @@ struct RevokeFingerprint {
 }
 
 struct PreparedRegistration {
+    conversation_id: Uuid,
     root_id: RootId,
     root: RegisteredRoot,
     grants: [Grant; 2],
     attachment: RootAttachment,
-    result: RegisterRootResult,
 }
 
 struct ControlAudit {
@@ -407,17 +407,47 @@ impl Controller {
             }
             result => result.map_err(error_response),
         };
-        let outcome = prepared
-            .as_ref()
-            .map(|item| item.result.clone())
-            .map_err(Clone::clone);
         let mut state = self.lock_state().map_err(error_response)?;
         let mut next = state.clone();
-        if let Ok(prepared) = prepared {
-            next.roots.insert(prepared.root_id, prepared.root);
-            next.grants.extend(prepared.grants);
-            next.attachments.push(prepared.attachment);
-        }
+        let outcome = match prepared {
+            Ok(prepared) => {
+                let existing = next.roots.iter().find_map(|(root_id, root)| {
+                    (root.owner == prepared.root.owner
+                        && root.root.identity() == prepared.root.root.identity())
+                    .then(|| (*root_id, root.display_name.clone()))
+                });
+                if let Some((root_id, display_name)) = existing {
+                    if !next.attachments.iter().any(|attachment| {
+                        attachment.conversation_id() == prepared.conversation_id
+                            && attachment.root_id() == root_id
+                    }) {
+                        next.attachments.push(
+                            RootAttachment::new(prepared.conversation_id, root_id)
+                                .map_err(BrokerError::from)
+                                .map_err(error_response)?,
+                        );
+                    }
+                    Ok(RegisterRootResult {
+                        root: RootSummary {
+                            root_id,
+                            display_name,
+                        },
+                    })
+                } else {
+                    let result = RegisterRootResult {
+                        root: RootSummary {
+                            root_id: prepared.root_id,
+                            display_name: prepared.root.display_name.clone(),
+                        },
+                    };
+                    next.roots.insert(prepared.root_id, prepared.root);
+                    next.grants.extend(prepared.grants);
+                    next.attachments.push(prepared.attachment);
+                    Ok(result)
+                }
+            }
+            Err(error) => Err(error),
+        };
         complete_register(&mut next, operation_id, &fingerprint, outcome.clone())
             .map_err(error_response)?;
         if let Err(error) = self.commit_state(&mut state, next) {
@@ -445,12 +475,6 @@ impl Controller {
         let validated = self.shared.policy.open_root(&request.path)?;
         let display_name = root_display_name(validated.canonical_path());
         let root_id = RootId::new();
-        let result = RegisterRootResult {
-            root: RootSummary {
-                root_id,
-                display_name: display_name.clone(),
-            },
-        };
         let consent = ConsentRecord::new(request.consent_method, Utc::now());
         let list_grant = Grant::from_consent(
             GrantId::new(),
@@ -467,6 +491,7 @@ impl Controller {
             consent,
         )?;
         Ok(PreparedRegistration {
+            conversation_id: request.conversation_id,
             root_id,
             root: RegisteredRoot {
                 owner: request.subject,
@@ -475,7 +500,6 @@ impl Controller {
             },
             grants: [list_grant, read_grant],
             attachment: RootAttachment::new(request.conversation_id, root_id)?,
-            result,
         })
     }
 
@@ -1319,6 +1343,54 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn repeated_registration_reuses_the_same_root_and_attaches_new_project_chat() {
+        let (_temp, broker, path) = setup();
+        let project = Uuid::new_v4();
+        let first_chat = Uuid::new_v4();
+        let second_chat = Uuid::new_v4();
+        let subject = GrantSubject::project(project).unwrap();
+
+        let first = register(
+            &broker.controller(),
+            subject,
+            first_chat,
+            path.clone(),
+            OperationId::new(),
+        );
+        let repeated = register(
+            &broker.controller(),
+            subject,
+            first_chat,
+            path.clone(),
+            OperationId::new(),
+        );
+        let attached = register(
+            &broker.controller(),
+            subject,
+            second_chat,
+            path,
+            OperationId::new(),
+        );
+
+        assert_eq!(repeated.root, first.root);
+        assert_eq!(attached.root, first.root);
+        for chat in [first_chat, second_chat] {
+            let roots = operate(
+                &broker.operator(),
+                ExecutionContext::project_chat(chat, project).unwrap(),
+                OperationRequest::ListRoots,
+            )
+            .unwrap();
+            assert_eq!(
+                roots,
+                OperationResult::ListRoots {
+                    roots: vec![first.root.clone()]
+                }
+            );
+        }
     }
 
     #[test]
