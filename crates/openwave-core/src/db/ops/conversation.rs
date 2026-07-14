@@ -185,9 +185,9 @@ pub(in crate::db) async fn append_turn_event(
             "event lease token must not be nil".into(),
         ));
     }
-    if attempt_event_ordinal < 1 {
+    if !(1..i32::MAX).contains(&attempt_event_ordinal) {
         return Err(AgentError::Store(
-            "attempt event ordinal must be positive".into(),
+            "attempt event ordinal must be positive and below the terminal slot".into(),
         ));
     }
     if matches!(

@@ -161,7 +161,14 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         completions.push(tokio::spawn(async move {
             barrier.wait().await;
             store
-                .complete_turn_run(next.id, completion_token, output.created_at, &output)
+                .complete_turn_run_and_append_event(
+                    next.id,
+                    completion_token,
+                    output.created_at,
+                    &output,
+                    Usage::default(),
+                    StopReason::EndTurn,
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -169,13 +176,18 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     }
     let mut committed = 0;
     let mut existing = 0;
+    let mut terminal_events = Vec::new();
     for completion in completions {
-        match completion.await.unwrap() {
+        let completion = completion.await.unwrap();
+        match completion.outcome {
             CompleteTurnRunOutcome::Completed(_) => committed += 1,
             CompleteTurnRunOutcome::Existing(_) => existing += 1,
         }
+        terminal_events.push(completion.terminal_event.unwrap());
     }
     assert_eq!((committed, existing), (1, 1));
+    assert_eq!(terminal_events[0], terminal_events[1]);
+    assert_eq!(terminal_events[0].seq, 1);
     assert_eq!(store.list_messages(next_chat.id).await.unwrap().len(), 2);
 
     let failure_chat = sample_chat();
