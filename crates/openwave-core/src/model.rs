@@ -834,7 +834,98 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
 }
 
-/// A persisted tool invocation — name, arguments, and (once finished) result.
+/// Where an accepted tool invocation must execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallExecution {
+    /// Execute inside the server-owned agent runtime.
+    Server,
+    /// Execute through a separately leased trusted client surface.
+    Client,
+}
+
+impl ToolCallExecution {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Server => "server",
+            Self::Client => "client",
+        }
+    }
+}
+
+/// Durable lifecycle of one tool invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallStatus {
+    /// Canonical arguments are committed and execution has not resolved.
+    Pending,
+    /// Execution returned a successful model-facing result.
+    Completed,
+    /// Execution returned a stable failure and model-facing result.
+    Failed,
+    /// Execution was intentionally cancelled with a model-facing result.
+    Cancelled,
+}
+
+impl ToolCallStatus {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Whether execution has a durable final result.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+}
+
+/// Exact terminal payload used for idempotent tool-call resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolCallResolution {
+    /// Successful execution.
+    Completed { result: String },
+    /// Failed execution with stable machine and optional diagnostic detail.
+    Failed {
+        result: String,
+        error_code: String,
+        error_detail: Option<String>,
+    },
+    /// Intentional cancellation, including a user declining a native prompt.
+    Cancelled { result: String },
+}
+
+impl ToolCallResolution {
+    /// Terminal state represented by this payload.
+    #[must_use]
+    pub const fn status(&self) -> ToolCallStatus {
+        match self {
+            Self::Completed { .. } => ToolCallStatus::Completed,
+            Self::Failed { .. } => ToolCallStatus::Failed,
+            Self::Cancelled { .. } => ToolCallStatus::Cancelled,
+        }
+    }
+
+    /// Model-facing result for this terminal outcome.
+    #[must_use]
+    pub fn result(&self) -> &str {
+        match self {
+            Self::Completed { result }
+            | Self::Failed { result, .. }
+            | Self::Cancelled { result } => result,
+        }
+    }
+}
+
+/// A persisted tool invocation — canonical identity, arguments, and lifecycle.
 ///
 /// Distinct from [`Message`]: the model transcript rebuilds `ToolUse` /
 /// `ToolResult` blocks from these rows so cross-turn context keeps structured
@@ -853,15 +944,37 @@ pub struct ToolCallRecord {
     pub name: String,
     /// Parsed JSON arguments.
     pub arguments: serde_json::Value,
-    /// Result text fed back to the model, once completed.
+    /// Which trusted surface owns execution.
+    pub execution: ToolCallExecution,
+    /// Durable execution state.
+    pub status: ToolCallStatus,
+    /// Result text fed back to the model once terminal.
     pub result: Option<String>,
-    /// Whether the tool reported a failure.
-    #[serde(default)]
-    pub is_error: bool,
+    /// Stable machine-readable failure code, only for `failed`.
+    pub error_code: Option<String>,
+    /// Bounded diagnostic failure detail, only for `failed`.
+    pub error_detail: Option<String>,
+    /// Exact client executor that owns the pending lease or resolved the call.
+    pub client_executor_id: Option<Uuid>,
+    /// Expiry of the exact client executor lease.
+    pub client_lease_expires_at: Option<DateTime<Utc>>,
     /// When the call was recorded (args known).
     pub created_at: DateTime<Utc>,
-    /// When the result was written, if completed.
-    pub completed_at: Option<DateTime<Utc>>,
+    /// When the terminal outcome was written.
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+impl ToolCallRecord {
+    /// Maximum UTF-8 bytes accepted for provider identity or tool name.
+    pub const MAX_LABEL_LEN: usize = 256;
+    /// Maximum serialized canonical argument bytes.
+    pub const MAX_ARGUMENT_BYTES: usize = 128 * 1024;
+    /// Maximum model-facing terminal result bytes.
+    pub const MAX_RESULT_BYTES: usize = 512 * 1024;
+    /// Maximum stable failure code bytes.
+    pub const MAX_ERROR_CODE_LEN: usize = 128;
+    /// Maximum diagnostic failure detail bytes.
+    pub const MAX_ERROR_DETAIL_LEN: usize = 4 * 1024;
 }
 
 #[cfg(test)]

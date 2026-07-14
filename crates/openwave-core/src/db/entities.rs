@@ -330,10 +330,16 @@ pub mod tool_call {
         pub name: String,
         #[sea_orm(column_type = "JsonBinary")]
         pub arguments: Json,
+        pub execution: String,
+        pub status: String,
         pub result: Option<String>,
-        pub is_error: bool,
+        pub error_code: Option<String>,
+        pub error_detail: Option<String>,
+        pub client_executor_id: Option<Uuid>,
+        pub client_lease_token: Option<Uuid>,
+        pub client_lease_expires_at: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,
-        pub completed_at: Option<DateTimeUtc>,
+        pub resolved_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

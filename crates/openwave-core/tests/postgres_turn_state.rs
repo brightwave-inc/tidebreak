@@ -5,11 +5,16 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use openwave_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent, ApplyTurnSteerOutcome, Chat, ChatId,
-    CompleteTurnRunOutcome, DbStore, FinishTurnCancellationOutcome, Message, MessageId,
-    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, Role, StopReason, Store,
-    TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
+    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent,
+    ApplyTurnSteerOutcome, CallId, Chat, ChatId, ClaimClientToolCallOutcome,
+    CompleteTurnRunOutcome, DbStore, FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome,
+    Message, MessageId, RecordTurnFailureOutcome, RequestTurnCancellationOutcome,
+    ResolveToolCallOutcome, Role, StopReason, Store, ToolCallExecution, ToolCallRecord,
+    ToolCallResolution, ToolCallStatus, TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId,
+    TurnSteerStatus, Usage,
 };
+
+static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn sample_chat() -> Chat {
     Chat {
@@ -23,7 +28,151 @@ fn sample_chat() -> Chat {
 }
 
 #[tokio::test]
+async fn postgres_client_execution_claim_has_one_winner() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let created_at = chrono::DateTime::<Utc>::from_timestamp(1_800_000_000, 123_456_789).unwrap();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "postgres_client_call".into(),
+        name: "select_folder".into(),
+        arguments: serde_json::json!({"reason": "test"}),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at,
+        resolved_at: None,
+    };
+    assert!(matches!(
+        store.accept_tool_call(&call).await.unwrap(),
+        AcceptToolCallOutcome::Accepted(_)
+    ));
+    assert!(matches!(
+        store.accept_tool_call(&call).await.unwrap(),
+        AcceptToolCallOutcome::Existing(_)
+    ));
+
+    let claim_at = created_at + Duration::seconds(1);
+    let lease_expires_at = claim_at + Duration::minutes(1);
+    let barrier = Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        let executor = uuid::Uuid::new_v4();
+        let lease_token = uuid::Uuid::new_v4();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            (
+                executor,
+                lease_token,
+                store
+                    .claim_client_tool_call(
+                        call.id,
+                        chat.id,
+                        executor,
+                        lease_token,
+                        claim_at,
+                        lease_expires_at,
+                    )
+                    .await
+                    .unwrap(),
+            )
+        }));
+    }
+    let mut winner = None;
+    for task in tasks {
+        let (executor, requested_lease_token, outcome) = task.await.unwrap();
+        match outcome {
+            ClaimClientToolCallOutcome::Claimed(claim) => {
+                assert_eq!(claim.lease_token, requested_lease_token);
+                assert!(
+                    winner.replace((executor, claim.lease_token)).is_none(),
+                    "multiple claim winners"
+                );
+            }
+            ClaimClientToolCallOutcome::Unavailable => {}
+            outcome => panic!("unexpected concurrent claim outcome: {outcome:?}"),
+        }
+    }
+    let (winner, lease_token) = winner.expect("one client executor claimed the call");
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                winner,
+                lease_token,
+                claim_at,
+                lease_expires_at,
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Existing(_)
+    ));
+    let extended_expiry = lease_expires_at + Duration::minutes(1);
+    assert_eq!(
+        store
+            .heartbeat_client_tool_call(
+                call.id,
+                lease_token,
+                claim_at + Duration::seconds(1),
+                extended_expiry,
+            )
+            .await
+            .unwrap(),
+        HeartbeatClientToolCallOutcome::Extended
+    );
+    assert_eq!(
+        store
+            .heartbeat_client_tool_call(
+                call.id,
+                lease_token,
+                claim_at + Duration::seconds(1),
+                extended_expiry,
+            )
+            .await
+            .unwrap(),
+        HeartbeatClientToolCallOutcome::Existing
+    );
+    let resolved_at = claim_at + Duration::seconds(1);
+    let resolution = ToolCallResolution::Completed {
+        result: "selected".into(),
+    };
+    assert_eq!(
+        store
+            .resolve_client_tool_call(call.id, lease_token, resolved_at, &resolution, resolved_at,)
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Resolved
+    );
+    assert_eq!(
+        store
+            .resolve_client_tool_call(call.id, lease_token, resolved_at, &resolution, resolved_at,)
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Existing
+    );
+}
+
+#[tokio::test]
 async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
     let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
         Ok(url) => url,
         Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {

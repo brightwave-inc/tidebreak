@@ -43,11 +43,11 @@ Major surfaces present today:
 | --- | --- |
 | `id` | Typed identifiers (`ChatId`, `TurnId`, `CallId`, …) — newtypes so the compiler stops you mixing them up. |
 | `error` | The crate-wide `AgentError` + `Result`. |
-| `model` | Persisted chats, projects, documents, jobs, leases, and lifecycle state. |
+| `model` | Persisted chats, projects, documents, jobs, tool executions, leases, and lifecycle state. |
 | `tool` | The tool contract (`Tool`, `ToolSpec`, `ToolOutput`, `ToolCtx`, `ApprovalClass`). |
 | `provider` | The model-provider contract (`ModelProvider`, `ChatRequest`, `ProviderEvent`, `Usage`). |
 | `agent` | The cancellable/steerable multi-step turn loop and durable event journal integration. |
-| `db` / `storage` | SQLite/PostgreSQL-capable state transitions plus in-memory implementations. |
+| `db` / `storage` | SQLite/PostgreSQL-capable state transitions plus in-memory implementations, including immutable accept/lease/terminal tool execution. |
 | `blob` / `keychain` | Immutable local blob storage and OS-backed secret storage. |
 
 **Depends on:** nothing in the workspace.

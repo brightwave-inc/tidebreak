@@ -944,8 +944,75 @@ impl Store for PauseTerminalStore {
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>> {
         self.inner.list_messages(chat_id).await
     }
-    async fn upsert_tool_call(&self, call: &openwave_core::ToolCallRecord) -> Result<()> {
-        self.inner.upsert_tool_call(call).await
+    async fn accept_tool_call(
+        &self,
+        call: &openwave_core::ToolCallRecord,
+    ) -> Result<openwave_core::AcceptToolCallOutcome> {
+        self.inner.accept_tool_call(call).await
+    }
+    async fn claim_client_tool_call(
+        &self,
+        id: openwave_core::CallId,
+        chat_id: ChatId,
+        executor_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::ClaimClientToolCallOutcome> {
+        self.inner
+            .claim_client_tool_call(id, chat_id, executor_id, lease_token, now, lease_expires_at)
+            .await
+    }
+    async fn heartbeat_client_tool_call(
+        &self,
+        id: openwave_core::CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::HeartbeatClientToolCallOutcome> {
+        self.inner
+            .heartbeat_client_tool_call(id, lease_token, now, lease_expires_at)
+            .await
+    }
+    async fn resolve_server_tool_call(
+        &self,
+        id: openwave_core::CallId,
+        resolution: &openwave_core::ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::ResolveToolCallOutcome> {
+        self.inner
+            .resolve_server_tool_call(id, resolution, resolved_at)
+            .await
+    }
+    async fn resolve_client_tool_call(
+        &self,
+        id: openwave_core::CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &openwave_core::ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::ResolveToolCallOutcome> {
+        self.inner
+            .resolve_client_tool_call(id, lease_token, now, resolution, resolved_at)
+            .await
+    }
+    async fn resolve_expired_client_tool_call(
+        &self,
+        id: openwave_core::CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &openwave_core::ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::ResolveToolCallOutcome> {
+        self.inner
+            .resolve_expired_client_tool_call(id, lease_token, now, resolution, resolved_at)
+            .await
+    }
+    async fn list_pending_client_tool_calls(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<openwave_core::ToolCallRecord>> {
+        self.inner.list_pending_client_tool_calls(chat_id).await
     }
     async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<openwave_core::ToolCallRecord>> {
         self.inner.list_tool_calls(chat_id).await
