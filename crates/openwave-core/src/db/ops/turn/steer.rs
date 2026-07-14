@@ -5,16 +5,18 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
+use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, MessageId, TurnId, TurnSteerId};
 use crate::model::{TurnRunStatus, TurnSteer, TurnSteerStatus};
-use crate::storage::{AcceptTurnSteerOutcome, ApplyTurnSteerOutcome};
+use crate::storage::{AcceptTurnSteerOutcome, ApplyTurnSteerOutcome, JournaledTurnSteerOutcome};
 
 use super::super::super::{entities, store_err, DbStore};
 use super::super::{
     acquire_chat_write_lock, acquire_turn_write_lock,
     conversation::{
-        next_message_seq_on, reserve_message_identity_on, transfer_steer_message_identity_on,
-        MESSAGE_IDENTITY_OWNER_MESSAGE, MESSAGE_IDENTITY_OWNER_STEER,
+        append_event_on, next_message_seq_on, reserve_message_identity_on,
+        transfer_steer_message_identity_on, MESSAGE_IDENTITY_OWNER_MESSAGE,
+        MESSAGE_IDENTITY_OWNER_STEER,
     },
 };
 use super::{canonical_db_timestamp, turn_run_status_from_db};
@@ -238,12 +240,18 @@ pub(in crate::db) async fn apply_turn_steer(
     turn_id: TurnId,
     lease_token: uuid::Uuid,
     steer_id: TurnSteerId,
+    attempt_event_ordinal: i32,
     preceding_assistant: Option<&crate::model::Message>,
     now: chrono::DateTime<Utc>,
-) -> Result<Option<ApplyTurnSteerOutcome>> {
+) -> Result<Option<JournaledTurnSteerOutcome>> {
     if turn_id.0.is_nil() || lease_token.is_nil() || steer_id.0.is_nil() {
         return Err(AgentError::Store(
             "turn, lease, and steer identities must not be nil".into(),
+        ));
+    }
+    if !(1..i32::MAX).contains(&attempt_event_ordinal) {
+        return Err(AgentError::Store(
+            "steer event ordinal must be positive and below the terminal slot".into(),
         ));
     }
     let now = canonical_db_timestamp(now)?;
@@ -281,9 +289,13 @@ pub(in crate::db) async fn apply_turn_steer(
             if let Some(preceding) = preceding_assistant {
                 ensure_exact_preceding_message_on(&transaction, &steer, preceding).await?;
             }
-            Some(ApplyTurnSteerOutcome::Existing(turn_steer_from_model(
-                steer,
-            )?))
+            let event =
+                exact_applied_event_on(&transaction, &steer, lease_token, attempt_event_ordinal)
+                    .await?;
+            Some(JournaledTurnSteerOutcome {
+                outcome: ApplyTurnSteerOutcome::Existing(turn_steer_from_model(steer)?),
+                event,
+            })
         } else {
             None
         };
@@ -467,9 +479,25 @@ pub(in crate::db) async fn apply_turn_steer(
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("applied steer {steer_id} disappeared")))?;
     ensure_exact_applied_message_on(&transaction, &applied).await?;
+    let event = AgentEvent::UserSteered {
+        content: applied.content.clone(),
+    };
+    let seq = append_event_on(
+        &transaction,
+        ChatId(applied.chat_id),
+        Some(turn_id),
+        Some(lease_token),
+        Some(attempt_event_ordinal),
+        None,
+        &event,
+    )
+    .await?;
     let applied = turn_steer_from_model(applied)?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(Some(ApplyTurnSteerOutcome::Applied(applied)))
+    Ok(Some(JournaledTurnSteerOutcome {
+        outcome: ApplyTurnSteerOutcome::Applied(applied),
+        event: SequencedEvent { seq, event },
+    }))
 }
 
 pub(super) async fn reject_pending_turn_steers_on<C>(
@@ -579,6 +607,49 @@ where
         )));
     }
     Ok(())
+}
+
+async fn exact_applied_event_on<C>(
+    conn: &C,
+    steer: &entities::turn_steer::Model,
+    lease_token: uuid::Uuid,
+    attempt_event_ordinal: i32,
+) -> Result<SequencedEvent>
+where
+    C: ConnectionTrait,
+{
+    let event = entities::event::Entity::find()
+        .filter(entities::event::Column::LeaseToken.eq(lease_token))
+        .filter(entities::event::Column::AttemptEventOrdinal.eq(attempt_event_ordinal))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "applied turn steer {} has no exact journal event",
+                TurnSteerId(steer.id)
+            ))
+        })?;
+    let payload = serde_json::from_value::<AgentEvent>(event.payload.clone())?;
+    let expected = AgentEvent::UserSteered {
+        content: steer.content.clone(),
+    };
+    if event.chat_id != steer.chat_id
+        || event.turn_id != Some(steer.turn_id)
+        || event.lease_token != Some(lease_token)
+        || event.attempt_event_ordinal != Some(attempt_event_ordinal)
+        || event.terminal
+        || payload != expected
+    {
+        return Err(AgentError::Store(format!(
+            "applied turn steer {} has a different journal event",
+            TurnSteerId(steer.id)
+        )));
+    }
+    Ok(SequencedEvent {
+        seq: event.seq,
+        event: payload,
+    })
 }
 
 async fn ensure_exact_preceding_message_on<C>(

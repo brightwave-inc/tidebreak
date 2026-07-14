@@ -39,6 +39,7 @@ async-trait = { workspace = true }
 cap-std = { workspace = true, optional = true }
 cap-fs-ext = { workspace = true, optional = true }
 futures = { workspace = true }
+futures-timer = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

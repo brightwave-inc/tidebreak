@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::ApplyTurnSteerOutcome;
 
 fn pending_turn_steer(
     turn: &crate::model::TurnRun,
@@ -223,11 +224,25 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     };
     let apply_at = Utc::now();
     let applied = store
-        .apply_turn_steer(turn.id, lease_token, steer_id, Some(&candidate), apply_at)
+        .apply_turn_steer(
+            turn.id,
+            lease_token,
+            steer_id,
+            1,
+            Some(&candidate),
+            apply_at,
+        )
         .await
         .unwrap()
         .unwrap();
-    let applied = match applied {
+    assert_eq!(
+        applied.event.event,
+        AgentEvent::UserSteered {
+            content: "change course".into(),
+        }
+    );
+    let applied_event = applied.event.clone();
+    let applied = match applied.outcome {
         ApplyTurnSteerOutcome::Applied(steer) => steer,
         other => panic!("unexpected steer application: {other:?}"),
     };
@@ -294,17 +309,34 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     ));
 
     let recovered = store
-        .apply_turn_steer(turn.id, lease_token, steer_id, Some(&candidate), Utc::now())
+        .apply_turn_steer(
+            turn.id,
+            lease_token,
+            steer_id,
+            1,
+            Some(&candidate),
+            Utc::now(),
+        )
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(recovered, ApplyTurnSteerOutcome::Existing(_)));
-    let second = match store
-        .apply_turn_steer(turn.id, lease_token, second_id, None, Utc::now())
+    assert!(matches!(
+        recovered.outcome,
+        ApplyTurnSteerOutcome::Existing(_)
+    ));
+    assert_eq!(recovered.event, applied_event);
+    let second = store
+        .apply_turn_steer(turn.id, lease_token, second_id, 2, None, Utc::now())
         .await
         .unwrap()
-        .unwrap()
-    {
+        .unwrap();
+    assert_eq!(
+        second.event.event,
+        AgentEvent::UserSteered {
+            content: "one more thing".into(),
+        }
+    );
+    let second = match second.outcome {
         ApplyTurnSteerOutcome::Applied(steer) => steer,
         other => panic!("unexpected second steer application: {other:?}"),
     };
@@ -570,25 +602,23 @@ async fn turn_steer_application_enforces_fifo_and_message_sequence_on_timestamp_
     let applied_at = Utc::now();
     assert_eq!(
         store
-            .apply_turn_steer(turn.id, lease, high_id, None, applied_at)
+            .apply_turn_steer(turn.id, lease, high_id, 1, None, applied_at)
             .await
             .unwrap(),
         None
     );
-    assert!(matches!(
-        store
-            .apply_turn_steer(turn.id, lease, low_id, None, applied_at)
-            .await
-            .unwrap(),
-        Some(ApplyTurnSteerOutcome::Applied(_))
-    ));
-    assert!(matches!(
-        store
-            .apply_turn_steer(turn.id, lease, high_id, None, applied_at)
-            .await
-            .unwrap(),
-        Some(ApplyTurnSteerOutcome::Applied(_))
-    ));
+    let low = store
+        .apply_turn_steer(turn.id, lease, low_id, 1, None, applied_at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(low.outcome, ApplyTurnSteerOutcome::Applied(_)));
+    let high = store
+        .apply_turn_steer(turn.id, lease, high_id, 2, None, applied_at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(high.outcome, ApplyTurnSteerOutcome::Applied(_)));
     assert_eq!(
         store
             .list_messages(chat.id)
@@ -649,7 +679,7 @@ async fn concurrent_apply_and_completion_leave_no_pending_steer() {
     let apply = tokio::spawn(async move {
         apply_barrier.wait().await;
         apply_store
-            .apply_turn_steer(turn.id, lease_token, steer_id, None, Utc::now())
+            .apply_turn_steer(turn.id, lease_token, steer_id, 1, None, Utc::now())
             .await
             .unwrap()
     });
@@ -662,8 +692,9 @@ async fn concurrent_apply_and_completion_leave_no_pending_steer() {
             .await
             .unwrap()
     });
-    let applied = match apply.await.unwrap() {
-        Some(ApplyTurnSteerOutcome::Applied(steer)) => steer,
+    let applied = apply.await.unwrap().unwrap();
+    let applied = match applied.outcome {
+        ApplyTurnSteerOutcome::Applied(steer) => steer,
         other => panic!("pending steer did not win completion race: {other:?}"),
     };
     assert!(matches!(
@@ -848,13 +879,12 @@ async fn concurrent_message_and_steer_reserve_one_shared_identity() {
     match steer {
         AcceptTurnSteerOutcome::Accepted(_) => {
             assert!(message.is_err());
-            assert!(matches!(
-                store
-                    .apply_turn_steer(steer_turn.id, lease, shared_id, None, Utc::now())
-                    .await
-                    .unwrap(),
-                Some(ApplyTurnSteerOutcome::Applied(_))
-            ));
+            let applied = store
+                .apply_turn_steer(steer_turn.id, lease, shared_id, 1, None, Utc::now())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(applied.outcome, ApplyTurnSteerOutcome::Applied(_)));
         }
         AcceptTurnSteerOutcome::IdentityConflict => {
             message.expect("message won the shared reservation");
@@ -1157,7 +1187,7 @@ async fn failed_steer_message_insert_rolls_back_the_application_receipt() {
     .await
     .unwrap();
     assert!(store
-        .apply_turn_steer(turn.id, lease, steer_id, None, Utc::now())
+        .apply_turn_steer(turn.id, lease, steer_id, 1, None, Utc::now())
         .await
         .is_err());
     let pending = existing_steer(
@@ -1170,4 +1200,79 @@ async fn failed_steer_message_insert_rolls_back_the_application_receipt() {
     assert_eq!(pending.applied_lease_token, None);
     assert_eq!(pending.message_id, None);
     assert_eq!(pending.resolved_at, None);
+    assert!(store.list_events(chat.id, 0).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_steer_event_insert_rolls_back_message_receipt_and_revision() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "initial input")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        other => panic!("unexpected turn acceptance: {other:?}"),
+    };
+    let lease = uuid::Uuid::new_v4();
+    let claimed_at = Utc::now();
+    store
+        .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    let steer_id = crate::id::TurnSteerId::new();
+    accepted_steer(
+        store
+            .accept_turn_steer(steer_id, turn.id, chat.id, "must stay atomic", false)
+            .await
+            .unwrap(),
+    );
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_steer_event BEFORE INSERT ON event
+             BEGIN SELECT RAISE(FAIL, 'injected steer event failure'); END",
+        )
+        .await
+        .unwrap();
+
+    assert!(store
+        .apply_turn_steer(turn.id, lease, steer_id, 1, None, Utc::now())
+        .await
+        .is_err());
+
+    let pending = existing_steer(
+        store
+            .accept_turn_steer(steer_id, turn.id, chat.id, "must stay atomic", false)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(pending.status, TurnSteerStatus::Pending);
+    assert_eq!(pending.applied_lease_token, None);
+    assert_eq!(pending.message_id, None);
+    assert_eq!(pending.resolved_at, None);
+    assert_eq!(
+        store
+            .get_turn_run(turn.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .steer_revision,
+        0
+    );
+    assert_eq!(
+        store
+            .list_messages(chat.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["initial input"]
+    );
+    assert!(store.list_events(chat.id, 0).await.unwrap().is_empty());
 }

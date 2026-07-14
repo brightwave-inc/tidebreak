@@ -306,6 +306,7 @@ struct PauseTerminalStore {
     fail_after_heartbeat_commit: std::sync::atomic::AtomicBool,
     fail_after_completion_commit: std::sync::atomic::AtomicBool,
     fail_after_apply_steer_commit: std::sync::atomic::AtomicBool,
+    cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool,
     advance_before_steer_read: std::sync::atomic::AtomicBool,
     fail_terminal_recovery: std::sync::atomic::AtomicBool,
     terminal_recovery_calls: AtomicUsize,
@@ -329,6 +330,7 @@ impl PauseTerminalStore {
             fail_after_heartbeat_commit: std::sync::atomic::AtomicBool::new(false),
             fail_after_completion_commit: std::sync::atomic::AtomicBool::new(false),
             fail_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
+            cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
             advance_before_steer_read: std::sync::atomic::AtomicBool::new(false),
             fail_terminal_recovery: std::sync::atomic::AtomicBool::new(false),
             terminal_recovery_calls: AtomicUsize::new(0),
@@ -364,6 +366,11 @@ impl PauseTerminalStore {
 
     fn fail_after_next_apply_steer_commit(&self) {
         self.fail_after_apply_steer_commit
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn cancel_after_next_apply_steer_commit(&self) {
+        self.cancel_after_apply_steer_commit
             .store(true, Ordering::SeqCst);
     }
 
@@ -692,13 +699,38 @@ impl Store for PauseTerminalStore {
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         steer_id: TurnSteerId,
+        attempt_event_ordinal: i32,
         preceding_assistant: Option<&Message>,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Option<openwave_core::ApplyTurnSteerOutcome>> {
+    ) -> Result<Option<openwave_core::JournaledTurnSteerOutcome>> {
         let applied = self
             .inner
-            .apply_turn_steer(turn_id, lease_token, steer_id, preceding_assistant, now)
+            .apply_turn_steer(
+                turn_id,
+                lease_token,
+                steer_id,
+                attempt_event_ordinal,
+                preceding_assistant,
+                now,
+            )
             .await?;
+        if applied.is_some()
+            && self
+                .cancel_after_apply_steer_commit
+                .swap(false, Ordering::SeqCst)
+        {
+            self.inner
+                .request_turn_cancellation_and_append_event(turn_id, chrono::Utc::now())
+                .await?
+                .ok_or_else(|| {
+                    AgentError::Store(
+                        "injected cancellation could not follow steer application".into(),
+                    )
+                })?;
+            return Err(AgentError::Store(
+                "injected cancelled ambiguous steer application response".into(),
+            ));
+        }
         if applied.is_some()
             && self
                 .fail_after_apply_steer_commit
@@ -1294,6 +1326,109 @@ async fn cancel_stops_a_running_turn() {
     ));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn cancellation_drains_buffered_preassigned_event_ordinals() {
+    struct TwoDeltasThenPark {
+        second_yielded: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for TwoDeltasThenPark {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("two-deltas-then-park")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let second_yielded = self.second_yielded.clone();
+            Ok(stream::iter(vec![ProviderEvent::TextDelta {
+                text: "first".into(),
+            }])
+            .chain(stream::once(async move {
+                second_yielded.notify_one();
+                ProviderEvent::TextDelta {
+                    text: "second".into(),
+                }
+            }))
+            .chain(stream::pending())
+            .boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let append_entered = Arc::new(Notify::new());
+    let append_release = Arc::new(Notify::new());
+    let injected = Arc::new(PauseTerminalStore::new(
+        inner,
+        append_entered.clone(),
+        append_release.clone(),
+    ));
+    injected.do_not_pause_terminal();
+    injected.pause_next_nonterminal_event();
+    let store: Arc<dyn Store> = injected;
+    let second_yielded = Arc::new(Notify::new());
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(TwoDeltasThenPark {
+            second_yielded: second_yielded.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker_with_config(
+        &state,
+        turn_worker::TurnWorkerConfig {
+            max_concurrency: 1,
+            ..turn_worker::TurnWorkerConfig::default()
+        },
+    );
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    let append_blocked = append_entered.notified();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), append_blocked)
+        .await
+        .expect("worker reached the first buffered event append");
+    tokio::time::timeout(Duration::from_secs(2), second_yielded.notified())
+        .await
+        .expect("agent yielded the following preassigned event");
+
+    assert_eq!(
+        cancel_turn(&router, &bearer, chat.id, turn_id).await,
+        StatusCode::ACCEPTED
+    );
+    append_release.notify_one();
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCancelled { .. })
+    ));
+}
+
 #[tokio::test]
 async fn cancel_without_a_running_turn_is_a_conflict_and_unknown_chat_is_404() {
     let (router, token, _store, _dir) = test_app().await;
@@ -1611,6 +1746,7 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
 async fn boundary_steer_commits_the_candidate_and_instruction_atomically() {
     struct FinishAfterGate {
         calls: Arc<AtomicUsize>,
+        entered: Arc<Notify>,
         gate: Arc<Notify>,
     }
 
@@ -1622,6 +1758,7 @@ async fn boundary_steer_commits_the_candidate_and_instruction_atomically() {
 
         async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
                 let gate = self.gate.clone();
                 return Ok(stream::iter(vec![ProviderEvent::TextDelta {
                     text: "candidate".into(),
@@ -1647,9 +1784,11 @@ async fn boundary_steer_commits_the_candidate_and_instruction_atomically() {
     }
 
     let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
     let gate = Arc::new(Notify::new());
     let (router, token, store, _dir) = test_app_with(Arc::new(FinishAfterGate {
         calls: calls.clone(),
+        entered: entered.clone(),
         gate: gate.clone(),
     }))
     .await;
@@ -1660,7 +1799,9 @@ async fn boundary_steer_commits_the_candidate_and_instruction_atomically() {
         send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
         StatusCode::ACCEPTED
     );
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("provider entered the first boundary generation");
 
     let steer_id = TurnSteerId::new();
     assert_eq!(
@@ -1680,6 +1821,17 @@ async fn boundary_steer_commits_the_candidate_and_instruction_atomically() {
 
     let events = wait_for_turn(&store, chat.id).await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.event,
+                AgentEvent::UserSteered { content } if content == "continue with this"
+            ))
+            .count(),
+        1,
+        "boundary steering must publish its committed event once"
+    );
     assert!(matches!(
         events.last().map(|event| &event.event),
         Some(AgentEvent::TurnCompleted { .. })
@@ -1707,6 +1859,7 @@ async fn boundary_steer_commits_the_candidate_and_instruction_atomically() {
 async fn durable_steer_poll_recovers_a_missing_local_notification() {
     struct StallThenFinish {
         calls: AtomicUsize,
+        entered: Arc<Notify>,
     }
     #[async_trait]
     impl ModelProvider for StallThenFinish {
@@ -1716,6 +1869,7 @@ async fn durable_steer_poll_recovers_a_missing_local_notification() {
 
         async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
                 return Ok(stream::pending().boxed());
             }
             Ok(stream::iter(vec![
@@ -1732,7 +1886,9 @@ async fn durable_steer_poll_recovers_a_missing_local_notification() {
 
     let provider = Arc::new(StallThenFinish {
         calls: AtomicUsize::new(0),
+        entered: Arc::new(Notify::new()),
     });
+    let entered = provider.entered.clone();
     let (router, token, store, _dir) = test_app_with(provider.clone()).await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
@@ -1741,7 +1897,9 @@ async fn durable_steer_poll_recovers_a_missing_local_notification() {
         send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
         StatusCode::ACCEPTED
     );
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("provider entered the generation before durable admission");
 
     let steer_id = TurnSteerId::new();
     assert!(matches!(
@@ -1790,6 +1948,7 @@ async fn durable_steer_poll_recovers_a_missing_local_notification() {
 async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
     struct StallThenFinish {
         calls: Arc<AtomicUsize>,
+        entered: Arc<Notify>,
     }
 
     #[async_trait]
@@ -1800,6 +1959,7 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
 
         async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
                 return Ok(stream::pending().boxed());
             }
             Ok(stream::iter(vec![
@@ -1831,6 +1991,7 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
     injected.do_not_pause_terminal();
     let store: Arc<dyn Store> = injected.clone();
     let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
     let (retrieval, _search) = build_retrieval(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
@@ -1840,6 +2001,7 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
         store.clone(),
         Arc::new(FixedResolver(Arc::new(StallThenFinish {
             calls: calls.clone(),
+            entered: entered.clone(),
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
@@ -1859,7 +2021,9 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
         send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
         StatusCode::ACCEPTED
     );
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("provider entered before the ambiguous application race");
 
     injected.advance_before_next_steer_read();
     injected.fail_after_next_apply_steer_commit();
@@ -1880,6 +2044,17 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
 
     let events = wait_for_turn(&store, chat.id).await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.event,
+                AgentEvent::UserSteered { content } if content == "recover exactly"
+            ))
+            .count(),
+        1,
+        "ambiguous application recovery must publish its committed event once"
+    );
     assert!(matches!(
         events.last().map(|event| &event.event),
         Some(AgentEvent::TurnCompleted { .. })
@@ -1898,6 +2073,133 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
                 "recover exactly",
             ),
             (messages[2].id, openwave_core::Role::Assistant, "recovered"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn committed_steer_event_recovers_when_cancellation_wins_ambiguous_response() {
+    struct NeverFinish {
+        entered: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for NeverFinish {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("never-finish")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            self.entered.notify_one();
+            Ok(stream::pending().boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let injected = Arc::new(PauseTerminalStore::new(
+        inner,
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+    ));
+    injected.do_not_pause_terminal();
+    injected.cancel_after_next_apply_steer_commit();
+    let store: Arc<dyn Store> = injected;
+    let entered = Arc::new(Notify::new());
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(NeverFinish {
+            entered: entered.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker_with_config(
+        &state,
+        turn_worker::TurnWorkerConfig {
+            lease: Duration::from_millis(500),
+            heartbeat: Duration::from_millis(20),
+            steer_poll: Duration::from_millis(5),
+            idle_min: Duration::from_millis(5),
+            idle_cap: Duration::from_millis(20),
+            failure_delay: Duration::from_millis(5),
+            max_concurrency: 1,
+        },
+    );
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("provider entered before the cancellation race");
+
+    let steer_id = TurnSteerId::new();
+    assert_eq!(
+        steer_turn_with_id(
+            &router,
+            &bearer,
+            chat.id,
+            steer_id,
+            turn_id,
+            "apply before cancellation",
+            true,
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.event,
+                AgentEvent::UserSteered { content } if content == "apply before cancellation"
+            ))
+            .count(),
+        1,
+        "exact recovery must publish the atomically committed steer event"
+    );
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCancelled { .. })
+    ));
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| (message.id, message.role, message.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (messages[0].id, openwave_core::Role::User, "go"),
+            (
+                openwave_core::MessageId(steer_id.0),
+                openwave_core::Role::User,
+                "apply before cancellation",
+            ),
         ]
     );
 }

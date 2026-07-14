@@ -7,9 +7,9 @@ use chrono::Utc;
 use futures::channel::mpsc::unbounded;
 use futures::StreamExt;
 use openwave_core::{
-    Agent, AgentConfig, AgentError, AgentEvent, AgentTurnOutcome, CompleteTurnRunOutcome,
-    MessageId, RecordTurnFailureOutcome, Result, SequencedEvent, Store, ToolRegistry,
-    TurnFailureRetry, TurnId, TurnRun, TurnRunStatus,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentTurnOutcome, ClaimedAgentEvent,
+    CompleteTurnRunOutcome, MessageId, RecordTurnFailureOutcome, Result, SequencedEvent, Store,
+    ToolRegistry, TurnFailureRetry, TurnId, TurnRun, TurnRunStatus,
 };
 use tokio::sync::Notify;
 
@@ -359,7 +359,7 @@ impl TurnWorker {
             let (events_tx, mut events_rx) = unbounded();
             let mut drive = AbortOnDrop(tokio::spawn(async move {
                 agent
-                    .run_claimed_turn(&chat, turn.id, output_message_id, &events_tx)
+                    .run_claimed_turn(&chat, turn.id, output_message_id, ordinal, &events_tx)
                     .await
             }));
             let mut drive_result = None;
@@ -372,16 +372,35 @@ impl TurnWorker {
                     result = &mut drive.0, if drive_result.is_none() => {
                         drive_result = Some(result);
                     }
-                    event = events_rx.next(), if channel_open => {
-                        match event {
-                            Some(event) => {
-                                match self.append_event(&turn, lease_token, ordinal, &event).await? {
+                    emission = events_rx.next(), if channel_open => {
+                        match emission {
+                            Some(ClaimedAgentEvent::Pending { ordinal: event_ordinal, event }) => {
+                                if event_ordinal != ordinal {
+                                    return Err(AgentError::msg(format!(
+                                        "turn {} emitted event ordinal {event_ordinal}, expected {ordinal}",
+                                        turn.id
+                                    )));
+                                }
+                                match self.append_event(&turn, lease_token, event_ordinal, &event).await? {
                                     EventAppend::Committed => {
                                         ordinal = ordinal.checked_add(1).ok_or_else(|| {
                                             AgentError::msg(format!("turn {} event ordinal exhausted", turn.id))
                                         })?;
                                     }
-                                    EventAppend::Cancelling => cancel.cancel(),
+                                    EventAppend::Cancelling => {
+                                        // The agent assigns ordinals before enqueueing. This
+                                        // emission is consumed even though cancellation won its
+                                        // append, so advance past it before draining any already
+                                        // buffered emissions. A later atomically committed event
+                                        // may legitimately follow this journal gap.
+                                        ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                                            AgentError::msg(format!(
+                                                "turn {} event ordinal exhausted",
+                                                turn.id
+                                            ))
+                                        })?;
+                                        cancel.cancel();
+                                    }
                                     EventAppend::LeaseLost => {
                                         drive.abort_and_wait().await;
                                         if heartbeat_open {
@@ -390,6 +409,21 @@ impl TurnWorker {
                                         return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
                                     }
                                 }
+                            }
+                            Some(ClaimedAgentEvent::Committed { ordinal: event_ordinal, event }) => {
+                                if event_ordinal != ordinal {
+                                    return Err(AgentError::msg(format!(
+                                        "turn {} committed event ordinal {event_ordinal}, expected {ordinal}",
+                                        turn.id
+                                    )));
+                                }
+                                self.publish(turn.chat_id, event);
+                                ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                                    AgentError::msg(format!("turn {} event ordinal exhausted", turn.id))
+                                })?;
+                            }
+                            Some(ClaimedAgentEvent::Flush(acknowledge)) => {
+                                let _ = acknowledge.send(());
                             }
                             None => channel_open = false,
                         }
