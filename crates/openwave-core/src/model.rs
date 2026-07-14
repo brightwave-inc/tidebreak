@@ -709,6 +709,44 @@ impl TurnRunStatus {
     }
 }
 
+/// Retry intent attached to one exact turn-attempt failure.
+///
+/// Workers must retain this value across an ambiguous database commit. A new
+/// backoff timestamp is a different failure request and is rejected if the
+/// original request already committed under the same lease token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnFailureRetry {
+    /// Do not claim this turn again automatically.
+    Permanent,
+    /// Make the turn eligible for another claim at the exact requested time.
+    RetryAt(DateTime<Utc>),
+}
+
+/// Immutable proof that one exact claimed attempt recorded a failure.
+///
+/// The mutable turn can advance to a later attempt after a retryable failure,
+/// so this receipt is the durable idempotency record for ambiguous retries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnFailureReceipt {
+    /// Exact claim identity that submitted the failure.
+    pub lease_token: Uuid,
+    /// Turn resolved by the claim.
+    pub turn_id: TurnId,
+    /// Attempt number recorded in the immutable claim receipt.
+    pub attempt_count: i32,
+    /// Requested retry time, retained even when exhaustion made the failure
+    /// terminal. `None` represents an explicitly permanent failure.
+    pub requested_retry_at: Option<DateTime<Utc>>,
+    /// Stable machine-readable failure category.
+    pub error_code: String,
+    /// Bounded diagnostic detail for local operators.
+    pub error_detail: Option<String>,
+    /// Fresh operational time at which the first resolution committed.
+    pub resolved_at: DateTime<Utc>,
+    /// Historical result of this resolution (`retry_wait` or `failed`).
+    pub result_status: TurnRunStatus,
+}
+
 /// One message in a chat: user input or assistant text.
 ///
 /// Tool calls are not messages; they persist separately (the `tool_call` table)

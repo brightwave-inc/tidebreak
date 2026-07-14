@@ -6,8 +6,8 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::id::{ChatId, MessageId, TurnId};
-use crate::model::{Message, Role, TurnRun, TurnRunStatus};
-use crate::storage::{AcceptTurnOutcome, CompleteTurnRunOutcome};
+use crate::model::{Message, Role, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus};
+use crate::storage::{AcceptTurnOutcome, CompleteTurnRunOutcome, RecordTurnFailureOutcome};
 
 use super::super::{entities, store_err, DbStore};
 
@@ -520,6 +520,167 @@ pub(in crate::db) async fn complete_turn_run(
     Ok(Some(CompleteTurnRunOutcome::Completed(completed)))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn record_turn_run_failure(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    retry: TurnFailureRetry,
+    error_code: &str,
+    error_detail: Option<&str>,
+) -> Result<Option<RecordTurnFailureOutcome>> {
+    validate_turn_failure(lease_token, error_code, error_detail)?;
+    let now = canonical_db_timestamp(now)?;
+    let requested_retry_at = match retry {
+        TurnFailureRetry::Permanent => None,
+        TurnFailureRetry::RetryAt(retry_at) => Some(canonical_db_timestamp(retry_at)?),
+    };
+
+    if let Some(existing) = exact_turn_failure_on(
+        &store.conn,
+        id,
+        lease_token,
+        requested_retry_at,
+        error_code,
+        error_detail,
+    )
+    .await?
+    {
+        return Ok(Some(RecordTurnFailureOutcome::Existing(existing)));
+    }
+    if requested_retry_at.is_some_and(|retry_at| retry_at <= now) {
+        return Err(AgentError::Store(
+            "turn retry time must be after failure resolution time".into(),
+        ));
+    }
+
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_exact_turn_write_lock(&transaction, id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    if let Some(existing) = exact_turn_failure_on(
+        &transaction,
+        id,
+        lease_token,
+        requested_retry_at,
+        error_code,
+        error_detail,
+    )
+    .await?
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(RecordTurnFailureOutcome::Existing(existing)));
+    }
+    let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .filter(|claim| claim.turn_id == id.0)
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let Some(turn) = entities::turn_run::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if turn.status != TurnRunStatus::Running.as_str()
+        || turn.attempt_count != claim.attempt_count
+        || turn.lease_token != Some(lease_token)
+        || turn
+            .lease_expires_at
+            .is_none_or(|expires_at| expires_at <= now)
+        || turn.updated_at > now
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    let result_status = if requested_retry_at.is_some() && turn.attempt_count < turn.max_attempts {
+        TurnRunStatus::RetryWait
+    } else {
+        TurnRunStatus::Failed
+    };
+    let receipt = entities::turn_failure::ActiveModel {
+        lease_token: Set(lease_token),
+        turn_id: Set(id.0),
+        attempt_count: Set(claim.attempt_count),
+        requested_retry_at: Set(requested_retry_at),
+        error_code: Set(error_code.to_owned()),
+        error_detail: Set(error_detail.map(str::to_owned)),
+        resolved_at: Set(now),
+        result_status: Set(result_status.as_str().into()),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+
+    let update = entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::Status,
+            sea_orm::sea_query::Expr::value(result_status.as_str()),
+        )
+        .col_expr(
+            entities::turn_run::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::turn_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::turn_run::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Some(error_code.to_owned())),
+        )
+        .col_expr(
+            entities::turn_run::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(error_detail.map(str::to_owned)),
+        )
+        .col_expr(
+            entities::turn_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        );
+    let update = match result_status {
+        TurnRunStatus::RetryWait => update.col_expr(
+            entities::turn_run::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(
+                requested_retry_at.expect("retry-wait failure has a retry time"),
+            ),
+        ),
+        TurnRunStatus::Failed => update.col_expr(
+            entities::turn_run::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        ),
+        _ => unreachable!("failure resolution has a constrained result status"),
+    };
+    let updated = update
+        .filter(entities::turn_run::Column::Id.eq(id.0))
+        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::turn_run::Column::AttemptCount.eq(claim.attempt_count))
+        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
+        .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+        .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
+        .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    let receipt = turn_failure_from_model(receipt)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(RecordTurnFailureOutcome::Recorded(receipt)))
+}
+
 async fn acquire_exact_turn_write_lock<C>(conn: &C, id: TurnId) -> Result<bool>
 where
     C: ConnectionTrait,
@@ -562,6 +723,84 @@ fn validate_turn_output(id: TurnId, lease_token: uuid::Uuid, output: &Message) -
         ));
     }
     Ok(())
+}
+
+fn validate_turn_failure(
+    lease_token: uuid::Uuid,
+    error_code: &str,
+    error_detail: Option<&str>,
+) -> Result<()> {
+    if lease_token.is_nil() {
+        return Err(AgentError::Store("turn lease token must not be nil".into()));
+    }
+    let code_len = error_code.chars().count();
+    if error_code.contains('\0') || !(1..=TurnRun::MAX_ERROR_CODE_LEN).contains(&code_len) {
+        return Err(AgentError::Store(
+            "turn error code must contain 1 to 128 non-NUL characters".into(),
+        ));
+    }
+    if error_detail.is_some_and(|detail| {
+        detail.contains('\0')
+            || !(1..=TurnRun::MAX_ERROR_DETAIL_LEN).contains(&detail.chars().count())
+    }) {
+        return Err(AgentError::Store(
+            "turn error detail must contain 1 to 4096 non-NUL characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn exact_turn_failure_on<C>(
+    conn: &C,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    requested_retry_at: Option<chrono::DateTime<Utc>>,
+    error_code: &str,
+    error_detail: Option<&str>,
+) -> Result<Option<TurnFailureReceipt>>
+where
+    C: ConnectionTrait,
+{
+    let Some(existing) = entities::turn_failure::Entity::find_by_id(lease_token)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    if existing.turn_id != id.0
+        || existing.requested_retry_at != requested_retry_at
+        || existing.error_code != error_code
+        || existing.error_detail.as_deref() != error_detail
+    {
+        return Err(AgentError::Store(format!(
+            "turn failure token {lease_token} was already recorded with different data"
+        )));
+    }
+    Ok(Some(turn_failure_from_model(existing)?))
+}
+
+fn turn_failure_from_model(model: entities::turn_failure::Model) -> Result<TurnFailureReceipt> {
+    let result_status = turn_run_status_from_db(&model.result_status)?;
+    if !matches!(
+        result_status,
+        TurnRunStatus::RetryWait | TurnRunStatus::Failed
+    ) {
+        return Err(AgentError::Store(format!(
+            "invalid durable turn failure result: {}",
+            model.result_status
+        )));
+    }
+    Ok(TurnFailureReceipt {
+        lease_token: model.lease_token,
+        turn_id: TurnId(model.turn_id),
+        attempt_count: model.attempt_count,
+        requested_retry_at: model.requested_retry_at,
+        error_code: model.error_code,
+        error_detail: model.error_detail,
+        resolved_at: model.resolved_at,
+        result_status,
+    })
 }
 
 async fn exact_completed_turn_on(

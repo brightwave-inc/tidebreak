@@ -29,11 +29,12 @@ use crate::model::{
     BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
     DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
-    DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, TurnRun, TurnRunStatus,
+    DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, TurnFailureRetry, TurnRun,
+    TurnRunStatus,
 };
 use crate::storage::{
     AcceptTurnOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
-    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, Store,
+    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, RecordTurnFailureOutcome, Store,
 };
 
 mod ops;
@@ -1688,6 +1689,27 @@ impl Store for DbStore {
         output: &Message,
     ) -> Result<Option<CompleteTurnRunOutcome>> {
         ops::turn::complete_turn_run(self, id, lease_token, now, output).await
+    }
+
+    async fn record_turn_run_failure(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        retry: TurnFailureRetry,
+        error_code: &str,
+        error_detail: Option<&str>,
+    ) -> Result<Option<RecordTurnFailureOutcome>> {
+        ops::turn::record_turn_run_failure(
+            self,
+            id,
+            lease_token,
+            now,
+            retry,
+            error_code,
+            error_detail,
+        )
+        .await
     }
 
     async fn append_message(&self, message: &Message) -> Result<()> {

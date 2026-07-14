@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use openwave_core::{
-    AcceptTurnOutcome, Chat, ChatId, CompleteTurnRunOutcome, DbStore, Message, MessageId, Role,
-    Store, TurnId, TurnRunStatus,
+    AcceptTurnOutcome, Chat, ChatId, CompleteTurnRunOutcome, DbStore, Message, MessageId,
+    RecordTurnFailureOutcome, Role, Store, TurnFailureRetry, TurnId, TurnRunStatus,
 };
 
 fn sample_chat() -> Chat {
@@ -175,4 +175,75 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     }
     assert_eq!((committed, existing), (1, 1));
     assert_eq!(store.list_messages(next_chat.id).await.unwrap().len(), 2);
+
+    let failure_chat = sample_chat();
+    store.create_chat(&failure_chat).await.unwrap();
+    let failure_turn = match store
+        .accept_turn(TurnId::new(), failure_chat.id, "gpt-5", "postgres failure")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let failure_token = uuid::Uuid::new_v4();
+    let failure_claimed_at = failure_turn.available_at + Duration::seconds(1);
+    let failure_at = failure_claimed_at + Duration::seconds(1);
+    let requested_retry_at = failure_at + Duration::minutes(1);
+    store
+        .claim_turn_run(
+            failure_token,
+            failure_claimed_at,
+            failure_claimed_at + Duration::minutes(2),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut failures = Vec::new();
+    for _ in 0..2 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        failures.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .record_turn_run_failure(
+                    failure_turn.id,
+                    failure_token,
+                    failure_at,
+                    TurnFailureRetry::RetryAt(requested_retry_at),
+                    "provider_unavailable",
+                    Some("temporary outage"),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        }));
+    }
+    let mut recorded = 0;
+    let mut failure_existing = 0;
+    for failure in failures {
+        match failure.await.unwrap() {
+            RecordTurnFailureOutcome::Recorded(receipt) => {
+                recorded += 1;
+                assert_eq!(receipt.result_status, TurnRunStatus::Failed);
+                assert_eq!(receipt.requested_retry_at, Some(requested_retry_at));
+            }
+            RecordTurnFailureOutcome::Existing(receipt) => {
+                failure_existing += 1;
+                assert_eq!(receipt.result_status, TurnRunStatus::Failed);
+                assert_eq!(receipt.requested_retry_at, Some(requested_retry_at));
+            }
+        }
+    }
+    assert_eq!((recorded, failure_existing), (1, 1));
+    assert_eq!(
+        store
+            .get_turn_run(failure_turn.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TurnRunStatus::Failed
+    );
 }
