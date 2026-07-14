@@ -5313,6 +5313,56 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
 }
 
 #[tokio::test]
+async fn turn_claim_rejects_a_receipt_for_an_attempt_that_never_advanced() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let accepted = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    entities::turn_claim::ActiveModel {
+        token: Set(uuid::Uuid::new_v4()),
+        turn_id: Set(accepted.id.0),
+        attempt_count: Set(1),
+        claimed_at: Set(claimed_at),
+        lease_expires_at: Set(claimed_at + chrono::Duration::minutes(1)),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        store.claim_turn_run(
+            uuid::Uuid::new_v4(),
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        ),
+    )
+    .await
+    .expect("claim must not spin on an inconsistent attempt receipt");
+    let AgentError::Store(message) = result.unwrap_err() else {
+        panic!("unexpected claim error")
+    };
+    assert!(message.contains("exists before the turn advanced"));
+    assert_eq!(
+        store
+            .get_turn_run(accepted.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TurnRunStatus::Queued
+    );
+}
+
+#[tokio::test]
 async fn turn_completion_atomically_persists_exact_output_and_recovers_retries() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();

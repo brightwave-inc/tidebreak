@@ -278,13 +278,46 @@ pub(in crate::db) async fn claim_turn_run(
             claimed_at: Set(now),
             lease_expires_at: Set(lease_expires_at),
         })
-        .on_conflict_do_nothing()
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::new()
+                .do_nothing()
+                .to_owned(),
+        )
+        .do_nothing()
         .exec_without_returning(&transaction)
         .await
         .map_err(store_err)?;
         if !matches!(receipt, TryInsertResult::Inserted(1)) {
             transaction.rollback().await.map_err(store_err)?;
-            continue;
+            if entities::turn_claim::Entity::find_by_id(lease_token)
+                .one(&store.conn)
+                .await
+                .map_err(store_err)?
+                .is_some()
+            {
+                continue;
+            }
+            let conflicting_attempt = entities::turn_claim::Entity::find()
+                .filter(entities::turn_claim::Column::TurnId.eq(candidate.id))
+                .filter(entities::turn_claim::Column::AttemptCount.eq(next_attempt))
+                .one(&store.conn)
+                .await
+                .map_err(store_err)?;
+            let current = entities::turn_run::Entity::find_by_id(candidate.id)
+                .one(&store.conn)
+                .await
+                .map_err(store_err)?;
+            if conflicting_attempt.is_some()
+                && current
+                    .as_ref()
+                    .is_some_and(|turn| turn.attempt_count >= next_attempt)
+            {
+                continue;
+            }
+            return Err(AgentError::Store(format!(
+                "turn {} claim receipt for attempt {next_attempt} exists before the turn advanced",
+                TurnId(candidate.id)
+            )));
         }
         let claim = entities::turn_run::Entity::update_many()
             .col_expr(
