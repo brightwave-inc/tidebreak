@@ -1644,11 +1644,11 @@ impl Store for DbStore {
     }
 
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {
-        ops::conversation::get_turn_run(self, id).await
+        ops::turn::get_turn_run(self, id).await
     }
 
     async fn list_turn_runs(&self, chat_id: ChatId) -> Result<Vec<TurnRun>> {
-        ops::conversation::list_turn_runs(self, chat_id).await
+        ops::turn::list_turn_runs(self, chat_id).await
     }
 
     async fn accept_turn(
@@ -1658,7 +1658,7 @@ impl Store for DbStore {
         model: &str,
         content: &str,
     ) -> Result<AcceptTurnOutcome> {
-        ops::conversation::accept_turn(self, id, chat_id, model, content).await
+        ops::turn::accept_turn(self, id, chat_id, model, content).await
     }
 
     async fn claim_turn_run(
@@ -1667,7 +1667,7 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
         lease_expires_at: chrono::DateTime<Utc>,
     ) -> Result<Option<TurnRun>> {
-        ops::conversation::claim_turn_run(self, lease_token, now, lease_expires_at).await
+        ops::turn::claim_turn_run(self, lease_token, now, lease_expires_at).await
     }
 
     async fn heartbeat_turn_run(
@@ -1677,7 +1677,7 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
         lease_expires_at: chrono::DateTime<Utc>,
     ) -> Result<bool> {
-        ops::conversation::heartbeat_turn_run(self, id, lease_token, now, lease_expires_at).await
+        ops::turn::heartbeat_turn_run(self, id, lease_token, now, lease_expires_at).await
     }
 
     async fn append_message(&self, message: &Message) -> Result<()> {
