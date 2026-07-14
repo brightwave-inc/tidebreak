@@ -125,6 +125,38 @@ impl Default for AgentConfig {
     }
 }
 
+/// The cooperative result of executing one durably claimed turn.
+///
+/// A completed output is returned to the worker instead of being persisted by
+/// the agent loop. The worker can then commit the message and terminal turn
+/// transition together through [`Store::complete_turn_run`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTurnOutcome {
+    /// The final assistant message prepared for atomic completion.
+    Completed {
+        /// The final message to publish with the terminal state transition.
+        output: Message,
+        /// Aggregate provider usage for the eventual terminal event.
+        usage: Usage,
+        /// Provider stop reason for the eventual terminal event.
+        stop_reason: StopReason,
+    },
+    /// The loop observed its cancellation token and stopped cooperatively.
+    Cancelled {
+        /// Aggregate provider usage for the eventual terminal event.
+        usage: Usage,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct TurnExecution<'a> {
+    turn_id: TurnId,
+    user_input: &'a str,
+    output_message_id: MessageId,
+    persist_input: bool,
+    publish_terminal: bool,
+}
+
 /// Drives turns for a chat over a provider, tool set, and store.
 pub struct Agent {
     provider: Arc<dyn ModelProvider>,
@@ -202,13 +234,76 @@ impl Agent {
         events: &UnboundedSender<AgentEvent>,
     ) -> Result<()> {
         let turn_id = TurnId::new();
-        let _ = events.unbounded_send(AgentEvent::TurnStarted { turn_id });
-        match self.drive(chat, turn_id, user_input, events).await {
-            Ok(()) => Ok(()),
+        let output_message_id = MessageId::new();
+        self.run_turn_inner(
+            chat,
+            TurnExecution {
+                turn_id,
+                user_input,
+                output_message_id,
+                persist_input: true,
+                publish_terminal: true,
+            },
+            events,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Execute an exact durably claimed turn without duplicating its accepted
+    /// input or publishing its final output ahead of the terminal state change.
+    ///
+    /// `turn_id` identifies the already-persisted [`crate::TurnRun`], whose
+    /// accepted user input must already be present in the store.
+    /// `output_message_id` is the worker's stable completion identity and is returned in
+    /// [`AgentTurnOutcome::Completed`] for an atomic
+    /// [`Store::complete_turn_run`] call. Intermediate assistant/tool state is
+    /// still persisted as it is produced so a later turn can rebuild context.
+    /// Terminal completed/cancelled/failed events are left to the worker to
+    /// publish only after its matching durable state transition commits.
+    pub async fn run_claimed_turn(
+        &self,
+        chat: &Chat,
+        turn_id: TurnId,
+        output_message_id: MessageId,
+        events: &UnboundedSender<AgentEvent>,
+    ) -> Result<AgentTurnOutcome> {
+        if turn_id.0.is_nil() || output_message_id.0.is_nil() {
+            return Err(AgentError::Store(
+                "claimed turn and output message ids must not be nil".into(),
+            ));
+        }
+        self.run_turn_inner(
+            chat,
+            TurnExecution {
+                turn_id,
+                user_input: "",
+                output_message_id,
+                persist_input: false,
+                publish_terminal: false,
+            },
+            events,
+        )
+        .await
+    }
+
+    async fn run_turn_inner(
+        &self,
+        chat: &Chat,
+        execution: TurnExecution<'_>,
+        events: &UnboundedSender<AgentEvent>,
+    ) -> Result<AgentTurnOutcome> {
+        let _ = events.unbounded_send(AgentEvent::TurnStarted {
+            turn_id: execution.turn_id,
+        });
+        match self.drive(chat, execution, events).await {
+            Ok(outcome) => Ok(outcome),
             Err(err) => {
-                let _ = events.unbounded_send(AgentEvent::TurnFailed {
-                    error: (&err).into(),
-                });
+                if execution.publish_terminal {
+                    let _ = events.unbounded_send(AgentEvent::TurnFailed {
+                        error: (&err).into(),
+                    });
+                }
                 Err(err)
             }
         }
@@ -217,12 +312,20 @@ impl Agent {
     async fn drive(
         &self,
         chat: &Chat,
-        turn_id: TurnId,
-        user_input: &str,
+        execution: TurnExecution<'_>,
         events: &UnboundedSender<AgentEvent>,
-    ) -> Result<()> {
-        self.persist(chat.id, turn_id, Role::User, user_input)
-            .await?;
+    ) -> Result<AgentTurnOutcome> {
+        let TurnExecution {
+            turn_id,
+            user_input,
+            output_message_id,
+            persist_input,
+            publish_terminal,
+        } = execution;
+        if persist_input {
+            self.persist(chat.id, turn_id, Role::User, user_input)
+                .await?;
+        }
         // The provider transcript for this turn: prior stored text + the blocks
         // we build up as the loop runs.
         let mut transcript = self.load_transcript(chat.id).await?;
@@ -232,10 +335,10 @@ impl Agent {
         for step in 0..self.config.max_steps {
             // Between steps: stop before starting a fresh model call if cancelled.
             if self.cancel.is_cancelled() {
-                return self.finish_cancelled(events, total_usage);
+                return Ok(self.finish_cancelled(events, total_usage, publish_terminal));
             }
             // Boundary steer: inject any queued messages before the next model call.
-            self.apply_steers(chat, turn_id, &mut transcript, events)
+            self.apply_steers(chat, turn_id, &mut transcript, None, events)
                 .await?;
 
             // Fit the transcript to the context window, retrying with tighter
@@ -341,14 +444,14 @@ impl Agent {
             // the left arm of the nested select). Also catch a cancel that raced
             // the final stream event.
             if matches!(stream_end, StreamEnd::Cancelled) || self.cancel.is_cancelled() {
-                return self.finish_cancelled(events, total_usage);
+                return Ok(self.finish_cancelled(events, total_usage, publish_terminal));
             }
             if matches!(stream_end, StreamEnd::Steered) {
                 // Discard this step's partial output — nothing from it was
                 // persisted. The marker lets replay/live clients clear deltas
                 // that were already streamed for this abandoned provider step.
                 let _ = events.unbounded_send(AgentEvent::StreamInterrupted);
-                self.apply_steers(chat, turn_id, &mut transcript, events)
+                self.apply_steers(chat, turn_id, &mut transcript, None, events)
                     .await?;
                 continue;
             }
@@ -357,8 +460,10 @@ impl Agent {
             let mut blocks: Vec<ContentBlock> = Vec::new();
             if !text.is_empty() {
                 blocks.push(ContentBlock::Text { text: text.clone() });
-                self.persist(chat.id, turn_id, Role::Assistant, &text)
-                    .await?;
+                if !calls.is_empty() {
+                    self.persist(chat.id, turn_id, Role::Assistant, &text)
+                        .await?;
+                }
             }
             for call in &calls {
                 let args = parse_args(&call.args);
@@ -392,6 +497,28 @@ impl Agent {
             }
 
             if calls.is_empty() {
+                // A boundary steer can turn this final candidate into an
+                // intermediate assistant message. Legacy turns persist each
+                // candidate immediately, so each needs its own identity. A
+                // claimed turn keeps the caller's stable completion identity:
+                // steered candidates are persisted separately by
+                // `apply_steers`, and only the actual final output uses it.
+                let candidate_message_id = if publish_terminal {
+                    MessageId::new()
+                } else {
+                    output_message_id
+                };
+                let output = Message {
+                    id: candidate_message_id,
+                    chat_id: chat.id,
+                    turn_id,
+                    role: Role::Assistant,
+                    content: text.clone(),
+                    created_at: Utc::now(),
+                };
+                if publish_terminal && !text.is_empty() {
+                    self.store.append_message(&output).await?;
+                }
                 // Drain steers until the inbox is quiet, then complete. A steer
                 // that arrives as the stream finished must continue the turn
                 // rather than race a TurnCompleted. `try_complete` holds the
@@ -399,21 +526,33 @@ impl Agent {
                 // concurrent push cannot 202 and then be orphaned.
                 loop {
                     if self.cancel.is_cancelled() {
-                        return self.finish_cancelled(events, total_usage);
+                        return Ok(self.finish_cancelled(events, total_usage, publish_terminal));
                     }
                     if self
-                        .apply_steers(chat, turn_id, &mut transcript, events)
+                        .apply_steers(
+                            chat,
+                            turn_id,
+                            &mut transcript,
+                            (!publish_terminal && !text.is_empty()).then_some(text.as_str()),
+                            events,
+                        )
                         .await?
                     {
                         break; // continue the outer step loop below
                     }
                     if self.steer.try_complete(|| {
-                        let _ = events.unbounded_send(AgentEvent::TurnCompleted {
+                        if publish_terminal {
+                            let _ = events.unbounded_send(AgentEvent::TurnCompleted {
+                                usage: total_usage,
+                                stop_reason,
+                            });
+                        }
+                    }) {
+                        return Ok(AgentTurnOutcome::Completed {
+                            output,
                             usage: total_usage,
                             stop_reason,
                         });
-                    }) {
-                        return Ok(());
                     }
                     // Steer arrived between drain and try_complete — loop.
                 }
@@ -457,7 +596,7 @@ impl Agent {
                 // A cancel that arrived during this tool (including while it was
                 // parked on approval) stops the turn before the next model call.
                 if self.cancel.is_cancelled() {
-                    return self.finish_cancelled(events, total_usage);
+                    return Ok(self.finish_cancelled(events, total_usage, publish_terminal));
                 }
             }
             // Tool results ride in a user-role message (the Messages convention).
@@ -466,7 +605,7 @@ impl Agent {
                 content: results,
             });
             // Boundary steer after tools — injected before the next model step.
-            self.apply_steers(chat, turn_id, &mut transcript, events)
+            self.apply_steers(chat, turn_id, &mut transcript, None, events)
                 .await?;
         }
 
@@ -475,9 +614,16 @@ impl Agent {
 
     /// Emit the cancellation terminal event and end the turn as a (non-error)
     /// success — the client asked for the stop, so it isn't a `TurnFailed`.
-    fn finish_cancelled(&self, events: &UnboundedSender<AgentEvent>, usage: Usage) -> Result<()> {
-        let _ = events.unbounded_send(AgentEvent::TurnCancelled { usage });
-        Ok(())
+    fn finish_cancelled(
+        &self,
+        events: &UnboundedSender<AgentEvent>,
+        usage: Usage,
+        publish_terminal_event: bool,
+    ) -> AgentTurnOutcome {
+        if publish_terminal_event {
+            let _ = events.unbounded_send(AgentEvent::TurnCancelled { usage });
+        }
+        AgentTurnOutcome::Cancelled { usage }
     }
 
     /// Drain the steer inbox into the transcript. Returns whether any messages
@@ -487,11 +633,16 @@ impl Agent {
         chat: &Chat,
         turn_id: TurnId,
         transcript: &mut Vec<ChatMessage>,
+        preceding_assistant: Option<&str>,
         events: &UnboundedSender<AgentEvent>,
     ) -> Result<bool> {
         let msgs = self.steer.drain();
         if msgs.is_empty() {
             return Ok(false);
+        }
+        if let Some(text) = preceding_assistant {
+            self.persist(chat.id, turn_id, Role::Assistant, text)
+                .await?;
         }
         for msg in msgs {
             self.persist(chat.id, turn_id, Role::User, &msg.content)
@@ -973,6 +1124,264 @@ mod tests {
         assert_eq!(calls[0].result.as_deref(), Some("hello from disk"));
         assert!(!calls[0].is_error);
         assert!(calls[0].completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("note.txt"), "hello from disk").unwrap();
+
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            workspace_dir: workspace.path().to_path_buf(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "read note.txt")
+            .await
+            .unwrap();
+        let claimed_at = Utc::now();
+        let lease_token = uuid::Uuid::new_v4();
+        let claimed = store
+            .claim_turn_run(
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .expect("accepted turn is claimable");
+        assert_eq!(claimed.id, turn_id);
+
+        let agent = Agent::new(
+            Arc::new(FakeProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(ReadFile))),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        );
+        let output_message_id = MessageId::new();
+        let (tx, rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, output_message_id, &tx)
+            .await
+            .unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        let AgentTurnOutcome::Completed {
+            output,
+            usage,
+            stop_reason,
+        } = outcome
+        else {
+            panic!("claimed turn should complete");
+        };
+        assert_eq!(output.id, output_message_id);
+        assert_eq!(output.chat_id, chat.id);
+        assert_eq!(output.turn_id, turn_id);
+        assert_eq!(output.role, Role::Assistant);
+        assert_eq!(output.content, "done");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (8, 6));
+        assert_eq!(stop_reason, StopReason::EndTurn);
+        assert!(matches!(
+            events.first(),
+            Some(AgentEvent::TurnStarted { turn_id: started }) if *started == turn_id
+        ));
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                AgentEvent::TurnCompleted { .. } | AgentEvent::TurnCancelled { .. }
+            )),
+            "the worker must publish terminal events only after its durable transition"
+        );
+
+        let stored = store.list_messages(chat.id).await.unwrap();
+        assert_eq!(stored.len(), 1, "accepted input must not be duplicated");
+        assert_eq!(stored[0].role, Role::User);
+        assert_eq!(stored[0].content, "read note.txt");
+        assert!(
+            stored.iter().all(|message| message.id != output_message_id),
+            "final output must remain unpublished until atomic completion"
+        );
+        let calls = store.list_tool_calls(chat.id).await.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].turn_id, turn_id);
+
+        let completed = store
+            .complete_turn_run(turn_id, lease_token, Utc::now(), &output)
+            .await
+            .unwrap()
+            .expect("the live worker lease can publish its prepared output");
+        assert!(matches!(
+            completed,
+            crate::CompleteTurnRunOutcome::Completed(_)
+        ));
+        let stored = store.list_messages(chat.id).await.unwrap();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[1].id, output.id);
+        assert_eq!(stored[1].chat_id, output.chat_id);
+        assert_eq!(stored[1].turn_id, output.turn_id);
+        assert_eq!(stored[1].role, output.role);
+        assert_eq!(stored[1].content, output.content);
+        assert_eq!(
+            stored[1].created_at.timestamp_micros(),
+            output.created_at.timestamp_micros()
+        );
+
+        let failed_turn_id = TurnId::new();
+        store
+            .accept_turn(
+                failed_turn_id,
+                chat.id,
+                "fake",
+                "fail before calling the model",
+            )
+            .await
+            .unwrap();
+        let failure_claimed_at = Utc::now();
+        let failure_token = uuid::Uuid::new_v4();
+        let failed_claim = store
+            .claim_turn_run(
+                failure_token,
+                failure_claimed_at,
+                failure_claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .expect("second accepted turn is claimable");
+        assert_eq!(failed_claim.id, failed_turn_id);
+        let failing_agent = Agent::new(
+            Arc::new(FakeProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new()),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                max_steps: 0,
+                ..Default::default()
+            },
+        );
+        let (failure_tx, failure_rx) = unbounded();
+        let error = failing_agent
+            .run_claimed_turn(&chat, failed_turn_id, MessageId::new(), &failure_tx)
+            .await
+            .expect_err("the zero-step guard fails execution");
+        drop(failure_tx);
+        let failure_events: Vec<AgentEvent> = failure_rx.collect().await;
+        assert!(failure_events.iter().all(|event| !matches!(
+            event,
+            AgentEvent::TurnCompleted { .. }
+                | AgentEvent::TurnCancelled { .. }
+                | AgentEvent::TurnFailed { .. }
+        )));
+        let error_detail = error.to_string();
+        let failure = store
+            .record_turn_run_failure(
+                failed_turn_id,
+                failure_token,
+                Utc::now(),
+                crate::TurnFailureRetry::Permanent,
+                "agent_error",
+                Some(&error_detail),
+            )
+            .await
+            .unwrap()
+            .expect("the worker can record failure before publishing its event");
+        assert!(matches!(
+            failure,
+            crate::RecordTurnFailureOutcome::Recorded(_)
+        ));
+
+        let cancelled_turn_id = TurnId::new();
+        store
+            .accept_turn(
+                cancelled_turn_id,
+                chat.id,
+                "fake",
+                "cancel before calling the model",
+            )
+            .await
+            .unwrap();
+        let cancellation_claimed_at = Utc::now();
+        let cancellation_token = uuid::Uuid::new_v4();
+        let cancelled_claim = store
+            .claim_turn_run(
+                cancellation_token,
+                cancellation_claimed_at,
+                cancellation_claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .expect("third accepted turn is claimable");
+        assert_eq!(cancelled_claim.id, cancelled_turn_id);
+        assert!(matches!(
+            store
+                .request_turn_cancellation(cancelled_turn_id, Utc::now())
+                .await
+                .unwrap(),
+            Some(crate::RequestTurnCancellationOutcome::Requested(_))
+        ));
+
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let cancelled_agent = Agent::new(
+            Arc::new(FakeProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new()),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_cancel(cancel);
+        let (cancellation_tx, cancellation_rx) = unbounded();
+        let outcome = cancelled_agent
+            .run_claimed_turn(&chat, cancelled_turn_id, MessageId::new(), &cancellation_tx)
+            .await
+            .unwrap();
+        drop(cancellation_tx);
+        assert_eq!(
+            outcome,
+            AgentTurnOutcome::Cancelled {
+                usage: Usage::default()
+            }
+        );
+        let cancellation_events: Vec<AgentEvent> = cancellation_rx.collect().await;
+        assert!(cancellation_events.iter().all(|event| !matches!(
+            event,
+            AgentEvent::TurnCompleted { .. }
+                | AgentEvent::TurnCancelled { .. }
+                | AgentEvent::TurnFailed { .. }
+        )));
+        assert!(matches!(
+            store
+                .finish_turn_cancellation(cancelled_turn_id, cancellation_token, Utc::now())
+                .await
+                .unwrap(),
+            Some(crate::FinishTurnCancellationOutcome::Cancelled(_))
+        ));
     }
 
     #[tokio::test]
@@ -1674,6 +2083,86 @@ mod tests {
             .iter()
             .any(|(r, c)| *r == Role::Assistant && c == "after steer"));
         assert!(!roles.iter().any(|(_, c)| c == "partial"));
+    }
+
+    #[tokio::test]
+    async fn boundary_steer_persists_distinct_legacy_assistant_candidates() {
+        let (store, chat, _workspace) = cancel_test_chat().await;
+
+        struct BoundaryThenFinish {
+            calls: AtomicUsize,
+            release: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+        }
+        #[async_trait]
+        impl ModelProvider for BoundaryThenFinish {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("boundary-then-finish")
+            }
+
+            async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let release = self.release.lock().unwrap().take().unwrap();
+                    return Ok(stream::iter(vec![ProviderEvent::TextDelta {
+                        text: "first candidate".into(),
+                    }])
+                    .chain(stream::once(async move {
+                        let _ = release.await;
+                        ProviderEvent::Stop {
+                            reason: StopReason::EndTurn,
+                        }
+                    }))
+                    .boxed());
+                }
+                Ok(stream::iter(vec![
+                    ProviderEvent::TextDelta {
+                        text: "final candidate".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ])
+                .boxed())
+            }
+        }
+
+        let (release_tx, release_rx) = futures::channel::oneshot::channel();
+        let steer = SteerInbox::new();
+        let agent = Agent::new(
+            Arc::new(BoundaryThenFinish {
+                calls: AtomicUsize::new(0),
+                release: Mutex::new(Some(release_rx)),
+            }),
+            Arc::new(ToolRegistry::new()),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_steer(steer.clone());
+
+        let chat_id = chat.id;
+        let (tx, mut rx) = unbounded();
+        let run = tokio::spawn(async move { agent.run_turn(&chat, "go", &tx).await });
+        while let Some(event) = rx.next().await {
+            if matches!(
+                event,
+                AgentEvent::TextDelta { ref text } if text == "first candidate"
+            ) {
+                assert!(steer.push("revise that", false));
+                let _ = release_tx.send(());
+                break;
+            }
+        }
+        run.await.unwrap().unwrap();
+
+        let messages = store.list_messages(chat_id).await.unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].content, "go");
+        assert_eq!(messages[1].content, "first candidate");
+        assert_eq!(messages[2].content, "revise that");
+        assert_eq!(messages[3].content, "final candidate");
+        assert_ne!(messages[1].id, messages[3].id);
     }
 
     #[tokio::test]

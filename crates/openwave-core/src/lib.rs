@@ -35,7 +35,7 @@ pub mod tool;
 #[cfg(feature = "tools")]
 pub mod tools;
 
-pub use agent::{Agent, AgentConfig, ToolRegistry};
+pub use agent::{Agent, AgentConfig, AgentTurnOutcome, ToolRegistry};
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalRequest, AutoApproveGate, RefuseGate,
 };
