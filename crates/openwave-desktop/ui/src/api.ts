@@ -2,7 +2,7 @@
 export type ServerInfo = {
   baseUrl: string;
   token: string;
-  workspaceDir: string;
+  scratchDir: string;
 };
 
 export type ProviderKind = "anthropic" | "openai" | "openai_compatible";
@@ -118,12 +118,14 @@ export class ApiClient {
     return this.json("/models", { headers: this.headers() });
   }
 
-  createChat(workspaceDir: string, model?: string): Promise<Chat> {
+  createChat(scratchDir: string, model?: string): Promise<Chat> {
     return this.json("/chats", {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({
-        workspace_dir: workspaceDir,
+        // Temporary server field: this now points only at app-private scratch.
+        // Connected user folders are broker capabilities, not chat workspaces.
+        workspace_dir: scratchDir,
         model: model || undefined,
       }),
     });
