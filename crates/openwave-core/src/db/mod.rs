@@ -1735,6 +1735,27 @@ impl Store for DbStore {
         .await
     }
 
+    async fn record_turn_run_failure_and_append_event(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        retry: TurnFailureRetry,
+        error_code: &str,
+        error_detail: Option<&str>,
+    ) -> Result<Option<JournaledTurnOutcome<RecordTurnFailureOutcome>>> {
+        ops::turn::record_turn_run_failure_and_append_event(
+            self,
+            id,
+            lease_token,
+            now,
+            retry,
+            error_code,
+            error_detail,
+        )
+        .await
+    }
+
     async fn request_turn_cancellation(
         &self,
         id: TurnId,

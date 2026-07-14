@@ -1343,7 +1343,7 @@ mod tests {
         )));
         let error_detail = error.to_string();
         let failure = store
-            .record_turn_run_failure(
+            .record_turn_run_failure_and_append_event(
                 failed_turn_id,
                 failure_token,
                 Utc::now(),
@@ -1355,9 +1355,42 @@ mod tests {
             .unwrap()
             .expect("the worker can record failure before publishing its event");
         assert!(matches!(
-            failure,
+            failure.outcome,
             crate::RecordTurnFailureOutcome::Recorded(_)
         ));
+        let terminal = failure
+            .terminal_event
+            .expect("terminal failure must return its committed event");
+        assert_eq!(
+            terminal.event,
+            AgentEvent::TurnFailed {
+                error: crate::AgentErrorInfo {
+                    kind: "agent_error".into(),
+                    message: error_detail.clone(),
+                }
+            }
+        );
+        assert_eq!(
+            store.list_events(chat.id, 0).await.unwrap().last(),
+            Some(&terminal)
+        );
+        let recovered = store
+            .record_turn_run_failure_and_append_event(
+                failed_turn_id,
+                failure_token,
+                failure_claimed_at + chrono::Duration::hours(1),
+                crate::TurnFailureRetry::Permanent,
+                "agent_error",
+                Some(&error_detail),
+            )
+            .await
+            .unwrap()
+            .expect("an exact terminal failure retry must remain recoverable");
+        assert!(matches!(
+            recovered.outcome,
+            crate::RecordTurnFailureOutcome::Existing(_)
+        ));
+        assert_eq!(recovered.terminal_event, Some(terminal));
 
         let cancelled_turn_id = TurnId::new();
         store

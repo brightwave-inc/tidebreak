@@ -221,7 +221,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         failures.push(tokio::spawn(async move {
             barrier.wait().await;
             store
-                .record_turn_run_failure(
+                .record_turn_run_failure_and_append_event(
                     failure_turn.id,
                     failure_token,
                     failure_at,
@@ -236,8 +236,10 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     }
     let mut recorded = 0;
     let mut failure_existing = 0;
+    let mut failure_events = Vec::new();
     for failure in failures {
-        match failure.await.unwrap() {
+        let failure = failure.await.unwrap();
+        match failure.outcome {
             RecordTurnFailureOutcome::Recorded(receipt) => {
                 recorded += 1;
                 assert_eq!(receipt.result_status, TurnRunStatus::Failed);
@@ -249,8 +251,11 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                 assert_eq!(receipt.requested_retry_at, Some(requested_retry_at));
             }
         }
+        failure_events.push(failure.terminal_event.unwrap());
     }
     assert_eq!((recorded, failure_existing), (1, 1));
+    assert_eq!(failure_events[0], failure_events[1]);
+    assert_eq!(failure_events[0].seq, 1);
     assert_eq!(
         store
             .get_turn_run(failure_turn.id)

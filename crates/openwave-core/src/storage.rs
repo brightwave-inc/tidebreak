@@ -710,6 +710,25 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Resolve one claimed failure and append its terminal event atomically.
+    ///
+    /// Retry-wait outcomes do not publish a terminal event. Terminal failures
+    /// commit their receipt, turn transition, and `TurnFailed` journal row in
+    /// one transaction, and exact ambiguous retries recover the original
+    /// journal sequence.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_turn_run_failure_and_append_event(
+        &self,
+        _id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+        _retry: TurnFailureRetry,
+        _error_code: &str,
+        _error_detail: Option<&str>,
+    ) -> Result<Option<JournaledTurnOutcome<RecordTurnFailureOutcome>>> {
+        turn_storage_unavailable()
+    }
+
     /// Durably request cancellation for one exact turn.
     ///
     /// Queued and retry-wait work becomes terminal immediately. Running work

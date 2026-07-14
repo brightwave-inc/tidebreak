@@ -3,7 +3,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, TransactionTrait,
 };
 
-use crate::error::{AgentError, Result};
+use crate::error::{AgentError, AgentErrorInfo, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, TurnId};
 use crate::model::{Message, Role, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus};
@@ -226,6 +226,60 @@ pub(in crate::db) async fn record_turn_run_failure(
     error_code: &str,
     error_detail: Option<&str>,
 ) -> Result<Option<RecordTurnFailureOutcome>> {
+    Ok(record_turn_run_failure_inner(
+        store,
+        id,
+        lease_token,
+        now,
+        retry,
+        error_code,
+        error_detail,
+        None,
+    )
+    .await?
+    .map(|resolution| resolution.outcome))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn record_turn_run_failure_and_append_event(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    retry: TurnFailureRetry,
+    error_code: &str,
+    error_detail: Option<&str>,
+) -> Result<Option<JournaledTurnOutcome<RecordTurnFailureOutcome>>> {
+    let event = AgentEvent::TurnFailed {
+        error: AgentErrorInfo {
+            kind: error_code.to_owned(),
+            message: error_detail.unwrap_or(error_code).to_owned(),
+        },
+    };
+    record_turn_run_failure_inner(
+        store,
+        id,
+        lease_token,
+        now,
+        retry,
+        error_code,
+        error_detail,
+        Some(&event),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_turn_run_failure_inner(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    retry: TurnFailureRetry,
+    error_code: &str,
+    error_detail: Option<&str>,
+    terminal_event: Option<&AgentEvent>,
+) -> Result<Option<JournaledTurnOutcome<RecordTurnFailureOutcome>>> {
     validate_turn_failure(lease_token, error_code, error_detail)?;
     let now = canonical_db_timestamp(now)?;
     let requested_retry_at = match retry {
@@ -243,7 +297,18 @@ pub(in crate::db) async fn record_turn_run_failure(
     )
     .await?
     {
-        return Ok(Some(RecordTurnFailureOutcome::Existing(existing)));
+        let sequenced_event = exact_failure_terminal_event_on(
+            &store.conn,
+            id,
+            lease_token,
+            &existing,
+            terminal_event,
+        )
+        .await?;
+        return Ok(Some(JournaledTurnOutcome {
+            outcome: RecordTurnFailureOutcome::Existing(existing),
+            terminal_event: sequenced_event,
+        }));
     }
     if requested_retry_at.is_some_and(|retry_at| retry_at <= now) {
         return Err(AgentError::Store(
@@ -251,7 +316,18 @@ pub(in crate::db) async fn record_turn_run_failure(
         ));
     }
 
+    let journal_chat_id = journal_chat_id(store, id, terminal_event.is_some()).await?;
+    if terminal_event.is_some() && journal_chat_id.is_none() {
+        return Ok(None);
+    }
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    if let Some(chat_id) = journal_chat_id {
+        if !acquire_chat_write_lock(&transaction, chat_id).await? {
+            return Err(AgentError::Store(format!(
+                "turn {id} references missing chat {chat_id}"
+            )));
+        }
+    }
     if !acquire_turn_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
@@ -266,8 +342,19 @@ pub(in crate::db) async fn record_turn_run_failure(
     )
     .await?
     {
+        let sequenced_event = exact_failure_terminal_event_on(
+            &transaction,
+            id,
+            lease_token,
+            &existing,
+            terminal_event,
+        )
+        .await?;
         transaction.commit().await.map_err(store_err)?;
-        return Ok(Some(RecordTurnFailureOutcome::Existing(existing)));
+        return Ok(Some(JournaledTurnOutcome {
+            outcome: RecordTurnFailureOutcome::Existing(existing),
+            terminal_event: sequenced_event,
+        }));
     }
     let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
         .one(&transaction)
@@ -372,9 +459,24 @@ pub(in crate::db) async fn record_turn_run_failure(
         return Ok(None);
     }
 
+    let sequenced_event = if result_status == TurnRunStatus::Failed {
+        append_terminal_event_on(
+            &transaction,
+            id,
+            ChatId(turn.chat_id),
+            lease_token,
+            terminal_event,
+        )
+        .await?
+    } else {
+        None
+    };
     let receipt = turn_failure_from_model(receipt)?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(Some(RecordTurnFailureOutcome::Recorded(receipt)))
+    Ok(Some(JournaledTurnOutcome {
+        outcome: RecordTurnFailureOutcome::Recorded(receipt),
+        terminal_event: sequenced_event,
+    }))
 }
 
 pub(in crate::db) async fn request_turn_cancellation(
@@ -767,20 +869,37 @@ where
         .one(conn)
         .await
         .map_err(store_err)?
-        .ok_or_else(|| AgentError::Store(format!("completed turn {id} is missing its event")))?;
+        .ok_or_else(|| AgentError::Store(format!("terminal turn {id} is missing its event")))?;
     let event = serde_json::from_value::<AgentEvent>(stored.payload)?;
     if stored.lease_token != Some(lease_token)
         || stored.attempt_event_ordinal != Some(i32::MAX)
         || event != *expected
     {
         return Err(AgentError::Store(format!(
-            "turn {id} was already completed with a different terminal event"
+            "turn {id} has a different terminal event"
         )));
     }
     Ok(Some(SequencedEvent {
         seq: stored.seq,
         event,
     }))
+}
+
+async fn exact_failure_terminal_event_on<C>(
+    conn: &C,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    receipt: &TurnFailureReceipt,
+    terminal_event: Option<&AgentEvent>,
+) -> Result<Option<SequencedEvent>>
+where
+    C: ConnectionTrait,
+{
+    if receipt.result_status == TurnRunStatus::Failed {
+        exact_terminal_event_on(conn, id, lease_token, terminal_event).await
+    } else {
+        Ok(None)
+    }
 }
 
 async fn exact_completed_output_on<C>(conn: &C, output: &Message) -> Result<bool>
