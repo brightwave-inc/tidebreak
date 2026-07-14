@@ -32,8 +32,8 @@ use crate::model::{
     DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, TurnRun, TurnRunStatus,
 };
 use crate::storage::{
-    AcceptTurnOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
-    EnsureDocumentParseJobOutcome, Store,
+    AcceptTurnOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
+    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, Store,
 };
 
 mod ops;
@@ -1678,6 +1678,16 @@ impl Store for DbStore {
         lease_expires_at: chrono::DateTime<Utc>,
     ) -> Result<bool> {
         ops::turn::heartbeat_turn_run(self, id, lease_token, now, lease_expires_at).await
+    }
+
+    async fn complete_turn_run(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        output: &Message,
+    ) -> Result<Option<CompleteTurnRunOutcome>> {
+        ops::turn::complete_turn_run(self, id, lease_token, now, output).await
     }
 
     async fn append_message(&self, message: &Message) -> Result<()> {

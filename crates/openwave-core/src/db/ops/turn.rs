@@ -6,8 +6,8 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::id::{ChatId, MessageId, TurnId};
-use crate::model::{TurnRun, TurnRunStatus};
-use crate::storage::AcceptTurnOutcome;
+use crate::model::{Message, Role, TurnRun, TurnRunStatus};
+use crate::storage::{AcceptTurnOutcome, CompleteTurnRunOutcome};
 
 use super::super::{entities, store_err, DbStore};
 
@@ -76,7 +76,7 @@ pub(in crate::db) async fn accept_turn(
         return Ok(AcceptTurnOutcome::ChatBusy(active));
     }
 
-    let now = Utc::now();
+    let now = canonical_db_timestamp(Utc::now())?;
     let input_message_id = MessageId::new();
     let message = entities::message::ActiveModel {
         id: Set(input_message_id.0),
@@ -95,6 +95,7 @@ pub(in crate::db) async fn accept_turn(
         id: Set(id.0),
         chat_id: Set(chat_id.0),
         input_message_id: Set(input_message_id.0),
+        output_message_id: Set(None),
         model: Set(model.into()),
         status: Set(TurnRunStatus::Queued.as_str().into()),
         attempt_count: Set(0),
@@ -139,6 +140,8 @@ pub(in crate::db) async fn claim_turn_run(
     now: chrono::DateTime<Utc>,
     lease_expires_at: chrono::DateTime<Utc>,
 ) -> Result<Option<TurnRun>> {
+    let now = canonical_db_timestamp(now)?;
+    let lease_expires_at = canonical_db_timestamp(lease_expires_at)?;
     if lease_token.is_nil() {
         return Err(AgentError::Store("turn lease token must not be nil".into()));
     }
@@ -353,6 +356,8 @@ pub(in crate::db) async fn heartbeat_turn_run(
     now: chrono::DateTime<Utc>,
     lease_expires_at: chrono::DateTime<Utc>,
 ) -> Result<bool> {
+    let now = canonical_db_timestamp(now)?;
+    let lease_expires_at = canonical_db_timestamp(lease_expires_at)?;
     if lease_expires_at <= now {
         return Err(AgentError::Store(
             "turn lease expiry must be after heartbeat time".into(),
@@ -377,6 +382,240 @@ pub(in crate::db) async fn heartbeat_turn_run(
         .await
         .map_err(store_err)?;
     Ok(heartbeat.rows_affected == 1)
+}
+
+pub(in crate::db) async fn complete_turn_run(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    output: &Message,
+) -> Result<Option<CompleteTurnRunOutcome>> {
+    validate_turn_output(id, lease_token, output)?;
+    let now = canonical_db_timestamp(now)?;
+    let output_created_at = canonical_db_timestamp(output.created_at)?;
+    if output_created_at > now {
+        return Err(AgentError::Store(
+            "turn output timestamp must not be after completion time".into(),
+        ));
+    }
+
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_exact_turn_write_lock(&transaction, id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(receipt) = entities::turn_claim::Entity::find_by_id(lease_token)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .filter(|receipt| receipt.turn_id == id.0)
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if output.chat_id.0 != existing.chat_id {
+        return Err(AgentError::Store(format!(
+            "turn {id} output belongs to a different chat"
+        )));
+    }
+
+    if existing.status == TurnRunStatus::Completed.as_str()
+        && existing.attempt_count == receipt.attempt_count
+    {
+        if existing.output_message_id != Some(output.id.0)
+            || !exact_completed_output_on(&transaction, output).await?
+        {
+            return Err(AgentError::Store(format!(
+                "turn {id} was already completed with different output"
+            )));
+        }
+        let existing = turn_run_from_model(existing)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(CompleteTurnRunOutcome::Existing(existing)));
+    }
+    if existing.status != TurnRunStatus::Running.as_str()
+        || existing.attempt_count != receipt.attempt_count
+        || existing.lease_token != Some(lease_token)
+        || existing
+            .lease_expires_at
+            .is_none_or(|expires_at| expires_at <= now)
+        || existing.updated_at > now
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    let message = entities::message::ActiveModel {
+        id: Set(output.id.0),
+        chat_id: Set(output.chat_id.0),
+        turn_id: Set(output.turn_id.0),
+        role: Set("assistant".into()),
+        content: Set(output.content.clone()),
+        created_at: Set(output_created_at),
+    };
+    if let Err(error) = message.insert(&transaction).await {
+        transaction.rollback().await.map_err(store_err)?;
+        if let Some(existing) = exact_completed_turn_on(store, id, lease_token, output).await? {
+            return Ok(Some(CompleteTurnRunOutcome::Existing(existing)));
+        }
+        return Err(store_err(error));
+    }
+
+    let completed = entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::Status,
+            sea_orm::sea_query::Expr::value(TurnRunStatus::Completed.as_str()),
+        )
+        .col_expr(
+            entities::turn_run::Column::OutputMessageId,
+            sea_orm::sea_query::Expr::value(Some(output.id.0)),
+        )
+        .col_expr(
+            entities::turn_run::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::turn_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::turn_run::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            entities::turn_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::turn_run::Column::Id.eq(id.0))
+        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::turn_run::Column::AttemptCount.eq(receipt.attempt_count))
+        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
+        .filter(entities::turn_run::Column::LeaseExpiresAt.eq(existing.lease_expires_at))
+        .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::turn_run::Column::UpdatedAt.eq(existing.updated_at))
+        .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if completed.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let completed = entities::turn_run::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("completed turn {id} disappeared")))
+        .and_then(turn_run_from_model)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(CompleteTurnRunOutcome::Completed(completed)))
+}
+
+async fn acquire_exact_turn_write_lock<C>(conn: &C, id: TurnId) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let locked = entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::col(entities::turn_run::Column::UpdatedAt).into(),
+        )
+        .filter(entities::turn_run::Column::Id.eq(id.0))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(locked.rows_affected == 1)
+}
+
+fn canonical_db_timestamp(timestamp: chrono::DateTime<Utc>) -> Result<chrono::DateTime<Utc>> {
+    chrono::DateTime::from_timestamp_micros(timestamp.timestamp_micros()).ok_or_else(|| {
+        AgentError::Store("turn output timestamp is outside the database range".into())
+    })
+}
+
+fn validate_turn_output(id: TurnId, lease_token: uuid::Uuid, output: &Message) -> Result<()> {
+    if lease_token.is_nil() {
+        return Err(AgentError::Store("turn lease token must not be nil".into()));
+    }
+    if output.id.0.is_nil() {
+        return Err(AgentError::Store(
+            "turn output message id must not be nil".into(),
+        ));
+    }
+    if output.turn_id != id || output.role != Role::Assistant {
+        return Err(AgentError::Store(
+            "turn output must be an assistant message for the completed turn".into(),
+        ));
+    }
+    if output.content.contains('\0') {
+        return Err(AgentError::Store(
+            "turn output must contain no NUL characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn exact_completed_turn_on(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    output: &Message,
+) -> Result<Option<TurnRun>> {
+    let Some(receipt) = entities::turn_claim::Entity::find_by_id(lease_token)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .filter(|receipt| receipt.turn_id == id.0)
+    else {
+        return Ok(None);
+    };
+    let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    if existing.status != TurnRunStatus::Completed.as_str()
+        || existing.attempt_count != receipt.attempt_count
+    {
+        return Ok(None);
+    }
+    if existing.output_message_id != Some(output.id.0)
+        || !exact_completed_output_on(&store.conn, output).await?
+    {
+        return Err(AgentError::Store(format!(
+            "turn {id} was already completed with different output"
+        )));
+    }
+    Ok(Some(turn_run_from_model(existing)?))
+}
+
+async fn exact_completed_output_on<C>(conn: &C, output: &Message) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let created_at = canonical_db_timestamp(output.created_at)?;
+    Ok(entities::message::Entity::find_by_id(output.id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some_and(|message| {
+            message.chat_id == output.chat_id.0
+                && message.turn_id == output.turn_id.0
+                && message.role == "assistant"
+                && message.content == output.content
+                && message.created_at == created_at
+        }))
 }
 
 async fn acquire_turn_claim_write_lock<C>(conn: &C) -> Result<()>
@@ -489,6 +728,7 @@ fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
         id: TurnId(model.id),
         chat_id: ChatId(model.chat_id),
         input_message_id: MessageId(model.input_message_id),
+        output_message_id: model.output_message_id.map(MessageId),
         model: model.model,
         status: turn_run_status_from_db(&model.status)?,
         attempt_count: model.attempt_count,

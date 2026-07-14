@@ -165,6 +165,12 @@ impl MigrationTrait for Init {
             .ne(TurnRunStatus::Running.as_str())
             .and(Expr::col(TurnRun::LeaseToken).is_null())
             .and(Expr::col(TurnRun::LeaseExpiresAt).is_null());
+        let completed_output = Expr::col(TurnRun::Status)
+            .eq(TurnRunStatus::Completed.as_str())
+            .and(Expr::col(TurnRun::OutputMessageId).is_not_null());
+        let no_output = Expr::col(TurnRun::Status)
+            .ne(TurnRunStatus::Completed.as_str())
+            .and(Expr::col(TurnRun::OutputMessageId).is_null());
         let terminal_finished = Expr::col(TurnRun::Status)
             .is_in([
                 TurnRunStatus::Completed.as_str(),
@@ -233,6 +239,7 @@ impl MigrationTrait for Init {
                     .col(ColumnDef::new(TurnRun::Id).uuid().not_null().primary_key())
                     .col(ColumnDef::new(TurnRun::ChatId).uuid().not_null())
                     .col(ColumnDef::new(TurnRun::InputMessageId).uuid().not_null())
+                    .col(ColumnDef::new(TurnRun::OutputMessageId).uuid())
                     .col(
                         ColumnDef::new(TurnRun::Model)
                             .string_len(crate::model::TurnRun::MAX_MODEL_LEN as u32)
@@ -305,6 +312,19 @@ impl MigrationTrait for Init {
                     )
                     .foreign_key(
                         ForeignKey::create()
+                            .name("fk_turn_run_output_message")
+                            .from_tbl(TurnRun::Table)
+                            .from_col(TurnRun::OutputMessageId)
+                            .from_col(TurnRun::ChatId)
+                            .from_col(TurnRun::Id)
+                            .to_tbl(Message::Table)
+                            .to_col(Message::Id)
+                            .to_col(Message::ChatId)
+                            .to_col(Message::TurnId)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
                             .name("fk_turn_run_live_claim")
                             .from_tbl(TurnRun::Table)
                             .from_col(TurnRun::LeaseToken)
@@ -331,6 +351,7 @@ impl MigrationTrait for Init {
                             ),
                     )
                     .check(running_lease.or(no_lease))
+                    .check(completed_output.or(no_output))
                     .check(terminal_finished.or(nonterminal_unfinished))
                     .check(
                         queued_attempt
@@ -1437,6 +1458,7 @@ enum TurnRun {
     Id,
     ChatId,
     InputMessageId,
+    OutputMessageId,
     Model,
     Status,
     AttemptCount,
