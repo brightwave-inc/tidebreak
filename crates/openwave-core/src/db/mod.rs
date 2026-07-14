@@ -22,7 +22,7 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
 use crate::id::{CallId, MessageId};
-use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId, TurnId};
+use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId, TurnId, TurnSteerId};
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
@@ -34,9 +34,10 @@ use crate::model::{
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
-    AcceptTurnOutcome, ClaimTurnRunOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
-    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
-    JournaledTurnOutcome, RecordTurnFailureOutcome, RequestTurnCancellationOutcome, Store,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, ApplyTurnSteerOutcome, ClaimTurnRunOutcome,
+    CompleteTurnRunOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
+    EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome, JournaledTurnOutcome,
+    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, Store,
 };
 
 mod ops;
@@ -1683,20 +1684,53 @@ impl Store for DbStore {
         ops::turn::heartbeat_turn_run(self, id, lease_token, now, lease_expires_at).await
     }
 
+    async fn accept_turn_steer(
+        &self,
+        id: TurnSteerId,
+        turn_id: TurnId,
+        chat_id: ChatId,
+        content: &str,
+        interrupt: bool,
+    ) -> Result<AcceptTurnSteerOutcome> {
+        ops::turn::accept_turn_steer(self, id, turn_id, chat_id, content, interrupt).await
+    }
+
+    async fn list_pending_turn_steers(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<Vec<crate::model::TurnSteer>>> {
+        ops::turn::list_pending_turn_steers(self, turn_id, lease_token, now).await
+    }
+
+    async fn apply_turn_steer(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        steer_id: TurnSteerId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<ApplyTurnSteerOutcome>> {
+        ops::turn::apply_turn_steer(self, turn_id, lease_token, steer_id, now).await
+    }
+
     async fn complete_turn_run(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
         now: chrono::DateTime<Utc>,
         output: &Message,
     ) -> Result<Option<CompleteTurnRunOutcome>> {
-        ops::turn::complete_turn_run(self, id, lease_token, now, output).await
+        ops::turn::complete_turn_run(self, id, lease_token, expected_steer_revision, now, output)
+            .await
     }
 
     async fn complete_turn_run_and_append_event(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
         now: chrono::DateTime<Utc>,
         output: &Message,
         usage: Usage,
@@ -1706,6 +1740,7 @@ impl Store for DbStore {
             self,
             id,
             lease_token,
+            expected_steer_revision,
             now,
             output,
             usage,

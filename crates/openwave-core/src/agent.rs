@@ -1246,6 +1246,7 @@ mod tests {
             .complete_turn_run_and_append_event(
                 turn_id,
                 lease_token,
+                0,
                 Utc::now(),
                 &output,
                 usage,
@@ -1274,6 +1275,7 @@ mod tests {
             .complete_turn_run_and_append_event(
                 turn_id,
                 lease_token,
+                0,
                 claimed_at + chrono::Duration::hours(1),
                 &output,
                 usage,

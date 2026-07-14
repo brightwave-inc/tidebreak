@@ -52,11 +52,41 @@ impl MigrationTrait for Init {
         manager
             .create_table(
                 Table::create()
+                    .table(MessageIdentity::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(MessageIdentity::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(MessageIdentity::ChatId).uuid().not_null())
+                    .col(ColumnDef::new(MessageIdentity::TurnId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(MessageIdentity::Owner)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_message_identity_chat")
+                            .from(MessageIdentity::Table, MessageIdentity::ChatId)
+                            .to(Chat::Table, Chat::Id),
+                    )
+                    .check(Expr::col(MessageIdentity::Owner).is_in(["message", "turn_steer"]))
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
                     .table(Message::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Message::Id).uuid().not_null().primary_key())
                     .col(ColumnDef::new(Message::ChatId).uuid().not_null())
                     .col(ColumnDef::new(Message::TurnId).uuid().not_null())
+                    .col(ColumnDef::new(Message::Seq).big_integer().not_null())
                     .col(ColumnDef::new(Message::Role).text().not_null())
                     .col(ColumnDef::new(Message::Content).text().not_null())
                     .col(
@@ -80,7 +110,8 @@ impl MigrationTrait for Init {
                     .name("idx_message_chat")
                     .table(Message::Table)
                     .col(Message::ChatId)
-                    .col(Message::CreatedAt)
+                    .col(Message::Seq)
+                    .unique()
                     .to_owned(),
             )
             .await?;
@@ -271,6 +302,12 @@ impl MigrationTrait for Init {
             ])
             .and(Expr::col(TurnRun::LastErrorCode).is_null())
             .and(Expr::col(TurnRun::LastErrorDetail).is_null());
+        let coherent_steer_generation = Expr::col(TurnRun::SteerRevision)
+            .eq(0)
+            .and(Expr::col(TurnRun::LastSteerAppliedAt).is_null())
+            .or(Expr::col(TurnRun::SteerRevision)
+                .gte(1)
+                .and(Expr::col(TurnRun::LastSteerAppliedAt).is_not_null()));
 
         manager
             .create_table(
@@ -321,6 +358,13 @@ impl MigrationTrait for Init {
                         ColumnDef::new(TurnRun::LastErrorDetail)
                             .string_len(crate::model::TurnRun::MAX_ERROR_DETAIL_LEN as u32),
                     )
+                    .col(
+                        ColumnDef::new(TurnRun::SteerRevision)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(ColumnDef::new(TurnRun::LastSteerAppliedAt).timestamp_with_time_zone())
                     .col(
                         ColumnDef::new(TurnRun::CreatedAt)
                             .timestamp_with_time_zone()
@@ -413,6 +457,18 @@ impl MigrationTrait for Init {
                             .is_null()
                             .or(Func::char_length(Expr::col(TurnRun::LastErrorDetail))
                                 .between(1, crate::model::TurnRun::MAX_ERROR_DETAIL_LEN as i32)),
+                    )
+                    .check(Expr::col(TurnRun::SteerRevision).gte(0))
+                    .check(coherent_steer_generation)
+                    .check(
+                        Expr::col(TurnRun::LastSteerAppliedAt)
+                            .is_null()
+                            .or(Expr::col(TurnRun::LastSteerAppliedAt)
+                                .gte(Expr::col(TurnRun::CreatedAt))
+                                .and(
+                                    Expr::col(TurnRun::LastSteerAppliedAt)
+                                        .lte(Expr::col(TurnRun::UpdatedAt)),
+                                )),
                     )
                     .to_owned(),
             )
@@ -732,6 +788,9 @@ impl MigrationTrait for Init {
             .await?;
         manager
             .drop_table(Table::drop().table(Message::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(MessageIdentity::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(TurnClaim::Table).to_owned())
@@ -1810,9 +1869,19 @@ enum Message {
     Id,
     ChatId,
     TurnId,
+    Seq,
     Role,
     Content,
     CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum MessageIdentity {
+    Table,
+    Id,
+    ChatId,
+    TurnId,
+    Owner,
 }
 
 #[derive(DeriveIden)]
@@ -1833,6 +1902,8 @@ enum TurnRun {
     FinishedAt,
     LastErrorCode,
     LastErrorDetail,
+    SteerRevision,
+    LastSteerAppliedAt,
     CreatedAt,
     UpdatedAt,
 }

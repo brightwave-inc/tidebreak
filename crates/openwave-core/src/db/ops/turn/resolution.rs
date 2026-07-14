@@ -6,7 +6,9 @@ use sea_orm::{
 use crate::error::{AgentError, AgentErrorInfo, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, TurnId};
-use crate::model::{Message, Role, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus};
+use crate::model::{
+    Message, Role, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus,
+};
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
     CompleteTurnRunOutcome, FinishTurnCancellationOutcome, JournaledTurnOutcome,
@@ -15,7 +17,11 @@ use crate::storage::{
 
 use super::super::super::{entities, store_err, DbStore};
 use super::super::{
-    acquire_chat_write_lock, acquire_turn_write_lock, conversation::append_event_on,
+    acquire_chat_write_lock, acquire_turn_write_lock,
+    conversation::{
+        append_event_on, next_message_seq_on, reserve_message_identity_on,
+        MESSAGE_IDENTITY_OWNER_MESSAGE,
+    },
 };
 use super::{canonical_db_timestamp, turn_run_from_model, turn_run_status_from_db};
 
@@ -30,14 +36,21 @@ pub(in crate::db) async fn complete_turn_run(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
     now: chrono::DateTime<Utc>,
     output: &Message,
 ) -> Result<Option<CompleteTurnRunOutcome>> {
-    Ok(
-        complete_turn_run_inner(store, id, lease_token, now, output, None)
-            .await?
-            .map(|resolution| resolution.outcome),
+    Ok(complete_turn_run_inner(
+        store,
+        id,
+        lease_token,
+        expected_steer_revision,
+        now,
+        output,
+        None,
     )
+    .await?
+    .map(|resolution| resolution.outcome))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -45,19 +58,30 @@ pub(in crate::db) async fn complete_turn_run_and_append_event(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
     now: chrono::DateTime<Utc>,
     output: &Message,
     usage: Usage,
     stop_reason: StopReason,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
     let event = AgentEvent::TurnCompleted { usage, stop_reason };
-    complete_turn_run_inner(store, id, lease_token, now, output, Some(&event)).await
+    complete_turn_run_inner(
+        store,
+        id,
+        lease_token,
+        expected_steer_revision,
+        now,
+        output,
+        Some(&event),
+    )
+    .await
 }
 
 async fn complete_turn_run_inner(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
     now: chrono::DateTime<Utc>,
     output: &Message,
     terminal_event: Option<&AgentEvent>,
@@ -71,17 +95,14 @@ async fn complete_turn_run_inner(
         ));
     }
 
-    let journal_chat_id = journal_chat_id(store, id, terminal_event.is_some()).await?;
-    if terminal_event.is_some() && journal_chat_id.is_none() {
+    let Some(journal_chat_id) = journal_chat_id(store, id, true).await? else {
         return Ok(None);
-    }
+    };
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    if let Some(chat_id) = journal_chat_id {
-        if !acquire_chat_write_lock(&transaction, chat_id).await? {
-            return Err(AgentError::Store(format!(
-                "turn {id} references missing chat {chat_id}"
-            )));
-        }
+    if !acquire_chat_write_lock(&transaction, journal_chat_id).await? {
+        return Err(AgentError::Store(format!(
+            "turn {id} references missing chat {journal_chat_id}"
+        )));
     }
     if !acquire_turn_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
@@ -140,11 +161,55 @@ async fn complete_turn_run_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
+    let stale_output = existing.steer_revision != expected_steer_revision;
+    let steer_pending = entities::turn_steer::Entity::find()
+        .filter(entities::turn_steer::Column::TurnId.eq(id.0))
+        .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if stale_output || steer_pending {
+        let existing = turn_run_from_model(existing)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(JournaledTurnOutcome {
+            outcome: if steer_pending {
+                CompleteTurnRunOutcome::SteerPending(existing)
+            } else {
+                CompleteTurnRunOutcome::OutputSuperseded(existing)
+            },
+            terminal_event: None,
+        }));
+    }
 
+    if !reserve_message_identity_on(
+        &transaction,
+        output.id,
+        output.chat_id,
+        output.turn_id,
+        MESSAGE_IDENTITY_OWNER_MESSAGE,
+    )
+    .await?
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        if let Some(existing) = exact_completed_turn_on(store, id, lease_token, output).await? {
+            let sequenced_event =
+                exact_terminal_event_on(&store.conn, id, Some(lease_token), terminal_event).await?;
+            return Ok(Some(JournaledTurnOutcome {
+                outcome: CompleteTurnRunOutcome::Existing(existing),
+                terminal_event: sequenced_event,
+            }));
+        }
+        return Err(AgentError::Store(format!(
+            "turn output message identity {} is already reserved",
+            output.id
+        )));
+    }
     let message = entities::message::ActiveModel {
         id: Set(output.id.0),
         chat_id: Set(output.chat_id.0),
         turn_id: Set(output.turn_id.0),
+        seq: Set(next_message_seq_on(&transaction, output.chat_id).await?),
         role: Set("assistant".into()),
         content: Set(output.content.clone()),
         created_at: Set(output_created_at),
@@ -202,6 +267,7 @@ async fn complete_turn_run_inner(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
+    super::steer::reject_pending_turn_steers_on(&transaction, id, now).await?;
     let sequenced_event = append_terminal_event_on(
         &transaction,
         id,
@@ -467,6 +533,7 @@ async fn record_turn_run_failure_inner(
     }
 
     let sequenced_event = if result_status == TurnRunStatus::Failed {
+        super::steer::reject_pending_turn_steers_on(&transaction, id, now).await?;
         append_terminal_event_on(
             &transaction,
             id,

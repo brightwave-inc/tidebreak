@@ -7,9 +7,9 @@ use chrono::Utc;
 use futures::channel::mpsc::unbounded;
 use futures::StreamExt;
 use openwave_core::{
-    Agent, AgentConfig, AgentError, AgentEvent, AgentTurnOutcome, MessageId,
-    RecordTurnFailureOutcome, Result, SequencedEvent, Store, ToolRegistry, TurnFailureRetry,
-    TurnId, TurnRun, TurnRunStatus,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentTurnOutcome, CompleteTurnRunOutcome,
+    MessageId, RecordTurnFailureOutcome, Result, SequencedEvent, Store, ToolRegistry,
+    TurnFailureRetry, TurnId, TurnRun, TurnRunStatus,
 };
 use tokio::sync::Notify;
 
@@ -441,6 +441,7 @@ impl TurnWorker {
                         .complete_turn_run_and_append_event(
                             turn.id,
                             lease_token,
+                            turn.steer_revision,
                             Utc::now(),
                             &output,
                             usage,
@@ -448,12 +449,22 @@ impl TurnWorker {
                         )
                         .await
                     {
-                        Ok(Some(resolution)) => {
-                            if let Some(event) = resolution.terminal_event {
-                                self.publish(turn.chat_id, event);
+                        Ok(Some(resolution)) => match resolution.outcome {
+                            CompleteTurnRunOutcome::Completed(_)
+                            | CompleteTurnRunOutcome::Existing(_) => {
+                                if let Some(event) = resolution.terminal_event {
+                                    self.publish(turn.chat_id, event);
+                                }
+                                return Ok(TurnWorkerOutcome::Completed(turn.id));
                             }
-                            return Ok(TurnWorkerOutcome::Completed(turn.id));
-                        }
+                            CompleteTurnRunOutcome::SteerPending(_)
+                            | CompleteTurnRunOutcome::OutputSuperseded(_) => {
+                                return Err(AgentError::msg(format!(
+                                    "turn {} requires durable steer continuation",
+                                    turn.id
+                                )));
+                            }
+                        },
                         Ok(None) => break,
                         Err(error) => {
                             self.retry_after("completion", turn.id, &error).await;

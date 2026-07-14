@@ -4,6 +4,8 @@ use crate::model::{
 };
 use chrono::{DateTime, Utc};
 
+mod turn_steer;
+
 async fn temp_store() -> (tempfile::TempDir, DbStore) {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}?mode=rwc", dir.path().join("test.db").display());
@@ -4583,10 +4585,14 @@ async fn make_queued_turn(
 ) -> entities::turn_run::ActiveModel {
     let turn_id = TurnId::new();
     let input_message_id = MessageId::new();
+    let seq = super::ops::conversation::next_message_seq_on(&store.conn, chat_id)
+        .await
+        .unwrap();
     entities::message::ActiveModel {
         id: Set(input_message_id.0),
         chat_id: Set(chat_id.0),
         turn_id: Set(turn_id.0),
+        seq: Set(seq),
         role: Set("user".into()),
         content: Set("turn input".into()),
         created_at: Set(now),
@@ -4611,154 +4617,11 @@ async fn make_queued_turn(
         finished_at: Set(None),
         last_error_code: Set(None),
         last_error_detail: Set(None),
+        steer_revision: Set(0),
+        last_steer_applied_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     }
-}
-
-fn pending_turn_steer(
-    turn: &crate::model::TurnRun,
-    id: crate::id::TurnSteerId,
-    content: &str,
-    now: DateTime<Utc>,
-) -> entities::turn_steer::ActiveModel {
-    entities::turn_steer::ActiveModel {
-        id: Set(id.0),
-        turn_id: Set(turn.id.0),
-        chat_id: Set(turn.chat_id.0),
-        content: Set(content.into()),
-        interrupt: Set(false),
-        status: Set(TurnSteerStatus::Pending.as_str().into()),
-        applied_lease_token: Set(None),
-        message_id: Set(None),
-        created_at: Set(now),
-        resolved_at: Set(None),
-    }
-}
-
-#[tokio::test]
-async fn turn_steer_schema_enforces_durable_delivery_identity() {
-    let (_dir, store) = temp_store().await;
-    let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
-    let queued = store
-        .accept_turn(TurnId::new(), chat.id, "gpt-5", "initial input")
-        .await
-        .unwrap();
-    let queued = match queued {
-        AcceptTurnOutcome::Accepted(turn) => turn,
-        other => panic!("unexpected acceptance: {other:?}"),
-    };
-    let now = Utc::now();
-    let claim_token = uuid::Uuid::new_v4();
-    let claimed = store
-        .claim_turn_run(claim_token, now, now + chrono::Duration::minutes(1))
-        .await
-        .unwrap()
-        .turn
-        .expect("turn claimed");
-    assert_eq!(claimed.id, queued.id);
-
-    let first_id = crate::id::TurnSteerId::new();
-    pending_turn_steer(&claimed, first_id, "change course", now)
-        .insert(&store.conn)
-        .await
-        .unwrap();
-
-    let mut empty = pending_turn_steer(&claimed, crate::id::TurnSteerId::new(), "", now);
-    assert!(empty.clone().insert(&store.conn).await.is_err());
-    empty.content = Set("x".repeat(crate::model::TurnSteer::MAX_CONTENT_LEN + 1));
-    assert!(empty.insert(&store.conn).await.is_err());
-
-    let mut pending_with_resolution =
-        pending_turn_steer(&claimed, crate::id::TurnSteerId::new(), "pending", now);
-    pending_with_resolution.resolved_at = Set(Some(now));
-    assert!(pending_with_resolution.insert(&store.conn).await.is_err());
-
-    let mut applied_without_receipt =
-        pending_turn_steer(&claimed, crate::id::TurnSteerId::new(), "applied", now);
-    applied_without_receipt.status = Set(TurnSteerStatus::Applied.as_str().into());
-    applied_without_receipt.resolved_at = Set(Some(now));
-    assert!(applied_without_receipt.insert(&store.conn).await.is_err());
-
-    let message_id = MessageId(first_id.0);
-    entities::message::ActiveModel {
-        id: Set(message_id.0),
-        chat_id: Set(chat.id.0),
-        turn_id: Set(claimed.id.0),
-        role: Set("user".into()),
-        content: Set("change course".into()),
-        created_at: Set(now),
-    }
-    .insert(&store.conn)
-    .await
-    .unwrap();
-    entities::turn_steer::Entity::update_many()
-        .col_expr(
-            entities::turn_steer::Column::Status,
-            sea_orm::sea_query::Expr::value(TurnSteerStatus::Applied.as_str()),
-        )
-        .col_expr(
-            entities::turn_steer::Column::AppliedLeaseToken,
-            sea_orm::sea_query::Expr::value(Some(claim_token)),
-        )
-        .col_expr(
-            entities::turn_steer::Column::MessageId,
-            sea_orm::sea_query::Expr::value(Some(message_id.0)),
-        )
-        .col_expr(
-            entities::turn_steer::Column::ResolvedAt,
-            sea_orm::sea_query::Expr::value(Some(now)),
-        )
-        .filter(entities::turn_steer::Column::Id.eq(first_id.0))
-        .exec(&store.conn)
-        .await
-        .unwrap();
-
-    let applied = entities::turn_steer::Entity::find_by_id(first_id.0)
-        .one(&store.conn)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(applied.status, TurnSteerStatus::Applied.as_str());
-    assert_eq!(applied.applied_lease_token, Some(claim_token));
-    assert_eq!(applied.message_id, Some(message_id.0));
-
-    let mismatched_message_id = MessageId::new();
-    entities::message::ActiveModel {
-        id: Set(mismatched_message_id.0),
-        chat_id: Set(chat.id.0),
-        turn_id: Set(claimed.id.0),
-        role: Set("user".into()),
-        content: Set("mismatched identity".into()),
-        created_at: Set(now),
-    }
-    .insert(&store.conn)
-    .await
-    .unwrap();
-    let mut mismatched_receipt = pending_turn_steer(
-        &claimed,
-        crate::id::TurnSteerId::new(),
-        "mismatched identity",
-        now,
-    );
-    mismatched_receipt.status = Set(TurnSteerStatus::Applied.as_str().into());
-    mismatched_receipt.applied_lease_token = Set(Some(claim_token));
-    mismatched_receipt.message_id = Set(Some(mismatched_message_id.0));
-    mismatched_receipt.resolved_at = Set(Some(now));
-    assert!(mismatched_receipt.insert(&store.conn).await.is_err());
-
-    let mut wrong_turn =
-        pending_turn_steer(&claimed, crate::id::TurnSteerId::new(), "wrong turn", now);
-    wrong_turn.turn_id = Set(TurnId::new().0);
-    assert!(wrong_turn.insert(&store.conn).await.is_err());
-
-    let mut rejected_with_message =
-        pending_turn_steer(&claimed, crate::id::TurnSteerId::new(), "rejected", now);
-    rejected_with_message.status = Set(TurnSteerStatus::Rejected.as_str().into());
-    rejected_with_message.message_id = Set(Some(message_id.0));
-    rejected_with_message.resolved_at = Set(Some(now));
-    assert!(rejected_with_message.insert(&store.conn).await.is_err());
 }
 
 #[tokio::test]
@@ -4787,10 +4650,14 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         .is_err());
 
     let first_output_id = MessageId::new();
+    let first_output_seq = super::ops::conversation::next_message_seq_on(&store.conn, chat.id)
+        .await
+        .unwrap();
     entities::message::ActiveModel {
         id: Set(first_output_id.0),
         chat_id: Set(chat.id.0),
         turn_id: Set(first.id),
+        seq: Set(first_output_seq),
         role: Set("assistant".into()),
         content: Set("done".into()),
         created_at: Set(now),
@@ -4886,6 +4753,12 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     let mut unknown_status = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     unknown_status.status = Set("waiting_for_magic".into());
     assert!(unknown_status.insert(&store.conn).await.is_err());
+    let mut negative_steer_revision = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
+    negative_steer_revision.steer_revision = Set(-1);
+    assert!(negative_steer_revision.insert(&store.conn).await.is_err());
+    let mut missing_steer_timestamp = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
+    missing_steer_timestamp.steer_revision = Set(1);
+    assert!(missing_steer_timestamp.insert(&store.conn).await.is_err());
     assert!(make_queued_turn(&store, invalid_chat.id, "", now)
         .await
         .insert(&store.conn)
@@ -5628,7 +5501,7 @@ async fn turn_completion_atomically_persists_exact_output_and_recovers_retries()
 
     assert_eq!(
         store
-            .complete_turn_run(turn_id, uuid::Uuid::new_v4(), output.created_at, &output)
+            .complete_turn_run(turn_id, uuid::Uuid::new_v4(), 0, output.created_at, &output)
             .await
             .unwrap(),
         None
@@ -5638,25 +5511,25 @@ async fn turn_completion_atomically_persists_exact_output_and_recovers_retries()
     let mut invalid = output.clone();
     invalid.role = Role::User;
     assert!(store
-        .complete_turn_run(turn_id, lease_token, output.created_at, &invalid)
+        .complete_turn_run(turn_id, lease_token, 0, output.created_at, &invalid)
         .await
         .is_err());
     invalid = output.clone();
     invalid.turn_id = TurnId::new();
     assert!(store
-        .complete_turn_run(turn_id, lease_token, output.created_at, &invalid)
+        .complete_turn_run(turn_id, lease_token, 0, output.created_at, &invalid)
         .await
         .is_err());
     invalid = output.clone();
     invalid.chat_id = ChatId::new();
     assert!(store
-        .complete_turn_run(turn_id, lease_token, output.created_at, &invalid)
+        .complete_turn_run(turn_id, lease_token, 0, output.created_at, &invalid)
         .await
         .is_err());
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
 
     let CompleteTurnRunOutcome::Completed(completed) = store
-        .complete_turn_run(turn_id, lease_token, output.created_at, &output)
+        .complete_turn_run(turn_id, lease_token, 0, output.created_at, &output)
         .await
         .unwrap()
         .unwrap()
@@ -5682,6 +5555,7 @@ async fn turn_completion_atomically_persists_exact_output_and_recovers_retries()
             .complete_turn_run(
                 turn_id,
                 lease_token,
+                0,
                 lease_expires_at + chrono::Duration::seconds(1),
                 &output,
             )
@@ -5694,13 +5568,13 @@ async fn turn_completion_atomically_persists_exact_output_and_recovers_retries()
     let mut mismatched = output.clone();
     mismatched.content = "different answer".into();
     assert!(store
-        .complete_turn_run(turn_id, lease_token, lease_expires_at, &mismatched)
+        .complete_turn_run(turn_id, lease_token, 0, lease_expires_at, &mismatched)
         .await
         .is_err());
     mismatched = output.clone();
     mismatched.id = MessageId::new();
     assert!(store
-        .complete_turn_run(turn_id, lease_token, lease_expires_at, &mismatched)
+        .complete_turn_run(turn_id, lease_token, 0, lease_expires_at, &mismatched)
         .await
         .is_err());
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
@@ -5864,7 +5738,7 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
     };
     assert!(matches!(
         store
-            .complete_turn_run(turn_id, second_token, output.created_at, &output)
+            .complete_turn_run(turn_id, second_token, 0, output.created_at, &output)
             .await
             .unwrap(),
         Some(CompleteTurnRunOutcome::Completed(_))
@@ -6406,7 +6280,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
     };
     assert_eq!(
         store
-            .complete_turn_run(turn.id, token, output.created_at, &output)
+            .complete_turn_run(turn.id, token, 0, output.created_at, &output)
             .await
             .unwrap(),
         None
@@ -6843,7 +6717,7 @@ async fn turn_completion_and_cancellation_serialize_to_one_decision() {
         tokio::spawn(async move {
             barrier.wait().await;
             store
-                .complete_turn_run(turn.id, token, decided_at, &output)
+                .complete_turn_run(turn.id, token, 0, decided_at, &output)
                 .await
         })
     };
@@ -6922,7 +6796,7 @@ async fn turn_completion_and_failure_serialize_to_one_terminal_decision() {
         tokio::spawn(async move {
             barrier.wait().await;
             store
-                .complete_turn_run(turn_id, token, resolved_at, &output)
+                .complete_turn_run(turn_id, token, 0, resolved_at, &output)
                 .await
         })
     };
@@ -7013,6 +6887,7 @@ async fn turn_completion_uses_the_heartbeated_lease_and_fences_operation_time() 
         .complete_turn_run(
             turn_id,
             token,
+            0,
             heartbeat_at + chrono::Duration::seconds(1),
             &future_output,
         )
@@ -7026,7 +6901,7 @@ async fn turn_completion_uses_the_heartbeated_lease_and_fences_operation_time() 
     };
     assert!(matches!(
         store
-            .complete_turn_run(turn_id, token, output.created_at, &output)
+            .complete_turn_run(turn_id, token, 0, output.created_at, &output)
             .await
             .unwrap(),
         Some(CompleteTurnRunOutcome::Completed(_))
@@ -7068,7 +6943,7 @@ async fn turn_completion_rejects_prepared_output_retried_after_expiry() {
 
     assert_eq!(
         store
-            .complete_turn_run(turn_id, token, lease_expires_at, &prepared_output)
+            .complete_turn_run(turn_id, token, 0, lease_expires_at, &prepared_output)
             .await
             .unwrap(),
         None
@@ -7132,7 +7007,13 @@ async fn stale_turn_attempt_cannot_complete_a_reclaimed_turn() {
     };
     assert_eq!(
         store
-            .complete_turn_run(turn_id, first_token, stale_output.created_at, &stale_output)
+            .complete_turn_run(
+                turn_id,
+                first_token,
+                0,
+                stale_output.created_at,
+                &stale_output
+            )
             .await
             .unwrap(),
         None
@@ -7144,7 +7025,7 @@ async fn stale_turn_attempt_cannot_complete_a_reclaimed_turn() {
     };
     assert!(matches!(
         store
-            .complete_turn_run(turn_id, second_token, output.created_at, &output)
+            .complete_turn_run(turn_id, second_token, 0, output.created_at, &output)
             .await
             .unwrap(),
         Some(CompleteTurnRunOutcome::Completed(_))
@@ -7196,7 +7077,7 @@ async fn concurrent_different_turn_completions_commit_one_output_once() {
         tasks.push(tokio::spawn(async move {
             barrier.wait().await;
             store
-                .complete_turn_run(turn_id, token, output.created_at, &output)
+                .complete_turn_run(turn_id, token, 0, output.created_at, &output)
                 .await
         }));
     }
@@ -7258,7 +7139,7 @@ async fn turn_completion_rolls_back_output_when_state_update_fails() {
         created_at: claimed_at + chrono::Duration::seconds(1),
     };
     assert!(store
-        .complete_turn_run(turn_id, token, output.created_at, &output)
+        .complete_turn_run(turn_id, token, 0, output.created_at, &output)
         .await
         .is_err());
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
@@ -7326,6 +7207,7 @@ async fn turn_completion_rolls_back_state_and_output_when_terminal_event_fails()
         .complete_turn_run_and_append_event(
             turn_id,
             token,
+            0,
             output.created_at,
             &output,
             Usage::default(),
@@ -7624,7 +7506,7 @@ async fn settings_roundtrip_and_overwrite() {
 }
 
 #[tokio::test]
-async fn list_chats_is_newest_first_and_messages_oldest_first() {
+async fn list_chats_is_newest_first_and_messages_follow_commit_sequence() {
     let (_dir, store) = temp_store().await;
     let mut older = sample_chat();
     older.created_at = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
@@ -7638,7 +7520,8 @@ async fn list_chats_is_newest_first_and_messages_oldest_first() {
         vec![newer.clone(), older.clone()]
     );
 
-    // Messages come back oldest-first regardless of insert order.
+    // Transcript order follows the durable per-chat commit sequence, even when
+    // caller-provided timestamps move backwards.
     let msg = |ts: i64| Message {
         id: MessageId::new(),
         chat_id: newer.id,
@@ -7651,7 +7534,7 @@ async fn list_chats_is_newest_first_and_messages_oldest_first() {
     store.append_message(&m1).await.unwrap();
     store.append_message(&m2).await.unwrap();
     let listed = store.list_messages(newer.id).await.unwrap();
-    assert_eq!(listed, vec![m2, m1]);
+    assert_eq!(listed, vec![m1, m2]);
 }
 
 #[tokio::test]

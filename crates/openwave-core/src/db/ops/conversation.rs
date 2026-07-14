@@ -4,7 +4,7 @@ use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    TransactionTrait, TryInsertResult,
 };
 
 use crate::error::{AgentError, Result};
@@ -15,6 +15,79 @@ use crate::model::{Chat, Message, Role, ToolCallRecord, TurnRunStatus};
 use super::super::{entities, store_err, DbStore};
 use super::turn::canonical_db_timestamp;
 use super::{acquire_chat_write_lock, acquire_turn_write_lock};
+
+pub(in crate::db) const MESSAGE_IDENTITY_OWNER_MESSAGE: &str = "message";
+pub(in crate::db) const MESSAGE_IDENTITY_OWNER_STEER: &str = "turn_steer";
+
+pub(in crate::db) async fn reserve_message_identity_on<C>(
+    conn: &C,
+    id: MessageId,
+    chat_id: ChatId,
+    turn_id: TurnId,
+    owner: &str,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let inserted =
+        entities::message_identity::Entity::insert(entities::message_identity::ActiveModel {
+            id: Set(id.0),
+            chat_id: Set(chat_id.0),
+            turn_id: Set(turn_id.0),
+            owner: Set(owner.to_owned()),
+        })
+        .on_conflict(
+            OnConflict::column(entities::message_identity::Column::Id)
+                .do_nothing()
+                .to_owned(),
+        )
+        .do_nothing()
+        .exec_without_returning(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(matches!(inserted, TryInsertResult::Inserted(1)))
+}
+
+pub(in crate::db) async fn transfer_steer_message_identity_on<C>(
+    conn: &C,
+    id: MessageId,
+    chat_id: ChatId,
+    turn_id: TurnId,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let transferred = entities::message_identity::Entity::update_many()
+        .col_expr(
+            entities::message_identity::Column::Owner,
+            sea_orm::sea_query::Expr::value(MESSAGE_IDENTITY_OWNER_MESSAGE),
+        )
+        .filter(entities::message_identity::Column::Id.eq(id.0))
+        .filter(entities::message_identity::Column::ChatId.eq(chat_id.0))
+        .filter(entities::message_identity::Column::TurnId.eq(turn_id.0))
+        .filter(entities::message_identity::Column::Owner.eq(MESSAGE_IDENTITY_OWNER_STEER))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(transferred.rows_affected == 1)
+}
+
+pub(in crate::db) async fn next_message_seq_on<C>(conn: &C, chat_id: ChatId) -> Result<i64>
+where
+    C: ConnectionTrait,
+{
+    entities::message::Entity::find()
+        .filter(entities::message::Column::ChatId.eq(chat_id.0))
+        .order_by_desc(entities::message::Column::Seq)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .map_or(Ok(1), |message| {
+            message.seq.checked_add(1).ok_or_else(|| {
+                AgentError::Store(format!("chat {chat_id} message sequence overflow"))
+            })
+        })
+}
 
 pub(in crate::db) async fn create_chat(store: &DbStore, chat: &Chat) -> Result<()> {
     entities::chat::ActiveModel {
@@ -68,24 +141,51 @@ pub(in crate::db) async fn list_chats(store: &DbStore) -> Result<Vec<Chat>> {
 }
 
 pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) -> Result<()> {
-    entities::message::ActiveModel {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, message.chat_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "chat {} does not exist",
+            message.chat_id
+        )));
+    }
+    if !reserve_message_identity_on(
+        &transaction,
+        message.id,
+        message.chat_id,
+        message.turn_id,
+        MESSAGE_IDENTITY_OWNER_MESSAGE,
+    )
+    .await?
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "message identity {} is already reserved",
+            message.id
+        )));
+    }
+    let seq = next_message_seq_on(&transaction, message.chat_id).await?;
+    let active = entities::message::ActiveModel {
         id: Set(message.id.0),
         chat_id: Set(message.chat_id.0),
         turn_id: Set(message.turn_id.0),
+        seq: Set(seq),
         role: Set(role_to_db(message.role).to_string()),
         content: Set(message.content.clone()),
         created_at: Set(message.created_at),
+    };
+    if let Err(error) = active.insert(&transaction).await {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(store_err(error));
     }
-    .insert(&store.conn)
-    .await
-    .map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
     Ok(())
 }
 
 pub(in crate::db) async fn list_messages(store: &DbStore, chat_id: ChatId) -> Result<Vec<Message>> {
     entities::message::Entity::find()
         .filter(entities::message::Column::ChatId.eq(chat_id.0))
-        .order_by_asc(entities::message::Column::CreatedAt)
+        .order_by_asc(entities::message::Column::Seq)
         .all(&store.conn)
         .await
         .map_err(store_err)?

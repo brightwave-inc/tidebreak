@@ -20,12 +20,12 @@ use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId, TurnId};
+use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId, TurnId, TurnSteerId};
 use crate::model::{
     BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentRecord, DocumentScope,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
-    TurnFailureReceipt, TurnFailureRetry, TurnRun,
+    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
 
@@ -98,6 +98,28 @@ pub enum AcceptTurnOutcome {
     ChatBusy(TurnRun),
 }
 
+/// Result of atomically accepting one exact steering instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptTurnSteerOutcome {
+    /// This call committed the pending instruction.
+    Accepted(TurnSteer),
+    /// This exact instruction identity and payload were already committed.
+    Existing(TurnSteer),
+    /// The identity was already used for different request data or a message.
+    IdentityConflict,
+    /// The target is missing, cross-chat, expired, cancelling, or terminal.
+    TurnUnavailable,
+}
+
+/// Result of atomically applying one exact pending steering instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyTurnSteerOutcome {
+    /// This call committed the user message and application receipt.
+    Applied(TurnSteer),
+    /// This exact worker lease already committed the same application.
+    Existing(TurnSteer),
+}
+
 /// Result of atomically completing one exact claimed turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompleteTurnRunOutcome {
@@ -105,6 +127,10 @@ pub enum CompleteTurnRunOutcome {
     Completed(TurnRun),
     /// This exact completion was already committed by an earlier call.
     Existing(TurnRun),
+    /// Completion was fenced because an accepted steer still needs application.
+    SteerPending(TurnRun),
+    /// The output was generated from an older steer revision and must be regenerated.
+    OutputSuperseded(TurnRun),
 }
 
 /// Result of recording one exact claimed turn failure.
@@ -682,6 +708,52 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Atomically accept one idempotent steering instruction for a live turn.
+    ///
+    /// The non-nil caller-supplied `id` also names the eventual user message.
+    /// Exact retries compare chat, turn, byte-exact content, and interrupt intent.
+    /// Queued, running, and retry-wait turns accept instructions; cancelling or
+    /// terminal turns return [`AcceptTurnSteerOutcome::TurnUnavailable`].
+    async fn accept_turn_steer(
+        &self,
+        _id: TurnSteerId,
+        _turn_id: TurnId,
+        _chat_id: ChatId,
+        _content: &str,
+        _interrupt: bool,
+    ) -> Result<AcceptTurnSteerOutcome> {
+        turn_storage_unavailable()
+    }
+
+    /// List pending instructions only while the caller owns the exact live lease.
+    ///
+    /// `Some` is ordered by durable acceptance time then identity. `None` means
+    /// the lease is stale, expired, cancelling, or otherwise no longer running.
+    async fn list_pending_turn_steers(
+        &self,
+        _turn_id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<Vec<TurnSteer>>> {
+        turn_storage_unavailable()
+    }
+
+    /// Persist one pending steer as a user message under the exact live lease.
+    ///
+    /// The message and application receipt commit atomically. Exact retries by
+    /// the same lease return [`ApplyTurnSteerOutcome::Existing`] even after the
+    /// turn advances. A stale lease, rejected steer, or different winning lease
+    /// returns `None`.
+    async fn apply_turn_steer(
+        &self,
+        _turn_id: TurnId,
+        _lease_token: uuid::Uuid,
+        _steer_id: TurnSteerId,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<ApplyTurnSteerOutcome>> {
+        turn_storage_unavailable()
+    }
+
     /// Atomically persist the final assistant message and complete its turn.
     ///
     /// The exact claim must still be live at the fresh operational `now`, and
@@ -690,11 +762,16 @@ pub trait Store: Send + Sync {
     /// an ambiguous commit returns the completed turn even after lease expiry,
     /// without inserting another message. Returns
     /// `None` when the token never owned this turn, its lease was lost, or
-    /// another terminal outcome already won.
+    /// another terminal outcome already won. Pending steering and stale model
+    /// output return explicit nonterminal outcomes so callers can continue the
+    /// same live attempt rather than mistaking them for lease loss. The caller
+    /// must pass the `steer_revision` captured before generation;
+    /// completion is fenced if another steer was applied in the meantime.
     async fn complete_turn_run(
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,
+        _expected_steer_revision: i64,
         _now: chrono::DateTime<chrono::Utc>,
         _output: &Message,
     ) -> Result<Option<CompleteTurnRunOutcome>> {
@@ -711,6 +788,7 @@ pub trait Store: Send + Sync {
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,
+        _expected_steer_revision: i64,
         _now: chrono::DateTime<chrono::Utc>,
         _output: &Message,
         _usage: Usage,

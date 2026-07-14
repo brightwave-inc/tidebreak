@@ -651,6 +651,10 @@ pub struct TurnRun {
     pub last_error_code: Option<String>,
     /// Bounded diagnostic detail for local operators.
     pub last_error_detail: Option<String>,
+    /// Durable generation revision captured before model work begins.
+    pub steer_revision: i64,
+    /// When the most recent durable steer application committed.
+    pub last_steer_applied_at: Option<DateTime<Utc>>,
     /// When this turn was accepted.
     pub created_at: DateTime<Utc>,
     /// When its durable state last changed.
@@ -756,7 +760,7 @@ pub enum TurnSteerStatus {
     Pending,
     /// User message and delivery receipt committed atomically.
     Applied,
-    /// The turn terminalized before this instruction could be applied.
+    /// The turn stopped accepting instructions before this one could be applied.
     Rejected,
 }
 
