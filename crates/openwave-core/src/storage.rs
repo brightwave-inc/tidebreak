@@ -25,7 +25,7 @@ use crate::model::{
     BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentRecord, DocumentScope,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
-    TurnRun,
+    TurnFailureReceipt, TurnFailureRetry, TurnRun,
 };
 
 /// Why maintenance determined that a document needs an index job.
@@ -102,6 +102,15 @@ pub enum CompleteTurnRunOutcome {
     Completed(TurnRun),
     /// This exact completion was already committed by an earlier call.
     Existing(TurnRun),
+}
+
+/// Result of recording one exact claimed turn failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordTurnFailureOutcome {
+    /// This call committed the receipt and state transition.
+    Recorded(TurnFailureReceipt),
+    /// This exact failure request was already committed by an earlier call.
+    Existing(TurnFailureReceipt),
 }
 
 fn document_storage_unavailable<T>() -> Result<T> {
@@ -626,6 +635,28 @@ pub trait Store: Send + Sync {
         _now: chrono::DateTime<chrono::Utc>,
         _output: &Message,
     ) -> Result<Option<CompleteTurnRunOutcome>> {
+        turn_storage_unavailable()
+    }
+
+    /// Atomically record a failure for one exact live claimed attempt.
+    ///
+    /// `now` is a fresh operational lease fence and is not part of the stable
+    /// request identity. An exact retry is identified by the turn, claim token,
+    /// retry intent, error code, and error detail; it returns `Existing` even if
+    /// a later attempt has already advanced the mutable turn. Reusing a token
+    /// with different request data is an error. A requested retry moves the turn
+    /// to `retry_wait` only while attempts remain; otherwise the result is
+    /// terminally `failed`. Returns `None` when this claim did not win the live
+    /// attempt or another resolution already did.
+    async fn record_turn_run_failure(
+        &self,
+        _id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+        _retry: TurnFailureRetry,
+        _error_code: &str,
+        _error_detail: Option<&str>,
+    ) -> Result<Option<RecordTurnFailureOutcome>> {
         turn_storage_unavailable()
     }
 

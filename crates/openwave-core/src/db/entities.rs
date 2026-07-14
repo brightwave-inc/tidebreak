@@ -229,6 +229,29 @@ pub mod turn_claim {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod turn_failure {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "turn_failure")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub lease_token: Uuid,
+        pub turn_id: Uuid,
+        pub attempt_count: i32,
+        pub requested_retry_at: Option<DateTimeUtc>,
+        pub error_code: String,
+        pub error_detail: Option<String>,
+        pub resolved_at: DateTimeUtc,
+        pub result_status: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod tool_call {
     use sea_orm::entity::prelude::*;
 

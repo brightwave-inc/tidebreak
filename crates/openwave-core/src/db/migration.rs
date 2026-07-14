@@ -447,6 +447,86 @@ impl MigrationTrait for Init {
         manager
             .create_table(
                 Table::create()
+                    .table(TurnFailure::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(TurnFailure::LeaseToken)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(TurnFailure::TurnId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(TurnFailure::AttemptCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(TurnFailure::RequestedRetryAt).timestamp_with_time_zone())
+                    .col(
+                        ColumnDef::new(TurnFailure::ErrorCode)
+                            .string_len(crate::model::TurnRun::MAX_ERROR_CODE_LEN as u32)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnFailure::ErrorDetail)
+                            .string_len(crate::model::TurnRun::MAX_ERROR_DETAIL_LEN as u32),
+                    )
+                    .col(
+                        ColumnDef::new(TurnFailure::ResolvedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnFailure::ResultStatus)
+                            .string_len(32)
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_failure_claim")
+                            .from_tbl(TurnFailure::Table)
+                            .from_col(TurnFailure::LeaseToken)
+                            .from_col(TurnFailure::TurnId)
+                            .from_col(TurnFailure::AttemptCount)
+                            .to_tbl(TurnClaim::Table)
+                            .to_col(TurnClaim::Token)
+                            .to_col(TurnClaim::TurnId)
+                            .to_col(TurnClaim::AttemptCount)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(Expr::col(TurnFailure::AttemptCount).gte(1))
+                    .check(Expr::col(TurnFailure::ResultStatus).is_in([
+                        TurnRunStatus::RetryWait.as_str(),
+                        TurnRunStatus::Failed.as_str(),
+                    ]))
+                    .check(
+                        Expr::col(TurnFailure::ResultStatus)
+                            .ne(TurnRunStatus::RetryWait.as_str())
+                            .or(Expr::col(TurnFailure::RequestedRetryAt).is_not_null()),
+                    )
+                    .check(
+                        Expr::col(TurnFailure::RequestedRetryAt)
+                            .is_null()
+                            .or(Expr::col(TurnFailure::RequestedRetryAt)
+                                .gt(Expr::col(TurnFailure::ResolvedAt))),
+                    )
+                    .check(
+                        Func::char_length(Expr::col(TurnFailure::ErrorCode))
+                            .between(1, crate::model::TurnRun::MAX_ERROR_CODE_LEN as i32),
+                    )
+                    .check(
+                        Expr::col(TurnFailure::ErrorDetail)
+                            .is_null()
+                            .or(Func::char_length(Expr::col(TurnFailure::ErrorDetail))
+                                .between(1, crate::model::TurnRun::MAX_ERROR_DETAIL_LEN as i32)),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
                     .table(Setting::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Setting::Key).text().not_null().primary_key())
@@ -459,6 +539,9 @@ impl MigrationTrait for Init {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(TurnFailure::Table).to_owned())
+            .await?;
         manager
             .drop_table(Table::drop().table(TurnRun::Table).to_owned())
             .await?;
@@ -1482,6 +1565,19 @@ enum TurnClaim {
     AttemptCount,
     ClaimedAt,
     LeaseExpiresAt,
+}
+
+#[derive(DeriveIden)]
+enum TurnFailure {
+    Table,
+    LeaseToken,
+    TurnId,
+    AttemptCount,
+    RequestedRetryAt,
+    ErrorCode,
+    ErrorDetail,
+    ResolvedAt,
+    ResultStatus,
 }
 
 #[derive(DeriveIden)]

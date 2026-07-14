@@ -4789,6 +4789,31 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     .await
     .unwrap();
     running.insert(&store.conn).await.unwrap();
+
+    let valid_failure = entities::turn_failure::ActiveModel {
+        lease_token: Set(running_token),
+        turn_id: Set(running_turn_id),
+        attempt_count: Set(1),
+        requested_retry_at: Set(Some(now + chrono::Duration::minutes(2))),
+        error_code: Set("provider_unavailable".into()),
+        error_detail: Set(Some("temporary outage".into())),
+        resolved_at: Set(now + chrono::Duration::seconds(1)),
+        result_status: Set(TurnRunStatus::RetryWait.as_str().into()),
+    };
+    let mut retry_without_time = valid_failure.clone();
+    retry_without_time.requested_retry_at = Set(None);
+    assert!(retry_without_time.insert(&store.conn).await.is_err());
+    let mut nonfuture_retry = valid_failure.clone();
+    nonfuture_retry.requested_retry_at = Set(Some(now));
+    assert!(nonfuture_retry.insert(&store.conn).await.is_err());
+    let mut unknown_failure_status = valid_failure.clone();
+    unknown_failure_status.result_status = Set("lost".into());
+    assert!(unknown_failure_status.insert(&store.conn).await.is_err());
+    let mut mismatched_failure_claim = valid_failure.clone();
+    mismatched_failure_claim.attempt_count = Set(2);
+    assert!(mismatched_failure_claim.insert(&store.conn).await.is_err());
+    valid_failure.insert(&store.conn).await.unwrap();
+
     assert!(entities::turn_claim::ActiveModel {
         token: Set(uuid::Uuid::new_v4()),
         turn_id: Set(running_turn_id),
@@ -5396,6 +5421,455 @@ async fn turn_completion_atomically_persists_exact_output_and_recovers_retries()
         .await
         .is_err());
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(2),
+        )
+        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let lease_expires_at = claimed_at + chrono::Duration::minutes(2);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, lease_expires_at)
+        .await
+        .unwrap()
+        .unwrap();
+    let resolved_at =
+        claimed_at + chrono::Duration::seconds(1) + chrono::Duration::nanoseconds(999);
+    let retry_at = resolved_at + chrono::Duration::minutes(1) + chrono::Duration::nanoseconds(777);
+    let canonical_resolved_at =
+        DateTime::<Utc>::from_timestamp_micros(resolved_at.timestamp_micros()).unwrap();
+    let canonical_retry_at =
+        DateTime::<Utc>::from_timestamp_micros(retry_at.timestamp_micros()).unwrap();
+
+    assert!(store
+        .record_turn_run_failure(
+            turn_id,
+            token,
+            resolved_at,
+            TurnFailureRetry::RetryAt(canonical_resolved_at + chrono::Duration::nanoseconds(999)),
+            "provider_unavailable",
+            None,
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .record_turn_run_failure(
+                turn_id,
+                uuid::Uuid::new_v4(),
+                resolved_at,
+                TurnFailureRetry::RetryAt(retry_at),
+                "provider_unavailable",
+                Some("temporary outage"),
+            )
+            .await
+            .unwrap(),
+        None
+    );
+
+    let RecordTurnFailureOutcome::Recorded(receipt) = store
+        .record_turn_run_failure(
+            turn_id,
+            token,
+            resolved_at,
+            TurnFailureRetry::RetryAt(retry_at),
+            "provider_unavailable",
+            Some("temporary outage"),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("first exact failure must commit")
+    };
+    assert_eq!(receipt.lease_token, token);
+    assert_eq!(receipt.turn_id, turn_id);
+    assert_eq!(receipt.attempt_count, 1);
+    assert_eq!(receipt.requested_retry_at, Some(canonical_retry_at));
+    assert_eq!(receipt.resolved_at, canonical_resolved_at);
+    assert_eq!(receipt.result_status, TurnRunStatus::RetryWait);
+    assert_eq!(receipt.error_code, "provider_unavailable");
+    assert_eq!(receipt.error_detail.as_deref(), Some("temporary outage"));
+    let waiting = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    assert_eq!(waiting.status, TurnRunStatus::RetryWait);
+    assert_eq!(waiting.available_at, canonical_retry_at);
+    assert_eq!(waiting.finished_at, None);
+    assert_eq!(waiting.lease_token, None);
+    assert_eq!(
+        waiting.last_error_code.as_deref(),
+        Some("provider_unavailable")
+    );
+
+    assert_eq!(
+        store
+            .record_turn_run_failure(
+                turn_id,
+                token,
+                canonical_retry_at + chrono::Duration::hours(1),
+                TurnFailureRetry::RetryAt(retry_at),
+                "provider_unavailable",
+                Some("temporary outage"),
+            )
+            .await
+            .unwrap(),
+        Some(RecordTurnFailureOutcome::Existing(receipt.clone()))
+    );
+    assert!(store
+        .record_turn_run_failure(
+            turn_id,
+            token,
+            resolved_at,
+            TurnFailureRetry::Permanent,
+            "provider_unavailable",
+            Some("temporary outage"),
+        )
+        .await
+        .is_err());
+    assert!(store
+        .record_turn_run_failure(
+            turn_id,
+            token,
+            resolved_at,
+            TurnFailureRetry::RetryAt(retry_at),
+            "provider_unavailable",
+            Some("different outage"),
+        )
+        .await
+        .is_err());
+
+    let second_token = uuid::Uuid::new_v4();
+    let second_expiry = canonical_retry_at + chrono::Duration::minutes(2);
+    let second = store
+        .claim_turn_run(second_token, canonical_retry_at, second_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.attempt_count, 2);
+    assert_eq!(second.last_error_code, None);
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "recovered".into(),
+        created_at: canonical_retry_at + chrono::Duration::seconds(1),
+    };
+    assert!(matches!(
+        store
+            .complete_turn_run(turn_id, second_token, output.created_at, &output)
+            .await
+            .unwrap(),
+        Some(CompleteTurnRunOutcome::Completed(_))
+    ));
+    assert_eq!(
+        store
+            .record_turn_run_failure(
+                turn_id,
+                token,
+                second_expiry + chrono::Duration::hours(1),
+                TurnFailureRetry::RetryAt(retry_at),
+                "provider_unavailable",
+                Some("temporary outage"),
+            )
+            .await
+            .unwrap(),
+        Some(RecordTurnFailureOutcome::Existing(receipt))
+    );
+}
+
+#[tokio::test]
+async fn turn_failure_exhaustion_retains_retry_intent_and_rolls_back_atomically() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(2))
+        .await
+        .unwrap()
+        .unwrap();
+    let failed_at = claimed_at + chrono::Duration::seconds(1);
+    let retry_at = failed_at + chrono::Duration::minutes(1);
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_turn_failure
+             BEFORE UPDATE OF status ON turn_run
+             WHEN NEW.status = 'failed'
+             BEGIN SELECT RAISE(FAIL, 'forced turn failure rollback'); END",
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .record_turn_run_failure(
+            turn_id,
+            token,
+            failed_at,
+            TurnFailureRetry::RetryAt(retry_at),
+            "provider_error",
+            None,
+        )
+        .await
+        .is_err());
+    assert!(entities::turn_failure::Entity::find_by_id(token)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        TurnRunStatus::Running
+    );
+    store
+        .conn
+        .execute_unprepared("DROP TRIGGER fail_turn_failure")
+        .await
+        .unwrap();
+
+    let RecordTurnFailureOutcome::Recorded(receipt) = store
+        .record_turn_run_failure(
+            turn_id,
+            token,
+            failed_at,
+            TurnFailureRetry::RetryAt(retry_at),
+            "provider_error",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("failure after rollback must commit")
+    };
+    assert_eq!(receipt.result_status, TurnRunStatus::Failed);
+    assert_eq!(receipt.requested_retry_at, Some(retry_at));
+    let failed = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    assert_eq!(failed.status, TurnRunStatus::Failed);
+    assert_eq!(failed.finished_at, Some(failed_at));
+    assert_eq!(failed.available_at, accepted.available_at);
+    assert_eq!(failed.last_error_code.as_deref(), Some("provider_error"));
+}
+
+#[tokio::test]
+async fn permanent_turn_failure_uses_the_heartbeated_lease_and_rejects_expiry() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let original_expiry = claimed_at + chrono::Duration::minutes(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, original_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+    let heartbeat_at = claimed_at + chrono::Duration::seconds(30);
+    let extended_expiry = original_expiry + chrono::Duration::minutes(1);
+    assert!(store
+        .heartbeat_turn_run(turn_id, token, heartbeat_at, extended_expiry)
+        .await
+        .unwrap());
+    let failed_at = original_expiry + chrono::Duration::seconds(1);
+    let RecordTurnFailureOutcome::Recorded(receipt) = store
+        .record_turn_run_failure(
+            turn_id,
+            token,
+            failed_at,
+            TurnFailureRetry::Permanent,
+            "unsafe_to_retry",
+            Some("tool outcome is ambiguous"),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("live heartbeated failure must commit")
+    };
+    assert_eq!(receipt.requested_retry_at, None);
+    assert_eq!(receipt.resolved_at, failed_at);
+    assert_eq!(receipt.result_status, TurnRunStatus::Failed);
+    let failed = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    assert_eq!(failed.status, TurnRunStatus::Failed);
+    assert_eq!(failed.finished_at, Some(failed_at));
+    assert_eq!(failed.last_error_code.as_deref(), Some("unsafe_to_retry"));
+
+    let expired_chat = sample_chat();
+    store.create_chat(&expired_chat).await.unwrap();
+    let expired_turn = match store
+        .accept_turn(TurnId::new(), expired_chat.id, "gpt-5", "expired")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let expired_claim_at = expired_turn.available_at + chrono::Duration::seconds(1);
+    let expired_at = expired_claim_at + chrono::Duration::minutes(1);
+    let expired_token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(expired_token, expired_claim_at, expired_at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .record_turn_run_failure(
+                expired_turn.id,
+                expired_token,
+                expired_at,
+                TurnFailureRetry::Permanent,
+                "too_late",
+                None,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(entities::turn_failure::Entity::find_by_id(expired_token)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store
+            .get_turn_run(expired_turn.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TurnRunStatus::Running
+    );
+}
+
+#[tokio::test]
+async fn turn_completion_and_failure_serialize_to_one_terminal_decision() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(2),
+        )
+        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(2))
+        .await
+        .unwrap()
+        .unwrap();
+    let resolved_at = claimed_at + chrono::Duration::seconds(1);
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "race winner".into(),
+        created_at: resolved_at,
+    };
+    let store = std::sync::Arc::new(store);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let completion = {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        let output = output.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .complete_turn_run(turn_id, token, resolved_at, &output)
+                .await
+        })
+    };
+    let failure = {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .record_turn_run_failure(
+                    turn_id,
+                    token,
+                    resolved_at,
+                    TurnFailureRetry::RetryAt(resolved_at + chrono::Duration::minutes(1)),
+                    "provider_error",
+                    None,
+                )
+                .await
+        })
+    };
+    let completion = completion.await.unwrap().unwrap();
+    let failure = failure.await.unwrap().unwrap();
+    let turn = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    match (completion, failure) {
+        (Some(CompleteTurnRunOutcome::Completed(_)), None) => {
+            assert_eq!(turn.status, TurnRunStatus::Completed);
+            assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+            assert!(entities::turn_failure::Entity::find_by_id(token)
+                .one(&store.conn)
+                .await
+                .unwrap()
+                .is_none());
+        }
+        (None, Some(RecordTurnFailureOutcome::Recorded(receipt))) => {
+            assert_eq!(receipt.result_status, TurnRunStatus::RetryWait);
+            assert_eq!(turn.status, TurnRunStatus::RetryWait);
+            assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+        }
+        outcomes => panic!("unexpected completion/failure race: {outcomes:?}"),
+    }
 }
 
 #[tokio::test]

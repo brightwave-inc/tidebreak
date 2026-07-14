@@ -55,7 +55,8 @@ pub use model::{
     DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
     DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
-    Project, Role, SourceLocation, SourceRegion, ToolCallRecord, TurnRun, TurnRunStatus,
+    Project, Role, SourceLocation, SourceRegion, ToolCallRecord, TurnFailureReceipt,
+    TurnFailureRetry, TurnRun, TurnRunStatus,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
@@ -64,7 +65,8 @@ pub use provider::{
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
     AcceptTurnOutcome, BlobStore, CompleteTurnRunOutcome, DocumentIndexJobReason,
-    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, SecretProvider, Store,
+    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, RecordTurnFailureOutcome,
+    SecretProvider, Store,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 #[cfg(feature = "tools")]
