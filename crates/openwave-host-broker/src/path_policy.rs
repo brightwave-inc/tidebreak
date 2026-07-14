@@ -186,6 +186,16 @@ impl RootPolicy {
         })
     }
 
+    /// Add an application-private directory that connected roots must never
+    /// contain or overlap, such as the broker's own state and audit directory.
+    pub fn with_private_directory(mut self, path: &Path) -> Result<Self, RootPolicyError> {
+        if !path.is_absolute() {
+            return Err(RootPolicyError::NotAbsolute);
+        }
+        self.sensitive.push(std::fs::canonicalize(path)?);
+        Ok(self)
+    }
+
     fn validate_canonical(&self, root: &Path) -> Result<(), RootPolicyError> {
         if !root.is_absolute() || is_filesystem_root(root) {
             return Err(RootPolicyError::TooBroad);
@@ -545,6 +555,25 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn application_private_directories_cannot_be_connected_or_contained() {
+        let temp = tempfile::tempdir().unwrap();
+        let private = temp.path().join("app-data");
+        std::fs::create_dir(&private).unwrap();
+        let policy = policy().with_private_directory(&private).unwrap();
+        let private = private.canonicalize().unwrap();
+        let parent = temp.path().canonicalize().unwrap();
+        assert!(matches!(
+            policy.validate_canonical(&private),
+            Err(RootPolicyError::SensitiveLocation)
+        ));
+        assert!(matches!(
+            policy.validate_canonical(&parent),
+            Err(RootPolicyError::SensitiveLocation)
+        ));
     }
 
     #[cfg(unix)]

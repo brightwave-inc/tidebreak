@@ -14,6 +14,7 @@ pub mod id;
 pub mod path_policy;
 pub mod protocol;
 pub mod relative_path;
+pub mod sidecar;
 
 pub use audit::{
     AuditActor, AuditError, AuditEvent, AuditLabel, AuditOperation, AuditOutcome, AuditSink,

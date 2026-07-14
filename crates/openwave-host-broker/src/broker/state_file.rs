@@ -13,7 +13,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use serde::{Deserialize, Serialize};
 
-use super::{BrokerError, MutationRecord, RegisteredRoot, State};
+use super::{root_display_name, BrokerError, MutationRecord, RegisteredRoot, State};
 use crate::{
     path_policy::RootIdentity, Grant, GrantSubject, OperationId, RootAttachment, RootId,
     RootPolicy, Scope,
@@ -123,11 +123,7 @@ impl StateFile {
             if validated.identity() != item.identity {
                 return Err(invalid_data("persisted root identity changed").into());
             }
-            let display_name = validated
-                .canonical_path()
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Connected folder".to_owned());
+            let display_name = root_display_name(validated.canonical_path());
             if roots
                 .insert(
                     item.id,

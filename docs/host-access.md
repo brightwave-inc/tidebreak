@@ -80,6 +80,21 @@ surface than the complete desktop or server. Process separation is useful
 defense in depth, not a substitute for authorization: the broker validates every
 operation even when its caller is local.
 
+The sidecar adapter is a small `openwave-host-broker` process owned by the
+desktop host. The host supplies absolute app-data and home-directory paths at
+spawn time; the broker never guesses them from an agent request. Its stdio wire
+format is strict, bounded newline-delimited JSON with an explicit control or
+operation channel and exactly one safe response per non-empty input line.
+Oversized lines are drained without unbounded allocation so the next request can
+still be parsed; whitespace-only or malformed non-empty frames receive a safe
+transport error rather than hanging a request/response client. Root counts,
+display names, directory results, and file bytes are bounded before response
+serialization, so the response cap is also an allocation bound. The app-private
+broker directory is added to root policy as a protected location, so it and any
+ancestor containing it cannot be connected.
+This process adapter does not itself grant the renderer access to the trusted
+control handle—the forthcoming Tauri client owns that routing distinction.
+
 The **renderer** presents connected folders and permission choices. It receives
 safe summaries, not the broker's persisted absolute-path registry.
 
@@ -237,7 +252,8 @@ This will land in independently reviewable pieces:
 4. Add bounded audit records for every machine-touching operation, including
    the exact grant that authorized an operation, de-sensitized targets, and
    local two-generation retention.
-5. Expose the same contract through a versioned sidecar adapter.
+5. Expose the same contract through a bounded, versioned sidecar adapter with
+   strict control/operation wire variants and app-private-directory protection.
 6. Add the Tauri sidecar client, connected-folder UI, and the durable
    agent-request → native-picker → grant → retry workflow. Broker state, audit,
    scratch, and handoffs live under OpenWave's application data directory;
