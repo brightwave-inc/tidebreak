@@ -163,7 +163,7 @@ pub(in crate::db) async fn append_event(
         )));
     }
 
-    let seq = append_event_on(&transaction, chat_id, None, None, None, event).await?;
+    let seq = append_event_on(&transaction, chat_id, None, None, None, None, event).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(seq)
 }
@@ -285,6 +285,7 @@ pub(in crate::db) async fn append_turn_event(
         Some(turn_id),
         Some(lease_token),
         Some(attempt_event_ordinal),
+        None,
         event,
     )
     .await?;
@@ -298,6 +299,7 @@ pub(in crate::db::ops) async fn append_event_on<C>(
     turn_id: Option<TurnId>,
     lease_token: Option<uuid::Uuid>,
     attempt_event_ordinal: Option<i32>,
+    scan_token: Option<uuid::Uuid>,
     event: &AgentEvent,
 ) -> Result<i64>
 where
@@ -318,6 +320,7 @@ where
         turn_id: Set(turn_id.map(|id| id.0)),
         lease_token: Set(lease_token),
         attempt_event_ordinal: Set(attempt_event_ordinal),
+        scan_token: Set(scan_token),
         terminal: Set(turn_id.is_some() && is_terminal_event(event)),
         payload: Set(serde_json::to_value(event)?),
         created_at: Set(Utc::now()),

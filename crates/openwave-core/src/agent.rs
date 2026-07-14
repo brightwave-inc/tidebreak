@@ -1164,6 +1164,7 @@ mod tests {
             )
             .await
             .unwrap()
+            .turn
             .expect("accepted turn is claimable");
         assert_eq!(claimed.id, turn_id);
 
@@ -1314,6 +1315,7 @@ mod tests {
             )
             .await
             .unwrap()
+            .turn
             .expect("second accepted turn is claimable");
         assert_eq!(failed_claim.id, failed_turn_id);
         let failing_agent = Agent::new(
@@ -1412,6 +1414,7 @@ mod tests {
             )
             .await
             .unwrap()
+            .turn
             .expect("third accepted turn is claimable");
         assert_eq!(cancelled_claim.id, cancelled_turn_id);
         assert!(matches!(

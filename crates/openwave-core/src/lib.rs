@@ -64,10 +64,10 @@ pub use provider::{
 };
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
-    AcceptTurnOutcome, BlobStore, CompleteTurnRunOutcome, DocumentIndexJobReason,
-    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
-    JournaledTurnOutcome, RecordTurnFailureOutcome, RequestTurnCancellationOutcome, SecretProvider,
-    Store,
+    AcceptTurnOutcome, BlobStore, ClaimScanTerminalEvent, ClaimTurnRunOutcome,
+    CompleteTurnRunOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
+    EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome, JournaledTurnOutcome,
+    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, SecretProvider, Store,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 #[cfg(feature = "tools")]

@@ -229,6 +229,22 @@ pub mod turn_claim {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod turn_claim_lock {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "turn_claim_lock")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod turn_failure {
     use sea_orm::entity::prelude::*;
 
@@ -313,6 +329,7 @@ pub mod event {
         pub turn_id: Option<Uuid>,
         pub lease_token: Option<Uuid>,
         pub attempt_event_ordinal: Option<i32>,
+        pub scan_token: Option<Uuid>,
         pub terminal: bool,
         #[sea_orm(column_type = "JsonBinary")]
         pub payload: Json,

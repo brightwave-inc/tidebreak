@@ -656,6 +656,7 @@ where
         Some(id),
         lease_token,
         lease_token.map(|_| i32::MAX),
+        None,
         event,
     )
     .await?;

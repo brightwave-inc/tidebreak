@@ -34,7 +34,7 @@ use crate::model::{
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
-    AcceptTurnOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
+    AcceptTurnOutcome, ClaimTurnRunOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
     EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
     JournaledTurnOutcome, RecordTurnFailureOutcome, RequestTurnCancellationOutcome, Store,
 };
@@ -1669,7 +1669,7 @@ impl Store for DbStore {
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         lease_expires_at: chrono::DateTime<Utc>,
-    ) -> Result<Option<TurnRun>> {
+    ) -> Result<ClaimTurnRunOutcome> {
         ops::turn::claim_turn_run(self, lease_token, now, lease_expires_at).await
     }
 
