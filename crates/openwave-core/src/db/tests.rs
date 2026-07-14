@@ -6681,6 +6681,77 @@ async fn turn_completion_rolls_back_output_when_state_update_fails() {
 }
 
 #[tokio::test]
+async fn turn_completion_rolls_back_state_and_output_when_terminal_event_fails() {
+    use crate::error::AgentErrorInfo;
+    use crate::event::AgentEvent;
+    use crate::provider::{StopReason, Usage};
+
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    entities::event::ActiveModel {
+        chat_id: Set(chat.id.0),
+        seq: Set(1),
+        turn_id: Set(Some(turn_id.0)),
+        lease_token: Set(Some(token)),
+        attempt_event_ordinal: Set(Some(i32::MAX)),
+        terminal: Set(true),
+        payload: Set(serde_json::to_value(AgentEvent::TurnFailed {
+            error: AgentErrorInfo {
+                kind: "forced".into(),
+                message: "occupy terminal slot".into(),
+            },
+        })
+        .unwrap()),
+        created_at: Set(Utc::now()),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "must roll back".into(),
+        created_at: claimed_at + chrono::Duration::seconds(1),
+    };
+
+    assert!(store
+        .complete_turn_run_and_append_event(
+            turn_id,
+            token,
+            output.created_at,
+            &output,
+            Usage::default(),
+            StopReason::EndTurn,
+        )
+        .await
+        .is_err());
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+    let still_running = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    assert_eq!(still_running.status, TurnRunStatus::Running);
+    assert_eq!(still_running.output_message_id, None);
+    assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn concurrent_turn_claimers_never_share_a_lease() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();

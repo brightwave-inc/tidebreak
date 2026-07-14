@@ -27,6 +27,7 @@ use crate::model::{
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
     TurnFailureReceipt, TurnFailureRetry, TurnRun,
 };
+use crate::provider::{StopReason, Usage};
 
 /// Why maintenance determined that a document needs an index job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +134,15 @@ pub enum FinishTurnCancellationOutcome {
     Cancelled(TurnRun),
     /// This exact claimed attempt already reached terminal cancellation.
     Existing(TurnRun),
+}
+
+/// A durable turn transition together with any terminal event committed by it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JournaledTurnOutcome<T> {
+    /// The state-machine result.
+    pub outcome: T,
+    /// The exact terminal journal row when this operation publishes one.
+    pub terminal_event: Option<SequencedEvent>,
 }
 
 fn document_storage_unavailable<T>() -> Result<T> {
@@ -657,6 +667,24 @@ pub trait Store: Send + Sync {
         _now: chrono::DateTime<chrono::Utc>,
         _output: &Message,
     ) -> Result<Option<CompleteTurnRunOutcome>> {
+        turn_storage_unavailable()
+    }
+
+    /// Complete one claimed turn and append its terminal event atomically.
+    ///
+    /// Exact ambiguous retries recover both the completed turn and the same
+    /// journal sequence. No terminal event is visible unless the output message
+    /// and terminal state transition commit with it.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_turn_run_and_append_event(
+        &self,
+        _id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+        _output: &Message,
+        _usage: Usage,
+        _stop_reason: StopReason,
+    ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
         turn_storage_unavailable()
     }
 

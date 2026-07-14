@@ -32,10 +32,11 @@ use crate::model::{
     DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, TurnFailureRetry, TurnRun,
     TurnRunStatus,
 };
+use crate::provider::{StopReason, Usage};
 use crate::storage::{
     AcceptTurnOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
     EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
-    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, Store,
+    JournaledTurnOutcome, RecordTurnFailureOutcome, RequestTurnCancellationOutcome, Store,
 };
 
 mod ops;
@@ -1690,6 +1691,27 @@ impl Store for DbStore {
         output: &Message,
     ) -> Result<Option<CompleteTurnRunOutcome>> {
         ops::turn::complete_turn_run(self, id, lease_token, now, output).await
+    }
+
+    async fn complete_turn_run_and_append_event(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        output: &Message,
+        usage: Usage,
+        stop_reason: StopReason,
+    ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
+        ops::turn::complete_turn_run_and_append_event(
+            self,
+            id,
+            lease_token,
+            now,
+            output,
+            usage,
+            stop_reason,
+        )
+        .await
     }
 
     async fn record_turn_run_failure(

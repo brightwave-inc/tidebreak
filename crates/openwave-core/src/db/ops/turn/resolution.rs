@@ -4,15 +4,19 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::TurnId;
+use crate::event::{AgentEvent, SequencedEvent};
+use crate::id::{ChatId, TurnId};
 use crate::model::{Message, Role, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus};
+use crate::provider::{StopReason, Usage};
 use crate::storage::{
-    CompleteTurnRunOutcome, FinishTurnCancellationOutcome, RecordTurnFailureOutcome,
-    RequestTurnCancellationOutcome,
+    CompleteTurnRunOutcome, FinishTurnCancellationOutcome, JournaledTurnOutcome,
+    RecordTurnFailureOutcome, RequestTurnCancellationOutcome,
 };
 
 use super::super::super::{entities, store_err, DbStore};
-use super::super::acquire_turn_write_lock;
+use super::super::{
+    acquire_chat_write_lock, acquire_turn_write_lock, conversation::append_event_on,
+};
 use super::{canonical_db_timestamp, turn_run_from_model, turn_run_status_from_db};
 
 pub(in crate::db) async fn complete_turn_run(
@@ -22,6 +26,35 @@ pub(in crate::db) async fn complete_turn_run(
     now: chrono::DateTime<Utc>,
     output: &Message,
 ) -> Result<Option<CompleteTurnRunOutcome>> {
+    Ok(
+        complete_turn_run_inner(store, id, lease_token, now, output, None)
+            .await?
+            .map(|resolution| resolution.outcome),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn complete_turn_run_and_append_event(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    output: &Message,
+    usage: Usage,
+    stop_reason: StopReason,
+) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
+    let event = AgentEvent::TurnCompleted { usage, stop_reason };
+    complete_turn_run_inner(store, id, lease_token, now, output, Some(&event)).await
+}
+
+async fn complete_turn_run_inner(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    output: &Message,
+    terminal_event: Option<&AgentEvent>,
+) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
     validate_turn_output(id, lease_token, output)?;
     let now = canonical_db_timestamp(now)?;
     let output_created_at = canonical_db_timestamp(output.created_at)?;
@@ -31,7 +64,18 @@ pub(in crate::db) async fn complete_turn_run(
         ));
     }
 
+    let journal_chat_id = journal_chat_id(store, id, terminal_event.is_some()).await?;
+    if terminal_event.is_some() && journal_chat_id.is_none() {
+        return Ok(None);
+    }
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    if let Some(chat_id) = journal_chat_id {
+        if !acquire_chat_write_lock(&transaction, chat_id).await? {
+            return Err(AgentError::Store(format!(
+                "turn {id} references missing chat {chat_id}"
+            )));
+        }
+    }
     if !acquire_turn_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
@@ -69,9 +113,14 @@ pub(in crate::db) async fn complete_turn_run(
                 "turn {id} was already completed with different output"
             )));
         }
+        let sequenced_event =
+            exact_terminal_event_on(&transaction, id, lease_token, terminal_event).await?;
         let existing = turn_run_from_model(existing)?;
         transaction.commit().await.map_err(store_err)?;
-        return Ok(Some(CompleteTurnRunOutcome::Existing(existing)));
+        return Ok(Some(JournaledTurnOutcome {
+            outcome: CompleteTurnRunOutcome::Existing(existing),
+            terminal_event: sequenced_event,
+        }));
     }
     if existing.status != TurnRunStatus::Running.as_str()
         || existing.attempt_count != receipt.attempt_count
@@ -96,7 +145,12 @@ pub(in crate::db) async fn complete_turn_run(
     if let Err(error) = message.insert(&transaction).await {
         transaction.rollback().await.map_err(store_err)?;
         if let Some(existing) = exact_completed_turn_on(store, id, lease_token, output).await? {
-            return Ok(Some(CompleteTurnRunOutcome::Existing(existing)));
+            let sequenced_event =
+                exact_terminal_event_on(&store.conn, id, lease_token, terminal_event).await?;
+            return Ok(Some(JournaledTurnOutcome {
+                outcome: CompleteTurnRunOutcome::Existing(existing),
+                terminal_event: sequenced_event,
+            }));
         }
         return Err(store_err(error));
     }
@@ -141,6 +195,14 @@ pub(in crate::db) async fn complete_turn_run(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
+    let sequenced_event = append_terminal_event_on(
+        &transaction,
+        id,
+        ChatId(existing.chat_id),
+        lease_token,
+        terminal_event,
+    )
+    .await?;
     let completed = entities::turn_run::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
@@ -148,7 +210,10 @@ pub(in crate::db) async fn complete_turn_run(
         .ok_or_else(|| AgentError::Store(format!("completed turn {id} disappeared")))
         .and_then(turn_run_from_model)?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(Some(CompleteTurnRunOutcome::Completed(completed)))
+    Ok(Some(JournaledTurnOutcome {
+        outcome: CompleteTurnRunOutcome::Completed(completed),
+        terminal_event: sequenced_event,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -639,6 +704,83 @@ async fn exact_completed_turn_on(
         )));
     }
     Ok(Some(turn_run_from_model(existing)?))
+}
+
+async fn journal_chat_id(
+    store: &DbStore,
+    id: TurnId,
+    journal_terminal: bool,
+) -> Result<Option<ChatId>> {
+    if !journal_terminal {
+        return Ok(None);
+    }
+    Ok(entities::turn_run::Entity::find_by_id(id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .map(|turn| ChatId(turn.chat_id)))
+}
+
+async fn append_terminal_event_on<C>(
+    conn: &C,
+    id: TurnId,
+    chat_id: ChatId,
+    lease_token: uuid::Uuid,
+    terminal_event: Option<&AgentEvent>,
+) -> Result<Option<SequencedEvent>>
+where
+    C: ConnectionTrait,
+{
+    let Some(event) = terminal_event else {
+        return Ok(None);
+    };
+    let seq = append_event_on(
+        conn,
+        chat_id,
+        Some(id),
+        Some(lease_token),
+        Some(i32::MAX),
+        event,
+    )
+    .await?;
+    Ok(Some(SequencedEvent {
+        seq,
+        event: event.clone(),
+    }))
+}
+
+async fn exact_terminal_event_on<C>(
+    conn: &C,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    expected: Option<&AgentEvent>,
+) -> Result<Option<SequencedEvent>>
+where
+    C: ConnectionTrait,
+{
+    let Some(expected) = expected else {
+        return Ok(None);
+    };
+    let stored = entities::event::Entity::find()
+        .filter(entities::event::Column::TurnId.eq(id.0))
+        .filter(entities::event::Column::Terminal.eq(true))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("completed turn {id} is missing its event")))?;
+    let event = serde_json::from_value::<AgentEvent>(stored.payload)?;
+    if stored.lease_token != Some(lease_token)
+        || stored.attempt_event_ordinal != Some(i32::MAX)
+        || event != *expected
+    {
+        return Err(AgentError::Store(format!(
+            "turn {id} was already completed with a different terminal event"
+        )));
+    }
+    Ok(Some(SequencedEvent {
+        seq: stored.seq,
+        event,
+    }))
 }
 
 async fn exact_completed_output_on<C>(conn: &C, output: &Message) -> Result<bool>

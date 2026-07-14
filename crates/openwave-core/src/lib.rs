@@ -66,7 +66,8 @@ pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
     AcceptTurnOutcome, BlobStore, CompleteTurnRunOutcome, DocumentIndexJobReason,
     EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
-    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, SecretProvider, Store,
+    JournaledTurnOutcome, RecordTurnFailureOutcome, RequestTurnCancellationOutcome, SecretProvider,
+    Store,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 #[cfg(feature = "tools")]

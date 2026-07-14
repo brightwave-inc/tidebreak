@@ -1226,15 +1226,62 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].turn_id, turn_id);
 
+        for (index, event) in events.iter().enumerate() {
+            let ordinal = i32::try_from(index + 1).unwrap();
+            assert_eq!(
+                store
+                    .append_turn_event(chat.id, turn_id, lease_token, ordinal, Utc::now(), event,)
+                    .await
+                    .unwrap(),
+                Some(i64::from(ordinal))
+            );
+        }
+
         let completed = store
-            .complete_turn_run(turn_id, lease_token, Utc::now(), &output)
+            .complete_turn_run_and_append_event(
+                turn_id,
+                lease_token,
+                Utc::now(),
+                &output,
+                usage,
+                stop_reason,
+            )
             .await
             .unwrap()
             .expect("the live worker lease can publish its prepared output");
         assert!(matches!(
-            completed,
+            completed.outcome,
             crate::CompleteTurnRunOutcome::Completed(_)
         ));
+        let terminal = completed
+            .terminal_event
+            .expect("completion must return its committed terminal event");
+        assert_eq!(terminal.seq, i64::try_from(events.len() + 1).unwrap());
+        assert_eq!(
+            terminal.event,
+            AgentEvent::TurnCompleted { usage, stop_reason }
+        );
+        assert_eq!(
+            store.list_events(chat.id, 0).await.unwrap().last(),
+            Some(&terminal)
+        );
+        let recovered = store
+            .complete_turn_run_and_append_event(
+                turn_id,
+                lease_token,
+                claimed_at + chrono::Duration::hours(1),
+                &output,
+                usage,
+                stop_reason,
+            )
+            .await
+            .unwrap()
+            .expect("an exact completion retry must remain recoverable");
+        assert!(matches!(
+            recovered.outcome,
+            crate::CompleteTurnRunOutcome::Existing(_)
+        ));
+        assert_eq!(recovered.terminal_event, Some(terminal));
         let stored = store.list_messages(chat.id).await.unwrap();
         assert_eq!(stored.len(), 2);
         assert_eq!(stored[1].id, output.id);

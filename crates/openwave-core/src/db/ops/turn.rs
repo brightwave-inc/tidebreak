@@ -15,7 +15,8 @@ use super::acquire_chat_write_lock;
 mod resolution;
 
 pub(in crate::db) use resolution::{
-    complete_turn_run, finish_turn_cancellation, record_turn_run_failure, request_turn_cancellation,
+    complete_turn_run, complete_turn_run_and_append_event, finish_turn_cancellation,
+    record_turn_run_failure, request_turn_cancellation,
 };
 
 pub(in crate::db) async fn get_turn_run(store: &DbStore, id: TurnId) -> Result<Option<TurnRun>> {
