@@ -214,22 +214,25 @@ This will land in independently reviewable pieces:
    that authorizes pinned handles, performs bounded-result I/O, and reauthorizes
    before releasing bytes so completed revocation fences in-flight results:
    hello, register/revoke/list roots, list directory, and read file.
-3. Persist the root/grant/attachment registry and idempotency receipts atomically,
-   add bounded audit records, and expose the same contract through a sidecar
-   adapter. Restart must revalidate and descriptor-pin every persisted root before
-   advertising it.
-4. Add the Tauri sidecar client, connected-folder UI, and the durable
+3. Persist the root/grant/attachment registry and idempotency receipts atomically
+   under a broker-private, exclusively owned state directory. Restart must
+   validate the bounded state file and revalidate and descriptor-pin every
+   persisted root before advertising it. A mutation with ambiguous publication
+   fails the broker closed until restart.
+4. Add bounded audit records for every machine-touching operation.
+5. Expose the same contract through a versioned sidecar adapter.
+6. Add the Tauri sidecar client, connected-folder UI, and the durable
    agent-request → native-picker → grant → retry workflow. Broker state, audit,
    scratch, and handoffs live under OpenWave's application data directory;
    remove the automatic `Documents/OpenWave` folder.
-5. Replace project/chat `workspace_dir` with persisted host-access context
+7. Replace project/chat `workspace_dir` with persisted host-access context
    identity and connected-root APIs. This can update the pre-v1 baseline schema
    directly.
-6. Route built-in file tools through the operation interface and remove direct
+8. Route built-in file tools through the operation interface and remove direct
    ambient host-directory opening from `ToolCtx`.
-7. Port bounded imports, writes, approvals, and confined command execution as
+9. Port bounded imports, writes, approvals, and confined command execution as
    separate capability slices.
-8. Adapt the explicit-workspace MCP command to the same broker policy instead of
+10. Adapt the explicit-workspace MCP command to the same broker policy instead of
    maintaining a second filesystem authority model.
 
 Each intermediate state must fail closed. In particular, adding the data model

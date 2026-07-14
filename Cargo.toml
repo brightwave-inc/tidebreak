@@ -26,6 +26,7 @@ futures-timer = "3"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+windows-sys = "0.61"
 sea-orm = { version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
 sea-orm-migration = { version = "1", default-features = false, features = ["runtime-tokio-rustls"] }
 tokio = { version = "1", features = ["rt", "macros", "fs"] }
