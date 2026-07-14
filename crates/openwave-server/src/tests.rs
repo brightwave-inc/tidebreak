@@ -1591,6 +1591,7 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
     // Stall after the first delta so steer can interrupt; then finish.
     struct StallThenFinish {
         calls: AtomicUsize,
+        entered: Arc<Notify>,
     }
     #[async_trait]
     impl ModelProvider for StallThenFinish {
@@ -1599,6 +1600,7 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
         }
         async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
                 let head = stream::iter(vec![ProviderEvent::TextDelta {
                     text: "partial".into(),
                 }]);
@@ -1616,8 +1618,10 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
         }
     }
 
+    let entered = Arc::new(Notify::new());
     let (router, token, store, _dir) = test_app_with(Arc::new(StallThenFinish {
         calls: AtomicUsize::new(0),
+        entered: entered.clone(),
     }))
     .await;
     let bearer = format!("Bearer {token}");
@@ -1628,8 +1632,9 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
         send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
         StatusCode::ACCEPTED
     );
-    // Give the turn a moment to enter the stalled stream.
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("provider entered before the interrupt steer");
     let steer_id = TurnSteerId::new();
     assert_eq!(
         steer_turn_with_id(

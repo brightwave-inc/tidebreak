@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use futures::channel::mpsc::unbounded;
+use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use openwave_core::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentTurnOutcome, ClaimedAgentEvent,
@@ -79,6 +79,27 @@ enum ClaimAction {
 enum HeartbeatOutcome {
     Cancelling,
     LeaseLost,
+}
+
+/// Finish live publication for state transitions that committed before this
+/// worker learned it had lost the lease. The producer must be stopped first so
+/// the channel closes after its already-buffered emissions are consumed.
+async fn drain_committed_events(
+    events: &EventBus,
+    chat_id: openwave_core::ChatId,
+    emissions: &mut UnboundedReceiver<ClaimedAgentEvent>,
+) {
+    while let Some(emission) = emissions.next().await {
+        match emission {
+            ClaimedAgentEvent::Committed { event, .. } => {
+                let _ = events.sender(chat_id).send(event);
+            }
+            ClaimedAgentEvent::Flush(acknowledge) => {
+                let _ = acknowledge.send(());
+            }
+            ClaimedAgentEvent::Pending { .. } => {}
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -406,6 +427,12 @@ impl TurnWorker {
                                         if heartbeat_open {
                                             heartbeat.abort_and_wait().await;
                                         }
+                                        drain_committed_events(
+                                            &self.events,
+                                            turn.chat_id,
+                                            &mut events_rx,
+                                        )
+                                        .await;
                                         return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
                                     }
                                 }
@@ -433,6 +460,12 @@ impl TurnWorker {
                             Ok(HeartbeatOutcome::Cancelling) => heartbeat_open = false,
                             Ok(HeartbeatOutcome::LeaseLost) | Err(_) => {
                                 drive.abort_and_wait().await;
+                                drain_committed_events(
+                                    &self.events,
+                                    turn.chat_id,
+                                    &mut events_rx,
+                                )
+                                .await;
                                 return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
                             }
                         }
@@ -1031,5 +1064,47 @@ fn log_turn_result(result: std::result::Result<Result<TurnWorkerOutcome>, tokio:
         Ok(Ok(_)) => {}
         Ok(Err(error)) => eprintln!("openwave: turn worker execution failed: {error}"),
         Err(error) => eprintln!("openwave: turn worker task stopped: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod committed_event_drain_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lease_loss_drain_discards_pending_and_publishes_committed_events() {
+        let events = EventBus::default();
+        let chat_id = openwave_core::ChatId::new();
+        let mut live = events.subscribe(chat_id);
+        let (sender, mut receiver) = unbounded();
+        sender
+            .unbounded_send(ClaimedAgentEvent::Pending {
+                ordinal: 2,
+                event: AgentEvent::TextDelta {
+                    text: "not committed".into(),
+                },
+            })
+            .unwrap();
+        let committed = SequencedEvent {
+            seq: 7,
+            event: AgentEvent::UserSteered {
+                content: "already durable".into(),
+            },
+        };
+        sender
+            .unbounded_send(ClaimedAgentEvent::Committed {
+                ordinal: 3,
+                event: committed.clone(),
+            })
+            .unwrap();
+        drop(sender);
+
+        drain_committed_events(&events, chat_id, &mut receiver).await;
+
+        assert_eq!(live.try_recv().unwrap(), committed);
+        assert!(matches!(
+            live.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 }
