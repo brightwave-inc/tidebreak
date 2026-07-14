@@ -7,15 +7,19 @@
 //! operations that were already in flight.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, Read},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
 };
 
 use cap_fs_ext::OpenOptionsSyncExt;
 use cap_std::fs::{Dir, OpenOptions};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -31,6 +35,9 @@ use crate::{
     GrantSubject, OperationId, RelativePath, RootAttachment, RootId, RootPolicy, RootPolicyError,
     Scope, SubjectKind, ValidatedRoot,
 };
+
+mod state_file;
+use state_file::StateFile;
 
 const MAX_READ_FILE_BYTES: usize = 64 * 1024;
 const MAX_LIST_DIR_BYTES: usize = 64 * 1024;
@@ -53,6 +60,10 @@ pub enum BrokerError {
     InvalidConsentMethod,
     #[error("broker state lock was poisoned")]
     StatePoisoned,
+    #[error("broker state publication may have committed; restart is required")]
+    PersistenceAmbiguous,
+    #[error("broker state exceeds its durable size limit")]
+    StateTooLarge,
     #[error("path is not a regular file")]
     NotRegularFile,
     #[error("file is too large (maximum {MAX_READ_FILE_BYTES} bytes)")]
@@ -90,23 +101,27 @@ pub struct Operator {
 struct Shared {
     policy: RootPolicy,
     state: Mutex<State>,
+    state_file: Option<StateFile>,
+    failed_closed: AtomicBool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct State {
     roots: HashMap<RootId, RegisteredRoot>,
     grants: Vec<Grant>,
     attachments: Vec<RootAttachment>,
     mutations: HashMap<OperationId, MutationRecord>,
+    active_mutations: HashSet<OperationId>,
 }
 
+#[derive(Clone)]
 struct RegisteredRoot {
     owner: GrantSubject,
     display_name: String,
-    root: ValidatedRoot,
+    root: Arc<ValidatedRoot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum MutationRecord {
     Register {
         request: RegisterFingerprint,
@@ -118,13 +133,13 @@ enum MutationRecord {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum MutationOutcome<T> {
-    InFlight,
+    Pending,
     Complete(Result<T, ErrorResponse>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RegisterFingerprint {
     subject: GrantSubject,
     conversation_id: Uuid,
@@ -132,7 +147,7 @@ struct RegisterFingerprint {
     consent_method: ConsentMethod,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct RevokeFingerprint {
     subject: GrantSubject,
     root_id: RootId,
@@ -153,8 +168,26 @@ impl Broker {
             shared: Arc::new(Shared {
                 policy,
                 state: Mutex::new(State::default()),
+                state_file: None,
+                failed_closed: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Open durable broker state under the application-private data directory.
+    /// Persisted roots are revalidated and descriptor-pinned before this
+    /// constructor returns, so stale state is never advertised.
+    pub fn open(policy: RootPolicy, data_dir: &Path) -> Result<Self, BrokerError> {
+        let state_file = StateFile::open(data_dir)?;
+        let state = state_file.load(&policy)?;
+        Ok(Self {
+            shared: Arc::new(Shared {
+                policy,
+                state: Mutex::new(state),
+                state_file: Some(state_file),
+                failed_closed: AtomicBool::new(false),
+            }),
+        })
     }
 
     /// Obtain the trusted host-only interface.
@@ -210,25 +243,40 @@ impl Controller {
         };
         {
             let mut state = self.lock_state().map_err(error_response)?;
-            match claim_register(&mut state, operation_id, &fingerprint).map_err(error_response)? {
+            let mut next = state.clone();
+            match claim_register(&mut next, operation_id, &fingerprint).map_err(error_response)? {
                 Claim::Start => {}
                 Claim::Complete(result) => return result,
             }
+            self.commit_state(&mut state, next)
+                .map_err(error_response)?;
         }
 
-        let prepared = self.prepare_registration(request).map_err(error_response);
+        let prepared = match self.prepare_registration(request) {
+            Err(error) if retryable_registration_error(&error) => {
+                let mut state = self.lock_state().map_err(error_response)?;
+                state.active_mutations.remove(&operation_id);
+                return Err(error_response(error));
+            }
+            result => result.map_err(error_response),
+        };
         let outcome = prepared
             .as_ref()
             .map(|item| item.result.clone())
             .map_err(Clone::clone);
         let mut state = self.lock_state().map_err(error_response)?;
+        let mut next = state.clone();
         if let Ok(prepared) = prepared {
-            state.roots.insert(prepared.root_id, prepared.root);
-            state.grants.extend(prepared.grants);
-            state.attachments.push(prepared.attachment);
+            next.roots.insert(prepared.root_id, prepared.root);
+            next.grants.extend(prepared.grants);
+            next.attachments.push(prepared.attachment);
         }
-        complete_register(&mut state, operation_id, &fingerprint, outcome.clone())
+        complete_register(&mut next, operation_id, &fingerprint, outcome.clone())
             .map_err(error_response)?;
+        if let Err(error) = self.commit_state(&mut state, next) {
+            state.active_mutations.remove(&operation_id);
+            return Err(error_response(error));
+        }
         outcome
     }
 
@@ -280,7 +328,7 @@ impl Controller {
             root: RegisteredRoot {
                 owner: request.subject,
                 display_name,
-                root: validated,
+                root: Arc::new(validated),
             },
             grants: [list_grant, read_grant],
             attachment: RootAttachment::new(request.conversation_id, root_id)?,
@@ -295,34 +343,60 @@ impl Controller {
             root_id: request.root_id,
         };
         let mut state = self.lock_state().map_err(error_response)?;
-        match claim_revoke(&mut state, operation_id, fingerprint).map_err(error_response)? {
+        let mut next = state.clone();
+        match claim_revoke(&mut next, operation_id, fingerprint).map_err(error_response)? {
             Claim::Complete(result) => return result,
             Claim::Start => {}
         }
-        let owned = state
+        let owned = next
             .roots
             .get(&request.root_id)
             .is_some_and(|root| root.owner == request.subject);
         if owned {
-            state.roots.remove(&request.root_id);
-            state
-                .grants
+            next.roots.remove(&request.root_id);
+            next.grants
                 .retain(|grant| !scope_targets_root(grant.scope(), request.root_id));
-            state
-                .attachments
+            next.attachments
                 .retain(|attachment| attachment.root_id() != request.root_id);
         }
         let result = Ok(RevokeRootResult { revoked: owned });
-        complete_revoke(&mut state, operation_id, fingerprint, result.clone())
+        complete_revoke(&mut next, operation_id, fingerprint, result.clone())
+            .map_err(error_response)?;
+        self.commit_state(&mut state, next)
             .map_err(error_response)?;
         result
     }
 
+    fn commit_state(
+        &self,
+        current: &mut MutexGuard<'_, State>,
+        next: State,
+    ) -> Result<(), BrokerError> {
+        if let Some(state_file) = &self.shared.state_file {
+            if let Err(error) = state_file.save(&next) {
+                if matches!(error, BrokerError::PersistenceAmbiguous) {
+                    self.shared.failed_closed.store(true, Ordering::SeqCst);
+                }
+                return Err(error);
+            }
+        }
+        **current = next;
+        Ok(())
+    }
+
     fn lock_state(&self) -> Result<MutexGuard<'_, State>, BrokerError> {
-        self.shared
+        if self.shared.failed_closed.load(Ordering::SeqCst) {
+            return Err(BrokerError::PersistenceAmbiguous);
+        }
+        let state = self
+            .shared
             .state
             .lock()
-            .map_err(|_| BrokerError::StatePoisoned)
+            .map_err(|_| BrokerError::StatePoisoned)?;
+        if self.shared.failed_closed.load(Ordering::SeqCst) {
+            return Err(BrokerError::PersistenceAmbiguous);
+        }
+        Ok(state)
     }
 }
 
@@ -404,10 +478,18 @@ impl Operator {
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, State>, BrokerError> {
-        self.shared
+        if self.shared.failed_closed.load(Ordering::SeqCst) {
+            return Err(BrokerError::PersistenceAmbiguous);
+        }
+        let state = self
+            .shared
             .state
             .lock()
-            .map_err(|_| BrokerError::StatePoisoned)
+            .map_err(|_| BrokerError::StatePoisoned)?;
+        if self.shared.failed_closed.load(Ordering::SeqCst) {
+            return Err(BrokerError::PersistenceAmbiguous);
+        }
+        Ok(state)
     }
 }
 
@@ -472,16 +554,23 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             "host operation request is invalid",
             false,
         ),
+        BrokerError::RootPolicy(RootPolicyError::Io(error)) => (
+            ErrorCode::HostIo,
+            "host filesystem operation failed",
+            transient_io_kind(error.kind()),
+        ),
         BrokerError::RootPolicy(_) => (
             ErrorCode::InvalidRoot,
             "selected folder is not an allowed connected root",
             false,
         ),
-        BrokerError::FileTooLarge | BrokerError::DirectoryTooLarge => (
-            ErrorCode::TooLarge,
-            "host operation exceeded its limit",
-            false,
-        ),
+        BrokerError::FileTooLarge | BrokerError::DirectoryTooLarge | BrokerError::StateTooLarge => {
+            (
+                ErrorCode::TooLarge,
+                "host operation exceeded its limit",
+                false,
+            )
+        }
         BrokerError::NotRegularFile | BrokerError::NotUtf8 => (
             ErrorCode::UnsupportedContent,
             "host resource has an unsupported content type",
@@ -497,12 +586,25 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             "broker state is unavailable; restart the broker",
             false,
         ),
+        BrokerError::PersistenceAmbiguous => (
+            ErrorCode::Internal,
+            "broker state publication is ambiguous; restart the broker",
+            false,
+        ),
     };
     ErrorResponse {
         code,
         message: message.to_owned(),
         retryable,
     }
+}
+
+fn retryable_registration_error(error: &BrokerError) -> bool {
+    matches!(
+        error,
+        BrokerError::RootPolicy(RootPolicyError::Io(source))
+            if transient_io_kind(source.kind())
+    )
 }
 
 fn transient_io_kind(kind: io::ErrorKind) -> bool {
@@ -528,9 +630,10 @@ fn claim_register(
                 operation_id,
                 MutationRecord::Register {
                     request: request.clone(),
-                    outcome: MutationOutcome::InFlight,
+                    outcome: MutationOutcome::Pending,
                 },
             );
+            state.active_mutations.insert(operation_id);
             Ok(Claim::Start)
         }
         Some(MutationRecord::Register {
@@ -539,8 +642,14 @@ fn claim_register(
         }) if existing == request => Ok(Claim::Complete(result.clone())),
         Some(MutationRecord::Register {
             request: existing,
-            outcome: MutationOutcome::InFlight,
-        }) if existing == request => Err(BrokerError::OperationInProgress),
+            outcome: MutationOutcome::Pending,
+        }) if existing == request => {
+            if state.active_mutations.insert(operation_id) {
+                Ok(Claim::Start)
+            } else {
+                Err(BrokerError::OperationInProgress)
+            }
+        }
         Some(_) => Err(BrokerError::OperationIdConflict),
     }
 }
@@ -555,8 +664,9 @@ fn complete_register(
         Some(MutationRecord::Register {
             request: existing,
             outcome,
-        }) if existing == request && matches!(outcome, MutationOutcome::InFlight) => {
+        }) if existing == request && matches!(outcome, MutationOutcome::Pending) => {
             *outcome = MutationOutcome::Complete(result);
+            state.active_mutations.remove(&operation_id);
             Ok(())
         }
         _ => Err(BrokerError::OperationIdConflict),
@@ -574,9 +684,10 @@ fn claim_revoke(
                 operation_id,
                 MutationRecord::Revoke {
                     request,
-                    outcome: MutationOutcome::InFlight,
+                    outcome: MutationOutcome::Pending,
                 },
             );
+            state.active_mutations.insert(operation_id);
             Ok(Claim::Start)
         }
         Some(MutationRecord::Revoke {
@@ -585,8 +696,14 @@ fn claim_revoke(
         }) if *existing == request => Ok(Claim::Complete(result.clone())),
         Some(MutationRecord::Revoke {
             request: existing,
-            outcome: MutationOutcome::InFlight,
-        }) if *existing == request => Err(BrokerError::OperationInProgress),
+            outcome: MutationOutcome::Pending,
+        }) if *existing == request => {
+            if state.active_mutations.insert(operation_id) {
+                Ok(Claim::Start)
+            } else {
+                Err(BrokerError::OperationInProgress)
+            }
+        }
         Some(_) => Err(BrokerError::OperationIdConflict),
     }
 }
@@ -601,8 +718,9 @@ fn complete_revoke(
         Some(MutationRecord::Revoke {
             request: existing,
             outcome,
-        }) if *existing == request && matches!(outcome, MutationOutcome::InFlight) => {
+        }) if *existing == request && matches!(outcome, MutationOutcome::Pending) => {
             *outcome = MutationOutcome::Complete(result);
+            state.active_mutations.remove(&operation_id);
             Ok(())
         }
         _ => Err(BrokerError::OperationIdConflict),
@@ -779,6 +897,15 @@ fn scope_targets_root(scope: &Scope, requested: RootId) -> bool {
 mod tests {
     use super::*;
 
+    fn test_policy(temp: &tempfile::TempDir) -> RootPolicy {
+        RootPolicy::for_test(
+            temp.path().join("home"),
+            vec![temp.path().join("sensitive")],
+            vec![temp.path().to_path_buf()],
+            Vec::new(),
+        )
+    }
+
     fn setup() -> (tempfile::TempDir, Broker, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
@@ -786,13 +913,18 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("note.txt"), "hello from broker").unwrap();
         std::fs::create_dir(root.join("reports")).unwrap();
-        let policy = RootPolicy::for_test(
-            home,
-            vec![temp.path().join("sensitive")],
-            vec![temp.path().to_path_buf()],
-            Vec::new(),
-        );
+        let policy = test_policy(&temp);
         (temp, Broker::new(policy), root)
+    }
+
+    fn durable_setup() -> (tempfile::TempDir, Broker, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("home/Documents");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.txt"), "hello from broker").unwrap();
+        let state_dir = temp.path().join("app-data/host-broker");
+        let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+        (temp, broker, root, state_dir)
     }
 
     fn register(
@@ -1230,5 +1362,352 @@ mod tests {
         let poisoned = error_response(BrokerError::StatePoisoned);
         assert_eq!(poisoned.code, ErrorCode::Internal);
         assert!(!poisoned.retryable);
+    }
+
+    #[test]
+    fn durable_registry_receipts_and_revocation_survive_restart() {
+        let (temp, broker, path, state_dir) = durable_setup();
+        let conversation = Uuid::new_v4();
+        let subject = GrantSubject::conversation(conversation).unwrap();
+        let register_id = OperationId::new();
+        let registered = register(
+            &broker.controller(),
+            subject,
+            conversation,
+            path.clone(),
+            register_id,
+        );
+        drop(broker);
+
+        let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+        let retry = register(
+            &broker.controller(),
+            subject,
+            conversation,
+            path,
+            register_id,
+        );
+        assert_eq!(retry, registered);
+        let context = ExecutionContext::standalone(conversation).unwrap();
+        assert!(operate(
+            &broker.operator(),
+            context,
+            OperationRequest::ReadFile(PathRequest {
+                root_id: registered.root.root_id,
+                path: RelativePath::parse("note.txt").unwrap(),
+            }),
+        )
+        .is_ok());
+
+        let revoke_id = OperationId::new();
+        let revoke = ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: ControlRequest::RevokeRoot(RevokeRootRequest {
+                operation_id: revoke_id,
+                subject,
+                root_id: registered.root.root_id,
+            }),
+        };
+        let first = unwrap_response(broker.controller().handle(revoke.clone())).unwrap();
+        assert_eq!(
+            first,
+            ControlResult::RevokeRoot(RevokeRootResult { revoked: true })
+        );
+        drop(broker);
+
+        let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+        let retry = unwrap_response(broker.controller().handle(revoke)).unwrap();
+        assert_eq!(retry, first);
+        assert_eq!(
+            operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap(),
+            OperationResult::ListRoots { roots: Vec::new() }
+        );
+        assert!(matches!(
+            operate(
+                &broker.operator(),
+                context,
+                OperationRequest::ReadFile(PathRequest {
+                    root_id: registered.root.root_id,
+                    path: RelativePath::parse("note.txt").unwrap(),
+                }),
+            ),
+            Err(ErrorResponse {
+                code: ErrorCode::Denied,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn pending_registration_resumes_after_completion_save_failure_and_restart() {
+        let (temp, broker, path, state_dir) = durable_setup();
+        broker
+            .shared
+            .state_file
+            .as_ref()
+            .unwrap()
+            .fail_after_saves(1);
+        let conversation = Uuid::new_v4();
+        let subject = GrantSubject::conversation(conversation).unwrap();
+        let operation_id = OperationId::new();
+        let request = ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: ControlRequest::RegisterRoot(RegisterRootRequest {
+                operation_id,
+                subject,
+                conversation_id: conversation,
+                path: path.clone(),
+                consent_method: ConsentMethod::FolderPicker,
+            }),
+        };
+        let failed = broker.controller().handle(request);
+        assert!(matches!(
+            failed.response,
+            Response::Error(ErrorResponse {
+                code: ErrorCode::HostIo,
+                ..
+            })
+        ));
+        drop(broker);
+
+        let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+        let completed = register(
+            &broker.controller(),
+            subject,
+            conversation,
+            path,
+            operation_id,
+        );
+        assert_eq!(completed.root.display_name, "Documents");
+    }
+
+    #[test]
+    fn ambiguous_state_publication_fails_closed_until_restart() {
+        let (temp, broker, path, state_dir) = durable_setup();
+        broker
+            .shared
+            .state_file
+            .as_ref()
+            .unwrap()
+            .fail_once_after_publish();
+        let conversation = Uuid::new_v4();
+        let subject = GrantSubject::conversation(conversation).unwrap();
+        let operation_id = OperationId::new();
+        let request = ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: ControlRequest::RegisterRoot(RegisterRootRequest {
+                operation_id,
+                subject,
+                conversation_id: conversation,
+                path: path.clone(),
+                consent_method: ConsentMethod::FolderPicker,
+            }),
+        };
+        let ambiguous = broker.controller().handle(request);
+        assert!(matches!(
+            ambiguous.response,
+            Response::Error(ErrorResponse {
+                code: ErrorCode::Internal,
+                retryable: false,
+                ..
+            })
+        ));
+        let unavailable = broker.operator().handle(OperationEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            context: ExecutionContext::standalone(conversation).unwrap(),
+            request: OperationRequest::ListRoots,
+        });
+        assert!(matches!(
+            unavailable.response,
+            Response::Error(ErrorResponse {
+                code: ErrorCode::Internal,
+                retryable: false,
+                ..
+            })
+        ));
+        drop(broker);
+
+        let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+        let completed = register(
+            &broker.controller(),
+            subject,
+            conversation,
+            path,
+            operation_id,
+        );
+        assert_eq!(completed.root.display_name, "Documents");
+    }
+
+    #[test]
+    fn one_process_exclusively_owns_a_durable_broker_directory() {
+        let (temp, broker, _path, state_dir) = durable_setup();
+        assert!(matches!(
+            Broker::open(test_policy(&temp), &state_dir),
+            Err(BrokerError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock
+        ));
+        drop(broker);
+        assert!(Broker::open(test_policy(&temp), &state_dir).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_state_uses_private_directory_and_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_temp, broker, path, state_dir) = durable_setup();
+        let conversation = Uuid::new_v4();
+        register(
+            &broker.controller(),
+            GrantSubject::conversation(conversation).unwrap(),
+            conversation,
+            path,
+            OperationId::new(),
+        );
+        assert_eq!(
+            std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(state_dir.join("host-broker-state.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn restart_revalidates_every_persisted_root_before_advertising_state() {
+        let (temp, broker, path, state_dir) = durable_setup();
+        let conversation = Uuid::new_v4();
+        register(
+            &broker.controller(),
+            GrantSubject::conversation(conversation).unwrap(),
+            conversation,
+            path.clone(),
+            OperationId::new(),
+        );
+        drop(broker);
+        std::fs::remove_file(path.join("note.txt")).unwrap();
+        std::fs::remove_dir(path).unwrap();
+
+        assert!(matches!(
+            Broker::open(test_policy(&temp), &state_dir),
+            Err(BrokerError::RootPolicy(_))
+        ));
+    }
+
+    #[test]
+    fn restart_refuses_to_rebind_a_grant_to_a_replaced_folder() {
+        let (temp, broker, path, state_dir) = durable_setup();
+        let conversation = Uuid::new_v4();
+        register(
+            &broker.controller(),
+            GrantSubject::conversation(conversation).unwrap(),
+            conversation,
+            path.clone(),
+            OperationId::new(),
+        );
+        drop(broker);
+        let original = path.with_file_name("Documents-original");
+        std::fs::rename(&path, original).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(matches!(
+            Broker::open(test_policy(&temp), &state_dir),
+            Err(BrokerError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
+        ));
+    }
+
+    #[test]
+    fn persisted_receipts_must_match_authoritative_state() {
+        let (_temp, broker, path, _state_dir) = durable_setup();
+        let conversation = Uuid::new_v4();
+        let subject = GrantSubject::conversation(conversation).unwrap();
+        let registered = register(
+            &broker.controller(),
+            subject,
+            conversation,
+            path,
+            OperationId::new(),
+        );
+        let state = broker.shared.state.lock().unwrap().clone();
+
+        let mut inconsistent_revoke = state.clone();
+        inconsistent_revoke.mutations.insert(
+            OperationId::new(),
+            MutationRecord::Revoke {
+                request: RevokeFingerprint {
+                    subject,
+                    root_id: registered.root.root_id,
+                },
+                outcome: MutationOutcome::Complete(Ok(RevokeRootResult { revoked: true })),
+            },
+        );
+        assert!(state_file::validate_loaded_state(&inconsistent_revoke).is_err());
+
+        let mut inconsistent_register = state;
+        let record = inconsistent_register
+            .mutations
+            .values_mut()
+            .find(|record| matches!(record, MutationRecord::Register { .. }))
+            .unwrap();
+        let MutationRecord::Register {
+            outcome: MutationOutcome::Complete(Ok(result)),
+            ..
+        } = record
+        else {
+            panic!("expected successful registration receipt")
+        };
+        result.root.root_id = RootId::new();
+        assert!(state_file::validate_loaded_state(&inconsistent_register).is_err());
+    }
+
+    #[test]
+    fn negative_revoke_receipt_is_valid_when_the_subject_did_not_own_the_root() {
+        let mut state = State::default();
+        state.mutations.insert(
+            OperationId::new(),
+            MutationRecord::Revoke {
+                request: RevokeFingerprint {
+                    subject: GrantSubject::conversation(Uuid::new_v4()).unwrap(),
+                    root_id: RootId::new(),
+                },
+                outcome: MutationOutcome::Complete(Ok(RevokeRootResult { revoked: false })),
+            },
+        );
+        assert!(state_file::validate_loaded_state(&state).is_ok());
+    }
+
+    #[test]
+    fn transient_root_open_failures_remain_retryable() {
+        let error = BrokerError::RootPolicy(RootPolicyError::Io(io::Error::from(
+            io::ErrorKind::WouldBlock,
+        )));
+        assert!(retryable_registration_error(&error));
+        let response = error_response(error);
+        assert_eq!(response.code, ErrorCode::HostIo);
+        assert!(response.retryable);
+    }
+
+    #[test]
+    fn restart_rejects_an_oversized_state_file_before_parsing_it() {
+        let (temp, broker, _path, state_dir) = durable_setup();
+        drop(broker);
+        std::fs::write(
+            state_dir.join("host-broker-state.json"),
+            vec![b' '; state_file::MAX_STATE_FILE_BYTES + 1],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            Broker::open(test_policy(&temp), &state_dir),
+            Err(BrokerError::StateTooLarge)
+        ));
     }
 }

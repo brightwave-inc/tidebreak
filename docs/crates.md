@@ -87,11 +87,13 @@ The runtime-neutral trust boundary for connected local folders. It owns opaque
 root/grant/operation identities, validated grant and attachment values, portable
 relative paths, descriptor-pinned root policy, and a versioned in-process broker
 with separate controller/operator handles. Register/revoke mutations are
-idempotent in process; list/read operations reauthorize before releasing bounded
-results so completed revocation fences in-flight work. Durable registry/audit,
-the sidecar adapter, and Tauri consent UI are the next slices; until those land,
-existing file tools do not use this boundary. See [Host access and connected
-folders](host-access.md).
+idempotent across restart through an atomically published, size-bounded private
+registry. Restart revalidates and pins every connected root before making it
+available, and ambiguous publication fails closed. List/read operations
+reauthorize before releasing bounded results so completed revocation fences
+in-flight work. Bounded audit, the sidecar adapter, and Tauri consent UI are the
+next slices; until those land, existing file tools do not use this boundary. See
+[Host access and connected folders](host-access.md).
 
 **Depends on:** no OpenWave client crate.
 

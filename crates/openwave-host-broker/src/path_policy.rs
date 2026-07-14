@@ -8,6 +8,7 @@ use std::{
 
 use cap_fs_ext::DirExt;
 use cap_std::{ambient_authority, fs::Dir};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Why a host folder cannot be opened as a registered root.
@@ -53,6 +54,14 @@ pub enum RootPolicyError {
 pub struct ValidatedRoot {
     _canonical_path: PathBuf,
     _directory: Dir,
+    identity: RootIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "platform", rename_all = "snake_case")]
+pub(crate) enum RootIdentity {
+    Unix { device: u64, inode: u64 },
+    Windows { volume: u32, file_index: u64 },
 }
 
 impl std::fmt::Debug for ValidatedRoot {
@@ -70,6 +79,10 @@ impl ValidatedRoot {
 
     pub(crate) fn directory(&self) -> &Dir {
         &self._directory
+    }
+
+    pub(crate) const fn identity(&self) -> RootIdentity {
+        self.identity
     }
 }
 
@@ -165,9 +178,11 @@ impl RootPolicy {
         let canonical_path = std::fs::canonicalize(candidate)?;
         self.validate_canonical(&canonical_path)?;
         let directory = open_canonical_dir_nofollow(&canonical_path)?;
+        let identity = root_identity(&directory)?;
         Ok(ValidatedRoot {
             _canonical_path: canonical_path,
             _directory: directory,
+            identity,
         })
     }
 
@@ -216,6 +231,45 @@ impl RootPolicy {
             home,
         }
     }
+}
+
+#[cfg(unix)]
+fn root_identity(directory: &Dir) -> io::Result<RootIdentity> {
+    use cap_fs_ext::MetadataExt;
+
+    let metadata = directory.dir_metadata()?;
+    Ok(RootIdentity::Unix {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn root_identity(directory: &Dir) -> io::Result<RootIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let succeeded =
+        unsafe { GetFileInformationByHandle(directory.as_raw_handle().cast(), &mut information) };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(RootIdentity::Windows {
+        volume: information.dwVolumeSerialNumber,
+        file_index: u64::from(information.nFileIndexHigh) << 32
+            | u64::from(information.nFileIndexLow),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn root_identity(_directory: &Dir) -> io::Result<RootIdentity> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "root identity is unsupported on this platform",
+    ))
 }
 
 #[cfg(windows)]
