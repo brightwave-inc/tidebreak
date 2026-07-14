@@ -12,6 +12,7 @@ use crate::storage::{
 };
 
 use super::super::super::{entities, store_err, DbStore};
+use super::super::acquire_turn_write_lock;
 use super::{canonical_db_timestamp, turn_run_from_model, turn_run_status_from_db};
 
 pub(in crate::db) async fn complete_turn_run(
@@ -31,7 +32,7 @@ pub(in crate::db) async fn complete_turn_run(
     }
 
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    if !acquire_exact_turn_write_lock(&transaction, id).await? {
+    if !acquire_turn_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
@@ -186,7 +187,7 @@ pub(in crate::db) async fn record_turn_run_failure(
     }
 
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    if !acquire_exact_turn_write_lock(&transaction, id).await? {
+    if !acquire_turn_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
@@ -318,7 +319,7 @@ pub(in crate::db) async fn request_turn_cancellation(
 ) -> Result<Option<RequestTurnCancellationOutcome>> {
     let now = canonical_db_timestamp(now)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    if !acquire_exact_turn_write_lock(&transaction, id).await? {
+    if !acquire_turn_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
@@ -423,7 +424,7 @@ pub(in crate::db) async fn finish_turn_cancellation(
     }
     let now = canonical_db_timestamp(now)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    if !acquire_exact_turn_write_lock(&transaction, id).await? {
+    if !acquire_turn_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
@@ -502,22 +503,6 @@ pub(in crate::db) async fn finish_turn_cancellation(
         .and_then(turn_run_from_model)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(FinishTurnCancellationOutcome::Cancelled(cancelled)))
-}
-
-async fn acquire_exact_turn_write_lock<C>(conn: &C, id: TurnId) -> Result<bool>
-where
-    C: ConnectionTrait,
-{
-    let locked = entities::turn_run::Entity::update_many()
-        .col_expr(
-            entities::turn_run::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(entities::turn_run::Column::UpdatedAt).into(),
-        )
-        .filter(entities::turn_run::Column::Id.eq(id.0))
-        .exec(conn)
-        .await
-        .map_err(store_err)?;
-    Ok(locked.rows_affected == 1)
 }
 
 fn validate_turn_output(id: TurnId, lease_token: uuid::Uuid, output: &Message) -> Result<()> {

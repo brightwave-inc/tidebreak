@@ -310,6 +310,10 @@ pub mod event {
         pub chat_id: Uuid,
         #[sea_orm(primary_key, auto_increment = false)]
         pub seq: i64,
+        pub turn_id: Option<Uuid>,
+        pub lease_token: Option<Uuid>,
+        pub attempt_event_ordinal: Option<i32>,
+        pub terminal: bool,
         #[sea_orm(column_type = "JsonBinary")]
         pub payload: Json,
         pub created_at: DateTimeUtc,

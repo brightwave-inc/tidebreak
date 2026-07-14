@@ -7,7 +7,8 @@ use chrono::{Duration, Utc};
 use openwave_core::{
     AcceptTurnOutcome, AgentEvent, Chat, ChatId, CompleteTurnRunOutcome, DbStore,
     FinishTurnCancellationOutcome, Message, MessageId, RecordTurnFailureOutcome,
-    RequestTurnCancellationOutcome, Role, Store, TurnFailureRetry, TurnId, TurnRunStatus,
+    RequestTurnCancellationOutcome, Role, StopReason, Store, TurnFailureRetry, TurnId,
+    TurnRunStatus, Usage,
 };
 
 fn sample_chat() -> Chat {
@@ -360,4 +361,122 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         events.iter().map(|event| event.seq).collect::<Vec<_>>(),
         (1..=16).collect::<Vec<_>>()
     );
+
+    let turn_event_chat = sample_chat();
+    store.create_chat(&turn_event_chat).await.unwrap();
+    let turn_event = match store
+        .accept_turn(TurnId::new(), turn_event_chat.id, "gpt-5", "event input")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let event_claimed_at = turn_event.available_at + Duration::seconds(1);
+    let event_lease_token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(
+            event_lease_token,
+            event_claimed_at,
+            event_claimed_at + Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let started = AgentEvent::TurnStarted {
+        turn_id: turn_event.id,
+    };
+    assert_eq!(
+        store
+            .append_turn_event(
+                turn_event_chat.id,
+                turn_event.id,
+                event_lease_token,
+                1,
+                event_claimed_at,
+                &started,
+            )
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    let turn_event_output = Message {
+        id: MessageId::new(),
+        chat_id: turn_event_chat.id,
+        turn_id: turn_event.id,
+        role: Role::Assistant,
+        content: "event turn complete".into(),
+        created_at: event_claimed_at + Duration::seconds(1),
+    };
+    store
+        .complete_turn_run(
+            turn_event.id,
+            event_lease_token,
+            turn_event_output.created_at,
+            &turn_event_output,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .append_turn_event(
+                turn_event_chat.id,
+                turn_event.id,
+                event_lease_token,
+                1,
+                event_claimed_at + Duration::hours(1),
+                &started,
+            )
+            .await
+            .unwrap(),
+        Some(1),
+        "postgres exact retries recover the original sequence after terminal state"
+    );
+    assert_eq!(
+        store
+            .append_turn_event(
+                turn_event_chat.id,
+                turn_event.id,
+                event_lease_token,
+                2,
+                event_claimed_at + Duration::seconds(2),
+                &AgentEvent::TextDelta {
+                    text: "late".into(),
+                },
+            )
+            .await
+            .unwrap(),
+        None,
+        "postgres terminal state fences a new stale event"
+    );
+    assert!(store
+        .append_event(turn_event_chat.id, &started)
+        .await
+        .is_err());
+    assert!(store
+        .append_turn_event(
+            event_chat.id,
+            turn_event.id,
+            event_lease_token,
+            2,
+            event_claimed_at,
+            &started,
+        )
+        .await
+        .is_err());
+    assert!(store
+        .append_turn_event(
+            turn_event_chat.id,
+            turn_event.id,
+            event_lease_token,
+            2,
+            event_claimed_at,
+            &AgentEvent::TurnCompleted {
+                usage: Usage::default(),
+                stop_reason: StopReason::EndTurn,
+            },
+        )
+        .await
+        .is_err());
 }

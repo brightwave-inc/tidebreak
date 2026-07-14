@@ -7029,6 +7029,176 @@ async fn event_journal_assigns_per_chat_seq_and_replays_after_cursor() {
 }
 
 #[tokio::test]
+async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
+    use crate::event::AgentEvent;
+    use crate::provider::{StopReason, Usage};
+
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = turn.available_at + chrono::Duration::seconds(1);
+    let lease_expires_at = claimed_at + chrono::Duration::minutes(1);
+    let lease_token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(lease_token, claimed_at, lease_expires_at)
+        .await
+        .unwrap()
+        .unwrap();
+    let started = AgentEvent::TurnStarted { turn_id: turn.id };
+    assert_eq!(
+        store
+            .append_turn_event(chat.id, turn.id, lease_token, 1, claimed_at, &started)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        store
+            .append_turn_event(
+                chat.id,
+                turn.id,
+                lease_token,
+                1,
+                lease_expires_at + chrono::Duration::seconds(1),
+                &started,
+            )
+            .await
+            .unwrap(),
+        Some(1),
+        "an exact ambiguous retry recovers its original sequence"
+    );
+    let stored = entities::event::Entity::find_by_id((chat.id.0, 1))
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.turn_id, Some(turn.id.0));
+    assert_eq!(stored.lease_token, Some(lease_token));
+    assert_eq!(stored.attempt_event_ordinal, Some(1));
+    assert!(!stored.terminal);
+    assert_eq!(
+        serde_json::from_value::<AgentEvent>(stored.payload).unwrap(),
+        started
+    );
+
+    let terminal = AgentEvent::TurnCompleted {
+        usage: Usage::default(),
+        stop_reason: StopReason::EndTurn,
+    };
+    assert!(store
+        .append_turn_event(chat.id, turn.id, lease_token, 2, claimed_at, &terminal)
+        .await
+        .is_err());
+    assert!(store
+        .append_turn_event(
+            chat.id,
+            turn.id,
+            lease_token,
+            1,
+            claimed_at,
+            &AgentEvent::ContextTruncated {
+                original_tokens: 20,
+                fitted_tokens: 10,
+            },
+        )
+        .await
+        .is_err());
+    assert!(store
+        .append_turn_event(
+            chat.id,
+            turn.id,
+            lease_token,
+            2,
+            claimed_at,
+            &AgentEvent::TurnStarted {
+                turn_id: TurnId::new(),
+            },
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .append_turn_event(
+                chat.id,
+                turn.id,
+                lease_token,
+                2,
+                lease_expires_at + chrono::Duration::seconds(1),
+                &AgentEvent::ContextTruncated {
+                    original_tokens: 20,
+                    fitted_tokens: 10,
+                },
+            )
+            .await
+            .unwrap(),
+        None,
+        "a stale lease cannot append a new event"
+    );
+    assert!(store.append_event(chat.id, &started).await.is_err());
+
+    entities::event::ActiveModel {
+        chat_id: Set(chat.id.0),
+        seq: Set(2),
+        turn_id: Set(Some(turn.id.0)),
+        lease_token: Set(Some(lease_token)),
+        attempt_event_ordinal: Set(Some(2)),
+        terminal: Set(true),
+        payload: Set(serde_json::to_value(&terminal).unwrap()),
+        created_at: Set(Utc::now()),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+    assert!(entities::event::ActiveModel {
+        chat_id: Set(chat.id.0),
+        seq: Set(3),
+        turn_id: Set(Some(turn.id.0)),
+        lease_token: Set(Some(lease_token)),
+        attempt_event_ordinal: Set(Some(3)),
+        terminal: Set(true),
+        payload: Set(serde_json::to_value(&terminal).unwrap()),
+        created_at: Set(Utc::now()),
+    }
+    .insert(&store.conn)
+    .await
+    .is_err());
+    assert!(entities::event::ActiveModel {
+        chat_id: Set(chat.id.0),
+        seq: Set(4),
+        turn_id: Set(None),
+        lease_token: Set(None),
+        attempt_event_ordinal: Set(None),
+        terminal: Set(true),
+        payload: Set(serde_json::to_value(&terminal).unwrap()),
+        created_at: Set(Utc::now()),
+    }
+    .insert(&store.conn)
+    .await
+    .is_err());
+    assert!(entities::event::ActiveModel {
+        chat_id: Set(chat.id.0),
+        seq: Set(5),
+        turn_id: Set(Some(turn.id.0)),
+        lease_token: Set(None),
+        attempt_event_ordinal: Set(None),
+        terminal: Set(false),
+        payload: Set(serde_json::to_value(&started).unwrap()),
+        created_at: Set(Utc::now()),
+    }
+    .insert(&store.conn)
+    .await
+    .is_err());
+}
+
+#[tokio::test]
 async fn concurrent_event_writers_allocate_one_contiguous_chat_sequence() {
     use crate::event::AgentEvent;
 
