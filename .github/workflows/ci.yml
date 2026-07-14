@@ -108,16 +108,16 @@ jobs:
             protobuf-compiler
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: cargo-registry
+          shared-key: cargo-registry-v2
           add-job-id-key: "false"
           cache-bin: false
           # Keep Cargo downloads cached, but never restore the multi-gigabyte
           # target archive that previously exhausted a hosted runner. sccache
           # reuses individual compiler outputs without pre-filling target/.
           cache-targets: false
-          # PR-scoped registry caches cannot help later PRs. All compiler lanes
-          # restore the trusted main cache and only main refreshes it.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Every lane restores the shared trusted-main registry cache; only the
+          # comprehensive build job below publishes a new immutable key.
+          save-if: false
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -155,11 +155,14 @@ jobs:
             protobuf-compiler
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: cargo-registry
+          shared-key: cargo-registry-v2
           add-job-id-key: "false"
           cache-bin: false
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Fetch the complete workspace lockfile
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: cargo fetch --locked
       - name: build
         run: cargo build --workspace --locked
 
@@ -197,11 +200,11 @@ jobs:
             protobuf-compiler
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: cargo-registry
+          shared-key: cargo-registry-v2
           add-job-id-key: "false"
           cache-bin: false
           cache-targets: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: false
       - name: test
         run: cargo test --workspace --locked
 
@@ -244,11 +247,11 @@ jobs:
           version: v0.16.0
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: cargo-registry
+          shared-key: cargo-registry-v2
           add-job-id-key: "false"
           cache-bin: false
           cache-targets: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: false
       - name: Exercise durable turn state on PostgreSQL
         run: >-
           cargo test -p openwave-core --no-default-features --features postgres
