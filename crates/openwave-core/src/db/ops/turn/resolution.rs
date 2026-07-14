@@ -114,7 +114,7 @@ async fn complete_turn_run_inner(
             )));
         }
         let sequenced_event =
-            exact_terminal_event_on(&transaction, id, lease_token, terminal_event).await?;
+            exact_terminal_event_on(&transaction, id, Some(lease_token), terminal_event).await?;
         let existing = turn_run_from_model(existing)?;
         transaction.commit().await.map_err(store_err)?;
         return Ok(Some(JournaledTurnOutcome {
@@ -146,7 +146,7 @@ async fn complete_turn_run_inner(
         transaction.rollback().await.map_err(store_err)?;
         if let Some(existing) = exact_completed_turn_on(store, id, lease_token, output).await? {
             let sequenced_event =
-                exact_terminal_event_on(&store.conn, id, lease_token, terminal_event).await?;
+                exact_terminal_event_on(&store.conn, id, Some(lease_token), terminal_event).await?;
             return Ok(Some(JournaledTurnOutcome {
                 outcome: CompleteTurnRunOutcome::Existing(existing),
                 terminal_event: sequenced_event,
@@ -199,7 +199,7 @@ async fn complete_turn_run_inner(
         &transaction,
         id,
         ChatId(existing.chat_id),
-        lease_token,
+        Some(lease_token),
         terminal_event,
     )
     .await?;
@@ -464,7 +464,7 @@ async fn record_turn_run_failure_inner(
             &transaction,
             id,
             ChatId(turn.chat_id),
-            lease_token,
+            Some(lease_token),
             terminal_event,
         )
         .await?
@@ -484,8 +484,41 @@ pub(in crate::db) async fn request_turn_cancellation(
     id: TurnId,
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<RequestTurnCancellationOutcome>> {
+    Ok(request_turn_cancellation_inner(store, id, now, None)
+        .await?
+        .map(|resolution| resolution.outcome))
+}
+
+pub(in crate::db) async fn request_turn_cancellation_and_append_event(
+    store: &DbStore,
+    id: TurnId,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<JournaledTurnOutcome<RequestTurnCancellationOutcome>>> {
+    let event = AgentEvent::TurnCancelled {
+        usage: Usage::default(),
+    };
+    request_turn_cancellation_inner(store, id, now, Some(&event)).await
+}
+
+async fn request_turn_cancellation_inner(
+    store: &DbStore,
+    id: TurnId,
+    now: chrono::DateTime<Utc>,
+    terminal_event: Option<&AgentEvent>,
+) -> Result<Option<JournaledTurnOutcome<RequestTurnCancellationOutcome>>> {
     let now = canonical_db_timestamp(now)?;
+    let journal_chat_id = journal_chat_id(store, id, terminal_event.is_some()).await?;
+    if terminal_event.is_some() && journal_chat_id.is_none() {
+        return Ok(None);
+    }
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    if let Some(chat_id) = journal_chat_id {
+        if !acquire_chat_write_lock(&transaction, chat_id).await? {
+            return Err(AgentError::Store(format!(
+                "turn {id} references missing chat {chat_id}"
+            )));
+        }
+    }
     if !acquire_turn_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
@@ -501,14 +534,25 @@ pub(in crate::db) async fn request_turn_cancellation(
     let status = turn_run_status_from_db(&turn.status)?;
     match status {
         TurnRunStatus::Cancelling | TurnRunStatus::Cancelled => {
+            let sequenced_event = if status == TurnRunStatus::Cancelled {
+                existing_cancellation_event_on(&transaction, id, terminal_event.is_some()).await?
+            } else {
+                None
+            };
             let turn = turn_run_from_model(turn)?;
             transaction.commit().await.map_err(store_err)?;
-            return Ok(Some(RequestTurnCancellationOutcome::Existing(turn)));
+            return Ok(Some(JournaledTurnOutcome {
+                outcome: RequestTurnCancellationOutcome::Existing(turn),
+                terminal_event: sequenced_event,
+            }));
         }
         TurnRunStatus::Completed | TurnRunStatus::Failed => {
             let turn = turn_run_from_model(turn)?;
             transaction.commit().await.map_err(store_err)?;
-            return Ok(Some(RequestTurnCancellationOutcome::AlreadyTerminal(turn)));
+            return Ok(Some(JournaledTurnOutcome {
+                outcome: RequestTurnCancellationOutcome::AlreadyTerminal(turn),
+                terminal_event: None,
+            }));
         }
         TurnRunStatus::Queued | TurnRunStatus::Running | TurnRunStatus::RetryWait => {}
     }
@@ -572,12 +616,22 @@ pub(in crate::db) async fn request_turn_cancellation(
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("cancelled turn {id} disappeared")))
         .and_then(turn_run_from_model)?;
-    transaction.commit().await.map_err(store_err)?;
-    if next_status == TurnRunStatus::Cancelling {
-        Ok(Some(RequestTurnCancellationOutcome::Requested(updated)))
+    let sequenced_event = if next_status == TurnRunStatus::Cancelled {
+        append_terminal_event_on(&transaction, id, ChatId(turn.chat_id), None, terminal_event)
+            .await?
     } else {
-        Ok(Some(RequestTurnCancellationOutcome::Cancelled(updated)))
-    }
+        None
+    };
+    transaction.commit().await.map_err(store_err)?;
+    let outcome = if next_status == TurnRunStatus::Cancelling {
+        RequestTurnCancellationOutcome::Requested(updated)
+    } else {
+        RequestTurnCancellationOutcome::Cancelled(updated)
+    };
+    Ok(Some(JournaledTurnOutcome {
+        outcome,
+        terminal_event: sequenced_event,
+    }))
 }
 
 pub(in crate::db) async fn finish_turn_cancellation(
@@ -586,11 +640,47 @@ pub(in crate::db) async fn finish_turn_cancellation(
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<FinishTurnCancellationOutcome>> {
+    Ok(
+        finish_turn_cancellation_inner(store, id, lease_token, now, None)
+            .await?
+            .map(|resolution| resolution.outcome),
+    )
+}
+
+pub(in crate::db) async fn finish_turn_cancellation_and_append_event(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    usage: Usage,
+) -> Result<Option<JournaledTurnOutcome<FinishTurnCancellationOutcome>>> {
+    let event = AgentEvent::TurnCancelled { usage };
+    finish_turn_cancellation_inner(store, id, lease_token, now, Some(&event)).await
+}
+
+async fn finish_turn_cancellation_inner(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    terminal_event: Option<&AgentEvent>,
+) -> Result<Option<JournaledTurnOutcome<FinishTurnCancellationOutcome>>> {
     if lease_token.is_nil() {
         return Err(AgentError::Store("turn lease token must not be nil".into()));
     }
     let now = canonical_db_timestamp(now)?;
+    let journal_chat_id = journal_chat_id(store, id, terminal_event.is_some()).await?;
+    if terminal_event.is_some() && journal_chat_id.is_none() {
+        return Ok(None);
+    }
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    if let Some(chat_id) = journal_chat_id {
+        if !acquire_chat_write_lock(&transaction, chat_id).await? {
+            return Err(AgentError::Store(format!(
+                "turn {id} references missing chat {chat_id}"
+            )));
+        }
+    }
     if !acquire_turn_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
@@ -614,9 +704,14 @@ pub(in crate::db) async fn finish_turn_cancellation(
     };
     if turn.status == TurnRunStatus::Cancelled.as_str() && turn.attempt_count == claim.attempt_count
     {
+        let sequenced_event =
+            exact_terminal_event_on(&transaction, id, Some(lease_token), terminal_event).await?;
         let turn = turn_run_from_model(turn)?;
         transaction.commit().await.map_err(store_err)?;
-        return Ok(Some(FinishTurnCancellationOutcome::Existing(turn)));
+        return Ok(Some(JournaledTurnOutcome {
+            outcome: FinishTurnCancellationOutcome::Existing(turn),
+            terminal_event: sequenced_event,
+        }));
     }
     if turn.status != TurnRunStatus::Cancelling.as_str()
         || turn.attempt_count != claim.attempt_count
@@ -668,8 +763,19 @@ pub(in crate::db) async fn finish_turn_cancellation(
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("cancelled turn {id} disappeared")))
         .and_then(turn_run_from_model)?;
+    let sequenced_event = append_terminal_event_on(
+        &transaction,
+        id,
+        ChatId(turn.chat_id),
+        Some(lease_token),
+        terminal_event,
+    )
+    .await?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(Some(FinishTurnCancellationOutcome::Cancelled(cancelled)))
+    Ok(Some(JournaledTurnOutcome {
+        outcome: FinishTurnCancellationOutcome::Cancelled(cancelled),
+        terminal_event: sequenced_event,
+    }))
 }
 
 fn validate_turn_output(id: TurnId, lease_token: uuid::Uuid, output: &Message) -> Result<()> {
@@ -827,7 +933,7 @@ async fn append_terminal_event_on<C>(
     conn: &C,
     id: TurnId,
     chat_id: ChatId,
-    lease_token: uuid::Uuid,
+    lease_token: Option<uuid::Uuid>,
     terminal_event: Option<&AgentEvent>,
 ) -> Result<Option<SequencedEvent>>
 where
@@ -840,8 +946,8 @@ where
         conn,
         chat_id,
         Some(id),
-        Some(lease_token),
-        Some(i32::MAX),
+        lease_token,
+        lease_token.map(|_| i32::MAX),
         event,
     )
     .await?;
@@ -854,7 +960,7 @@ where
 async fn exact_terminal_event_on<C>(
     conn: &C,
     id: TurnId,
-    lease_token: uuid::Uuid,
+    lease_token: Option<uuid::Uuid>,
     expected: Option<&AgentEvent>,
 ) -> Result<Option<SequencedEvent>>
 where
@@ -871,8 +977,8 @@ where
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("terminal turn {id} is missing its event")))?;
     let event = serde_json::from_value::<AgentEvent>(stored.payload)?;
-    if stored.lease_token != Some(lease_token)
-        || stored.attempt_event_ordinal != Some(i32::MAX)
+    if stored.lease_token != lease_token
+        || stored.attempt_event_ordinal != lease_token.map(|_| i32::MAX)
         || event != *expected
     {
         return Err(AgentError::Store(format!(
@@ -896,10 +1002,40 @@ where
     C: ConnectionTrait,
 {
     if receipt.result_status == TurnRunStatus::Failed {
-        exact_terminal_event_on(conn, id, lease_token, terminal_event).await
+        exact_terminal_event_on(conn, id, Some(lease_token), terminal_event).await
     } else {
         Ok(None)
     }
+}
+
+async fn existing_cancellation_event_on<C>(
+    conn: &C,
+    id: TurnId,
+    expected: bool,
+) -> Result<Option<SequencedEvent>>
+where
+    C: ConnectionTrait,
+{
+    if !expected {
+        return Ok(None);
+    }
+    let stored = entities::event::Entity::find()
+        .filter(entities::event::Column::TurnId.eq(id.0))
+        .filter(entities::event::Column::Terminal.eq(true))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("cancelled turn {id} is missing its event")))?;
+    let event = serde_json::from_value::<AgentEvent>(stored.payload)?;
+    if !matches!(event, AgentEvent::TurnCancelled { .. }) {
+        return Err(AgentError::Store(format!(
+            "cancelled turn {id} has a different terminal event"
+        )));
+    }
+    Ok(Some(SequencedEvent {
+        seq: stored.seq,
+        event,
+    }))
 }
 
 async fn exact_completed_output_on<C>(conn: &C, output: &Message) -> Result<bool>

@@ -744,6 +744,19 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Request cancellation and publish an immediate terminal outcome atomically.
+    ///
+    /// Queued and retry-wait turns commit `TurnCancelled` with their terminal
+    /// transition. Running turns only enter `cancelling`; their worker publishes
+    /// the terminal event when it acknowledges quiescence.
+    async fn request_turn_cancellation_and_append_event(
+        &self,
+        _id: TurnId,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<JournaledTurnOutcome<RequestTurnCancellationOutcome>>> {
+        turn_storage_unavailable()
+    }
+
     /// Acknowledge that one exact cancelling worker has quiesced.
     ///
     /// The immutable claim receipt and terminal attempt make exact retries
@@ -756,6 +769,20 @@ pub trait Store: Send + Sync {
         _lease_token: uuid::Uuid,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<FinishTurnCancellationOutcome>> {
+        turn_storage_unavailable()
+    }
+
+    /// Acknowledge cancellation and publish its terminal event atomically.
+    ///
+    /// Exact ambiguous retries recover both the cancelled turn and the same
+    /// journal sequence, including the usage recorded by the original worker.
+    async fn finish_turn_cancellation_and_append_event(
+        &self,
+        _id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+        _usage: Usage,
+    ) -> Result<Option<JournaledTurnOutcome<FinishTurnCancellationOutcome>>> {
         turn_storage_unavailable()
     }
 

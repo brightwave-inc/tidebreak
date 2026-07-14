@@ -302,7 +302,10 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         cancellations.push(tokio::spawn(async move {
             barrier.wait().await;
             store
-                .request_turn_cancellation(cancellation_turn.id, cancellation_requested_at)
+                .request_turn_cancellation_and_append_event(
+                    cancellation_turn.id,
+                    cancellation_requested_at,
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -311,7 +314,9 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     let mut requested = 0;
     let mut cancellation_existing = 0;
     for cancellation in cancellations {
-        match cancellation.await.unwrap() {
+        let cancellation = cancellation.await.unwrap();
+        assert_eq!(cancellation.terminal_event, None);
+        match cancellation.outcome {
             RequestTurnCancellationOutcome::Requested(turn) => {
                 requested += 1;
                 assert_eq!(turn.status, TurnRunStatus::Cancelling);
@@ -325,26 +330,42 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     }
     assert_eq!((requested, cancellation_existing), (1, 1));
     let acknowledged_at = cancellation_expiry + Duration::seconds(1);
-    let FinishTurnCancellationOutcome::Cancelled(cancelled) = store
-        .finish_turn_cancellation(cancellation_turn.id, cancellation_token, acknowledged_at)
+    let usage = Usage {
+        input_tokens: 3,
+        output_tokens: 2,
+        ..Usage::default()
+    };
+    let journaled = store
+        .finish_turn_cancellation_and_append_event(
+            cancellation_turn.id,
+            cancellation_token,
+            acknowledged_at,
+            usage,
+        )
         .await
         .unwrap()
-        .unwrap()
-    else {
+        .unwrap();
+    let FinishTurnCancellationOutcome::Cancelled(cancelled) = journaled.outcome else {
         panic!("exact PostgreSQL cancellation acknowledgement must commit")
     };
     assert_eq!(cancelled.status, TurnRunStatus::Cancelled);
+    let terminal = journaled.terminal_event.unwrap();
+    assert_eq!(terminal.event, AgentEvent::TurnCancelled { usage });
+    let recovered = store
+        .finish_turn_cancellation_and_append_event(
+            cancellation_turn.id,
+            cancellation_token,
+            acknowledged_at + Duration::hours(1),
+            usage,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        store
-            .finish_turn_cancellation(
-                cancellation_turn.id,
-                cancellation_token,
-                acknowledged_at + Duration::hours(1),
-            )
-            .await
-            .unwrap(),
-        Some(FinishTurnCancellationOutcome::Existing(cancelled))
+        recovered.outcome,
+        FinishTurnCancellationOutcome::Existing(cancelled)
     );
+    assert_eq!(recovered.terminal_event, Some(terminal));
 
     let event_chat = sample_chat();
     store.create_chat(&event_chat).await.unwrap();

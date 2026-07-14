@@ -5945,30 +5945,45 @@ async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
     };
     assert_eq!(
         store
-            .request_turn_cancellation(queued.id, queued.updated_at - chrono::Duration::seconds(1))
+            .request_turn_cancellation_and_append_event(
+                queued.id,
+                queued.updated_at - chrono::Duration::seconds(1),
+            )
             .await
             .unwrap(),
         None
     );
     let cancelled_at = queued.updated_at + chrono::Duration::seconds(1);
-    let RequestTurnCancellationOutcome::Cancelled(cancelled) = store
-        .request_turn_cancellation(queued.id, cancelled_at)
+    let journaled = store
+        .request_turn_cancellation_and_append_event(queued.id, cancelled_at)
         .await
         .unwrap()
-        .unwrap()
-    else {
+        .unwrap();
+    let RequestTurnCancellationOutcome::Cancelled(cancelled) = journaled.outcome else {
         panic!("queued cancellation must be immediate")
     };
     assert_eq!(cancelled.status, TurnRunStatus::Cancelled);
     assert_eq!(cancelled.attempt_count, 0);
     assert_eq!(cancelled.finished_at, Some(cancelled_at));
+    let terminal = journaled
+        .terminal_event
+        .expect("queued cancellation must append a terminal event");
     assert_eq!(
-        store
-            .request_turn_cancellation(queued.id, queued.updated_at)
-            .await
-            .unwrap(),
-        Some(RequestTurnCancellationOutcome::Existing(cancelled))
+        terminal.event,
+        AgentEvent::TurnCancelled {
+            usage: Usage::default()
+        }
     );
+    let recovered = store
+        .request_turn_cancellation_and_append_event(queued.id, queued.updated_at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recovered.outcome,
+        RequestTurnCancellationOutcome::Existing(cancelled)
+    );
+    assert_eq!(recovered.terminal_event, Some(terminal));
     let after_cancel = match store
         .accept_turn(TurnId::new(), queued_chat.id, "gpt-5", "after cancel")
         .await
@@ -6032,14 +6047,21 @@ async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
         panic!("retryable failure must commit")
     };
     let retry_cancelled_at = failed_at + chrono::Duration::seconds(1);
-    let RequestTurnCancellationOutcome::Cancelled(cancelled) = store
-        .request_turn_cancellation(retry_turn.id, retry_cancelled_at)
+    let journaled = store
+        .request_turn_cancellation_and_append_event(retry_turn.id, retry_cancelled_at)
         .await
         .unwrap()
-        .unwrap()
-    else {
+        .unwrap();
+    let RequestTurnCancellationOutcome::Cancelled(cancelled) = journaled.outcome else {
         panic!("retry-wait cancellation must be immediate")
     };
+    assert!(matches!(
+        journaled.terminal_event,
+        Some(SequencedEvent {
+            event: AgentEvent::TurnCancelled { .. },
+            ..
+        })
+    ));
     assert_eq!(cancelled.status, TurnRunStatus::Cancelled);
     assert_eq!(cancelled.finished_at, Some(retry_cancelled_at));
     assert_eq!(cancelled.last_error_code, None);
@@ -6058,6 +6080,50 @@ async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
             .unwrap(),
         Some(RecordTurnFailureOutcome::Existing(receipt))
     );
+}
+
+#[tokio::test]
+async fn immediate_cancellation_rolls_back_when_terminal_event_fails() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "cancel before claim")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    entities::event::ActiveModel {
+        chat_id: Set(chat.id.0),
+        seq: Set(1),
+        turn_id: Set(Some(turn.id.0)),
+        lease_token: Set(None),
+        attempt_event_ordinal: Set(None),
+        terminal: Set(true),
+        payload: Set(serde_json::to_value(AgentEvent::TurnCompleted {
+            usage: Usage::default(),
+            stop_reason: StopReason::EndTurn,
+        })
+        .unwrap()),
+        created_at: Set(Utc::now()),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+
+    assert!(store
+        .request_turn_cancellation_and_append_event(
+            turn.id,
+            turn.updated_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .is_err());
+    let still_queued = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    assert_eq!(still_queued.status, TurnRunStatus::Queued);
+    assert_eq!(still_queued.finished_at, None);
+    assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -6082,14 +6148,15 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
         .unwrap()
         .unwrap();
     let requested_at = claimed_at + chrono::Duration::seconds(1);
-    let RequestTurnCancellationOutcome::Requested(cancelling) = store
-        .request_turn_cancellation(turn.id, requested_at)
+    let requested = store
+        .request_turn_cancellation_and_append_event(turn.id, requested_at)
         .await
         .unwrap()
-        .unwrap()
-    else {
+        .unwrap();
+    let RequestTurnCancellationOutcome::Requested(cancelling) = requested.outcome else {
         panic!("running cancellation must await worker acknowledgement")
     };
+    assert_eq!(requested.terminal_event, None);
     assert_eq!(cancelling.status, TurnRunStatus::Cancelling);
     assert_eq!(cancelling.lease_token, Some(token));
     assert_eq!(cancelling.lease_expires_at, Some(expires_at));
@@ -6159,25 +6226,51 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
     );
 
     let acknowledged_at = expires_at + chrono::Duration::seconds(1);
-    let FinishTurnCancellationOutcome::Cancelled(cancelled) = store
-        .finish_turn_cancellation(turn.id, token, acknowledged_at)
+    let usage = Usage {
+        input_tokens: 13,
+        output_tokens: 8,
+        ..Usage::default()
+    };
+    let journaled = store
+        .finish_turn_cancellation_and_append_event(turn.id, token, acknowledged_at, usage)
         .await
         .unwrap()
-        .unwrap()
-    else {
+        .unwrap();
+    let FinishTurnCancellationOutcome::Cancelled(cancelled) = journaled.outcome else {
         panic!("exact worker acknowledgement must cancel")
     };
     assert_eq!(cancelled.status, TurnRunStatus::Cancelled);
     assert_eq!(cancelled.lease_token, None);
     assert_eq!(cancelled.lease_expires_at, None);
     assert_eq!(cancelled.finished_at, Some(acknowledged_at));
+    let terminal = journaled
+        .terminal_event
+        .expect("worker acknowledgement must append a terminal event");
+    assert_eq!(terminal.event, AgentEvent::TurnCancelled { usage });
+    let recovered = store
+        .finish_turn_cancellation_and_append_event(
+            turn.id,
+            token,
+            acknowledged_at + chrono::Duration::hours(1),
+            usage,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        store
-            .finish_turn_cancellation(turn.id, token, acknowledged_at + chrono::Duration::hours(1),)
-            .await
-            .unwrap(),
-        Some(FinishTurnCancellationOutcome::Existing(cancelled))
+        recovered.outcome,
+        FinishTurnCancellationOutcome::Existing(cancelled)
     );
+    assert_eq!(recovered.terminal_event, Some(terminal));
+    assert!(store
+        .finish_turn_cancellation_and_append_event(
+            turn.id,
+            token,
+            acknowledged_at + chrono::Duration::hours(1),
+            Usage::default(),
+        )
+        .await
+        .is_err());
     assert!(matches!(
         store
             .accept_turn(TurnId::new(), chat.id, "gpt-5", "after acknowledgement")

@@ -1764,6 +1764,14 @@ impl Store for DbStore {
         ops::turn::request_turn_cancellation(self, id, now).await
     }
 
+    async fn request_turn_cancellation_and_append_event(
+        &self,
+        id: TurnId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<JournaledTurnOutcome<RequestTurnCancellationOutcome>>> {
+        ops::turn::request_turn_cancellation_and_append_event(self, id, now).await
+    }
+
     async fn finish_turn_cancellation(
         &self,
         id: TurnId,
@@ -1771,6 +1779,17 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
     ) -> Result<Option<FinishTurnCancellationOutcome>> {
         ops::turn::finish_turn_cancellation(self, id, lease_token, now).await
+    }
+
+    async fn finish_turn_cancellation_and_append_event(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        usage: Usage,
+    ) -> Result<Option<JournaledTurnOutcome<FinishTurnCancellationOutcome>>> {
+        ops::turn::finish_turn_cancellation_and_append_event(self, id, lease_token, now, usage)
+            .await
     }
 
     async fn append_message(&self, message: &Message) -> Result<()> {

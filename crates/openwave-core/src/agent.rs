@@ -1416,10 +1416,13 @@ mod tests {
         assert_eq!(cancelled_claim.id, cancelled_turn_id);
         assert!(matches!(
             store
-                .request_turn_cancellation(cancelled_turn_id, Utc::now())
+                .request_turn_cancellation_and_append_event(cancelled_turn_id, Utc::now())
                 .await
                 .unwrap(),
-            Some(crate::RequestTurnCancellationOutcome::Requested(_))
+            Some(crate::JournaledTurnOutcome {
+                outcome: crate::RequestTurnCancellationOutcome::Requested(_),
+                terminal_event: None,
+            })
         ));
 
         let cancel = CancelToken::new();
@@ -1455,13 +1458,48 @@ mod tests {
                 | AgentEvent::TurnCancelled { .. }
                 | AgentEvent::TurnFailed { .. }
         )));
+        let cancellation = store
+            .finish_turn_cancellation_and_append_event(
+                cancelled_turn_id,
+                cancellation_token,
+                Utc::now(),
+                Usage::default(),
+            )
+            .await
+            .unwrap()
+            .expect("the exact worker acknowledgement must commit");
         assert!(matches!(
-            store
-                .finish_turn_cancellation(cancelled_turn_id, cancellation_token, Utc::now())
-                .await
-                .unwrap(),
-            Some(crate::FinishTurnCancellationOutcome::Cancelled(_))
+            cancellation.outcome,
+            crate::FinishTurnCancellationOutcome::Cancelled(_)
         ));
+        let terminal = cancellation
+            .terminal_event
+            .expect("terminal cancellation must return its committed event");
+        assert_eq!(
+            terminal.event,
+            AgentEvent::TurnCancelled {
+                usage: Usage::default()
+            }
+        );
+        assert_eq!(
+            store.list_events(chat.id, 0).await.unwrap().last(),
+            Some(&terminal)
+        );
+        let recovered = store
+            .finish_turn_cancellation_and_append_event(
+                cancelled_turn_id,
+                cancellation_token,
+                cancellation_claimed_at + chrono::Duration::hours(1),
+                Usage::default(),
+            )
+            .await
+            .unwrap()
+            .expect("an exact cancellation retry must remain recoverable");
+        assert!(matches!(
+            recovered.outcome,
+            crate::FinishTurnCancellationOutcome::Existing(_)
+        ));
+        assert_eq!(recovered.terminal_event, Some(terminal));
     }
 
     #[tokio::test]
