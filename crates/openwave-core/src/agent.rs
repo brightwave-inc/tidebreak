@@ -154,6 +154,7 @@ struct TurnExecution<'a> {
     user_input: &'a str,
     output_message_id: MessageId,
     persist_input: bool,
+    publish_started: bool,
     publish_terminal: bool,
 }
 
@@ -242,6 +243,7 @@ impl Agent {
                 user_input,
                 output_message_id,
                 persist_input: true,
+                publish_started: true,
                 publish_terminal: true,
             },
             events,
@@ -280,6 +282,7 @@ impl Agent {
                 user_input: "",
                 output_message_id,
                 persist_input: false,
+                publish_started: false,
                 publish_terminal: false,
             },
             events,
@@ -293,9 +296,11 @@ impl Agent {
         execution: TurnExecution<'_>,
         events: &UnboundedSender<AgentEvent>,
     ) -> Result<AgentTurnOutcome> {
-        let _ = events.unbounded_send(AgentEvent::TurnStarted {
-            turn_id: execution.turn_id,
-        });
+        if execution.publish_started {
+            let _ = events.unbounded_send(AgentEvent::TurnStarted {
+                turn_id: execution.turn_id,
+            });
+        }
         match self.drive(chat, execution, events).await {
             Ok(outcome) => Ok(outcome),
             Err(err) => {
@@ -321,6 +326,7 @@ impl Agent {
             output_message_id,
             persist_input,
             publish_terminal,
+            ..
         } = execution;
         if persist_input {
             self.persist(chat.id, turn_id, Role::User, user_input)
@@ -1203,16 +1209,14 @@ mod tests {
         assert_eq!(output.content, "done");
         assert_eq!((usage.input_tokens, usage.output_tokens), (8, 6));
         assert_eq!(stop_reason, StopReason::EndTurn);
-        assert!(matches!(
-            events.first(),
-            Some(AgentEvent::TurnStarted { turn_id: started }) if *started == turn_id
-        ));
         assert!(
             events.iter().all(|event| !matches!(
                 event,
-                AgentEvent::TurnCompleted { .. } | AgentEvent::TurnCancelled { .. }
+                AgentEvent::TurnStarted { .. }
+                    | AgentEvent::TurnCompleted { .. }
+                    | AgentEvent::TurnCancelled { .. }
             )),
-            "the worker must publish terminal events only after its durable transition"
+            "the worker owns lifecycle events around the durable execution boundary"
         );
 
         let stored = store.list_messages(chat.id).await.unwrap();
@@ -1339,7 +1343,8 @@ mod tests {
         let failure_events: Vec<AgentEvent> = failure_rx.collect().await;
         assert!(failure_events.iter().all(|event| !matches!(
             event,
-            AgentEvent::TurnCompleted { .. }
+            AgentEvent::TurnStarted { .. }
+                | AgentEvent::TurnCompleted { .. }
                 | AgentEvent::TurnCancelled { .. }
                 | AgentEvent::TurnFailed { .. }
         )));
@@ -1457,7 +1462,8 @@ mod tests {
         let cancellation_events: Vec<AgentEvent> = cancellation_rx.collect().await;
         assert!(cancellation_events.iter().all(|event| !matches!(
             event,
-            AgentEvent::TurnCompleted { .. }
+            AgentEvent::TurnStarted { .. }
+                | AgentEvent::TurnCompleted { .. }
                 | AgentEvent::TurnCancelled { .. }
                 | AgentEvent::TurnFailed { .. }
         )));
@@ -1598,6 +1604,10 @@ mod tests {
         let events: Vec<AgentEvent> = rx.collect().await;
 
         assert!(result.is_err());
+        assert!(matches!(
+            events.first(),
+            Some(AgentEvent::TurnStarted { .. })
+        ));
         assert!(matches!(events.last(), Some(AgentEvent::TurnFailed { .. })));
         // The tool never ran: no completion event and nothing tool-related persisted.
         assert!(!events
