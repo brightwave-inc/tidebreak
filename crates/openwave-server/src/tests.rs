@@ -307,6 +307,7 @@ struct PauseTerminalStore {
     fail_after_completion_commit: std::sync::atomic::AtomicBool,
     fail_after_apply_steer_commit: std::sync::atomic::AtomicBool,
     cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool,
+    pause_before_steer_read: std::sync::atomic::AtomicBool,
     advance_before_steer_read: std::sync::atomic::AtomicBool,
     fail_terminal_recovery: std::sync::atomic::AtomicBool,
     terminal_recovery_calls: AtomicUsize,
@@ -331,6 +332,7 @@ impl PauseTerminalStore {
             fail_after_completion_commit: std::sync::atomic::AtomicBool::new(false),
             fail_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
             cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
+            pause_before_steer_read: std::sync::atomic::AtomicBool::new(false),
             advance_before_steer_read: std::sync::atomic::AtomicBool::new(false),
             fail_terminal_recovery: std::sync::atomic::AtomicBool::new(false),
             terminal_recovery_calls: AtomicUsize::new(0),
@@ -372,6 +374,10 @@ impl PauseTerminalStore {
     fn cancel_after_next_apply_steer_commit(&self) {
         self.cancel_after_apply_steer_commit
             .store(true, Ordering::SeqCst);
+    }
+
+    fn pause_before_next_steer_read(&self) {
+        self.pause_before_steer_read.store(true, Ordering::SeqCst);
     }
 
     fn advance_before_next_steer_read(&self) {
@@ -669,6 +675,10 @@ impl Store for PauseTerminalStore {
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<Vec<openwave_core::TurnSteer>>> {
+        if self.pause_before_steer_read.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
         if self.advance_before_steer_read.swap(false, Ordering::SeqCst) {
             let turn = self
                 .inner
@@ -1988,15 +1998,17 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
         .await
         .unwrap(),
     );
+    let steer_read_entered = Arc::new(Notify::new());
+    let release_steer_read = Arc::new(Notify::new());
     let injected = Arc::new(PauseTerminalStore::new(
         inner,
-        Arc::new(Notify::new()),
-        Arc::new(Notify::new()),
+        steer_read_entered.clone(),
+        release_steer_read.clone(),
     ));
     injected.do_not_pause_terminal();
     let store: Arc<dyn Store> = injected.clone();
     let calls = Arc::new(AtomicUsize::new(0));
-    let entered = Arc::new(Notify::new());
+    let provider_entered = Arc::new(Notify::new());
     let (retrieval, _search) = build_retrieval(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
@@ -2006,7 +2018,7 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
         store.clone(),
         Arc::new(FixedResolver(Arc::new(StallThenFinish {
             calls: calls.clone(),
-            entered: entered.clone(),
+            entered: provider_entered.clone(),
         }))),
         Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
@@ -2026,10 +2038,14 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
         send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
         StatusCode::ACCEPTED
     );
-    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+    tokio::time::timeout(Duration::from_secs(2), provider_entered.notified())
         .await
         .expect("provider entered before the ambiguous application race");
 
+    injected.pause_before_next_steer_read();
+    tokio::time::timeout(Duration::from_secs(2), steer_read_entered.notified())
+        .await
+        .expect("steer poll paused before reading the durable queue");
     injected.advance_before_next_steer_read();
     injected.fail_after_next_apply_steer_commit();
     let steer_id = TurnSteerId::new();
@@ -2046,6 +2062,7 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
         .await,
         StatusCode::ACCEPTED
     );
+    release_steer_read.notify_one();
 
     let events = wait_for_turn(&store, chat.id).await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
