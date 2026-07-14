@@ -120,6 +120,15 @@ pub enum ApplyTurnSteerOutcome {
     Existing(TurnSteer),
 }
 
+/// One applied steering result and the replay event committed with it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JournaledTurnSteerOutcome {
+    /// The steer application result.
+    pub outcome: ApplyTurnSteerOutcome,
+    /// The exact nonterminal journal row committed by the application.
+    pub event: SequencedEvent,
+}
+
 /// Result of atomically completing one exact claimed turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompleteTurnRunOutcome {
@@ -741,18 +750,21 @@ pub trait Store: Send + Sync {
     /// Persist one pending steer as a user message under the exact live lease.
     ///
     /// An optional preceding assistant candidate, the steer message, the
-    /// application receipt, and the revision increment commit atomically in
-    /// transcript order. Exact retries by the same lease return
-    /// [`ApplyTurnSteerOutcome::Existing`] even after the turn advances. A stale
-    /// lease, rejected steer, or different winning lease returns `None`.
+    /// application receipt, the revision increment, and its [`AgentEvent::UserSteered`]
+    /// journal row commit atomically in transcript order. The event ordinal is
+    /// the worker's exact attempt identity. Exact retries by the same lease and
+    /// ordinal return [`ApplyTurnSteerOutcome::Existing`] with the same journal
+    /// row even after the turn advances. A stale lease, rejected steer, or
+    /// different winning lease returns `None`.
     async fn apply_turn_steer(
         &self,
         _turn_id: TurnId,
         _lease_token: uuid::Uuid,
         _steer_id: TurnSteerId,
+        _attempt_event_ordinal: i32,
         _preceding_assistant: Option<&Message>,
         _now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Option<ApplyTurnSteerOutcome>> {
+    ) -> Result<Option<JournaledTurnSteerOutcome>> {
         turn_storage_unavailable()
     }
 

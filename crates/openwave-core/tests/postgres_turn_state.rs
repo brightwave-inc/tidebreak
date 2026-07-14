@@ -617,13 +617,20 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             steer_turn.id,
             steer_lease,
             steer_id,
+            1,
             Some(&preceding),
             Utc::now(),
         )
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(applied, ApplyTurnSteerOutcome::Applied(_)));
+    assert!(matches!(applied.outcome, ApplyTurnSteerOutcome::Applied(_)));
+    assert_eq!(
+        applied.event.event,
+        AgentEvent::UserSteered {
+            content: "postgres steer".into(),
+        }
+    );
     assert_eq!(
         store
             .list_messages(steer_chat.id)
@@ -674,18 +681,19 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             .unwrap(),
         Some(CompleteTurnRunOutcome::SteerPending(_))
     ));
-    let second_steer = match store
+    let second_steer = store
         .apply_turn_steer(
             steer_turn.id,
             steer_lease,
             second_steer_id,
+            2,
             None,
             Utc::now(),
         )
         .await
         .unwrap()
-        .unwrap()
-    {
+        .unwrap();
+    let second_steer = match second_steer.outcome {
         ApplyTurnSteerOutcome::Applied(steer) => steer,
         outcome => panic!("unexpected postgres second steer: {outcome:?}"),
     };
@@ -708,19 +716,23 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         .await
         .unwrap()
         .unwrap();
+    let recovered = store
+        .apply_turn_steer(
+            steer_turn.id,
+            steer_lease,
+            steer_id,
+            1,
+            Some(&preceding),
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert!(matches!(
-        store
-            .apply_turn_steer(
-                steer_turn.id,
-                steer_lease,
-                steer_id,
-                Some(&preceding),
-                Utc::now(),
-            )
-            .await
-            .unwrap(),
-        Some(ApplyTurnSteerOutcome::Existing(_))
+        recovered.outcome,
+        ApplyTurnSteerOutcome::Existing(_)
     ));
+    assert_eq!(recovered.event, applied.event);
     assert!(matches!(
         store
             .accept_turn_steer(

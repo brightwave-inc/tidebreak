@@ -35,7 +35,7 @@ pub mod tool;
 #[cfg(feature = "tools")]
 pub mod tools;
 
-pub use agent::{Agent, AgentConfig, AgentTurnOutcome, ToolRegistry};
+pub use agent::{Agent, AgentConfig, AgentTurnOutcome, ClaimedAgentEvent, ToolRegistry};
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalRequest, AutoApproveGate, RefuseGate,
 };
@@ -69,8 +69,8 @@ pub use storage::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, ApplyTurnSteerOutcome, BlobStore,
     ClaimScanTerminalEvent, ClaimTurnRunOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
     EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
-    JournaledTurnOutcome, RecordTurnFailureOutcome, RequestTurnCancellationOutcome, SecretProvider,
-    Store,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, RecordTurnFailureOutcome,
+    RequestTurnCancellationOutcome, SecretProvider, Store,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 #[cfg(feature = "tools")]

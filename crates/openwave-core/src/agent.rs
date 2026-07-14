@@ -16,27 +16,29 @@
 //!   retries with progressive reduction on provider prompt-too-long errors.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
-use std::task::Poll;
+use std::time::Duration;
 
 use chrono::Utc;
-use futures::channel::mpsc::UnboundedSender;
+use futures::channel::{mpsc::UnboundedSender, oneshot};
 use futures::future::{self, Either};
 use futures::StreamExt;
+use futures_timer::Delay;
 use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalGate, ApprovalRequest, RefuseGate};
 use crate::cancel::CancelToken;
 use crate::context;
 use crate::error::{AgentError, Result};
-use crate::event::AgentEvent;
+use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, MessageId, TurnId};
 use crate::model::{Chat, Message, Role, ToolCallRecord, TurnRunStatus};
 use crate::provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, StopReason, Usage,
 };
 use crate::steer::SteerInbox;
-use crate::storage::{ApplyTurnSteerOutcome, Store};
+use crate::storage::{ApplyTurnSteerOutcome, JournaledTurnSteerOutcome, Store};
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 
 /// A name-keyed registry of the tools available to the agent.
@@ -155,6 +157,87 @@ pub enum AgentTurnOutcome {
     },
 }
 
+/// One emission from a durably claimed agent generation.
+///
+/// Ordinary events still need the worker to append them. A committed event was
+/// journaled atomically with another state transition and only needs live
+/// publication. Flush barriers let the agent wait until every preceding
+/// ordinary event is durable before it performs such a transition.
+pub enum ClaimedAgentEvent {
+    /// Append this event under its exact attempt ordinal.
+    Pending { ordinal: i32, event: AgentEvent },
+    /// Publish an event whose journal transaction already committed.
+    Committed { ordinal: i32, event: SequencedEvent },
+    /// Acknowledge after all preceding channel items have been handled.
+    Flush(oneshot::Sender<()>),
+}
+
+enum EventSink<'a> {
+    Legacy(&'a UnboundedSender<AgentEvent>),
+    Claimed {
+        sender: &'a UnboundedSender<ClaimedAgentEvent>,
+        next_ordinal: AtomicI32,
+    },
+}
+
+impl EventSink<'_> {
+    fn send(&self, event: AgentEvent) {
+        match self {
+            Self::Legacy(sender) => {
+                let _ = sender.unbounded_send(event);
+            }
+            Self::Claimed {
+                sender,
+                next_ordinal,
+            } => {
+                if let Ok(ordinal) = reserve_event_ordinal(next_ordinal) {
+                    let _ = sender.unbounded_send(ClaimedAgentEvent::Pending { ordinal, event });
+                }
+            }
+        }
+    }
+
+    async fn flush(&self) -> Result<()> {
+        let Self::Claimed { sender, .. } = self else {
+            return Ok(());
+        };
+        let (acknowledge, acknowledged) = oneshot::channel();
+        sender
+            .unbounded_send(ClaimedAgentEvent::Flush(acknowledge))
+            .map_err(|_| AgentError::Store("claimed turn event channel closed".into()))?;
+        acknowledged
+            .await
+            .map_err(|_| AgentError::Store("claimed turn event flush was abandoned".into()))
+    }
+
+    fn reserve_ordinal(&self) -> Result<i32> {
+        match self {
+            Self::Claimed { next_ordinal, .. } => reserve_event_ordinal(next_ordinal),
+            Self::Legacy(_) => Err(AgentError::Store(
+                "legacy turn cannot reserve a durable event ordinal".into(),
+            )),
+        }
+    }
+
+    fn send_committed(&self, ordinal: i32, event: SequencedEvent) -> Result<()> {
+        let Self::Claimed { sender, .. } = self else {
+            return Err(AgentError::Store(
+                "legacy turn cannot publish a committed durable event".into(),
+            ));
+        };
+        sender
+            .unbounded_send(ClaimedAgentEvent::Committed { ordinal, event })
+            .map_err(|_| AgentError::Store("claimed turn event channel closed".into()))
+    }
+}
+
+fn reserve_event_ordinal(next: &AtomicI32) -> Result<i32> {
+    next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |ordinal| {
+        ordinal.checked_add(1).filter(|next| *next < i32::MAX)
+    })
+    .map_err(|_| AgentError::Store("turn event ordinal exhausted".into()))
+}
+
 #[derive(Clone, Copy)]
 struct TurnExecution<'a> {
     turn_id: TurnId,
@@ -252,6 +335,7 @@ impl Agent {
     ) -> Result<()> {
         let turn_id = TurnId::new();
         let output_message_id = MessageId::new();
+        let events = EventSink::Legacy(events);
         self.run_turn_inner(
             chat,
             TurnExecution {
@@ -262,7 +346,7 @@ impl Agent {
                 publish_started: true,
                 publish_terminal: true,
             },
-            events,
+            &events,
         )
         .await
         .map(|_| ())
@@ -284,13 +368,21 @@ impl Agent {
         chat: &Chat,
         turn_id: TurnId,
         output_message_id: MessageId,
-        events: &UnboundedSender<AgentEvent>,
+        first_event_ordinal: i32,
+        events: &UnboundedSender<ClaimedAgentEvent>,
     ) -> Result<AgentTurnOutcome> {
-        if turn_id.0.is_nil() || output_message_id.0.is_nil() {
+        if turn_id.0.is_nil()
+            || output_message_id.0.is_nil()
+            || !(1..i32::MAX).contains(&first_event_ordinal)
+        {
             return Err(AgentError::Store(
-                "claimed turn and output message ids must not be nil".into(),
+                "claimed turn identities and first event ordinal must be valid".into(),
             ));
         }
+        let events = EventSink::Claimed {
+            sender: events,
+            next_ordinal: AtomicI32::new(first_event_ordinal),
+        };
         self.run_turn_inner(
             chat,
             TurnExecution {
@@ -301,7 +393,7 @@ impl Agent {
                 publish_started: false,
                 publish_terminal: false,
             },
-            events,
+            &events,
         )
         .await
     }
@@ -310,10 +402,10 @@ impl Agent {
         &self,
         chat: &Chat,
         execution: TurnExecution<'_>,
-        events: &UnboundedSender<AgentEvent>,
+        events: &EventSink<'_>,
     ) -> Result<AgentTurnOutcome> {
         if execution.publish_started {
-            let _ = events.unbounded_send(AgentEvent::TurnStarted {
+            events.send(AgentEvent::TurnStarted {
                 turn_id: execution.turn_id,
             });
         }
@@ -321,7 +413,7 @@ impl Agent {
             Ok(outcome) => Ok(outcome),
             Err(err) => {
                 if execution.publish_terminal {
-                    let _ = events.unbounded_send(AgentEvent::TurnFailed {
+                    events.send(AgentEvent::TurnFailed {
                         error: (&err).into(),
                     });
                 }
@@ -334,7 +426,7 @@ impl Agent {
         &self,
         chat: &Chat,
         execution: TurnExecution<'_>,
-        events: &UnboundedSender<AgentEvent>,
+        events: &EventSink<'_>,
     ) -> Result<AgentTurnOutcome> {
         let TurnExecution {
             turn_id,
@@ -387,7 +479,7 @@ impl Agent {
                         // a UI can surface it. Emitted only for the request that
                         // actually went out (after any retry climb).
                         if reduced {
-                            let _ = events.unbounded_send(AgentEvent::ContextTruncated {
+                            events.send(AgentEvent::ContextTruncated {
                                 original_tokens: context::estimate_transcript_tokens(&transcript)
                                     as u32,
                                 fitted_tokens: fitted_tokens as u32,
@@ -431,17 +523,17 @@ impl Agent {
                 };
                 match event {
                     ProviderEvent::TextDelta { text: delta } => {
-                        let _ = events.unbounded_send(AgentEvent::TextDelta {
+                        events.send(AgentEvent::TextDelta {
                             text: delta.clone(),
                         });
                         text.push_str(&delta);
                     }
                     ProviderEvent::ReasoningDelta { text: delta } => {
-                        let _ = events.unbounded_send(AgentEvent::ReasoningDelta { text: delta });
+                        events.send(AgentEvent::ReasoningDelta { text: delta });
                     }
                     ProviderEvent::ToolCallStarted { index, id, name } => {
                         let call_id = CallId::new();
-                        let _ = events.unbounded_send(AgentEvent::ToolCallStarted {
+                        events.send(AgentEvent::ToolCallStarted {
                             call_id,
                             name: name.clone(),
                         });
@@ -455,7 +547,7 @@ impl Agent {
                     }
                     ProviderEvent::ToolCallArgsDelta { index, fragment } => {
                         if let Some(&i) = by_index.get(&index) {
-                            let _ = events.unbounded_send(AgentEvent::ToolCallArgsDelta {
+                            events.send(AgentEvent::ToolCallArgsDelta {
                                 call_id: calls[i].call_id,
                                 fragment: fragment.clone(),
                             });
@@ -476,7 +568,7 @@ impl Agent {
                 // Discard this step's partial output — nothing from it was
                 // persisted. The marker lets replay/live clients clear deltas
                 // that were already streamed for this abandoned provider step.
-                let _ = events.unbounded_send(AgentEvent::StreamInterrupted);
+                events.send(AgentEvent::StreamInterrupted);
                 self.apply_steers(chat, turn_id, &mut transcript, None, events)
                     .await?;
                 continue;
@@ -582,7 +674,7 @@ impl Agent {
                     }
                     if self.steer.try_complete(|| {
                         if publish_terminal {
-                            let _ = events.unbounded_send(AgentEvent::TurnCompleted {
+                            events.send(AgentEvent::TurnCompleted {
                                 usage: total_usage,
                                 stop_reason,
                             });
@@ -612,7 +704,7 @@ impl Agent {
             let mut results: Vec<ContentBlock> = Vec::new();
             for call in &calls {
                 let output = self.run_tool(chat, turn_id, call, events).await;
-                let _ = events.unbounded_send(AgentEvent::ToolCallCompleted {
+                events.send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
                     output: output.clone(),
                 });
@@ -663,13 +755,13 @@ impl Agent {
     /// success — the client asked for the stop, so it isn't a `TurnFailed`.
     fn finish_cancelled(
         &self,
-        events: &UnboundedSender<AgentEvent>,
+        events: &EventSink<'_>,
         usage: Usage,
         model_steps: usize,
         publish_terminal_event: bool,
     ) -> AgentTurnOutcome {
         if publish_terminal_event {
-            let _ = events.unbounded_send(AgentEvent::TurnCancelled { usage });
+            events.send(AgentEvent::TurnCancelled { usage });
         }
         AgentTurnOutcome::Cancelled { usage, model_steps }
     }
@@ -682,7 +774,7 @@ impl Agent {
         turn_id: TurnId,
         transcript: &mut Vec<ChatMessage>,
         preceding_assistant: Option<&str>,
-        events: &UnboundedSender<AgentEvent>,
+        events: &EventSink<'_>,
     ) -> Result<bool> {
         let msgs = self.steer.drain();
         let durable = match self.durable_steer_lease {
@@ -712,7 +804,7 @@ impl Agent {
                     text: msg.content.clone(),
                 }],
             });
-            let _ = events.unbounded_send(AgentEvent::UserSteered {
+            events.send(AgentEvent::UserSteered {
                 content: msg.content,
             });
         }
@@ -726,31 +818,35 @@ impl Agent {
                 content: text.to_owned(),
                 created_at: Utc::now(),
             });
+        if !durable.is_empty() {
+            events.flush().await?;
+        }
         let lease_token = self.durable_steer_lease;
         for (index, steer) in durable.into_iter().enumerate() {
             let preceding_assistant = if index == 0 { preceding.as_ref() } else { None };
-            let applied = self
+            let event_ordinal = events.reserve_ordinal()?;
+            let journaled = self
                 .apply_durable_steer_retry(
                     turn_id,
                     lease_token.expect("durable steering has a lease"),
                     steer.id,
+                    event_ordinal,
                     preceding_assistant,
                 )
                 .await?;
-            let steer = match applied {
+            let steer = match journaled.outcome {
                 ApplyTurnSteerOutcome::Applied(steer) | ApplyTurnSteerOutcome::Existing(steer) => {
                     steer
                 }
             };
+            let event = journaled.event;
             transcript.push(ChatMessage {
                 role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: steer.content.clone(),
                 }],
             });
-            let _ = events.unbounded_send(AgentEvent::UserSteered {
-                content: steer.content,
-            });
+            events.send_committed(event_ordinal, event)?;
         }
         Ok(true)
     }
@@ -822,8 +918,10 @@ impl Agent {
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         steer_id: crate::id::TurnSteerId,
+        attempt_event_ordinal: i32,
         preceding_assistant: Option<&Message>,
-    ) -> Result<ApplyTurnSteerOutcome> {
+    ) -> Result<JournaledTurnSteerOutcome> {
+        let mut exact_retry_attempted = false;
         loop {
             match self
                 .store
@@ -831,46 +929,46 @@ impl Agent {
                     turn_id,
                     lease_token,
                     steer_id,
+                    attempt_event_ordinal,
                     preceding_assistant,
                     Utc::now(),
                 )
                 .await
             {
                 Ok(Some(applied)) => return Ok(applied),
-                Ok(None) | Err(_) => {
-                    // Retrying the same identity recovers `Existing` when the
-                    // commit won but its response was lost.
+                Ok(None) => {
                     self.durable_turn_revision_retry(turn_id, lease_token)
                         .await?;
                     self.wait_for_durable_store_retry(turn_id).await?;
+                }
+                Err(_) => {
+                    // Retry the exact identity before classifying current turn
+                    // state. A committed application remains recoverable after
+                    // cancellation or lease expiry through its immutable
+                    // receipt and journal identity.
+                    if exact_retry_attempted {
+                        self.wait_for_durable_store_retry(turn_id).await?;
+                    } else {
+                        exact_retry_attempted = true;
+                        Delay::new(Duration::from_millis(10)).await;
+                    }
                 }
             }
         }
     }
 
     async fn wait_for_durable_store_retry(&self, turn_id: TurnId) -> Result<()> {
-        if self.cancel.is_cancelled() {
-            return Err(AgentError::Store(format!(
+        match future::select(
+            self.cancel.cancelled(),
+            Delay::new(Duration::from_millis(10)),
+        )
+        .await
+        {
+            Either::Left(((), _)) => Err(AgentError::Store(format!(
                 "turn {turn_id} was cancelled while retrying durable steering"
-            )));
+            ))),
+            Either::Right(((), _)) => Ok(()),
         }
-        let mut yielded = false;
-        future::poll_fn(|cx| {
-            if yielded {
-                Poll::Ready(())
-            } else {
-                yielded = true;
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        })
-        .await;
-        if self.cancel.is_cancelled() {
-            return Err(AgentError::Store(format!(
-                "turn {turn_id} was cancelled while retrying durable steering"
-            )));
-        }
-        Ok(())
     }
 
     /// Resolve approval and execute one tool call, returning its output. Tool and
@@ -880,7 +978,7 @@ impl Agent {
         chat: &Chat,
         turn_id: TurnId,
         call: &PendingCall,
-        events: &UnboundedSender<AgentEvent>,
+        events: &EventSink<'_>,
     ) -> ToolOutput {
         let Some(tool) = self.tools.get(&call.name) else {
             return ToolOutput::error(format!("unknown tool: {}", call.name));
@@ -898,7 +996,7 @@ impl Agent {
                 class: ApprovalClass::Sensitive,
                 summary: summary.clone(),
             });
-            let _ = events.unbounded_send(AgentEvent::ApprovalRequired {
+            events.send(AgentEvent::ApprovalRequired {
                 call_id: call.call_id,
                 class: ApprovalClass::Sensitive,
                 summary,
@@ -915,7 +1013,7 @@ impl Agent {
             let decision = match future::select(pending, self.cancel.cancelled()).await {
                 Either::Left((decision, _)) if !self.cancel.is_cancelled() => decision,
                 Either::Left(_) | Either::Right(((), _)) => {
-                    let _ = events.unbounded_send(AgentEvent::ApprovalDecided {
+                    events.send(AgentEvent::ApprovalDecided {
                         call_id: call.call_id,
                         approved: false,
                     });
@@ -923,7 +1021,7 @@ impl Agent {
                 }
             };
             let approved = matches!(decision, ApprovalDecision::Approve);
-            let _ = events.unbounded_send(AgentEvent::ApprovalDecided {
+            events.send(AgentEvent::ApprovalDecided {
                 call_id: call.call_id,
                 approved,
             });
@@ -1183,6 +1281,17 @@ mod tests {
     use crate::provider::ProviderId;
     use crate::tools::ReadFile;
 
+    fn emitted_events(emissions: Vec<ClaimedAgentEvent>) -> Vec<AgentEvent> {
+        emissions
+            .into_iter()
+            .map(|emission| match emission {
+                ClaimedAgentEvent::Pending { event, .. } => event,
+                ClaimedAgentEvent::Committed { event, .. } => event.event,
+                ClaimedAgentEvent::Flush(_) => panic!("unhandled claimed-event flush"),
+            })
+            .collect()
+    }
+
     /// A scripted provider: step 0 calls `read_file`, step 1 gives a final answer.
     struct FakeProvider {
         calls: AtomicUsize,
@@ -1395,11 +1504,11 @@ mod tests {
         let output_message_id = MessageId::new();
         let (tx, rx) = unbounded();
         let outcome = agent
-            .run_claimed_turn(&chat, turn_id, output_message_id, &tx)
+            .run_claimed_turn(&chat, turn_id, output_message_id, 1, &tx)
             .await
             .unwrap();
         drop(tx);
-        let events: Vec<AgentEvent> = rx.collect().await;
+        let events = emitted_events(rx.collect().await);
 
         let AgentTurnOutcome::Completed {
             output,
@@ -1546,11 +1655,11 @@ mod tests {
         );
         let (failure_tx, failure_rx) = unbounded();
         let error = failing_agent
-            .run_claimed_turn(&chat, failed_turn_id, MessageId::new(), &failure_tx)
+            .run_claimed_turn(&chat, failed_turn_id, MessageId::new(), 1, &failure_tx)
             .await
             .expect_err("the zero-step guard fails execution");
         drop(failure_tx);
-        let failure_events: Vec<AgentEvent> = failure_rx.collect().await;
+        let failure_events = emitted_events(failure_rx.collect().await);
         assert!(failure_events.iter().all(|event| !matches!(
             event,
             AgentEvent::TurnStarted { .. }
@@ -1659,7 +1768,13 @@ mod tests {
         .with_cancel(cancel);
         let (cancellation_tx, cancellation_rx) = unbounded();
         let outcome = cancelled_agent
-            .run_claimed_turn(&chat, cancelled_turn_id, MessageId::new(), &cancellation_tx)
+            .run_claimed_turn(
+                &chat,
+                cancelled_turn_id,
+                MessageId::new(),
+                1,
+                &cancellation_tx,
+            )
             .await
             .unwrap();
         drop(cancellation_tx);
@@ -1670,7 +1785,7 @@ mod tests {
                 model_steps: 0,
             }
         );
-        let cancellation_events: Vec<AgentEvent> = cancellation_rx.collect().await;
+        let cancellation_events = emitted_events(cancellation_rx.collect().await);
         assert!(cancellation_events.iter().all(|event| !matches!(
             event,
             AgentEvent::TurnStarted { .. }

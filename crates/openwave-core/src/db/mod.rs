@@ -34,9 +34,9 @@ use crate::model::{
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, ApplyTurnSteerOutcome, ClaimTurnRunOutcome,
-    CompleteTurnRunOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
-    EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome, JournaledTurnOutcome,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, ClaimTurnRunOutcome, CompleteTurnRunOutcome,
+    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
+    FinishTurnCancellationOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
     RecordTurnFailureOutcome, RequestTurnCancellationOutcome, Store,
 };
 
@@ -1709,14 +1709,16 @@ impl Store for DbStore {
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         steer_id: TurnSteerId,
+        attempt_event_ordinal: i32,
         preceding_assistant: Option<&Message>,
         now: chrono::DateTime<Utc>,
-    ) -> Result<Option<ApplyTurnSteerOutcome>> {
+    ) -> Result<Option<JournaledTurnSteerOutcome>> {
         ops::turn::apply_turn_steer(
             self,
             turn_id,
             lease_token,
             steer_id,
+            attempt_event_ordinal,
             preceding_assistant,
             now,
         )
