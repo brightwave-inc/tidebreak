@@ -22,6 +22,7 @@ use crate::state::TurnGuard;
 pub(crate) struct TurnWorkerConfig {
     pub(crate) lease: Duration,
     pub(crate) heartbeat: Duration,
+    pub(crate) steer_poll: Duration,
     pub(crate) idle_min: Duration,
     pub(crate) idle_cap: Duration,
     pub(crate) failure_delay: Duration,
@@ -33,6 +34,7 @@ impl Default for TurnWorkerConfig {
         Self {
             lease: Duration::from_secs(60),
             heartbeat: Duration::from_secs(15),
+            steer_poll: Duration::from_millis(250),
             idle_min: Duration::from_millis(250),
             idle_cap: Duration::from_secs(5),
             failure_delay: Duration::from_secs(1),
@@ -81,6 +83,12 @@ enum HeartbeatOutcome {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LeaseState {
+    Running,
+    Cancelling,
+    Lost,
+}
+
+enum LiveTurnState {
     Running,
     Cancelling,
     Lost,
@@ -169,6 +177,7 @@ impl TurnWorker {
     ) -> Self {
         assert!(!config.lease.is_zero());
         assert!(!config.heartbeat.is_zero());
+        assert!(!config.steer_poll.is_zero());
         assert!(config.heartbeat < config.lease);
         assert!(config.max_concurrency > 0);
         Self {
@@ -313,13 +322,6 @@ impl TurnWorker {
             }
             LeaseState::Lost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
         }
-        let mut heartbeat = AbortOnDrop(tokio::spawn(self.clone().heartbeat_lease(
-            turn.clone(),
-            lease_token,
-            cancel.clone(),
-        )));
-        let mut heartbeat_open = true;
-
         let started = AgentEvent::TurnStarted { turn_id: turn.id };
         match self.append_event(&turn, lease_token, 1, &started).await? {
             EventAppend::Committed => {}
@@ -332,185 +334,303 @@ impl TurnWorker {
             EventAppend::LeaseLost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
         }
 
-        let mut config = self.agent_config.clone();
-        config.model = turn.model.clone();
-        let provider = self.resolver.resolve().await;
-        let agent = Agent::new(provider, self.tools.clone(), self.store.clone(), config)
-            .with_approvals(self.approvals.clone())
-            .with_cancel(cancel.clone())
-            .with_steer(active.steer_inbox());
-        let output_message_id = MessageId::new();
-        let (events_tx, mut events_rx) = unbounded();
-        let mut drive = AbortOnDrop(tokio::spawn(async move {
-            agent
-                .run_claimed_turn(&chat, turn.id, output_message_id, &events_tx)
-                .await
-        }));
-        let mut drive_result = None;
-        let mut channel_open = true;
         let mut ordinal = 2_i32;
+        let mut total_usage = openwave_core::Usage::default();
+        let mut remaining_steps = self.agent_config.max_steps;
+        let output_message_id = MessageId::new();
+        loop {
+            let mut heartbeat = AbortOnDrop(tokio::spawn(self.clone().heartbeat_lease(
+                turn.clone(),
+                lease_token,
+                cancel.clone(),
+            )));
+            let mut heartbeat_open = true;
+            let mut config = self.agent_config.clone();
+            config.model = turn.model.clone();
+            config.max_steps = remaining_steps;
+            let provider = self.resolver.resolve().await;
+            let steer = active.steer_inbox();
+            let agent = Agent::new(provider, self.tools.clone(), self.store.clone(), config)
+                .with_approvals(self.approvals.clone())
+                .with_cancel(cancel.clone())
+                .with_steer(steer.clone())
+                .with_durable_steer(lease_token);
+            let chat = chat.clone();
+            let (events_tx, mut events_rx) = unbounded();
+            let mut drive = AbortOnDrop(tokio::spawn(async move {
+                agent
+                    .run_claimed_turn(&chat, turn.id, output_message_id, &events_tx)
+                    .await
+            }));
+            let mut drive_result = None;
+            let mut channel_open = true;
+            let mut steer_poll = tokio::time::interval(self.config.steer_poll);
+            steer_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        while drive_result.is_none() || channel_open {
-            tokio::select! {
-                result = &mut drive.0, if drive_result.is_none() => {
-                    drive_result = Some(result);
-                }
-                event = events_rx.next(), if channel_open => {
-                    match event {
-                        Some(event) => {
-                            match self.append_event(&turn, lease_token, ordinal, &event).await? {
-                                EventAppend::Committed => {
-                                    ordinal = ordinal.checked_add(1).ok_or_else(|| {
-                                        AgentError::msg(format!("turn {} event ordinal exhausted", turn.id))
-                                    })?;
-                                }
-                                EventAppend::Cancelling => cancel.cancel(),
-                                EventAppend::LeaseLost => {
-                                    drive.abort_and_wait().await;
-                                    if heartbeat_open {
-                                        heartbeat.abort_and_wait().await;
+            while drive_result.is_none() || channel_open {
+                tokio::select! {
+                    result = &mut drive.0, if drive_result.is_none() => {
+                        drive_result = Some(result);
+                    }
+                    event = events_rx.next(), if channel_open => {
+                        match event {
+                            Some(event) => {
+                                match self.append_event(&turn, lease_token, ordinal, &event).await? {
+                                    EventAppend::Committed => {
+                                        ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                                            AgentError::msg(format!("turn {} event ordinal exhausted", turn.id))
+                                        })?;
                                     }
-                                    return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                    EventAppend::Cancelling => cancel.cancel(),
+                                    EventAppend::LeaseLost => {
+                                        drive.abort_and_wait().await;
+                                        if heartbeat_open {
+                                            heartbeat.abort_and_wait().await;
+                                        }
+                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                    }
                                 }
                             }
+                            None => channel_open = false,
                         }
-                        None => channel_open = false,
                     }
-                }
-                result = &mut heartbeat.0, if heartbeat_open => {
-                    match result {
-                        Ok(HeartbeatOutcome::Cancelling) => heartbeat_open = false,
-                        Ok(HeartbeatOutcome::LeaseLost) | Err(_) => {
-                            drive.abort_and_wait().await;
-                            return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                    result = &mut heartbeat.0, if heartbeat_open => {
+                        match result {
+                            Ok(HeartbeatOutcome::Cancelling) => heartbeat_open = false,
+                            Ok(HeartbeatOutcome::LeaseLost) | Err(_) => {
+                                drive.abort_and_wait().await;
+                                return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                            }
+                        }
+                    }
+                    _ = steer_poll.tick(), if drive_result.is_none() => {
+                        match self
+                            .store
+                            .list_pending_turn_steers(turn.id, lease_token, Utc::now())
+                            .await
+                        {
+                            Ok(Some(pending)) if !pending.is_empty() => {
+                                steer.signal_durable(pending.iter().any(|item| item.interrupt));
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "openwave: turn {} steer poll failed: {error}",
+                                    turn.id
+                                );
+                            }
                         }
                     }
                 }
             }
-        }
-        // Freeze periodic lease writes before terminal CAS. A concurrent
-        // heartbeat would legitimately change `updated_at` between the
-        // resolution read and update and make this worker race itself.
-        if heartbeat_open {
-            heartbeat.abort_and_wait().await;
-        }
-        let drive_result = match drive_result.expect("drive completed before its channel closed") {
-            Ok(result) => result,
-            Err(error) => Err(AgentError::msg(format!("agent task stopped: {error}"))),
-        };
-        // Prove a fresh full lease after stopping the periodic task. This both
-        // closes near-expiry ambiguous-claim recovery and gives exact terminal
-        // retries their full resolution window without a self-racing heartbeat.
-        match self.renew_lease(&turn, lease_token).await {
-            LeaseState::Running => {}
-            LeaseState::Cancelling => {
-                let usage = match &drive_result {
-                    Ok(AgentTurnOutcome::Completed { usage, .. })
-                    | Ok(AgentTurnOutcome::Cancelled { usage }) => *usage,
-                    Err(_) => openwave_core::Usage::default(),
+            if heartbeat_open {
+                heartbeat.abort_and_wait().await;
+            }
+            let drive_result =
+                match drive_result.expect("drive completed before its channel closed") {
+                    Ok(result) => result,
+                    Err(error) => Err(AgentError::msg(format!("agent task stopped: {error}"))),
                 };
-                drop(active);
-                return self
-                    .acknowledge_cancellation(&turn, lease_token, usage)
-                    .await;
-            }
-            LeaseState::Lost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
-        }
-        drop(active);
-
-        match drive_result {
-            Ok(AgentTurnOutcome::Completed {
-                output,
-                usage,
-                stop_reason,
-            }) => {
-                if output.content.contains('\0') {
+            match self.renew_lease(&turn, lease_token).await {
+                LeaseState::Running => {}
+                LeaseState::Cancelling => {
+                    let usage = match &drive_result {
+                        Ok(AgentTurnOutcome::Completed { usage, .. })
+                        | Ok(AgentTurnOutcome::Cancelled { usage, .. }) => *usage,
+                        Err(_) => openwave_core::Usage::default(),
+                    };
+                    total_usage += usage;
+                    drop(active);
                     return self
-                        .record_failure(
-                            &turn,
-                            lease_token,
-                            "invalid_agent_output",
-                            "agent output contained a NUL character",
-                        )
+                        .acknowledge_cancellation(&turn, lease_token, total_usage)
                         .await;
                 }
-                let terminal_event = AgentEvent::TurnCompleted { usage, stop_reason };
-                loop {
-                    match self
-                        .store
-                        .complete_turn_run_and_append_event(
-                            turn.id,
-                            lease_token,
-                            turn.steer_revision,
-                            Utc::now(),
-                            &output,
-                            usage,
-                            stop_reason,
-                        )
-                        .await
-                    {
-                        Ok(Some(resolution)) => match resolution.outcome {
-                            CompleteTurnRunOutcome::Completed(_)
-                            | CompleteTurnRunOutcome::Existing(_) => {
-                                if let Some(event) = resolution.terminal_event {
-                                    self.publish(turn.chat_id, event);
-                                }
-                                return Ok(TurnWorkerOutcome::Completed(turn.id));
-                            }
-                            CompleteTurnRunOutcome::SteerPending(_)
-                            | CompleteTurnRunOutcome::OutputSuperseded(_) => {
-                                return Err(AgentError::msg(format!(
-                                    "turn {} requires durable steer continuation",
-                                    turn.id
-                                )));
-                            }
-                        },
-                        Ok(None) => break,
-                        Err(error) => {
-                            self.retry_after("completion", turn.id, &error).await;
-                            match self
-                                .resolution_state_retry(
-                                    &turn,
-                                    lease_token,
-                                    TerminalIdentity::Completed {
-                                        output_message_id: output.id,
-                                        event: &terminal_event,
-                                    },
-                                )
-                                .await
-                            {
-                                ResolutionState::Retry => {}
-                                ResolutionState::Resolved(event) => {
-                                    self.publish(turn.chat_id, event);
+                LeaseState::Lost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
+            }
+
+            match drive_result {
+                Ok(AgentTurnOutcome::Completed {
+                    output,
+                    usage,
+                    stop_reason,
+                    steer_revision,
+                    model_steps,
+                }) => {
+                    if model_steps == 0 || model_steps > remaining_steps {
+                        return Err(AgentError::msg(format!(
+                            "turn {} returned an invalid model-step count {model_steps}",
+                            turn.id
+                        )));
+                    }
+                    remaining_steps -= model_steps;
+                    total_usage += usage;
+                    if output.content.contains('\0') {
+                        return self
+                            .record_failure(
+                                &turn,
+                                lease_token,
+                                "invalid_agent_output",
+                                "agent output contained a NUL character",
+                            )
+                            .await;
+                    }
+                    let expected_steer_revision = steer_revision.ok_or_else(|| {
+                        AgentError::msg(format!(
+                            "turn {} completed without a durable generation fence",
+                            turn.id
+                        ))
+                    })?;
+                    let terminal_event = AgentEvent::TurnCompleted {
+                        usage: total_usage,
+                        stop_reason,
+                    };
+                    let mut continue_after_steer = false;
+                    loop {
+                        match self
+                            .store
+                            .complete_turn_run_and_append_event(
+                                turn.id,
+                                lease_token,
+                                expected_steer_revision,
+                                Utc::now(),
+                                &output,
+                                total_usage,
+                                stop_reason,
+                            )
+                            .await
+                        {
+                            Ok(Some(resolution)) => match resolution.outcome {
+                                CompleteTurnRunOutcome::Completed(_)
+                                | CompleteTurnRunOutcome::Existing(_) => {
+                                    if let Some(event) = resolution.terminal_event {
+                                        self.publish(turn.chat_id, event);
+                                    }
                                     return Ok(TurnWorkerOutcome::Completed(turn.id));
                                 }
-                                ResolutionState::Cancelling => break,
-                                ResolutionState::Lost => {
-                                    return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                CompleteTurnRunOutcome::SteerPending(_)
+                                | CompleteTurnRunOutcome::OutputSuperseded(_) => {
+                                    continue_after_steer = true;
+                                    break;
+                                }
+                            },
+                            Ok(None) => {
+                                // A concurrent durable admission can advance
+                                // `updated_at` after this completion timestamp
+                                // without changing the generation. Re-read the
+                                // exact lease before deciding whether this was
+                                // cancellation, lease loss, or a retryable CAS
+                                // miss. Keep the original steer revision fence:
+                                // if the steer was applied concurrently, the
+                                // retry must supersede this output.
+                                match self.live_turn_state_retry(&turn, lease_token).await {
+                                    LiveTurnState::Running => tokio::task::yield_now().await,
+                                    LiveTurnState::Cancelling => break,
+                                    LiveTurnState::Lost => {
+                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                self.retry_after("completion", turn.id, &error).await;
+                                match self
+                                    .resolution_state_retry(
+                                        &turn,
+                                        lease_token,
+                                        TerminalIdentity::Completed {
+                                            output_message_id: output.id,
+                                            event: &terminal_event,
+                                        },
+                                    )
+                                    .await
+                                {
+                                    ResolutionState::Retry => {}
+                                    ResolutionState::Resolved(event) => {
+                                        self.publish(turn.chat_id, event);
+                                        return Ok(TurnWorkerOutcome::Completed(turn.id));
+                                    }
+                                    ResolutionState::Cancelling => break,
+                                    ResolutionState::Lost => {
+                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                self.acknowledge_cancellation(&turn, lease_token, usage)
-                    .await
-            }
-            Ok(AgentTurnOutcome::Cancelled { usage }) => {
-                self.acknowledge_cancellation(&turn, lease_token, usage)
-                    .await
-            }
-            Err(error) => {
-                if self.is_cancelling_retry(&turn, lease_token).await {
+                    if continue_after_steer {
+                        if remaining_steps == 0 {
+                            drop(active);
+                            return self
+                                .record_failure(
+                                    &turn,
+                                    lease_token,
+                                    "max_steps_exceeded",
+                                    "max steps per turn exceeded while applying durable steering",
+                                )
+                                .await;
+                        }
+                        // Completion must stop the normal heartbeat to avoid
+                        // racing its own CAS. Once completion chooses a
+                        // nonterminal continuation, resume heartbeats while the
+                        // journal append retries so a transient store outage
+                        // cannot consume the accepted steer's lease.
+                        let mut continuation_heartbeat = AbortOnDrop(tokio::spawn(
+                            self.clone()
+                                .heartbeat_lease(turn.clone(), lease_token, cancel.clone()),
+                        ));
+                        match self
+                            .append_event(
+                                &turn,
+                                lease_token,
+                                ordinal,
+                                &AgentEvent::StreamInterrupted,
+                            )
+                            .await?
+                        {
+                            EventAppend::Committed => {
+                                ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                                    AgentError::msg(format!(
+                                        "turn {} event ordinal exhausted",
+                                        turn.id
+                                    ))
+                                })?;
+                            }
+                            EventAppend::Cancelling => {
+                                cancel.cancel();
+                                drop(active);
+                                return self
+                                    .acknowledge_cancellation(&turn, lease_token, total_usage)
+                                    .await;
+                            }
+                            EventAppend::LeaseLost => {
+                                return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                            }
+                        }
+                        continuation_heartbeat.abort_and_wait().await;
+                        continue;
+                    }
+                    drop(active);
                     return self
-                        .acknowledge_cancellation(
-                            &turn,
-                            lease_token,
-                            openwave_core::Usage::default(),
-                        )
+                        .acknowledge_cancellation(&turn, lease_token, total_usage)
                         .await;
                 }
-                self.record_failure(&turn, lease_token, "agent_error", &error.to_string())
-                    .await
+                Ok(AgentTurnOutcome::Cancelled { usage, .. }) => {
+                    total_usage += usage;
+                    drop(active);
+                    return self
+                        .acknowledge_cancellation(&turn, lease_token, total_usage)
+                        .await;
+                }
+                Err(error) => {
+                    if self.is_cancelling_retry(&turn, lease_token).await {
+                        drop(active);
+                        return self
+                            .acknowledge_cancellation(&turn, lease_token, total_usage)
+                            .await;
+                    }
+                    return self
+                        .record_failure(&turn, lease_token, "agent_error", &error.to_string())
+                        .await;
+                }
             }
         }
     }
@@ -635,6 +755,35 @@ impl TurnWorker {
                 Err(error) => {
                     self.retry_after("cancellation check", turn.id, &error)
                         .await
+                }
+            }
+        }
+    }
+
+    async fn live_turn_state_retry(
+        &self,
+        turn: &TurnRun,
+        lease_token: uuid::Uuid,
+    ) -> LiveTurnState {
+        loop {
+            match self.store.get_turn_run(turn.id).await {
+                Ok(Some(current))
+                    if current.lease_token == Some(lease_token)
+                        && current.attempt_count == turn.attempt_count
+                        && current
+                            .lease_expires_at
+                            .is_some_and(|expires_at| expires_at > Utc::now()) =>
+                {
+                    return match current.status {
+                        TurnRunStatus::Running => LiveTurnState::Running,
+                        TurnRunStatus::Cancelling => LiveTurnState::Cancelling,
+                        _ => LiveTurnState::Lost,
+                    };
+                }
+                Ok(_) => return LiveTurnState::Lost,
+                Err(error) => {
+                    self.retry_after("turn generation fence read", turn.id, &error)
+                        .await;
                 }
             }
         }

@@ -148,13 +148,14 @@ export class ApiClient {
   steer(
     chatId: string,
     turnId: string,
+    steerId: string,
     content: string,
     interrupt = false,
   ): Promise<void> {
     return this.json(`/chats/${chatId}/steer`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ turn_id: turnId, content, interrupt }),
+      body: JSON.stringify({ steer_id: steerId, turn_id: turnId, content, interrupt }),
     });
   }
 

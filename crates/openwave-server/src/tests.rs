@@ -11,7 +11,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use openwave_core::{
     AgentErrorInfo, AgentEvent, ApprovalClass, BlobStore, Chat, ChatId, ChatRequest, Message,
     ModelProvider, Project, ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent,
-    StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, TurnId, Usage,
+    StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, TurnId, TurnSteerId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -305,6 +305,8 @@ struct PauseTerminalStore {
     pause_after_claim_commit: std::sync::atomic::AtomicBool,
     fail_after_heartbeat_commit: std::sync::atomic::AtomicBool,
     fail_after_completion_commit: std::sync::atomic::AtomicBool,
+    fail_after_apply_steer_commit: std::sync::atomic::AtomicBool,
+    advance_before_steer_read: std::sync::atomic::AtomicBool,
     fail_terminal_recovery: std::sync::atomic::AtomicBool,
     terminal_recovery_calls: AtomicUsize,
     scan_before_failure_resolution: std::sync::atomic::AtomicBool,
@@ -326,6 +328,8 @@ impl PauseTerminalStore {
             pause_after_claim_commit: std::sync::atomic::AtomicBool::new(false),
             fail_after_heartbeat_commit: std::sync::atomic::AtomicBool::new(false),
             fail_after_completion_commit: std::sync::atomic::AtomicBool::new(false),
+            fail_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
+            advance_before_steer_read: std::sync::atomic::AtomicBool::new(false),
             fail_terminal_recovery: std::sync::atomic::AtomicBool::new(false),
             terminal_recovery_calls: AtomicUsize::new(0),
             scan_before_failure_resolution: std::sync::atomic::AtomicBool::new(false),
@@ -356,6 +360,15 @@ impl PauseTerminalStore {
     fn fail_after_next_completion_commit(&self) {
         self.fail_after_completion_commit
             .store(true, Ordering::SeqCst);
+    }
+
+    fn fail_after_next_apply_steer_commit(&self) {
+        self.fail_after_apply_steer_commit
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn advance_before_next_steer_read(&self) {
+        self.advance_before_steer_read.store(true, Ordering::SeqCst);
     }
 
     fn fail_next_terminal_recovery(&self) {
@@ -630,6 +643,72 @@ impl Store for PauseTerminalStore {
             self.release.notified().await;
         }
         self.inner.accept_turn(id, chat_id, model, content).await
+    }
+    async fn accept_turn_steer(
+        &self,
+        id: TurnSteerId,
+        turn_id: TurnId,
+        chat_id: ChatId,
+        content: &str,
+        interrupt: bool,
+    ) -> Result<openwave_core::AcceptTurnSteerOutcome> {
+        self.inner
+            .accept_turn_steer(id, turn_id, chat_id, content, interrupt)
+            .await
+    }
+    async fn list_pending_turn_steers(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<Vec<openwave_core::TurnSteer>>> {
+        if self.advance_before_steer_read.swap(false, Ordering::SeqCst) {
+            let turn = self
+                .inner
+                .get_turn_run(turn_id)
+                .await?
+                .ok_or_else(|| AgentError::Store("injected steer read lost turn".into()))?;
+            let lease_expires_at = turn
+                .lease_expires_at
+                .ok_or_else(|| AgentError::Store("injected steer read lost lease".into()))?
+                + chrono::Duration::seconds(1);
+            let advanced = now + chrono::Duration::milliseconds(1);
+            if !self
+                .inner
+                .heartbeat_turn_run(turn_id, lease_token, advanced, lease_expires_at)
+                .await?
+            {
+                return Err(AgentError::Store(
+                    "injected steer read could not advance heartbeat".into(),
+                ));
+            }
+        }
+        self.inner
+            .list_pending_turn_steers(turn_id, lease_token, now)
+            .await
+    }
+    async fn apply_turn_steer(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        steer_id: TurnSteerId,
+        preceding_assistant: Option<&Message>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<openwave_core::ApplyTurnSteerOutcome>> {
+        let applied = self
+            .inner
+            .apply_turn_steer(turn_id, lease_token, steer_id, preceding_assistant, now)
+            .await?;
+        if applied.is_some()
+            && self
+                .fail_after_apply_steer_commit
+                .swap(false, Ordering::SeqCst)
+        {
+            return Err(AgentError::Store(
+                "injected ambiguous steer application response".into(),
+            ));
+        }
+        Ok(applied)
     }
     async fn claim_turn_run(
         &self,
@@ -1270,6 +1349,27 @@ async fn steer_turn(
     content: &str,
     interrupt: bool,
 ) -> StatusCode {
+    steer_turn_with_id(
+        router,
+        bearer,
+        chat,
+        TurnSteerId::new(),
+        turn_id,
+        content,
+        interrupt,
+    )
+    .await
+}
+
+async fn steer_turn_with_id(
+    router: &Router,
+    bearer: &str,
+    chat: ChatId,
+    steer_id: TurnSteerId,
+    turn_id: TurnId,
+    content: &str,
+    interrupt: bool,
+) -> StatusCode {
     router
         .clone()
         .oneshot(
@@ -1280,6 +1380,7 @@ async fn steer_turn(
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "steer_id": steer_id,
                         "turn_id": turn_id,
                         "content": content,
                         "interrupt": interrupt
@@ -1309,6 +1410,43 @@ async fn steer_without_a_running_turn_is_a_conflict_and_unknown_chat_is_404() {
     );
     assert_eq!(
         steer_turn(&router, &bearer, chat.id, TurnId::new(), "  ", false).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        steer_turn_with_id(
+            &router,
+            &bearer,
+            chat.id,
+            TurnSteerId(uuid::Uuid::nil()),
+            TurnId::new(),
+            "hi",
+            false,
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        steer_turn(
+            &router,
+            &bearer,
+            chat.id,
+            TurnId::new(),
+            "contains\0nul",
+            false,
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        steer_turn(
+            &router,
+            &bearer,
+            chat.id,
+            TurnId::new(),
+            &"x".repeat(openwave_core::TurnSteer::MAX_CONTENT_LEN + 1),
+            false,
+        )
+        .await,
         StatusCode::BAD_REQUEST
     );
 }
@@ -1357,9 +1495,47 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
     );
     // Give the turn a moment to enter the stalled stream.
     tokio::time::sleep(Duration::from_millis(30)).await;
+    let steer_id = TurnSteerId::new();
     assert_eq!(
-        steer_turn(&router, &bearer, chat.id, turn_id, "change course", true,).await,
+        steer_turn_with_id(
+            &router,
+            &bearer,
+            chat.id,
+            steer_id,
+            turn_id,
+            "change course",
+            true,
+        )
+        .await,
         StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        steer_turn_with_id(
+            &router,
+            &bearer,
+            chat.id,
+            steer_id,
+            turn_id,
+            "change course",
+            true,
+        )
+        .await,
+        StatusCode::ACCEPTED,
+        "an exact admission retry is idempotent"
+    );
+    assert_eq!(
+        steer_turn_with_id(
+            &router,
+            &bearer,
+            chat.id,
+            steer_id,
+            turn_id,
+            "different request data",
+            true,
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "reusing an identity for different input must fail"
     );
 
     let events = wait_for_turn(&store, chat.id).await;
@@ -1398,6 +1574,407 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
             .iter()
             .any(|e| matches!(e.event, AgentEvent::TurnCancelled { .. })),
         "steer continues the turn"
+    );
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| (message.id, message.role, message.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (messages[0].id, openwave_core::Role::User, "go"),
+            (
+                openwave_core::MessageId(steer_id.0),
+                openwave_core::Role::User,
+                "change course",
+            ),
+            (
+                messages[2].id,
+                openwave_core::Role::Assistant,
+                "after steer"
+            ),
+        ]
+    );
+    assert!(matches!(
+        store
+            .accept_turn_steer(steer_id, turn_id, chat.id, "change course", true)
+            .await
+            .unwrap(),
+        openwave_core::AcceptTurnSteerOutcome::Existing(openwave_core::TurnSteer {
+            status: openwave_core::TurnSteerStatus::Applied,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn boundary_steer_commits_the_candidate_and_instruction_atomically() {
+    struct FinishAfterGate {
+        calls: Arc<AtomicUsize>,
+        gate: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for FinishAfterGate {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("finish-after-gate")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let gate = self.gate.clone();
+                return Ok(stream::iter(vec![ProviderEvent::TextDelta {
+                    text: "candidate".into(),
+                }])
+                .chain(stream::once(async move {
+                    gate.notified().await;
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    }
+                }))
+                .boxed());
+            }
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "final".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(Notify::new());
+    let (router, token, store, _dir) = test_app_with(Arc::new(FinishAfterGate {
+        calls: calls.clone(),
+        gate: gate.clone(),
+    }))
+    .await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let steer_id = TurnSteerId::new();
+    assert_eq!(
+        steer_turn_with_id(
+            &router,
+            &bearer,
+            chat.id,
+            steer_id,
+            turn_id,
+            "continue with this",
+            false,
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    gate.notify_one();
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| (message.id, message.role, message.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (messages[0].id, openwave_core::Role::User, "go"),
+            (messages[1].id, openwave_core::Role::Assistant, "candidate",),
+            (
+                openwave_core::MessageId(steer_id.0),
+                openwave_core::Role::User,
+                "continue with this",
+            ),
+            (messages[3].id, openwave_core::Role::Assistant, "final"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn durable_steer_poll_recovers_a_missing_local_notification() {
+    struct StallThenFinish {
+        calls: AtomicUsize,
+    }
+    #[async_trait]
+    impl ModelProvider for StallThenFinish {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("durable-steer-poll")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(stream::pending().boxed());
+            }
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "after durable poll".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    let provider = Arc::new(StallThenFinish {
+        calls: AtomicUsize::new(0),
+    });
+    let (router, token, store, _dir) = test_app_with(provider.clone()).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let steer_id = TurnSteerId::new();
+    assert!(matches!(
+        store
+            .accept_turn_steer(
+                steer_id,
+                turn_id,
+                chat.id,
+                "recover from the database",
+                true,
+            )
+            .await
+            .unwrap(),
+        openwave_core::AcceptTurnSteerOutcome::Accepted(_)
+    ));
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        AgentEvent::UserSteered { content } if content == "recover from the database"
+    )));
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+    assert!(matches!(
+        store
+            .accept_turn_steer(
+                steer_id,
+                turn_id,
+                chat.id,
+                "recover from the database",
+                true,
+            )
+            .await
+            .unwrap(),
+        openwave_core::AcceptTurnSteerOutcome::Existing(openwave_core::TurnSteer {
+            status: openwave_core::TurnSteerStatus::Applied,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
+    struct StallThenFinish {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for StallThenFinish {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("durable-steer-retry")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(stream::pending().boxed());
+            }
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "recovered".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let injected = Arc::new(PauseTerminalStore::new(
+        inner,
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+    ));
+    injected.do_not_pause_terminal();
+    let store: Arc<dyn Store> = injected.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(StallThenFinish {
+            calls: calls.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    injected.advance_before_next_steer_read();
+    injected.fail_after_next_apply_steer_commit();
+    let steer_id = TurnSteerId::new();
+    assert_eq!(
+        steer_turn_with_id(
+            &router,
+            &bearer,
+            chat.id,
+            steer_id,
+            turn_id,
+            "recover exactly",
+            true,
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| (message.id, message.role, message.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (messages[0].id, openwave_core::Role::User, "go"),
+            (
+                openwave_core::MessageId(steer_id.0),
+                openwave_core::Role::User,
+                "recover exactly",
+            ),
+            (messages[2].id, openwave_core::Role::Assistant, "recovered"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn queued_steer_is_applied_when_the_worker_claims_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    let router = app(state.clone());
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
+        StatusCode::ACCEPTED
+    );
+    let steer_id = TurnSteerId::new();
+    assert_eq!(
+        steer_turn_with_id(
+            &router,
+            &bearer,
+            chat.id,
+            steer_id,
+            turn_id,
+            "queued direction",
+            false,
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+
+    spawn_turn_worker(&state);
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        AgentEvent::UserSteered { content } if content == "queued direction"
+    )));
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| (message.id, message.role, message.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (messages[0].id, openwave_core::Role::User, "go"),
+            (
+                openwave_core::MessageId(steer_id.0),
+                openwave_core::Role::User,
+                "queued direction",
+            ),
+            (messages[2].id, openwave_core::Role::Assistant, "hi"),
+        ]
     );
 }
 
@@ -4551,6 +5128,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         turn_worker::TurnWorkerConfig {
             lease: Duration::from_millis(600),
             heartbeat: Duration::from_millis(200),
+            steer_poll: Duration::from_millis(10),
             idle_min: Duration::from_millis(10),
             idle_cap: Duration::from_millis(20),
             failure_delay: Duration::from_millis(10),
@@ -4643,6 +5221,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         turn_worker::TurnWorkerConfig {
             lease: Duration::from_millis(250),
             heartbeat: Duration::from_millis(50),
+            steer_poll: Duration::from_millis(10),
             idle_min: Duration::from_millis(10),
             idle_cap: Duration::from_millis(20),
             failure_delay: Duration::from_millis(10),
@@ -4663,7 +5242,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         .await
         .expect("worker reached the blocked event append");
     tokio::time::sleep(Duration::from_millis(400)).await;
-    release.notify_waiters();
+    release.notify_one();
 
     let events = wait_for_turn(&store, chat.id).await;
     assert!(
@@ -4885,8 +5464,8 @@ async fn durable_slot_stays_held_and_cancel_can_win_terminal_commit_race() {
     );
     assert_eq!(
         steer_turn(&router, &bearer, chat.id, turn_id, "late", false).await,
-        StatusCode::CONFLICT,
-        "steer must not reach an agent that has already quiesced"
+        StatusCode::ACCEPTED,
+        "a live durable turn must accept steering even while completion is in flight"
     );
     assert_eq!(
         cancel_turn(&router, &bearer, chat.id, turn_id).await,
@@ -4894,15 +5473,268 @@ async fn durable_slot_stays_held_and_cancel_can_win_terminal_commit_race() {
         "durable cancellation may win until completion commits"
     );
 
-    release.notify_waiters();
+    release.notify_one();
     let events = wait_for_turn(&store, chat.id).await;
     assert!(matches!(
         events.last().map(|event| &event.event),
         Some(AgentEvent::TurnCancelled { .. })
     ));
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| (message.role, message.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(openwave_core::Role::User, "one")],
+        "cancellation rejects the pending steer without an orphan assistant candidate"
+    );
     assert_eq!(
         send_message(&router, &bearer, chat.id, "two").await,
         StatusCode::ACCEPTED
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn steer_wins_a_completion_race_and_restarts_generation() {
+    struct FinishTwice {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for FinishTwice {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("finish-twice")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let text = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                "before steer"
+            } else {
+                "after steer"
+            };
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta { text: text.into() },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let store: Arc<dyn Store> = Arc::new(PauseTerminalStore::new(
+        inner,
+        entered.clone(),
+        release.clone(),
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FinishTwice {
+            calls: calls.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("first generation reached its atomic completion");
+
+    let steer_id = TurnSteerId::new();
+    assert_eq!(
+        steer_turn_with_id(
+            &router,
+            &bearer,
+            chat.id,
+            steer_id,
+            turn_id,
+            "replace the answer",
+            false,
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    release.notify_one();
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let interrupted_at = events
+        .iter()
+        .position(|event| matches!(event.event, AgentEvent::StreamInterrupted))
+        .expect("superseded output clears already-streamed deltas");
+    let steered_at = events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                AgentEvent::UserSteered { content } if content == "replace the answer"
+            )
+        })
+        .expect("the next generation applies the durable steer");
+    assert!(interrupted_at < steered_at);
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| (message.id, message.role, message.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (messages[0].id, openwave_core::Role::User, "go"),
+            (
+                openwave_core::MessageId(steer_id.0),
+                openwave_core::Role::User,
+                "replace the answer",
+            ),
+            (
+                messages[2].id,
+                openwave_core::Role::Assistant,
+                "after steer"
+            ),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn late_steers_share_the_turn_wide_model_step_budget() {
+    struct CountedFinish {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for CountedFinish {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("counted-finish")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "candidate".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let store: Arc<dyn Store> = Arc::new(PauseTerminalStore::new(
+        inner,
+        entered.clone(),
+        release.clone(),
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(CountedFinish {
+            calls: calls.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            max_steps: 1,
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "go").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("model output reached atomic completion");
+    assert_eq!(
+        steer_turn(
+            &router,
+            &bearer,
+            chat.id,
+            turn_id,
+            "too late for another call",
+            false,
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    release.notify_one();
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnFailed { error }) if error.kind == "max_steps_exceeded"
+    ));
+    assert_eq!(
+        store
+            .list_messages(chat.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|message| (message.role, message.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(openwave_core::Role::User, "go")]
     );
 }
 

@@ -740,15 +740,17 @@ pub trait Store: Send + Sync {
 
     /// Persist one pending steer as a user message under the exact live lease.
     ///
-    /// The message and application receipt commit atomically. Exact retries by
-    /// the same lease return [`ApplyTurnSteerOutcome::Existing`] even after the
-    /// turn advances. A stale lease, rejected steer, or different winning lease
-    /// returns `None`.
+    /// An optional preceding assistant candidate, the steer message, the
+    /// application receipt, and the revision increment commit atomically in
+    /// transcript order. Exact retries by the same lease return
+    /// [`ApplyTurnSteerOutcome::Existing`] even after the turn advances. A stale
+    /// lease, rejected steer, or different winning lease returns `None`.
     async fn apply_turn_steer(
         &self,
         _turn_id: TurnId,
         _lease_token: uuid::Uuid,
         _steer_id: TurnSteerId,
+        _preceding_assistant: Option<&Message>,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<ApplyTurnSteerOutcome>> {
         turn_storage_unavailable()
