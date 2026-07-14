@@ -11,9 +11,16 @@ use crate::model::{TurnRun, TurnRunStatus};
 use crate::storage::{AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome};
 
 use super::super::{entities, store_err, DbStore};
-use super::{acquire_chat_write_lock, conversation::append_event_on};
+use super::{
+    acquire_chat_write_lock,
+    conversation::{
+        append_event_on, next_message_seq_on, reserve_message_identity_on,
+        MESSAGE_IDENTITY_OWNER_MESSAGE,
+    },
+};
 
 mod resolution;
+mod steer;
 
 pub(in crate::db) use resolution::{
     complete_turn_run, complete_turn_run_and_append_event, finish_turn_cancellation,
@@ -21,6 +28,7 @@ pub(in crate::db) use resolution::{
     record_turn_run_failure_and_append_event, request_turn_cancellation,
     request_turn_cancellation_and_append_event,
 };
+pub(in crate::db) use steer::{accept_turn_steer, apply_turn_steer, list_pending_turn_steers};
 
 pub(in crate::db) async fn get_turn_run(store: &DbStore, id: TurnId) -> Result<Option<TurnRun>> {
     entities::turn_run::Entity::find_by_id(id.0)
@@ -110,10 +118,25 @@ pub(in crate::db) async fn accept_turn(
 
     let now = canonical_db_timestamp(Utc::now())?;
     let input_message_id = MessageId::new();
+    if !reserve_message_identity_on(
+        &transaction,
+        input_message_id,
+        chat_id,
+        id,
+        MESSAGE_IDENTITY_OWNER_MESSAGE,
+    )
+    .await?
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "turn input message identity {input_message_id} is already reserved"
+        )));
+    }
     let message = entities::message::ActiveModel {
         id: Set(input_message_id.0),
         chat_id: Set(chat_id.0),
         turn_id: Set(id.0),
+        seq: Set(next_message_seq_on(&transaction, chat_id).await?),
         role: Set("user".into()),
         content: Set(content.into()),
         created_at: Set(now),
@@ -139,6 +162,8 @@ pub(in crate::db) async fn accept_turn(
         finished_at: Set(None),
         last_error_code: Set(None),
         last_error_detail: Set(None),
+        steer_revision: Set(0),
+        last_steer_applied_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -317,6 +342,7 @@ pub(in crate::db) async fn claim_turn_run(
                 transaction.rollback().await.map_err(store_err)?;
                 continue;
             }
+            steer::reject_pending_turn_steers_on(&transaction, TurnId(candidate.id), now).await?;
             let event = AgentEvent::TurnCancelled {
                 usage: crate::provider::Usage::default(),
             };
@@ -390,6 +416,7 @@ pub(in crate::db) async fn claim_turn_run(
                 transaction.rollback().await.map_err(store_err)?;
                 continue;
             }
+            steer::reject_pending_turn_steers_on(&transaction, TurnId(candidate.id), now).await?;
             let event = AgentEvent::TurnFailed {
                 error: AgentErrorInfo {
                     kind: "lease_expired".into(),
@@ -786,6 +813,8 @@ fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
         finished_at: model.finished_at,
         last_error_code: model.last_error_code,
         last_error_detail: model.last_error_detail,
+        steer_revision: model.steer_revision,
+        last_steer_applied_at: model.last_steer_applied_at,
         created_at: model.created_at,
         updated_at: model.updated_at,
     })

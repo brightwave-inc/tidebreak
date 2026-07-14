@@ -681,6 +681,7 @@ impl Store for PauseTerminalStore {
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
         now: chrono::DateTime<chrono::Utc>,
         output: &Message,
         usage: Usage,
@@ -698,7 +699,15 @@ impl Store for PauseTerminalStore {
         }
         let outcome = self
             .inner
-            .complete_turn_run_and_append_event(id, lease_token, now, output, usage, stop_reason)
+            .complete_turn_run_and_append_event(
+                id,
+                lease_token,
+                expected_steer_revision,
+                now,
+                output,
+                usage,
+                stop_reason,
+            )
             .await?;
         if outcome.is_some()
             && self

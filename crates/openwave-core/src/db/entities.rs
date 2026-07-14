@@ -166,6 +166,7 @@ pub mod message {
         pub id: Uuid,
         pub chat_id: Uuid,
         pub turn_id: Uuid,
+        pub seq: i64,
         pub role: String,
         pub content: String,
         pub created_at: DateTimeUtc,
@@ -199,6 +200,8 @@ pub mod turn_run {
         pub finished_at: Option<DateTimeUtc>,
         pub last_error_code: Option<String>,
         pub last_error_detail: Option<String>,
+        pub steer_revision: i64,
+        pub last_steer_applied_at: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
@@ -237,6 +240,25 @@ pub mod turn_claim_lock {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod message_identity {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "message_identity")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub chat_id: Uuid,
+        pub turn_id: Uuid,
+        pub owner: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

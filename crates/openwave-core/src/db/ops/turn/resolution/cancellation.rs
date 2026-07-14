@@ -131,6 +131,7 @@ async fn request_turn_cancellation_inner(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
+    super::super::steer::reject_pending_turn_steers_on(&transaction, id, now).await?;
     let updated = entities::turn_run::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
@@ -278,6 +279,7 @@ async fn finish_turn_cancellation_inner(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
+    super::super::steer::reject_pending_turn_steers_on(&transaction, id, now).await?;
     let cancelled = entities::turn_run::Entity::find_by_id(id.0)
         .one(&transaction)
         .await

@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use openwave_core::{
-    AcceptTurnOutcome, AgentEvent, Chat, ChatId, CompleteTurnRunOutcome, DbStore,
-    FinishTurnCancellationOutcome, Message, MessageId, RecordTurnFailureOutcome,
-    RequestTurnCancellationOutcome, Role, StopReason, Store, TurnFailureRetry, TurnId,
-    TurnRunStatus, Usage,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent, ApplyTurnSteerOutcome, Chat, ChatId,
+    CompleteTurnRunOutcome, DbStore, FinishTurnCancellationOutcome, Message, MessageId,
+    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, Role, StopReason, Store,
+    TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
 };
 
 fn sample_chat() -> Chat {
@@ -180,6 +180,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                 .complete_turn_run_and_append_event(
                     next.id,
                     completion_token,
+                    0,
                     output.created_at,
                     &output,
                     Usage::default(),
@@ -198,6 +199,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         match completion.outcome {
             CompleteTurnRunOutcome::Completed(_) => committed += 1,
             CompleteTurnRunOutcome::Existing(_) => existing += 1,
+            outcome => panic!("unexpected completion outcome: {outcome:?}"),
         }
         terminal_events.push(completion.terminal_event.unwrap());
     }
@@ -469,6 +471,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         .complete_turn_run(
             turn_event.id,
             event_lease_token,
+            0,
             turn_event_output.created_at,
             &turn_event_output,
         )
@@ -536,6 +539,242 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         )
         .await
         .is_err());
+
+    let steer_chat = sample_chat();
+    store.create_chat(&steer_chat).await.unwrap();
+    let steer_turn = match store
+        .accept_turn(TurnId::new(), steer_chat.id, "gpt-5", "steer input")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected steer turn acceptance: {outcome:?}"),
+    };
+    let steer_id = TurnSteerId::new();
+    let barrier = Arc::new(tokio::sync::Barrier::new(4));
+    let mut steer_tasks = Vec::new();
+    for _ in 0..4 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        steer_tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .accept_turn_steer(
+                    steer_id,
+                    steer_turn.id,
+                    steer_chat.id,
+                    "postgres steer",
+                    true,
+                )
+                .await
+                .unwrap()
+        }));
+    }
+    let mut steer_accepted = 0;
+    let mut steer_existing = 0;
+    for task in steer_tasks {
+        match task.await.unwrap() {
+            AcceptTurnSteerOutcome::Accepted(_) => steer_accepted += 1,
+            AcceptTurnSteerOutcome::Existing(_) => steer_existing += 1,
+            outcome => panic!("unexpected concurrent steer acceptance: {outcome:?}"),
+        }
+    }
+    assert_eq!((steer_accepted, steer_existing), (1, 3));
+
+    let steer_lease = uuid::Uuid::new_v4();
+    let steer_claimed_at = Utc::now();
+    store
+        .claim_turn_run(
+            steer_lease,
+            steer_claimed_at,
+            steer_claimed_at + Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    assert_eq!(
+        store
+            .list_pending_turn_steers(steer_turn.id, steer_lease, Utc::now())
+            .await
+            .unwrap()
+            .unwrap()
+            .iter()
+            .map(|steer| steer.id)
+            .collect::<Vec<_>>(),
+        vec![steer_id]
+    );
+    let applied = store
+        .apply_turn_steer(steer_turn.id, steer_lease, steer_id, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(applied, ApplyTurnSteerOutcome::Applied(_)));
+
+    let second_steer_id = TurnSteerId::new();
+    assert!(matches!(
+        store
+            .accept_turn_steer(
+                second_steer_id,
+                steer_turn.id,
+                steer_chat.id,
+                "apply before completion",
+                false,
+            )
+            .await
+            .unwrap(),
+        AcceptTurnSteerOutcome::Accepted(_)
+    ));
+    let steer_completed_at = Utc::now();
+    assert!(matches!(
+        store
+            .complete_turn_run(
+                steer_turn.id,
+                steer_lease,
+                0,
+                steer_completed_at,
+                &Message {
+                    id: MessageId::new(),
+                    chat_id: steer_chat.id,
+                    turn_id: steer_turn.id,
+                    role: Role::Assistant,
+                    content: "stale steer completion".into(),
+                    created_at: steer_completed_at,
+                },
+            )
+            .await
+            .unwrap(),
+        Some(CompleteTurnRunOutcome::SteerPending(_))
+    ));
+    let second_steer = match store
+        .apply_turn_steer(steer_turn.id, steer_lease, second_steer_id, Utc::now())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        ApplyTurnSteerOutcome::Applied(steer) => steer,
+        outcome => panic!("unexpected postgres second steer: {outcome:?}"),
+    };
+    let fresh_completed_at = second_steer.resolved_at.unwrap() + chrono::Duration::microseconds(1);
+    store
+        .complete_turn_run(
+            steer_turn.id,
+            steer_lease,
+            1,
+            fresh_completed_at,
+            &Message {
+                id: MessageId::new(),
+                chat_id: steer_chat.id,
+                turn_id: steer_turn.id,
+                role: Role::Assistant,
+                content: "fresh steer completion".into(),
+                created_at: fresh_completed_at,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        store
+            .apply_turn_steer(steer_turn.id, steer_lease, steer_id, Utc::now())
+            .await
+            .unwrap(),
+        Some(ApplyTurnSteerOutcome::Existing(_))
+    ));
+    assert!(matches!(
+        store
+            .accept_turn_steer(
+                second_steer_id,
+                steer_turn.id,
+                steer_chat.id,
+                "apply before completion",
+                false,
+            )
+            .await
+            .unwrap(),
+        AcceptTurnSteerOutcome::Existing(steer)
+            if steer.status == TurnSteerStatus::Applied
+    ));
+
+    let registry_steer_chat = sample_chat();
+    let registry_message_chat = sample_chat();
+    store.create_chat(&registry_steer_chat).await.unwrap();
+    store.create_chat(&registry_message_chat).await.unwrap();
+    let registry_steer_turn = match store
+        .accept_turn(
+            TurnId::new(),
+            registry_steer_chat.id,
+            "gpt-5",
+            "registry steer",
+        )
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected registry steer turn: {outcome:?}"),
+    };
+    let registry_message_turn = match store
+        .accept_turn(
+            TurnId::new(),
+            registry_message_chat.id,
+            "gpt-5",
+            "registry message",
+        )
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected registry message turn: {outcome:?}"),
+    };
+    let shared_identity = TurnSteerId::new();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let steer_store = store.clone();
+    let steer_barrier = barrier.clone();
+    let steer_task = tokio::spawn(async move {
+        steer_barrier.wait().await;
+        steer_store
+            .accept_turn_steer(
+                shared_identity,
+                registry_steer_turn.id,
+                registry_steer_chat.id,
+                "shared postgres identity",
+                false,
+            )
+            .await
+            .unwrap()
+    });
+    let message_store = store.clone();
+    let message_barrier = barrier.clone();
+    let message_task = tokio::spawn(async move {
+        message_barrier.wait().await;
+        message_store
+            .append_message(&Message {
+                id: MessageId(shared_identity.0),
+                chat_id: registry_message_chat.id,
+                turn_id: registry_message_turn.id,
+                role: Role::Assistant,
+                content: "shared postgres identity".into(),
+                created_at: Utc::now(),
+            })
+            .await
+    });
+    let steer_result = steer_task.await.unwrap();
+    let message_result = message_task.await.unwrap();
+    match steer_result {
+        AcceptTurnSteerOutcome::Accepted(_) => assert!(message_result.is_err()),
+        AcceptTurnSteerOutcome::IdentityConflict => {
+            message_result.expect("postgres message won shared identity")
+        }
+        outcome => panic!("unexpected postgres registry race: {outcome:?}"),
+    }
+    store
+        .request_turn_cancellation(registry_steer_turn.id, Utc::now())
+        .await
+        .unwrap();
+    store
+        .request_turn_cancellation(registry_message_turn.id, Utc::now())
+        .await
+        .unwrap();
 
     // Keep this global-queue fixture last: its winning turn deliberately remains
     // queued so the race proves only acceptance rollback/recovery behavior.
