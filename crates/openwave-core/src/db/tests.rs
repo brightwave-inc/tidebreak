@@ -4572,15 +4572,30 @@ async fn chats_and_messages_roundtrip() {
     assert_eq!(store.list_messages(chat.id).await.unwrap(), vec![msg]);
 }
 
-#[tokio::test]
-async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
-    let (_dir, store) = temp_store().await;
-    let chat = sample_chat();
-    store.create_chat(&chat).await.unwrap();
-    let now = DateTime::<Utc>::from_timestamp(1_752_408_000, 0).unwrap();
-    let make_turn = |chat_id: ChatId, model: &str| entities::turn_run::ActiveModel {
-        id: Set(TurnId::new().0),
+async fn make_queued_turn(
+    store: &DbStore,
+    chat_id: ChatId,
+    model: &str,
+    now: DateTime<Utc>,
+) -> entities::turn_run::ActiveModel {
+    let turn_id = TurnId::new();
+    let input_message_id = MessageId::new();
+    entities::message::ActiveModel {
+        id: Set(input_message_id.0),
         chat_id: Set(chat_id.0),
+        turn_id: Set(turn_id.0),
+        role: Set("user".into()),
+        content: Set("turn input".into()),
+        created_at: Set(now),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+
+    entities::turn_run::ActiveModel {
+        id: Set(turn_id.0),
+        chat_id: Set(chat_id.0),
+        input_message_id: Set(input_message_id.0),
         model: Set(model.into()),
         status: Set(TurnRunStatus::Queued.as_str().into()),
         attempt_count: Set(0),
@@ -4594,9 +4609,17 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         last_error_detail: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
-    };
+    }
+}
 
-    let first = make_turn(chat.id, "claude-sonnet-4-5")
+#[tokio::test]
+async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let now = DateTime::<Utc>::from_timestamp(1_752_408_000, 0).unwrap();
+    let first = make_queued_turn(&store, chat.id, "claude-sonnet-4-5", now)
+        .await
         .insert(&store.conn)
         .await
         .unwrap();
@@ -4608,7 +4631,8 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     assert_eq!(store.list_turn_runs(chat.id).await.unwrap(), vec![stored]);
 
     // The database, not a process-local map, owns the one-live-turn invariant.
-    assert!(make_turn(chat.id, "gpt-5")
+    assert!(make_queued_turn(&store, chat.id, "gpt-5", now)
+        .await
         .insert(&store.conn)
         .await
         .is_err());
@@ -4634,7 +4658,8 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         .exec(&store.conn)
         .await
         .unwrap();
-    make_turn(chat.id, "gpt-5")
+    make_queued_turn(&store, chat.id, "gpt-5", now)
+        .await
         .insert(&store.conn)
         .await
         .unwrap();
@@ -4642,42 +4667,46 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     let invalid_chat = sample_chat();
     store.create_chat(&invalid_chat).await.unwrap();
 
-    let mut running_without_lease = make_turn(invalid_chat.id, "gpt-5");
+    let mut running_without_lease = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     running_without_lease.status = Set(TurnRunStatus::Running.as_str().into());
     running_without_lease.attempt_count = Set(1);
     running_without_lease.started_at = Set(Some(now));
     assert!(running_without_lease.insert(&store.conn).await.is_err());
 
-    let mut retry_without_error = make_turn(invalid_chat.id, "gpt-5");
+    let mut retry_without_error = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     retry_without_error.status = Set(TurnRunStatus::RetryWait.as_str().into());
     retry_without_error.attempt_count = Set(1);
     retry_without_error.max_attempts = Set(2);
     retry_without_error.started_at = Set(Some(now));
     assert!(retry_without_error.insert(&store.conn).await.is_err());
 
-    let mut failed_without_finish = make_turn(invalid_chat.id, "gpt-5");
+    let mut failed_without_finish = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     failed_without_finish.status = Set(TurnRunStatus::Failed.as_str().into());
     failed_without_finish.attempt_count = Set(1);
     failed_without_finish.started_at = Set(Some(now));
     failed_without_finish.last_error_code = Set(Some("provider_error".into()));
     assert!(failed_without_finish.insert(&store.conn).await.is_err());
 
-    let mut unknown_status = make_turn(invalid_chat.id, "gpt-5");
+    let mut unknown_status = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     unknown_status.status = Set("waiting_for_magic".into());
     assert!(unknown_status.insert(&store.conn).await.is_err());
-    assert!(make_turn(invalid_chat.id, "")
+    assert!(make_queued_turn(&store, invalid_chat.id, "", now)
+        .await
         .insert(&store.conn)
         .await
         .is_err());
-    assert!(make_turn(
+    assert!(make_queued_turn(
+        &store,
         invalid_chat.id,
         &"m".repeat(crate::model::TurnRun::MAX_MODEL_LEN + 1),
+        now,
     )
+    .await
     .insert(&store.conn)
     .await
     .is_err());
 
-    let mut oversized_error = make_turn(invalid_chat.id, "gpt-5");
+    let mut oversized_error = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     oversized_error.status = Set(TurnRunStatus::Failed.as_str().into());
     oversized_error.attempt_count = Set(1);
     oversized_error.started_at = Set(Some(now));
@@ -4690,7 +4719,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     // The turn identity is global and cannot be replayed against another chat.
     let other = sample_chat();
     store.create_chat(&other).await.unwrap();
-    let mut duplicate_identity = make_turn(other.id, "gpt-5");
+    let mut duplicate_identity = make_queued_turn(&store, other.id, "gpt-5", now).await;
     duplicate_identity.id = Set(first.id);
     assert!(duplicate_identity.insert(&store.conn).await.is_err());
 
@@ -4698,7 +4727,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     // must reach these shapes atomically under exact predicates.
     let running_chat = sample_chat();
     store.create_chat(&running_chat).await.unwrap();
-    let mut running = make_turn(running_chat.id, "gpt-5");
+    let mut running = make_queued_turn(&store, running_chat.id, "gpt-5", now).await;
     running.status = Set(TurnRunStatus::Running.as_str().into());
     running.attempt_count = Set(1);
     running.started_at = Set(Some(now));
@@ -4708,7 +4737,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
 
     let retry_chat = sample_chat();
     store.create_chat(&retry_chat).await.unwrap();
-    let mut retry_wait = make_turn(retry_chat.id, "gpt-5");
+    let mut retry_wait = make_queued_turn(&store, retry_chat.id, "gpt-5", now).await;
     retry_wait.status = Set(TurnRunStatus::RetryWait.as_str().into());
     retry_wait.attempt_count = Set(1);
     retry_wait.max_attempts = Set(2);
@@ -4718,7 +4747,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
 
     let failed_chat = sample_chat();
     store.create_chat(&failed_chat).await.unwrap();
-    let mut failed = make_turn(failed_chat.id, "gpt-5");
+    let mut failed = make_queued_turn(&store, failed_chat.id, "gpt-5", now).await;
     failed.status = Set(TurnRunStatus::Failed.as_str().into());
     failed.attempt_count = Set(1);
     failed.started_at = Set(Some(now));
@@ -4730,7 +4759,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     for started in [false, true] {
         let cancelled_chat = sample_chat();
         store.create_chat(&cancelled_chat).await.unwrap();
-        let mut cancelled = make_turn(cancelled_chat.id, "gpt-5");
+        let mut cancelled = make_queued_turn(&store, cancelled_chat.id, "gpt-5", now).await;
         cancelled.status = Set(TurnRunStatus::Cancelled.as_str().into());
         cancelled.finished_at = Set(Some(now));
         if started {
@@ -4739,6 +4768,298 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         }
         cancelled.insert(&store.conn).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn turn_run_input_message_must_match_its_chat_and_turn() {
+    let (_dir, store) = temp_store().await;
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    let now = DateTime::<Utc>::from_timestamp(1_752_408_000, 0).unwrap();
+
+    let mut missing = make_queued_turn(&store, first_chat.id, "gpt-5", now).await;
+    missing.input_message_id = Set(MessageId::new().0);
+    assert!(missing.insert(&store.conn).await.is_err());
+
+    let mut wrong_chat = make_queued_turn(&store, first_chat.id, "gpt-5", now).await;
+    wrong_chat.chat_id = Set(second_chat.id.0);
+    assert!(wrong_chat.insert(&store.conn).await.is_err());
+
+    let mut wrong_turn = make_queued_turn(&store, first_chat.id, "gpt-5", now).await;
+    wrong_turn.id = Set(TurnId::new().0);
+    assert!(wrong_turn.insert(&store.conn).await.is_err());
+}
+
+#[tokio::test]
+async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected first acceptance outcome: {outcome:?}"),
+    };
+    assert_eq!(accepted.id, turn_id);
+    assert_eq!(accepted.chat_id, chat.id);
+    assert_eq!(accepted.model, "gpt-5");
+    assert_eq!(accepted.status, TurnRunStatus::Queued);
+    assert_eq!(accepted.attempt_count, 0);
+    assert_eq!(accepted.max_attempts, 1);
+    assert_eq!(accepted.lease_token, None);
+
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id, accepted.input_message_id);
+    assert_eq!(messages[0].turn_id, turn_id);
+    assert_eq!(messages[0].role, Role::User);
+    assert_eq!(messages[0].content, "hello");
+
+    let existing = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Existing(turn) => turn,
+        outcome => panic!("unexpected retry outcome: {outcome:?}"),
+    };
+    assert_eq!(existing, accepted);
+    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+
+    assert!(store
+        .accept_turn(turn_id, chat.id, "gpt-5", "different")
+        .await
+        .is_err());
+    assert!(store
+        .accept_turn(turn_id, chat.id, "other-model", "hello")
+        .await
+        .is_err());
+
+    let busy = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "next")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::ChatBusy(turn) => turn,
+        outcome => panic!("unexpected busy outcome: {outcome:?}"),
+    };
+    assert_eq!(busy, accepted);
+
+    let other = sample_chat();
+    store.create_chat(&other).await.unwrap();
+    assert!(store
+        .accept_turn(turn_id, other.id, "gpt-5", "hello")
+        .await
+        .is_err());
+
+    let missing = ChatId::new();
+    assert!(store
+        .accept_turn(TurnId::new(), missing, "gpt-5", "hello")
+        .await
+        .is_err());
+    assert!(store
+        .accept_turn(TurnId::new(), other.id, "", "hello")
+        .await
+        .is_err());
+    assert!(store
+        .accept_turn(TurnId::new(), other.id, "gpt-5", " \n\t")
+        .await
+        .is_err());
+    assert!(store
+        .accept_turn(TurnId::new(), other.id, "gpt\0-5", "hello")
+        .await
+        .is_err());
+    assert!(store
+        .accept_turn(TurnId::new(), other.id, "gpt-5", "hello\0world")
+        .await
+        .is_err());
+    assert!(store.list_turn_runs(other.id).await.unwrap().is_empty());
+    assert!(store.list_messages(other.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_turn_acceptance_commits_one_request_and_one_message() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let store = std::sync::Arc::new(store);
+    let turn_id = TurnId::new();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .accept_turn(turn_id, chat.id, "gpt-5", "same input")
+                .await
+                .unwrap()
+        }));
+    }
+
+    let mut accepted = 0;
+    let mut existing = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            AcceptTurnOutcome::Accepted(_) => accepted += 1,
+            AcceptTurnOutcome::Existing(_) => existing += 1,
+            outcome => panic!("unexpected concurrent outcome: {outcome:?}"),
+        }
+    }
+    assert_eq!(accepted, 1);
+    assert_eq!(existing, 7);
+    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+
+    let competing_chat = sample_chat();
+    store.create_chat(&competing_chat).await.unwrap();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for index in 0..8 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .accept_turn(
+                    TurnId::new(),
+                    competing_chat.id,
+                    "gpt-5",
+                    &format!("input {index}"),
+                )
+                .await
+                .unwrap()
+        }));
+    }
+    let mut accepted = 0;
+    let mut busy = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            AcceptTurnOutcome::Accepted(_) => accepted += 1,
+            AcceptTurnOutcome::ChatBusy(_) => busy += 1,
+            outcome => panic!("unexpected competing outcome: {outcome:?}"),
+        }
+    }
+    assert_eq!(accepted, 1);
+    assert_eq!(busy, 7);
+    assert_eq!(
+        store.list_turn_runs(competing_chat.id).await.unwrap().len(),
+        1
+    );
+    assert_eq!(
+        store.list_messages(competing_chat.id).await.unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn concurrent_cross_chat_reuse_of_a_turn_id_commits_once() {
+    let (_dir, store) = temp_store().await;
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    let store = std::sync::Arc::new(store);
+    let turn_id = TurnId::new();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+    let mut tasks = Vec::new();
+    for chat_id in [first_chat.id, second_chat.id] {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .accept_turn(turn_id, chat_id, "gpt-5", "same input")
+                .await
+        }));
+    }
+
+    let mut accepted = 0;
+    let mut rejected = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            Ok(AcceptTurnOutcome::Accepted(_)) => accepted += 1,
+            Err(_) => rejected += 1,
+            outcome => panic!("unexpected cross-chat outcome: {outcome:?}"),
+        }
+    }
+    assert_eq!(accepted, 1);
+    assert_eq!(rejected, 1);
+    assert_eq!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().id,
+        turn_id
+    );
+    assert_eq!(
+        store.list_messages(first_chat.id).await.unwrap().len()
+            + store.list_messages(second_chat.id).await.unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn turn_acceptance_rolls_back_when_input_message_insert_fails() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_turn_input
+             BEFORE INSERT ON message
+             WHEN NEW.content = 'force failure'
+             BEGIN
+               SELECT RAISE(ABORT, 'forced input failure');
+             END;",
+        )
+        .await
+        .unwrap();
+
+    let turn_id = TurnId::new();
+    assert!(store
+        .accept_turn(turn_id, chat.id, "gpt-5", "force failure")
+        .await
+        .is_err());
+    assert_eq!(store.get_turn_run(turn_id).await.unwrap(), None);
+    assert!(store.list_turn_runs(chat.id).await.unwrap().is_empty());
+    assert!(store.list_messages(chat.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn turn_acceptance_rolls_back_message_when_turn_insert_fails() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_turn_run
+             BEFORE INSERT ON turn_run
+             WHEN NEW.model = 'force-run-failure'
+             BEGIN
+               SELECT RAISE(ABORT, 'forced turn failure');
+             END;",
+        )
+        .await
+        .unwrap();
+
+    let turn_id = TurnId::new();
+    assert!(store
+        .accept_turn(turn_id, chat.id, "force-run-failure", "input was inserted")
+        .await
+        .is_err());
+    assert_eq!(store.get_turn_run(turn_id).await.unwrap(), None);
+    assert!(store.list_turn_runs(chat.id).await.unwrap().is_empty());
+    assert!(store.list_messages(chat.id).await.unwrap().is_empty());
 }
 
 #[tokio::test]

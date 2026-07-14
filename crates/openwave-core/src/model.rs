@@ -621,6 +621,8 @@ pub struct TurnRun {
     pub id: TurnId,
     /// Conversation this turn belongs to.
     pub chat_id: ChatId,
+    /// Exact persisted user message that supplied this turn's initial input.
+    pub input_message_id: MessageId,
     /// Model selected when the turn was accepted.
     pub model: String,
     /// Durable delivery state.

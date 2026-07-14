@@ -186,6 +186,7 @@ pub mod turn_run {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
         pub chat_id: Uuid,
+        pub input_message_id: Uuid,
         pub model: String,
         pub status: String,
         pub attempt_count: i32,

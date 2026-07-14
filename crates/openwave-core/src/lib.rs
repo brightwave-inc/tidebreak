@@ -63,7 +63,7 @@ pub use provider::{
 };
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
-    BlobStore, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
+    AcceptTurnOutcome, BlobStore, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
     EnsureDocumentParseJobOutcome, SecretProvider, Store,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};

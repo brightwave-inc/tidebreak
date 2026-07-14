@@ -32,7 +32,8 @@ use crate::model::{
     DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, TurnRun, TurnRunStatus,
 };
 use crate::storage::{
-    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, Store,
+    AcceptTurnOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
+    EnsureDocumentParseJobOutcome, Store,
 };
 
 mod ops;
@@ -1648,6 +1649,16 @@ impl Store for DbStore {
 
     async fn list_turn_runs(&self, chat_id: ChatId) -> Result<Vec<TurnRun>> {
         ops::conversation::list_turn_runs(self, chat_id).await
+    }
+
+    async fn accept_turn(
+        &self,
+        id: TurnId,
+        chat_id: ChatId,
+        model: &str,
+        content: &str,
+    ) -> Result<AcceptTurnOutcome> {
+        ops::conversation::accept_turn(self, id, chat_id, model, content).await
     }
 
     async fn append_message(&self, message: &Message) -> Result<()> {
