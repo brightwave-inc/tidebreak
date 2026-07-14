@@ -161,7 +161,9 @@ stored on the chat. That is a temporary pre-alpha boundary, not the intended
 product model. Projects and conversations will instead resolve to distinct
 host-access contexts containing user-approved roots, and file operations will go
 through a capability-gated host-broker sidecar. See [Host access and connected
-folders](host-access.md). The model router supports Anthropic, OpenAI, and
+folders](host-access.md). An agent may ask the desktop to connect another folder,
+but the request only opens a native consent flow; it never grants a named path by
+itself. The model router supports Anthropic, OpenAI, and
 OpenAI-compatible endpoints. It fails closed: if no enabled provider with a
 usable credential can serve the selected model, no model request is sent.
 

@@ -1,0 +1,585 @@
+//! Deny-by-default capability grants and conversation attachments.
+//!
+//! These are persistence and protocol-safe value types. The matcher in this
+//! module exists only in tests to specify the intended grant and attachment
+//! intersection. A later broker operation layer must derive the capability and
+//! resource from a typed request, reauthorize, and perform the effect without
+//! handing callers a reusable authorization token.
+
+use chrono::{DateTime, Utc};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
+
+#[cfg(test)]
+use crate::ExecutionContext;
+use crate::{GrantId, GrantSubject, RelativePath, RootId};
+
+/// A class of host action guarded independently by the broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Capability {
+    /// Discover safe summaries of roots connected to this subject.
+    ListRoots,
+    /// List directories and read file bytes within a connected root.
+    ReadFiles,
+}
+
+/// Resource scope covered by one grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Scope {
+    /// A subject-wide action that touches no root, such as listing roots.
+    Subject,
+    /// An entire connected root.
+    Root { root_id: RootId },
+    /// One non-root subtree within a connected root.
+    PathSubtree {
+        root_id: RootId,
+        relative: RelativePath,
+    },
+}
+
+/// How the user expressed consent for a grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ConsentMethod {
+    /// The user chose a folder through a trusted native picker.
+    FolderPicker,
+    /// The user approved a capability in an explicit permission dialog.
+    PermissionDialog,
+    /// A local operator deliberately provisioned a headless installation.
+    OperatorConfig,
+}
+
+/// Auditable evidence attached to a grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsentRecord {
+    method: ConsentMethod,
+    granted_at: DateTime<Utc>,
+}
+
+impl ConsentRecord {
+    #[cfg(test)]
+    pub(crate) const fn new(method: ConsentMethod, granted_at: DateTime<Utc>) -> Self {
+        Self { method, granted_at }
+    }
+
+    /// Trusted interaction through which consent was captured.
+    pub const fn method(&self) -> ConsentMethod {
+        self.method
+    }
+
+    /// Host-stamped time at which the user granted access.
+    pub const fn granted_at(&self) -> DateTime<Utc> {
+        self.granted_at
+    }
+}
+
+/// A persisted authorization for one exact product subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Grant {
+    id: GrantId,
+    subject: GrantSubject,
+    capability: Capability,
+    scope: Scope,
+    consent: ConsentRecord,
+}
+
+impl Grant {
+    pub(crate) fn from_consent(
+        id: GrantId,
+        subject: GrantSubject,
+        capability: Capability,
+        scope: Scope,
+        consent: ConsentRecord,
+    ) -> Result<Self, GrantError> {
+        validate_capability_scope(capability, &scope)?;
+        Ok(Self {
+            id,
+            subject,
+            capability,
+            scope,
+            consent,
+        })
+    }
+
+    /// Stable identity recorded in operation receipts and audit entries.
+    pub const fn id(&self) -> GrantId {
+        self.id
+    }
+
+    /// Project or conversation to which the standing consent belongs.
+    pub const fn subject(&self) -> GrantSubject {
+        self.subject
+    }
+
+    /// Action class the user allowed.
+    pub const fn capability(&self) -> Capability {
+        self.capability
+    }
+
+    /// Root or subtree in which the action is allowed.
+    pub const fn scope(&self) -> &Scope {
+        &self.scope
+    }
+
+    /// How and when the grant was created.
+    pub const fn consent(&self) -> &ConsentRecord {
+        &self.consent
+    }
+}
+
+impl<'de> Deserialize<'de> for Grant {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireGrant {
+            id: GrantId,
+            subject: GrantSubject,
+            capability: Capability,
+            scope: Scope,
+            consent: ConsentRecord,
+        }
+
+        let wire = WireGrant::deserialize(deserializer)?;
+        Self::from_consent(
+            wire.id,
+            wire.subject,
+            wire.capability,
+            wire.scope,
+            wire.consent,
+        )
+        .map_err(D::Error::custom)
+    }
+}
+
+/// A root explicitly attached to one conversation.
+///
+/// Standing project consent alone is insufficient: every root operation must
+/// also match one of these broker-owned attachments for the active conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct RootAttachment {
+    conversation_id: Uuid,
+    root_id: RootId,
+}
+
+impl RootAttachment {
+    pub(crate) fn new(conversation_id: Uuid, root_id: RootId) -> Result<Self, GrantError> {
+        if conversation_id.is_nil() {
+            return Err(GrantError::NilConversation);
+        }
+        Ok(Self {
+            conversation_id,
+            root_id,
+        })
+    }
+
+    /// Conversation that explicitly selected this root.
+    pub const fn conversation_id(self) -> Uuid {
+        self.conversation_id
+    }
+
+    /// Attached broker root.
+    pub const fn root_id(self) -> RootId {
+        self.root_id
+    }
+}
+
+impl<'de> Deserialize<'de> for RootAttachment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireAttachment {
+            conversation_id: Uuid,
+            root_id: RootId,
+        }
+
+        let wire = WireAttachment::deserialize(deserializer)?;
+        Self::new(wire.conversation_id, wire.root_id).map_err(D::Error::custom)
+    }
+}
+
+/// Invalid trusted-control or persisted grant data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum GrantError {
+    /// Capability and scope do not describe a meaningful operation class.
+    #[error("capability cannot be granted with this scope")]
+    InvalidCapabilityScope,
+    /// A subtree grant must name at least one path segment.
+    #[error("a subtree grant cannot cover the root")]
+    EmptySubtree,
+    /// Nil conversation IDs cannot own attachments.
+    #[error("attachment conversation must not be nil")]
+    NilConversation,
+}
+
+fn validate_capability_scope(capability: Capability, scope: &Scope) -> Result<(), GrantError> {
+    match (capability, scope) {
+        (Capability::ListRoots, Scope::Subject) | (Capability::ReadFiles, Scope::Root { .. }) => {
+            Ok(())
+        }
+        (Capability::ReadFiles, Scope::PathSubtree { relative, .. }) if !relative.is_root() => {
+            Ok(())
+        }
+        (Capability::ReadFiles, Scope::PathSubtree { .. }) => Err(GrantError::EmptySubtree),
+        _ => Err(GrantError::InvalidCapabilityScope),
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Resource<'a> {
+    Subject,
+    Root(&'a RootId),
+    Path {
+        root_id: &'a RootId,
+        relative: &'a RelativePath,
+    },
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Authorization {
+    pub(crate) grant_id: GrantId,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Denied {
+    pub(crate) capability: Capability,
+}
+
+#[cfg(test)]
+pub(crate) fn authorize(
+    grants: &[Grant],
+    attachments: &[RootAttachment],
+    context: ExecutionContext,
+    capability: Capability,
+    resource: Resource<'_>,
+) -> Result<Authorization, Denied> {
+    let attached = match resource {
+        Resource::Subject => true,
+        Resource::Root(root_id) | Resource::Path { root_id, .. } => {
+            attachments.iter().any(|item| {
+                item.conversation_id == context.conversation_id() && item.root_id == *root_id
+            })
+        }
+    };
+    if !attached {
+        return Err(Denied { capability });
+    }
+
+    grants
+        .iter()
+        .find(|grant| {
+            context.grant_subject_matches(grant.subject)
+                && grant.capability == capability
+                && scope_covers(&grant.scope, resource)
+        })
+        .map(|grant| Authorization { grant_id: grant.id })
+        .ok_or(Denied { capability })
+}
+
+#[cfg(test)]
+fn scope_covers(scope: &Scope, resource: Resource<'_>) -> bool {
+    match (scope, resource) {
+        (Scope::Subject, Resource::Subject) => true,
+        (Scope::Root { root_id }, Resource::Root(requested)) => root_id == requested,
+        (
+            Scope::Root { root_id },
+            Resource::Path {
+                root_id: requested, ..
+            },
+        ) => root_id == requested,
+        (
+            Scope::PathSubtree { root_id, relative },
+            Resource::Path {
+                root_id: requested,
+                relative: requested_relative,
+            },
+        ) => root_id == requested && path_starts_with(requested_relative, relative),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+fn path_starts_with(candidate: &RelativePath, prefix: &RelativePath) -> bool {
+    let candidate = candidate.segments().collect::<Vec<_>>();
+    let prefix = prefix.segments().collect::<Vec<_>>();
+    candidate.len() >= prefix.len()
+        && prefix
+            .iter()
+            .zip(candidate.iter())
+            .all(|(left, right)| left == right)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    fn subject_project(id: Uuid) -> GrantSubject {
+        GrantSubject::project(id).unwrap()
+    }
+
+    fn subject_conversation(id: Uuid) -> GrantSubject {
+        GrantSubject::conversation(id).unwrap()
+    }
+
+    fn grant(subject: GrantSubject, capability: Capability, scope: Scope) -> Grant {
+        Grant::from_consent(
+            GrantId::new(),
+            subject,
+            capability,
+            scope,
+            ConsentRecord::new(
+                ConsentMethod::FolderPicker,
+                Utc.with_ymd_and_hms(2026, 7, 14, 0, 0, 0).unwrap(),
+            ),
+        )
+        .unwrap()
+    }
+
+    fn attachment(conversation_id: Uuid, root_id: RootId) -> RootAttachment {
+        RootAttachment::new(conversation_id, root_id).unwrap()
+    }
+
+    #[test]
+    fn denies_without_an_exact_live_grant_and_attachment() {
+        let conversation = Uuid::new_v4();
+        let context = ExecutionContext::standalone(conversation).unwrap();
+        let root = RootId::new();
+        let expected = Err(Denied {
+            capability: Capability::ReadFiles,
+        });
+        assert_eq!(
+            authorize(
+                &[],
+                &[attachment(conversation, root)],
+                context,
+                Capability::ReadFiles,
+                Resource::Root(&root),
+            ),
+            expected
+        );
+        let grants = [grant(
+            subject_conversation(conversation),
+            Capability::ReadFiles,
+            Scope::Root { root_id: root },
+        )];
+        assert_eq!(
+            authorize(
+                &grants,
+                &[],
+                context,
+                Capability::ReadFiles,
+                Resource::Root(&root),
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn project_consent_is_intersected_with_conversation_attachment() {
+        let project = Uuid::new_v4();
+        let attached_conversation = Uuid::new_v4();
+        let other_conversation = Uuid::new_v4();
+        let root = RootId::new();
+        let grants = [grant(
+            subject_project(project),
+            Capability::ReadFiles,
+            Scope::Root { root_id: root },
+        )];
+        let attachments = [attachment(attached_conversation, root)];
+
+        assert!(authorize(
+            &grants,
+            &attachments,
+            ExecutionContext::project_chat(attached_conversation, project).unwrap(),
+            Capability::ReadFiles,
+            Resource::Root(&root),
+        )
+        .is_ok());
+        assert!(authorize(
+            &grants,
+            &attachments,
+            ExecutionContext::project_chat(other_conversation, project).unwrap(),
+            Capability::ReadFiles,
+            Resource::Root(&root),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn subject_wide_root_discovery_does_not_require_a_root_attachment() {
+        let project = Uuid::new_v4();
+        let conversation = Uuid::new_v4();
+        let grants = [grant(
+            subject_project(project),
+            Capability::ListRoots,
+            Scope::Subject,
+        )];
+        assert!(authorize(
+            &grants,
+            &[],
+            ExecutionContext::project_chat(conversation, project).unwrap(),
+            Capability::ListRoots,
+            Resource::Subject,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_a_grant_from_another_project_or_conversation() {
+        let conversation = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let root = RootId::new();
+        let attachments = [attachment(conversation, root)];
+        let context = ExecutionContext::project_chat(conversation, project).unwrap();
+        for subject in [
+            subject_project(Uuid::new_v4()),
+            subject_conversation(Uuid::new_v4()),
+        ] {
+            let grants = [grant(
+                subject,
+                Capability::ReadFiles,
+                Scope::Root { root_id: root },
+            )];
+            assert!(authorize(
+                &grants,
+                &attachments,
+                context,
+                Capability::ReadFiles,
+                Resource::Root(&root),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn selects_the_exact_root_in_a_multi_root_context() {
+        let conversation = Uuid::new_v4();
+        let context = ExecutionContext::standalone(conversation).unwrap();
+        let allowed = RootId::new();
+        let other = RootId::new();
+        let grants = [grant(
+            subject_conversation(conversation),
+            Capability::ReadFiles,
+            Scope::Root { root_id: allowed },
+        )];
+        let attachments = [
+            attachment(conversation, allowed),
+            attachment(conversation, other),
+        ];
+        assert!(authorize(
+            &grants,
+            &attachments,
+            context,
+            Capability::ReadFiles,
+            Resource::Root(&allowed),
+        )
+        .is_ok());
+        assert!(authorize(
+            &grants,
+            &attachments,
+            context,
+            Capability::ReadFiles,
+            Resource::Root(&other),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn subtree_grants_cover_only_segment_aligned_descendants() {
+        let conversation = Uuid::new_v4();
+        let context = ExecutionContext::standalone(conversation).unwrap();
+        let root = RootId::new();
+        let subtree = RelativePath::parse("reports/approved").unwrap();
+        let inside = RelativePath::parse("reports/approved/q1.md").unwrap();
+        let sibling = RelativePath::parse("reports/approved-old/q1.md").unwrap();
+        let grants = [grant(
+            subject_conversation(conversation),
+            Capability::ReadFiles,
+            Scope::PathSubtree {
+                root_id: root,
+                relative: subtree,
+            },
+        )];
+        let attachments = [attachment(conversation, root)];
+        assert!(authorize(
+            &grants,
+            &attachments,
+            context,
+            Capability::ReadFiles,
+            Resource::Path {
+                root_id: &root,
+                relative: &inside,
+            },
+        )
+        .is_ok());
+        assert!(authorize(
+            &grants,
+            &attachments,
+            context,
+            Capability::ReadFiles,
+            Resource::Path {
+                root_id: &root,
+                relative: &sibling,
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn invalid_capability_scope_pairs_cannot_deserialize() {
+        let subject = subject_project(Uuid::new_v4());
+        let consent = ConsentRecord::new(ConsentMethod::FolderPicker, Utc::now());
+        let invalid = serde_json::json!({
+            "id": GrantId::new(),
+            "subject": subject,
+            "capability": "list_roots",
+            "scope": { "kind": "root", "root_id": RootId::new() },
+            "consent": consent,
+        });
+        assert!(serde_json::from_value::<Grant>(invalid).is_err());
+    }
+
+    #[test]
+    fn revocation_is_a_fresh_snapshot_not_a_cached_directory_handle() {
+        let conversation = Uuid::new_v4();
+        let context = ExecutionContext::standalone(conversation).unwrap();
+        let root = RootId::new();
+        let mut grants = vec![grant(
+            subject_conversation(conversation),
+            Capability::ReadFiles,
+            Scope::Root { root_id: root },
+        )];
+        let attachments = [attachment(conversation, root)];
+        assert!(authorize(
+            &grants,
+            &attachments,
+            context,
+            Capability::ReadFiles,
+            Resource::Root(&root),
+        )
+        .is_ok());
+        grants.clear();
+        assert!(authorize(
+            &grants,
+            &attachments,
+            context,
+            Capability::ReadFiles,
+            Resource::Root(&root),
+        )
+        .is_err());
+    }
+}

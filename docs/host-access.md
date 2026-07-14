@@ -33,6 +33,9 @@ In practical terms:
   paths. It never receives authority by naming an absolute host path.
 - Connecting one folder never grants access to its siblings, the user's whole
   home directory, or another project's roots.
+- An agent can request access to another folder, including familiar locations
+  such as Documents or Downloads. The request can explain why and suggest where
+  to open the picker, but only the folder the user actually selects is granted.
 
 The current `workspace_dir` fields on projects and chats do not express this
 model. They are temporary pre-alpha implementation details and will be replaced
@@ -100,6 +103,38 @@ The host-access context and the conversation's attached-root set are supplied by
 trusted conversation execution state, not by model-generated tool arguments.
 This stops a model from selecting a different project's context even if it
 guesses an identifier.
+
+## Agent-requested access
+
+Agents need a safe way to ask for a folder they cannot currently see. This is a
+two-step product workflow, not a privileged broker operation:
+
+1. The agent records an access request with a stable identity, a user-readable
+   reason, untrusted proposals for the capabilities it needs, and an optional
+   folder hint such as `Documents`, `Downloads`, or a project name.
+2. The desktop renders a request card. Only after the user accepts that card does
+   it open a native folder picker. A hint may choose the picker's starting
+   location, but it confers no authority. Durable coalescing and rate limits keep
+   an agent from creating repeated modal prompts.
+3. If the user selects a folder, the trusted desktop host derives and displays a
+   fixed low-risk capability set, then sends a control request containing the
+   picker result and that host-defined set. It never copies the agent's proposed
+   capability list into a grant. The broker canonicalizes the root, applies
+   policy, and records only those capabilities. Command execution, destructive
+   writes, and other high-risk access require their own explicit permission
+   dialogs.
+4. The original operation can retry against the returned opaque root identity.
+   Cancelling or rejecting the picker resolves the request without any grant.
+
+The control plane should persist the request and its resolution so a restart or
+ambiguous response does not create duplicate prompts or grants. The broker
+control remains idempotent under its own stable operation identity. Agents never
+receive an API that accepts an absolute path, and they cannot silently connect a
+standard folder by naming it.
+
+Root policy intentionally refuses the user's entire home directory while
+allowing specific children such as `~/Documents`, `~/Downloads`, or a nested
+project folder when the user selects them.
 
 ## Capabilities and paths
 
@@ -173,11 +208,14 @@ provisioned grants with clear operator intent.
 This will land in independently reviewable pieces:
 
 1. Add `openwave-host-broker` with typed capabilities, grants, access-context and
-   root identifiers, deny-by-default authorization, and path policy tests.
-2. Add the versioned control/operation protocol and a minimal sidecar vertical
-   slice: hello, register/revoke/list roots, list directory, and read file.
-3. Add the Tauri sidecar client and native folder-picker controls. Broker state,
-   audit, scratch, and handoffs live under OpenWave's application data directory;
+   root identifiers, authorization value-model/specification tests, and
+   descriptor-pinned root policy.
+2. Add the versioned control/operation protocol and an owning broker that performs
+   live authorization and each filesystem effect together: hello,
+   register/revoke/list roots, list directory, and read file.
+3. Add the Tauri sidecar client, connected-folder UI, and the durable
+   agent-request → native-picker → grant → retry workflow. Broker state, audit,
+   scratch, and handoffs live under OpenWave's application data directory;
    remove the automatic `Documents/OpenWave` folder.
 4. Replace project/chat `workspace_dir` with persisted host-access context
    identity and connected-root APIs. This can update the pre-v1 baseline schema
