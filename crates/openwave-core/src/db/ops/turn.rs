@@ -10,6 +10,7 @@ use crate::model::{TurnRun, TurnRunStatus};
 use crate::storage::AcceptTurnOutcome;
 
 use super::super::{entities, store_err, DbStore};
+use super::acquire_chat_write_lock;
 
 mod resolution;
 
@@ -52,16 +53,7 @@ pub(in crate::db) async fn accept_turn(
     validate_turn_input(model, content)?;
 
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    let chat_lock = entities::chat::Entity::update_many()
-        .col_expr(
-            entities::chat::Column::Title,
-            sea_orm::sea_query::Expr::col(entities::chat::Column::Title).into(),
-        )
-        .filter(entities::chat::Column::Id.eq(chat_id.0))
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
-    if chat_lock.rows_affected != 1 {
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
         return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
     }
 

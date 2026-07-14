@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use openwave_core::{
-    AcceptTurnOutcome, Chat, ChatId, CompleteTurnRunOutcome, DbStore,
+    AcceptTurnOutcome, AgentEvent, Chat, ChatId, CompleteTurnRunOutcome, DbStore,
     FinishTurnCancellationOutcome, Message, MessageId, RecordTurnFailureOutcome,
     RequestTurnCancellationOutcome, Role, Store, TurnFailureRetry, TurnId, TurnRunStatus,
 };
@@ -326,5 +326,38 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             .await
             .unwrap(),
         Some(FinishTurnCancellationOutcome::Existing(cancelled))
+    );
+
+    let event_chat = sample_chat();
+    store.create_chat(&event_chat).await.unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(16));
+    let mut writers = Vec::new();
+    for index in 0..16 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        writers.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .append_event(
+                    event_chat.id,
+                    &AgentEvent::TextDelta {
+                        text: format!("postgres delta {index}"),
+                    },
+                )
+                .await
+                .unwrap()
+        }));
+    }
+    let mut assigned = Vec::new();
+    for writer in writers {
+        assigned.push(writer.await.unwrap());
+    }
+    assigned.sort_unstable();
+    assert_eq!(assigned, (1..=16).collect::<Vec<_>>());
+    let events = store.list_events(event_chat.id, 0).await.unwrap();
+    assert_eq!(events.len(), 16);
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        (1..=16).collect::<Vec<_>>()
     );
 }

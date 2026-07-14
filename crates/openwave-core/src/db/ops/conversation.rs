@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+};
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
@@ -10,6 +12,7 @@ use crate::id::{CallId, ChatId, MessageId, ProjectId, TurnId};
 use crate::model::{Chat, Message, Role, ToolCallRecord};
 
 use super::super::{entities, store_err, DbStore};
+use super::acquire_chat_write_lock;
 
 pub(in crate::db) async fn create_chat(store: &DbStore, chat: &Chat) -> Result<()> {
     entities::chat::ActiveModel {
@@ -139,19 +142,23 @@ pub(in crate::db) async fn append_event(
     chat_id: ChatId,
     event: &AgentEvent,
 ) -> Result<i64> {
-    // Next seq for this chat. This assumes a single writer per chat —
-    // the server enforces it by allowing only one active turn per chat at
-    // a time (a concurrent message is refused, not queued behind a second
-    // writer). Under that invariant read-then-insert is race-free; the
-    // composite (chat_id, seq) primary key is the backstop that turns any
-    // concurrent double-write into an error, never a silent dup or lost seq.
+    // Serialize sequence allocation on the durable chat row. This is also the
+    // lock used by turn acceptance, so independently running servers cannot
+    // race a journal append with the next turn's admission.
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
+    }
+
     let last = entities::event::Entity::find()
         .filter(entities::event::Column::ChatId.eq(chat_id.0))
         .order_by_desc(entities::event::Column::Seq)
-        .one(&store.conn)
+        .one(&transaction)
         .await
         .map_err(store_err)?;
-    let seq = last.map_or(0, |model| model.seq) + 1;
+    let seq = last
+        .map_or(Some(1), |model| model.seq.checked_add(1))
+        .ok_or_else(|| AgentError::Store(format!("event sequence exhausted for chat {chat_id}")))?;
 
     entities::event::ActiveModel {
         chat_id: Set(chat_id.0),
@@ -159,9 +166,10 @@ pub(in crate::db) async fn append_event(
         payload: Set(serde_json::to_value(event)?),
         created_at: Set(Utc::now()),
     }
-    .insert(&store.conn)
+    .insert(&transaction)
     .await
     .map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
     Ok(seq)
 }
 
