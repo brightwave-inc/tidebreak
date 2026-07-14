@@ -14,7 +14,19 @@ workspace = true
 default = ["sqlite", "keychain", "tools", "blob-fs"]
 # The default SeaORM-backed Store with the SQLite driver. Turn off
 # (`default-features = false`) to depend on just the trait contracts.
-sqlite = ["dep:sea-orm", "dep:sea-orm-migration"]
+sqlite = [
+    "dep:sea-orm",
+    "dep:sea-orm-migration",
+    "sea-orm/sqlx-sqlite",
+    "sea-orm-migration/sqlx-sqlite",
+]
+# PostgreSQL-backed Store for self-hosted deployments and cross-backend tests.
+postgres = [
+    "dep:sea-orm",
+    "dep:sea-orm-migration",
+    "sea-orm/sqlx-postgres",
+    "sea-orm-migration/sqlx-postgres",
+]
 # The OS-keychain-backed SecretProvider.
 keychain = ["dep:keyring", "dep:tokio"]
 # The built-in filesystem tools (read_file / list_dir / write_file).

@@ -196,10 +196,58 @@ jobs:
       - name: test
         run: cargo test --workspace --locked
 
+  postgres:
+    name: postgres state machine
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: openwave_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d openwave_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      OPENWAVE_POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/openwave_test
+      OPENWAVE_REQUIRE_POSTGRES_TEST: "true"
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: v0.16.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-registry
+          add-job-id-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Exercise durable turn state on PostgreSQL
+        run: >-
+          cargo test -p openwave-core --no-default-features --features postgres
+          --test postgres_turn_state --locked
+
   rust:
     name: fmt · clippy · build · test
     if: ${{ always() }}
-    needs: [changes, fmt, lint, build, test]
+    needs: [changes, fmt, lint, build, test, postgres]
     runs-on: ubuntu-latest
     steps:
       - name: Require every Rust lane
@@ -208,6 +256,7 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          POSTGRES_RESULT: ${{ needs.postgres.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUST_CHANGED: ${{ needs.changes.outputs.rust }}
         run: |
@@ -218,12 +267,14 @@ jobs:
               test "$LINT_RESULT" = success
               test "$BUILD_RESULT" = success
               test "$TEST_RESULT" = success
+              test "$POSTGRES_RESULT" = success
               ;;
             false)
               test "$FMT_RESULT" = skipped
               test "$LINT_RESULT" = skipped
               test "$BUILD_RESULT" = skipped
               test "$TEST_RESULT" = skipped
+              test "$POSTGRES_RESULT" = skipped
               ;;
             *)
               echo "invalid Rust change detector output: $RUST_CHANGED" >&2

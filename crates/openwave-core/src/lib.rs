@@ -20,7 +20,7 @@ pub mod blob;
 pub mod cancel;
 pub mod config;
 pub mod context;
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod db;
 pub mod error;
 pub mod event;
@@ -43,7 +43,7 @@ pub use approval::{
 pub use blob::FsBlobStore;
 pub use cancel::{CancelToken, Cancelled};
 pub use config::{Config, Profile};
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use db::DbStore;
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};

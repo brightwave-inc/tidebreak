@@ -455,7 +455,9 @@ async fn document_constraints_reject_invalid_catalog_state() {
     assert!(entities::document::Entity::update_many()
         .col_expr(
             entities::document::Column::SourceSha256,
-            sea_orm::sea_query::Expr::value(Some(vec![0x22; 31])),
+            sea_orm::sea_query::Expr::value(sea_orm::sea_query::Value::Bytes(Some(Box::new(
+                vec![0x22; 31],
+            )))),
         )
         .filter(entities::document::Column::Id.eq(valid_source.id.0))
         .exec(&store.conn)
