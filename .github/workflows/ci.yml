@@ -165,6 +165,10 @@ jobs:
         run: cargo fetch --locked
       - name: build
         run: cargo build --workspace --locked
+      # Keep desktop test coverage here, where the Tauri system dependencies
+      # are already installed. The headless test lane can then avoid that graph.
+      - name: desktop tests
+        run: cargo test -p openwave-desktop --locked
 
   test:
     name: test
@@ -188,15 +192,12 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
         with:
           version: v0.16.0
-      - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
+      - name: Install headless system deps (protobuf for the LanceDB vector store)
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
+          sudo apt-get install -y --no-install-recommends \
+            libprotobuf-dev \
             mold \
-            patchelf \
             protobuf-compiler
       - uses: Swatinem/rust-cache@v2
         with:
@@ -205,8 +206,8 @@ jobs:
           cache-bin: false
           cache-targets: false
           save-if: false
-      - name: test
-        run: cargo test --workspace --locked
+      - name: headless tests
+        run: cargo test --workspace --exclude openwave-desktop --locked
 
   postgres:
     name: postgres state machine
