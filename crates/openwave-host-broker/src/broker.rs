@@ -46,6 +46,8 @@ use state_file::StateFile;
 const MAX_READ_FILE_BYTES: usize = 64 * 1024;
 const MAX_LIST_DIR_BYTES: usize = 64 * 1024;
 const MAX_LIST_DIR_ENTRIES: usize = 4_096;
+const MAX_LIST_ROOTS: usize = 256;
+const MAX_ROOT_DISPLAY_BYTES: usize = 1024;
 
 /// A broker request failed without widening host access.
 #[derive(Debug, Error)]
@@ -76,6 +78,8 @@ pub enum BrokerError {
     NotUtf8,
     #[error("directory listing exceeds broker limits")]
     DirectoryTooLarge,
+    #[error("connected root listing exceeds broker limits")]
+    RootListTooLarge,
     #[error(transparent)]
     RootPolicy(#[from] RootPolicyError),
     #[error(transparent)]
@@ -439,11 +443,7 @@ impl Controller {
             return Err(BrokerError::InvalidConsentMethod);
         }
         let validated = self.shared.policy.open_root(&request.path)?;
-        let display_name = validated
-            .canonical_path()
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Connected folder".to_owned());
+        let display_name = root_display_name(validated.canonical_path());
         let root_id = RootId::new();
         let result = RegisterRootResult {
             root: RootSummary {
@@ -761,13 +761,14 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             "selected folder is not an allowed connected root",
             false,
         ),
-        BrokerError::FileTooLarge | BrokerError::DirectoryTooLarge | BrokerError::StateTooLarge => {
-            (
-                ErrorCode::TooLarge,
-                "host operation exceeded its limit",
-                false,
-            )
-        }
+        BrokerError::FileTooLarge
+        | BrokerError::DirectoryTooLarge
+        | BrokerError::RootListTooLarge
+        | BrokerError::StateTooLarge => (
+            ErrorCode::TooLarge,
+            "host operation exceeded its limit",
+            false,
+        ),
         BrokerError::NotRegularFile | BrokerError::NotUtf8 => (
             ErrorCode::UnsupportedContent,
             "host resource has an unsupported content type",
@@ -959,13 +960,32 @@ fn list_roots(
             root_id: *root_id,
             display_name: root.display_name.clone(),
         })
+        .take(MAX_LIST_ROOTS + 1)
         .collect::<Vec<_>>();
+    if roots.len() > MAX_LIST_ROOTS {
+        return Err(BrokerError::RootListTooLarge);
+    }
     roots.sort_by(|left, right| {
         left.display_name
             .cmp(&right.display_name)
             .then_with(|| left.root_id.to_string().cmp(&right.root_id.to_string()))
     });
     Ok((OperationResult::ListRoots { roots }, grant_id))
+}
+
+fn root_display_name(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Connected folder".to_owned());
+    if name.len() <= MAX_ROOT_DISPLAY_BYTES {
+        return name;
+    }
+    let mut boundary = MAX_ROOT_DISPLAY_BYTES;
+    while !name.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    name[..boundary].to_owned()
 }
 
 fn list_directory(root: &Dir, path: &RelativePath) -> Result<OperationResult, BrokerError> {
@@ -1494,6 +1514,62 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn connected_root_results_are_bounded_before_transport_serialization() {
+        let (_temp, broker, path) = setup();
+        let conversation = Uuid::new_v4();
+        let subject = GrantSubject::conversation(conversation).unwrap();
+        let consent = ConsentRecord::new(ConsentMethod::FolderPicker, Utc::now());
+        let pinned = Arc::new(broker.shared.policy.open_root(&path).unwrap());
+        let mut state = State::default();
+        state.grants.push(
+            Grant::from_consent(
+                GrantId::new(),
+                subject,
+                Capability::ListRoots,
+                Scope::Subject,
+                consent.clone(),
+            )
+            .unwrap(),
+        );
+        for _ in 0..=MAX_LIST_ROOTS {
+            let root_id = RootId::new();
+            state.roots.insert(
+                root_id,
+                RegisteredRoot {
+                    owner: subject,
+                    display_name: "Documents".to_owned(),
+                    root: pinned.clone(),
+                },
+            );
+            state
+                .attachments
+                .push(RootAttachment::new(conversation, root_id).unwrap());
+            state.grants.push(
+                Grant::from_consent(
+                    GrantId::new(),
+                    subject,
+                    Capability::ReadFiles,
+                    Scope::Root { root_id },
+                    consent.clone(),
+                )
+                .unwrap(),
+            );
+        }
+        assert!(matches!(
+            list_roots(&state, ExecutionContext::standalone(conversation).unwrap()),
+            Err(BrokerError::RootListTooLarge)
+        ));
+    }
+
+    #[test]
+    fn connected_root_display_names_are_bounded_on_utf8_boundaries() {
+        let component = "é".repeat(MAX_ROOT_DISPLAY_BYTES);
+        let display = root_display_name(Path::new(&component));
+        assert!(display.len() <= MAX_ROOT_DISPLAY_BYTES);
+        assert!(display.is_char_boundary(display.len()));
     }
 
     #[test]

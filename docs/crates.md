@@ -96,9 +96,11 @@ audit event naming its result and authorizing grant; synced JSONL rotation bound
 local retention without recording absolute paths or contents. Partial writes
 are rolled back before retry, interrupted tails/rotations recover on restart,
 and degraded read-tier audit does not withhold the user's existing file access.
-The sidecar adapter and Tauri consent UI are the next slices; until those land,
-existing file tools do not use this boundary. See [Host access and connected
-folders](host-access.md).
+A runnable sidecar exposes the same core over bounded, strict JSONL stdio,
+resynchronizes after oversized input, and protects its own app-data directory
+from ever becoming a connected root. The Tauri client and consent UI are the
+next slices; until those land, existing file tools do not use this boundary. See
+[Host access and connected folders](host-access.md).
 
 **Depends on:** no OpenWave client crate.
 

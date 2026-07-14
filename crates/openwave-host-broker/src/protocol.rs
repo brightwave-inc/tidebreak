@@ -40,7 +40,12 @@ pub struct OperationEnvelope {
 
 /// Trusted control actions. Agent code must not receive a [`crate::Controller`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "control", content = "payload", rename_all = "snake_case")]
+#[serde(
+    tag = "control",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 #[non_exhaustive]
 pub enum ControlRequest {
     /// Version negotiation. This request is accepted even when its envelope
@@ -79,7 +84,12 @@ pub struct RevokeRootRequest {
 
 /// Capability-checked agent operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "operation", content = "payload", rename_all = "snake_case")]
+#[serde(
+    tag = "operation",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 #[non_exhaustive]
 pub enum OperationRequest {
     /// Discover safe summaries of roots available to the active conversation.
@@ -267,6 +277,21 @@ mod tests {
             RootId::new(),
         );
         assert!(serde_json::from_str::<OperationEnvelope>(&encoded).is_err());
+    }
+
+    #[test]
+    fn request_variants_reject_unknown_sibling_fields() {
+        let control = format!(
+            r#"{{"protocol_version":1,"request_id":"{}","request":{{"control":"hello","extra":true}}}}"#,
+            RequestId::new()
+        );
+        assert!(serde_json::from_str::<ControlEnvelope>(&control).is_err());
+        let operation = format!(
+            r#"{{"protocol_version":1,"request_id":"{}","context":{{"conversation_id":"{}","project_id":null}},"request":{{"operation":"list_roots","extra":true}}}}"#,
+            RequestId::new(),
+            Uuid::new_v4(),
+        );
+        assert!(serde_json::from_str::<OperationEnvelope>(&operation).is_err());
     }
 
     #[test]

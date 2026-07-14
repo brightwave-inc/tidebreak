@@ -8,6 +8,10 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "openwave-host-broker"
+path = "src/bin/openwave-host-broker.rs"
+
 [dependencies]
 cap-fs-ext.workspace = true
 cap-std.workspace = true
