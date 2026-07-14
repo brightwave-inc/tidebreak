@@ -78,7 +78,7 @@ export default function App() {
         setModels(catalog.models);
         setProviders(providerList.providers);
         const created = await client.createChat(
-          info.workspaceDir,
+          info.scratchDir,
           catalog.models[0]?.id,
         );
         if (cancelled) return;
@@ -345,7 +345,7 @@ export default function App() {
               }}
             />
             <span title={chat.workspace_dir}>
-              workspace · {shortPath(chat.workspace_dir)}
+              private scratch · {shortPath(chat.workspace_dir)}
             </span>
           </div>
 

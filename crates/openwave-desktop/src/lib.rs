@@ -22,8 +22,9 @@ pub struct ServerInfo {
     pub base_url: String,
     /// Per-launch bearer token.
     pub token: String,
-    /// Absolute workspace path used for new chats in this session.
-    pub workspace_dir: String,
+    /// App-private scratch path used by legacy direct file tools until they are
+    /// routed through the host broker.
+    pub scratch_dir: String,
 }
 
 struct AppState {
@@ -55,15 +56,18 @@ fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Default workspace for chats created from the shell (Documents/OpenWave).
-fn default_workspace(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let docs = app
-        .path()
-        .document_dir()
-        .map_err(|e| format!("documents dir: {e}"))?;
-    let workspace = docs.join("OpenWave");
-    std::fs::create_dir_all(&workspace).map_err(|e| format!("create workspace: {e}"))?;
-    Ok(workspace)
+/// Private scratch for the current desktop profile. This is operational app
+/// data, not a connected user folder and never appears in a native picker.
+fn private_scratch(data_dir: &std::path::Path) -> Result<PathBuf, String> {
+    let scratch = data_dir.join("scratch");
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("create private scratch: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("restrict private scratch: {e}"))?;
+    }
+    Ok(scratch)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -77,10 +81,10 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             let data = data_dir(&handle)?;
-            let workspace = default_workspace(&handle)?;
+            let scratch = private_scratch(&data)?;
 
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = boot_server(info_tx, data, workspace).await {
+                if let Err(error) = boot_server(info_tx, data, scratch).await {
                     eprintln!("openwave-desktop: {error}");
                 }
             });
@@ -94,7 +98,7 @@ pub fn run() {
 async fn boot_server(
     info_tx: watch::Sender<Option<ServerInfo>>,
     data_dir: PathBuf,
-    workspace_dir: PathBuf,
+    scratch_dir: PathBuf,
 ) -> Result<(), String> {
     let server = openwave_server::bind(Config::desktop(data_dir))
         .await
@@ -102,7 +106,7 @@ async fn boot_server(
     let info = ServerInfo {
         base_url: format!("http://{}", server.local_addr()),
         token: server.token().to_string(),
-        workspace_dir: workspace_dir.display().to_string(),
+        scratch_dir: scratch_dir.display().to_string(),
     };
     let _ = info_tx.send(Some(info));
     server.serve().await.map_err(|e| e.to_string())

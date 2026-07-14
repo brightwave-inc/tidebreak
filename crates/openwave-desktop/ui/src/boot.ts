@@ -6,7 +6,7 @@ import type { ServerInfo } from "./api";
  *
  * - Inside Tauri: `server_info` from the host (in-process server).
  * - In a plain browser (`pnpm --dir ui dev`): `VITE_OPENWAVE_URL` +
- *   `VITE_OPENWAVE_TOKEN` (+ optional `VITE_OPENWAVE_WORKSPACE`), so the same
+ *   `VITE_OPENWAVE_TOKEN` + explicit `VITE_OPENWAVE_SCRATCH`, so the same
  *   React app can be exercised against `openwave serve`.
  */
 export async function resolveServerInfo(): Promise<ServerInfo> {
@@ -18,7 +18,8 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
   if (fromEnv) return fromEnv;
 
   throw new Error(
-    "Set VITE_OPENWAVE_URL and VITE_OPENWAVE_TOKEN (from `openwave serve`) " +
+    "Set VITE_OPENWAVE_URL, VITE_OPENWAVE_TOKEN, and VITE_OPENWAVE_SCRATCH " +
+      "(for `openwave serve`) " +
       "to run the UI in a browser, or launch via `cargo tauri dev`.",
   );
 }
@@ -28,19 +29,12 @@ function envServerInfo(): ServerInfo | null {
   const token = import.meta.env.VITE_OPENWAVE_TOKEN?.trim();
   if (!baseUrl || !token) return null;
 
-  const workspaceDir =
-    import.meta.env.VITE_OPENWAVE_WORKSPACE?.trim() ||
-    defaultWorkspaceFallback();
+  const scratchDir = import.meta.env.VITE_OPENWAVE_SCRATCH?.trim();
+  if (!scratchDir) return null;
 
   return {
     baseUrl: baseUrl.replace(/\/$/, ""),
     token,
-    workspaceDir,
+    scratchDir,
   };
-}
-
-function defaultWorkspaceFallback(): string {
-  // Absolute path required by the API; browser-dev users should set
-  // VITE_OPENWAVE_WORKSPACE to a real directory on the machine running serve.
-  return "/tmp/openwave-workspace";
 }
