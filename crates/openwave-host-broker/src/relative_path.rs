@@ -8,6 +8,9 @@ use thiserror::Error;
 /// Why a requested root-relative path was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum RelativePathError {
+    /// Paths are bounded before filesystem or audit processing.
+    #[error("path exceeds its size limit")]
+    TooLong,
     /// Absolute paths are never part of the agent-facing protocol.
     #[error("path must be relative to a registered root")]
     Absolute,
@@ -35,6 +38,9 @@ pub struct RelativePath(String);
 impl RelativePath {
     /// Validate and normalize an untrusted protocol path.
     pub fn parse(input: &str) -> Result<Self, RelativePathError> {
+        if input.len() > 1024 {
+            return Err(RelativePathError::TooLong);
+        }
         if input.starts_with('/') {
             return Err(RelativePathError::Absolute);
         }
@@ -152,6 +158,10 @@ mod tests {
 
     #[test]
     fn rejects_absolute_parent_and_nonportable_paths_on_every_host() {
+        assert!(matches!(
+            RelativePath::parse(&"a".repeat(1025)),
+            Err(RelativePathError::TooLong)
+        ));
         for absolute in ["/etc/passwd", "\\server\\share", "C:/Windows"] {
             assert!(RelativePath::parse(absolute).is_err(), "{absolute}");
         }

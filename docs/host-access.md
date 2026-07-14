@@ -183,6 +183,21 @@ intent cannot be recorded durably. App-private scratch may allow replacement;
 connected roots default to additive, no-clobber writes, with replacement and
 deletion modeled as distinct higher-risk actions.
 
+The local audit is structured JSONL under the broker-private data directory. It
+records opaque root IDs and bounded root-relative paths, never absolute host
+paths, raw OS errors, or file contents. Each append is synced before returning;
+the active file and one previous generation provide bounded local retention.
+Transient append failures retry only after the partial attempt has been rolled
+back and synced; an ambiguous append or rotation degrades the sink until restart,
+where an incomplete tail and interrupted rotation are repaired before new
+records are accepted. Unix rotation syncs the containing directory and Windows
+uses write-through file moves. Read-tier audit initialization or append failure
+is reported locally but does not prevent the user from reading their own files.
+Future write, command, and computer-control operations must durably record a
+bounded intent before acting and refuse the action if that record cannot be
+written. Forwarding this local trail off-device is a separate, explicit privacy
+decision, not a side effect of choosing a hosted model.
+
 ## Deployment evolution
 
 The trust boundary does not move when deployment changes:
@@ -219,7 +234,9 @@ This will land in independently reviewable pieces:
    validate the bounded state file and revalidate and descriptor-pin every
    persisted root before advertising it. A mutation with ambiguous publication
    fails the broker closed until restart.
-4. Add bounded audit records for every machine-touching operation.
+4. Add bounded audit records for every machine-touching operation, including
+   the exact grant that authorized an operation, de-sensitized targets, and
+   local two-generation retention.
 5. Expose the same contract through a versioned sidecar adapter.
 6. Add the Tauri sidecar client, connected-folder UI, and the durable
    agent-request → native-picker → grant → retry workflow. Broker state, audit,

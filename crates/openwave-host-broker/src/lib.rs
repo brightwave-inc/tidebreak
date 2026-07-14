@@ -7,6 +7,7 @@
 //! revocation therefore fences in-flight results without waiting on host I/O.
 //! No desktop runtime or concrete transport is referenced here.
 
+pub mod audit;
 pub mod broker;
 pub mod capability;
 pub mod id;
@@ -14,6 +15,10 @@ pub mod path_policy;
 pub mod protocol;
 pub mod relative_path;
 
+pub use audit::{
+    AuditActor, AuditError, AuditEvent, AuditLabel, AuditOperation, AuditOutcome, AuditSink,
+    AuditTarget,
+};
 pub use broker::{Broker, BrokerError, Controller, Operator};
 pub use capability::{
     Capability, ConsentMethod, ConsentRecord, Grant, GrantError, RootAttachment, Scope,
