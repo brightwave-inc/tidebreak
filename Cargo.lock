@@ -5780,6 +5780,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "openwave-host-broker"
+version = "0.0.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "openwave-mcp"
 version = "0.0.0"
 dependencies = [

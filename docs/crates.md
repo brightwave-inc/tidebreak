@@ -12,7 +12,7 @@ libraries.
                                └────── openwave-server
                                             │
       libraries          openwave-mcp   openwave-retrieval   openwave-router
-                         openwave-host-broker (planned)          │
+                         openwave-host-broker                    │
                                │             │                   │
                                └─────────────┴───────────────────┘
                                             │
@@ -81,12 +81,13 @@ connector tools that list and fetch from sources like Drive and Box.
 
 **Depends on:** nothing in the workspace yet.
 
-## `openwave-host-broker` — consented host access ⚪
+## `openwave-host-broker` — consented host access 🟡
 
-The planned runtime-neutral trust boundary for connected local folders. It will
-own capability grants, root registration, path policy, audited filesystem
-operations, and a versioned sidecar protocol. The Tauri host will own native
-consent UI; agent execution will receive only the operation interface. See
+The runtime-neutral policy foundation for connected local folders. It now owns
+opaque root/grant/operation identities, validated grant and attachment values,
+portable relative paths, and descriptor-pinned root policy. The owning operation
+layer, durable registry, sidecar adapter, audit, and Tauri consent UI are the next
+slices; until those land, existing file tools do not use this boundary. See
 [Host access and connected folders](host-access.md).
 
 **Depends on:** no OpenWave client crate.
