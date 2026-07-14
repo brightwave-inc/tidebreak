@@ -16,7 +16,9 @@ mod resolution;
 
 pub(in crate::db) use resolution::{
     complete_turn_run, complete_turn_run_and_append_event, finish_turn_cancellation,
-    record_turn_run_failure, record_turn_run_failure_and_append_event, request_turn_cancellation,
+    finish_turn_cancellation_and_append_event, record_turn_run_failure,
+    record_turn_run_failure_and_append_event, request_turn_cancellation,
+    request_turn_cancellation_and_append_event,
 };
 
 pub(in crate::db) async fn get_turn_run(store: &DbStore, id: TurnId) -> Result<Option<TurnRun>> {
