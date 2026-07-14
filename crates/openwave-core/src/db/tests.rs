@@ -4616,6 +4616,151 @@ async fn make_queued_turn(
     }
 }
 
+fn pending_turn_steer(
+    turn: &crate::model::TurnRun,
+    id: crate::id::TurnSteerId,
+    content: &str,
+    now: DateTime<Utc>,
+) -> entities::turn_steer::ActiveModel {
+    entities::turn_steer::ActiveModel {
+        id: Set(id.0),
+        turn_id: Set(turn.id.0),
+        chat_id: Set(turn.chat_id.0),
+        content: Set(content.into()),
+        interrupt: Set(false),
+        status: Set(TurnSteerStatus::Pending.as_str().into()),
+        applied_lease_token: Set(None),
+        message_id: Set(None),
+        created_at: Set(now),
+        resolved_at: Set(None),
+    }
+}
+
+#[tokio::test]
+async fn turn_steer_schema_enforces_durable_delivery_identity() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let queued = store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "initial input")
+        .await
+        .unwrap();
+    let queued = match queued {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        other => panic!("unexpected acceptance: {other:?}"),
+    };
+    let now = Utc::now();
+    let claim_token = uuid::Uuid::new_v4();
+    let claimed = store
+        .claim_turn_run(claim_token, now, now + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .turn
+        .expect("turn claimed");
+    assert_eq!(claimed.id, queued.id);
+
+    let first_id = crate::id::TurnSteerId::new();
+    pending_turn_steer(&claimed, first_id, "change course", now)
+        .insert(&store.conn)
+        .await
+        .unwrap();
+
+    let mut empty = pending_turn_steer(&claimed, crate::id::TurnSteerId::new(), "", now);
+    assert!(empty.clone().insert(&store.conn).await.is_err());
+    empty.content = Set("x".repeat(crate::model::TurnSteer::MAX_CONTENT_LEN + 1));
+    assert!(empty.insert(&store.conn).await.is_err());
+
+    let mut pending_with_resolution =
+        pending_turn_steer(&claimed, crate::id::TurnSteerId::new(), "pending", now);
+    pending_with_resolution.resolved_at = Set(Some(now));
+    assert!(pending_with_resolution.insert(&store.conn).await.is_err());
+
+    let mut applied_without_receipt =
+        pending_turn_steer(&claimed, crate::id::TurnSteerId::new(), "applied", now);
+    applied_without_receipt.status = Set(TurnSteerStatus::Applied.as_str().into());
+    applied_without_receipt.resolved_at = Set(Some(now));
+    assert!(applied_without_receipt.insert(&store.conn).await.is_err());
+
+    let message_id = MessageId(first_id.0);
+    entities::message::ActiveModel {
+        id: Set(message_id.0),
+        chat_id: Set(chat.id.0),
+        turn_id: Set(claimed.id.0),
+        role: Set("user".into()),
+        content: Set("change course".into()),
+        created_at: Set(now),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+    entities::turn_steer::Entity::update_many()
+        .col_expr(
+            entities::turn_steer::Column::Status,
+            sea_orm::sea_query::Expr::value(TurnSteerStatus::Applied.as_str()),
+        )
+        .col_expr(
+            entities::turn_steer::Column::AppliedLeaseToken,
+            sea_orm::sea_query::Expr::value(Some(claim_token)),
+        )
+        .col_expr(
+            entities::turn_steer::Column::MessageId,
+            sea_orm::sea_query::Expr::value(Some(message_id.0)),
+        )
+        .col_expr(
+            entities::turn_steer::Column::ResolvedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .filter(entities::turn_steer::Column::Id.eq(first_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+
+    let applied = entities::turn_steer::Entity::find_by_id(first_id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(applied.status, TurnSteerStatus::Applied.as_str());
+    assert_eq!(applied.applied_lease_token, Some(claim_token));
+    assert_eq!(applied.message_id, Some(message_id.0));
+
+    let mismatched_message_id = MessageId::new();
+    entities::message::ActiveModel {
+        id: Set(mismatched_message_id.0),
+        chat_id: Set(chat.id.0),
+        turn_id: Set(claimed.id.0),
+        role: Set("user".into()),
+        content: Set("mismatched identity".into()),
+        created_at: Set(now),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+    let mut mismatched_receipt = pending_turn_steer(
+        &claimed,
+        crate::id::TurnSteerId::new(),
+        "mismatched identity",
+        now,
+    );
+    mismatched_receipt.status = Set(TurnSteerStatus::Applied.as_str().into());
+    mismatched_receipt.applied_lease_token = Set(Some(claim_token));
+    mismatched_receipt.message_id = Set(Some(mismatched_message_id.0));
+    mismatched_receipt.resolved_at = Set(Some(now));
+    assert!(mismatched_receipt.insert(&store.conn).await.is_err());
+
+    let mut wrong_turn =
+        pending_turn_steer(&claimed, crate::id::TurnSteerId::new(), "wrong turn", now);
+    wrong_turn.turn_id = Set(TurnId::new().0);
+    assert!(wrong_turn.insert(&store.conn).await.is_err());
+
+    let mut rejected_with_message =
+        pending_turn_steer(&claimed, crate::id::TurnSteerId::new(), "rejected", now);
+    rejected_with_message.status = Set(TurnSteerStatus::Rejected.as_str().into());
+    rejected_with_message.message_id = Set(Some(message_id.0));
+    rejected_with_message.resolved_at = Set(Some(now));
+    assert!(rejected_with_message.insert(&store.conn).await.is_err());
+}
+
 #[tokio::test]
 async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     let (_dir, store) = temp_store().await;

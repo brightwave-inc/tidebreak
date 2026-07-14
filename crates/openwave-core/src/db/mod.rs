@@ -30,7 +30,7 @@ use crate::model::{
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
     DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
     DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, TurnFailureRetry, TurnRun,
-    TurnRunStatus,
+    TurnRunStatus, TurnSteerStatus,
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
