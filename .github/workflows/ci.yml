@@ -99,9 +99,10 @@ jobs:
       - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
+            libprotobuf-dev \
             librsvg2-dev \
             mold \
             patchelf \
@@ -146,9 +147,10 @@ jobs:
       - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
+            libprotobuf-dev \
             librsvg2-dev \
             mold \
             patchelf \
@@ -165,8 +167,47 @@ jobs:
         run: cargo fetch --locked
       - name: build
         run: cargo build --workspace --locked
-      # Keep desktop test coverage here, where the Tauri system dependencies
-      # are already installed. The headless test lane can then avoid that graph.
+
+  desktop:
+    name: desktop test
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
+      RUSTC_WRAPPER: sccache
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: v0.16.0
+      - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            libprotobuf-dev \
+            librsvg2-dev \
+            mold \
+            patchelf \
+            protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-registry-v2
+          add-job-id-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: false
       - name: desktop tests
         run: cargo test -p openwave-desktop --locked
 
@@ -261,7 +302,7 @@ jobs:
   rust:
     name: fmt · clippy · build · test
     if: ${{ always() }}
-    needs: [changes, fmt, lint, build, test, postgres]
+    needs: [changes, fmt, lint, build, desktop, test, postgres]
     runs-on: ubuntu-latest
     steps:
       - name: Require every Rust lane
@@ -269,6 +310,7 @@ jobs:
           FMT_RESULT: ${{ needs.fmt.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           BUILD_RESULT: ${{ needs.build.result }}
+          DESKTOP_RESULT: ${{ needs.desktop.result }}
           TEST_RESULT: ${{ needs.test.result }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
@@ -280,6 +322,7 @@ jobs:
               test "$FMT_RESULT" = success
               test "$LINT_RESULT" = success
               test "$BUILD_RESULT" = success
+              test "$DESKTOP_RESULT" = success
               test "$TEST_RESULT" = success
               test "$POSTGRES_RESULT" = success
               ;;
@@ -287,6 +330,7 @@ jobs:
               test "$FMT_RESULT" = skipped
               test "$LINT_RESULT" = skipped
               test "$BUILD_RESULT" = skipped
+              test "$DESKTOP_RESULT" = skipped
               test "$TEST_RESULT" = skipped
               test "$POSTGRES_RESULT" = skipped
               ;;
