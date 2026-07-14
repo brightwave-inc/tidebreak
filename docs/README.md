@@ -4,9 +4,11 @@ Project documentation, versioned alongside the code.
 
 - [The crates](crates.md) — what each crate in the workspace is and does, and how
   they fit together.
+- [How OpenWave works](how-openwave-works.md) — a plain-language maintainer tour
+  of the product, runtime, state machines, document model, and unfinished edges.
 
-More to come as the walking skeleton lands (architecture overview, running
-locally, the event stream and store, writing tools).
+More to come as the product surfaces land (running locally, API reference, and
+writing tools).
 
 For API-level docs, `cargo doc --open` renders the module documentation straight
 from the source.
