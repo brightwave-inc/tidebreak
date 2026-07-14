@@ -12,6 +12,7 @@ libraries.
                                └────── openwave-server
                                             │
       libraries          openwave-mcp   openwave-retrieval   openwave-router
+                         openwave-host-broker (planned)          │
                                │             │                   │
                                └─────────────┴───────────────────┘
                                             │
@@ -79,6 +80,16 @@ Scaffold reserved for loopback OAuth (RFC 8252 + PKCE), token refresh, and
 connector tools that list and fetch from sources like Drive and Box.
 
 **Depends on:** nothing in the workspace yet.
+
+## `openwave-host-broker` — consented host access ⚪
+
+The planned runtime-neutral trust boundary for connected local folders. It will
+own capability grants, root registration, path policy, audited filesystem
+operations, and a versioned sidecar protocol. The Tauri host will own native
+consent UI; agent execution will receive only the operation interface. See
+[Host access and connected folders](host-access.md).
+
+**Depends on:** no OpenWave client crate.
 
 ## `openwave-retrieval` — parsing, search, citations 🟢
 

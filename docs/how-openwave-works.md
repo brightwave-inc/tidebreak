@@ -11,9 +11,10 @@ change.
 
 ## OpenWave in one minute
 
-OpenWave is a local agent runtime. A user gives it a workspace, chooses a model,
-and starts a chat. The runtime can ask the model for an answer, call tools over
-the workspace, search an indexed document corpus, pause for approval before a
+OpenWave is a local agent runtime. A user chooses a model, starts a chat, and can
+connect one or more folders that the project or conversation is allowed to use.
+The runtime can ask the model for an answer, call tools over those connected
+folders, search an indexed document corpus, pause for approval before a
 sensitive action, and stream progress back to the client.
 
 The important architectural choice is that the user-facing request and the
@@ -46,9 +47,9 @@ are not exactly-once yet.
                      |      |       |
           model calls|      |       |file/search tools
                      |      |       |
-              +------v--+   |   +---v----------------+
-              | router  |   |   | workspace + search |
-              +---------+   |   +--------------------+
+              +------v--+   |   +---v------------------+
+              | router  |   |   | host broker + search |
+              +---------+   |   +----------------------+
                             |
         +-------------------+--------------------+
         |                   |                    |
@@ -155,10 +156,14 @@ The built-in server registry currently contains:
 - `search`, which queries the indexed corpus and requires approval only when its
   embedder, store, or reranker can send data outside the machine.
 
-Tools operate inside an explicitly opened workspace directory. The model router
-supports Anthropic, OpenAI, and OpenAI-compatible endpoints. It fails closed: if
-no enabled provider with a usable credential can serve the selected model, no
-model request is sent.
+Today these file tools operate inside one directly opened workspace directory
+stored on the chat. That is a temporary pre-alpha boundary, not the intended
+product model. Projects and conversations will instead resolve to distinct
+host-access contexts containing user-approved roots, and file operations will go
+through a capability-gated host-broker sidecar. See [Host access and connected
+folders](host-access.md). The model router supports Anthropic, OpenAI, and
+OpenAI-compatible endpoints. It fails closed: if no enabled provider with a
+usable credential can serve the selected model, no model request is sent.
 
 ### 4. Events drive the live client
 
@@ -239,11 +244,10 @@ pending ----worker applies----> applied
    +----turn fails/cancels-----> rejected
 ```
 
-One narrow recovery seam remains: applying the steering message and emitting its
-`UserSteered` replay event are separate commits. A crash or cancellation in that
-gap can leave the persisted transcript correct while the replay journal lacks
-that notification. The intended fix is to make the message, application receipt,
-and journal event one exact transaction.
+Applying a steer commits its user message, application receipt, revision, and
+`UserSteered` replay event in one transaction. If the response to that commit is
+lost, the worker retries the same identity and recovers the exact existing
+result rather than applying the instruction twice.
 
 ## What happens when a document is added
 
@@ -380,9 +384,13 @@ The browser-facing API is not exposed on a public network interface.
 
 The current UI is a walking skeleton, not the complete product. It creates a new
 loose chat on each launch and supports provider setup, model selection, basic
-chat streaming, and approval prompts. It does not yet provide a chat picker,
-history reconstruction, projects, document ingestion, document search, cancel,
-or steer controls, even though much of that backend API already exists.
+chat streaming, and approval prompts. It also creates and assigns one
+`Documents/OpenWave` directory automatically. That single-directory behavior is
+temporary: the desktop should keep OpenWave's private data in app storage and
+let each project or conversation connect user-chosen folders through the host
+broker. The UI does not yet provide a chat picker, history reconstruction,
+projects, document ingestion, document search, cancel, or steer controls, even
+though much of that backend API already exists.
 
 Because that chat is projectless, its `search` tool can see only the unscoped
 document corpus. Project-scoped documents are not reachable through the current
@@ -431,6 +439,7 @@ object storage, and multi-process ownership remain future integration work.
 | Documents | `crates/openwave-server/src/routes/document.rs`, `document_worker.rs` | Upload API and Parse/Index worker orchestration |
 | Retrieval | `crates/openwave-retrieval/src/` | Parsing, chunks, embeddings, Lance, ranking, citations |
 | Desktop | `crates/openwave-desktop/src/`, `crates/openwave-desktop/ui/src/App.tsx` | Tauri host and current React shell |
+| Host access (planned) | `docs/host-access.md` | Broker trust boundary, connected-root model, and delivery slices |
 | MCP | `crates/openwave-mcp/src/`, `crates/openwave-cli/src/main.rs` | MCP protocol server and stdio command |
 | Connectors and Slack | `crates/openwave-connectors`, `crates/openwave-slack` | Placeholders, not working product surfaces yet |
 
@@ -472,7 +481,8 @@ and fail-closed provider routing.
 
 The main next steps are:
 
-- close the steering application/event atomicity gap;
+- replace raw chat/project workspace paths with broker-mediated, per-context
+  connected roots while keeping OpenWave's private app data separate;
 - add resumable checkpoints and explicit idempotency policy around tool effects;
 - make approvals resumable rather than process-local;
 - expose existing backend capabilities through a real desktop information
@@ -518,7 +528,11 @@ steps; the migrations should be condensed into a clean baseline before v1.
 
 ## Glossary
 
-- **Chat:** a conversation container and workspace context.
+- **Chat:** a conversation container that resolves an explicit host-access
+  context; it does not own an arbitrary absolute workspace path in the intended
+  model.
+- **Connected root:** a user-approved host folder known to tools by an opaque
+  root identifier and root-relative paths.
 - **Turn:** one accepted unit of user-to-agent work inside a chat.
 - **Message:** durable user or assistant text; tool calls are stored separately.
 - **Event journal:** ordered receipts used to rebuild a live client stream.

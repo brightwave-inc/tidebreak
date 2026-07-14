@@ -6,6 +6,8 @@ Project documentation, versioned alongside the code.
   they fit together.
 - [How OpenWave works](how-openwave-works.md) — a plain-language maintainer tour
   of the product, runtime, state machines, document model, and unfinished edges.
+- [Host access and connected folders](host-access.md) — how projects and
+  conversations receive user-approved access to folders on the host machine.
 
 More to come as the product surfaces land (running locally, API reference, and
 writing tools).
