@@ -1709,9 +1709,18 @@ impl Store for DbStore {
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         steer_id: TurnSteerId,
+        preceding_assistant: Option<&Message>,
         now: chrono::DateTime<Utc>,
     ) -> Result<Option<ApplyTurnSteerOutcome>> {
-        ops::turn::apply_turn_steer(self, turn_id, lease_token, steer_id, now).await
+        ops::turn::apply_turn_steer(
+            self,
+            turn_id,
+            lease_token,
+            steer_id,
+            preceding_assistant,
+            now,
+        )
+        .await
     }
 
     async fn complete_turn_run(

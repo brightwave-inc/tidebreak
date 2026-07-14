@@ -34,12 +34,17 @@ pub struct SteerInbox {
 
 #[derive(Default)]
 struct Inner {
-    queue: Mutex<VecDeque<SteerMessage>>,
+    queue: Mutex<VecDeque<InboxItem>>,
     interrupt: AtomicBool,
     /// Set when the turn is about to emit `TurnCompleted`, so a concurrent
     /// [`SteerInbox::push`] cannot land a message that will never be drained.
     sealed: AtomicBool,
     waker: AtomicWaker,
+}
+
+enum InboxItem {
+    Message(SteerMessage),
+    DurableSignal,
 }
 
 impl SteerInbox {
@@ -63,7 +68,30 @@ impl SteerInbox {
         if self.inner.sealed.load(Ordering::Acquire) {
             return false;
         }
-        queue.push_back(SteerMessage { content });
+        queue.push_back(InboxItem::Message(SteerMessage { content }));
+        if interrupt {
+            self.inner.interrupt.store(true, Ordering::Release);
+            self.inner.waker.wake();
+        }
+        true
+    }
+
+    /// Wake a claimed turn after durable steering admission commits.
+    ///
+    /// The instruction content remains in the store and is applied under the
+    /// worker's exact lease. This marker only supplies low-latency boundary or
+    /// interrupt delivery; the database remains the source of truth.
+    pub fn signal_durable(&self, interrupt: bool) -> bool {
+        let mut queue = self.inner.queue.lock().unwrap();
+        if self.inner.sealed.load(Ordering::Acquire) {
+            return false;
+        }
+        if !queue
+            .iter()
+            .any(|item| matches!(item, InboxItem::DurableSignal))
+        {
+            queue.push_back(InboxItem::DurableSignal);
+        }
         if interrupt {
             self.inner.interrupt.store(true, Ordering::Release);
             self.inner.waker.wake();
@@ -74,7 +102,13 @@ impl SteerInbox {
     /// Drain every queued message (order preserved). Clears the interrupt flag.
     pub fn drain(&self) -> Vec<SteerMessage> {
         let mut queue = self.inner.queue.lock().unwrap();
-        let out: Vec<_> = queue.drain(..).collect();
+        let out = queue
+            .drain(..)
+            .filter_map(|item| match item {
+                InboxItem::Message(message) => Some(message),
+                InboxItem::DurableSignal => None,
+            })
+            .collect();
         self.inner.interrupt.store(false, Ordering::Release);
         out
     }
@@ -177,6 +211,19 @@ mod tests {
         assert!(!inbox.try_complete(|| panic!("must not complete")));
         assert_eq!(inbox.drain()[0].content, "pending");
         assert!(inbox.push("after", false));
+    }
+
+    #[test]
+    fn durable_signal_coalesces_and_fences_completion() {
+        let inbox = SteerInbox::new();
+        assert!(inbox.signal_durable(false));
+        assert!(inbox.signal_durable(true));
+        assert!(inbox.interrupt_requested());
+        assert!(!inbox.try_complete(|| panic!("durable work is pending")));
+        assert!(inbox.drain().is_empty());
+        assert!(!inbox.interrupt_requested());
+        assert!(inbox.try_complete(|| {}));
+        assert!(!inbox.signal_durable(true));
     }
 
     #[tokio::test]

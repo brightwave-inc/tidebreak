@@ -604,12 +604,40 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             .collect::<Vec<_>>(),
         vec![steer_id]
     );
+    let preceding = Message {
+        id: MessageId::new(),
+        chat_id: steer_chat.id,
+        turn_id: steer_turn.id,
+        role: Role::Assistant,
+        content: "postgres candidate".into(),
+        created_at: Utc::now(),
+    };
     let applied = store
-        .apply_turn_steer(steer_turn.id, steer_lease, steer_id, Utc::now())
+        .apply_turn_steer(
+            steer_turn.id,
+            steer_lease,
+            steer_id,
+            Some(&preceding),
+            Utc::now(),
+        )
         .await
         .unwrap()
         .unwrap();
     assert!(matches!(applied, ApplyTurnSteerOutcome::Applied(_)));
+    assert_eq!(
+        store
+            .list_messages(steer_chat.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|message| (message.role, message.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Role::User, "steer input"),
+            (Role::Assistant, "postgres candidate"),
+            (Role::User, "postgres steer"),
+        ]
+    );
 
     let second_steer_id = TurnSteerId::new();
     assert!(matches!(
@@ -647,7 +675,13 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         Some(CompleteTurnRunOutcome::SteerPending(_))
     ));
     let second_steer = match store
-        .apply_turn_steer(steer_turn.id, steer_lease, second_steer_id, Utc::now())
+        .apply_turn_steer(
+            steer_turn.id,
+            steer_lease,
+            second_steer_id,
+            None,
+            Utc::now(),
+        )
         .await
         .unwrap()
         .unwrap()
@@ -676,7 +710,13 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         .unwrap();
     assert!(matches!(
         store
-            .apply_turn_steer(steer_turn.id, steer_lease, steer_id, Utc::now())
+            .apply_turn_steer(
+                steer_turn.id,
+                steer_lease,
+                steer_id,
+                Some(&preceding),
+                Utc::now(),
+            )
             .await
             .unwrap(),
         Some(ApplyTurnSteerOutcome::Existing(_))

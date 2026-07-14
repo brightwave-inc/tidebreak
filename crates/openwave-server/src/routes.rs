@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
-    AcceptTurnOutcome, ApprovalDecision, CallId, Chat, ChatId, Project, ProjectId,
-    RequestTurnCancellationOutcome, SecretProvider, SequencedEvent, Store, TurnId,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, ApprovalDecision, CallId, Chat, ChatId, Project,
+    ProjectId, RequestTurnCancellationOutcome, SecretProvider, SequencedEvent, Store, TurnId,
+    TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -502,6 +503,8 @@ pub async fn post_message(
 /// Body of `POST /chats/{id}/steer`.
 #[derive(Debug, Deserialize)]
 pub struct SteerBody {
+    /// Stable client-generated identity for admission and ambiguous retries.
+    pub steer_id: TurnSteerId,
     /// Exact durable turn to steer.
     pub turn_id: TurnId,
     /// User text to inject into the running turn.
@@ -512,32 +515,58 @@ pub struct SteerBody {
     pub interrupt: bool,
 }
 
-/// `POST /chats/{id}/steer` — inject a message into the turn currently running.
+/// `POST /chats/{id}/steer` — durably enqueue an instruction for an active turn.
 ///
-/// `202 Accepted` once the message is queued (and interrupt signalled, if
-/// requested). The turn continues after injecting — watch the event stream for
-/// `UserSteered`. `404` if the chat doesn't exist, `409` if no turn is running,
-/// `400` if `content` is empty.
+/// `202 Accepted` only after the exact instruction commits. A local notification
+/// can reduce delivery latency, but the claimed worker always applies pending
+/// instructions from the database. Repeating the same identity and payload is
+/// idempotent. `404` if the chat doesn't exist, `409` for conflicting identity or
+/// unavailable turn, and `400` for malformed input.
 pub async fn post_steer(
     State(state): State<AppState>,
     Path(id): Path<ChatId>,
     Json(body): Json<SteerBody>,
 ) -> Result<StatusCode, ServerError> {
-    if body.content.trim().is_empty() {
-        return Err(ServerError::bad_request("steer content must not be empty"));
+    if body.steer_id.0.is_nil() {
+        return Err(ServerError::bad_request("steer_id must not be nil"));
+    }
+    if body.content.trim().is_empty()
+        || body.content.contains('\0')
+        || body.content.chars().count() > TurnSteer::MAX_CONTENT_LEN
+    {
+        return Err(ServerError::bad_request(
+            "steer content must be non-empty, contain no NUL characters, and fit the size limit",
+        ));
     }
     if state.store.get_chat(id).await?.is_none() {
         return Err(ServerError::not_found(format!("chat {id} not found")));
     }
-    if state
-        .active_turns
-        .steer(id, body.turn_id, body.content, body.interrupt)
+    match state
+        .store
+        .accept_turn_steer(
+            body.steer_id,
+            body.turn_id,
+            id,
+            &body.content,
+            body.interrupt,
+        )
+        .await?
     {
-        Ok(StatusCode::ACCEPTED)
-    } else {
-        Err(ServerError::conflict(format!(
-            "chat {id} has no turn in progress"
-        )))
+        AcceptTurnSteerOutcome::Accepted(_) | AcceptTurnSteerOutcome::Existing(_) => {
+            state
+                .active_turns
+                .signal_steer(id, body.turn_id, body.interrupt);
+            state.turn_job_wake.notify_one();
+            Ok(StatusCode::ACCEPTED)
+        }
+        AcceptTurnSteerOutcome::IdentityConflict => Err(ServerError::conflict(format!(
+            "steer {} was already used by different request data",
+            body.steer_id
+        ))),
+        AcceptTurnSteerOutcome::TurnUnavailable => Err(ServerError::conflict(format!(
+            "turn {} is not accepting steering instructions",
+            body.turn_id
+        ))),
     }
 }
 

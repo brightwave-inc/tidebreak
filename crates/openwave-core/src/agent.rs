@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::task::Poll;
 
 use chrono::Utc;
 use futures::channel::mpsc::UnboundedSender;
@@ -30,12 +31,12 @@ use crate::context;
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::id::{CallId, MessageId, TurnId};
-use crate::model::{Chat, Message, Role, ToolCallRecord};
+use crate::model::{Chat, Message, Role, ToolCallRecord, TurnRunStatus};
 use crate::provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, StopReason, Usage,
 };
 use crate::steer::SteerInbox;
-use crate::storage::Store;
+use crate::storage::{ApplyTurnSteerOutcome, Store};
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 
 /// A name-keyed registry of the tools available to the agent.
@@ -140,11 +141,17 @@ pub enum AgentTurnOutcome {
         usage: Usage,
         /// Provider stop reason for the eventual terminal event.
         stop_reason: StopReason,
+        /// Durable steering epoch captured immediately before the final model call.
+        steer_revision: Option<i64>,
+        /// Model-call steps consumed from the turn-wide execution budget.
+        model_steps: usize,
     },
     /// The loop observed its cancellation token and stopped cooperatively.
     Cancelled {
         /// Aggregate provider usage for the eventual terminal event.
         usage: Usage,
+        /// Model-call steps consumed from the turn-wide execution budget.
+        model_steps: usize,
     },
 }
 
@@ -167,6 +174,7 @@ pub struct Agent {
     approvals: Arc<dyn ApprovalGate>,
     cancel: CancelToken,
     steer: SteerInbox,
+    durable_steer_lease: Option<uuid::Uuid>,
 }
 
 /// A tool call accumulated from the provider stream.
@@ -196,6 +204,7 @@ impl Agent {
             approvals: Arc::new(RefuseGate),
             cancel: CancelToken::new(),
             steer: SteerInbox::new(),
+            durable_steer_lease: None,
         }
     }
 
@@ -219,6 +228,13 @@ impl Agent {
     #[must_use]
     pub fn with_steer(mut self, steer: SteerInbox) -> Self {
         self.steer = steer;
+        self
+    }
+
+    /// Apply durable steering under the exact claimed-turn lease.
+    #[must_use]
+    pub fn with_durable_steer(mut self, lease_token: uuid::Uuid) -> Self {
+        self.durable_steer_lease = Some(lease_token);
         self
     }
 
@@ -341,11 +357,15 @@ impl Agent {
         for step in 0..self.config.max_steps {
             // Between steps: stop before starting a fresh model call if cancelled.
             if self.cancel.is_cancelled() {
-                return Ok(self.finish_cancelled(events, total_usage, publish_terminal));
+                return Ok(self.finish_cancelled(events, total_usage, step, publish_terminal));
             }
             // Boundary steer: inject any queued messages before the next model call.
             self.apply_steers(chat, turn_id, &mut transcript, None, events)
                 .await?;
+            // Fence this exact provider request, not the later worker handoff.
+            // A steer applied after this snapshot must supersede its output;
+            // one applied at the boundary above is already part of the prompt.
+            let generation_steer_revision = self.durable_generation_revision(turn_id).await?;
 
             // Fit the transcript to the context window, retrying with tighter
             // budgets on prompt-too-long errors from the provider.
@@ -450,7 +470,7 @@ impl Agent {
             // the left arm of the nested select). Also catch a cancel that raced
             // the final stream event.
             if matches!(stream_end, StreamEnd::Cancelled) || self.cancel.is_cancelled() {
-                return Ok(self.finish_cancelled(events, total_usage, publish_terminal));
+                return Ok(self.finish_cancelled(events, total_usage, step + 1, publish_terminal));
             }
             if matches!(stream_end, StreamEnd::Steered) {
                 // Discard this step's partial output — nothing from it was
@@ -532,7 +552,12 @@ impl Agent {
                 // concurrent push cannot 202 and then be orphaned.
                 loop {
                     if self.cancel.is_cancelled() {
-                        return Ok(self.finish_cancelled(events, total_usage, publish_terminal));
+                        return Ok(self.finish_cancelled(
+                            events,
+                            total_usage,
+                            step + 1,
+                            publish_terminal,
+                        ));
                     }
                     if self
                         .apply_steers(
@@ -546,6 +571,15 @@ impl Agent {
                     {
                         break; // continue the outer step loop below
                     }
+                    if self.durable_steer_lease.is_some() {
+                        return Ok(AgentTurnOutcome::Completed {
+                            output,
+                            usage: total_usage,
+                            stop_reason,
+                            steer_revision: generation_steer_revision,
+                            model_steps: step + 1,
+                        });
+                    }
                     if self.steer.try_complete(|| {
                         if publish_terminal {
                             let _ = events.unbounded_send(AgentEvent::TurnCompleted {
@@ -558,6 +592,8 @@ impl Agent {
                             output,
                             usage: total_usage,
                             stop_reason,
+                            steer_revision: generation_steer_revision,
+                            model_steps: step + 1,
                         });
                     }
                     // Steer arrived between drain and try_complete — loop.
@@ -602,7 +638,12 @@ impl Agent {
                 // A cancel that arrived during this tool (including while it was
                 // parked on approval) stops the turn before the next model call.
                 if self.cancel.is_cancelled() {
-                    return Ok(self.finish_cancelled(events, total_usage, publish_terminal));
+                    return Ok(self.finish_cancelled(
+                        events,
+                        total_usage,
+                        step + 1,
+                        publish_terminal,
+                    ));
                 }
             }
             // Tool results ride in a user-role message (the Messages convention).
@@ -624,12 +665,13 @@ impl Agent {
         &self,
         events: &UnboundedSender<AgentEvent>,
         usage: Usage,
+        model_steps: usize,
         publish_terminal_event: bool,
     ) -> AgentTurnOutcome {
         if publish_terminal_event {
             let _ = events.unbounded_send(AgentEvent::TurnCancelled { usage });
         }
-        AgentTurnOutcome::Cancelled { usage }
+        AgentTurnOutcome::Cancelled { usage, model_steps }
     }
 
     /// Drain the steer inbox into the transcript. Returns whether any messages
@@ -643,12 +685,23 @@ impl Agent {
         events: &UnboundedSender<AgentEvent>,
     ) -> Result<bool> {
         let msgs = self.steer.drain();
-        if msgs.is_empty() {
+        let durable = match self.durable_steer_lease {
+            Some(lease_token) => self.list_durable_steers_retry(turn_id, lease_token).await?,
+            None => Vec::new(),
+        };
+        if msgs.is_empty() && durable.is_empty() {
             return Ok(false);
         }
-        if let Some(text) = preceding_assistant {
-            self.persist(chat.id, turn_id, Role::Assistant, text)
-                .await?;
+        if self.durable_steer_lease.is_some() && !msgs.is_empty() {
+            return Err(AgentError::Store(format!(
+                "turn {turn_id} mixed process-local messages with durable steering"
+            )));
+        }
+        if self.durable_steer_lease.is_none() {
+            if let Some(text) = preceding_assistant {
+                self.persist(chat.id, turn_id, Role::Assistant, text)
+                    .await?;
+            }
         }
         for msg in msgs {
             self.persist(chat.id, turn_id, Role::User, &msg.content)
@@ -663,7 +716,161 @@ impl Agent {
                 content: msg.content,
             });
         }
+        let preceding = preceding_assistant
+            .filter(|text| !text.is_empty() && !durable.is_empty())
+            .map(|text| Message {
+                id: MessageId::new(),
+                chat_id: chat.id,
+                turn_id,
+                role: Role::Assistant,
+                content: text.to_owned(),
+                created_at: Utc::now(),
+            });
+        let lease_token = self.durable_steer_lease;
+        for (index, steer) in durable.into_iter().enumerate() {
+            let preceding_assistant = if index == 0 { preceding.as_ref() } else { None };
+            let applied = self
+                .apply_durable_steer_retry(
+                    turn_id,
+                    lease_token.expect("durable steering has a lease"),
+                    steer.id,
+                    preceding_assistant,
+                )
+                .await?;
+            let steer = match applied {
+                ApplyTurnSteerOutcome::Applied(steer) | ApplyTurnSteerOutcome::Existing(steer) => {
+                    steer
+                }
+            };
+            transcript.push(ChatMessage {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: steer.content.clone(),
+                }],
+            });
+            let _ = events.unbounded_send(AgentEvent::UserSteered {
+                content: steer.content,
+            });
+        }
         Ok(true)
+    }
+
+    async fn durable_generation_revision(&self, turn_id: TurnId) -> Result<Option<i64>> {
+        match self.durable_steer_lease {
+            Some(lease_token) => self
+                .durable_turn_revision_retry(turn_id, lease_token)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn durable_turn_revision_retry(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+    ) -> Result<i64> {
+        loop {
+            match self.store.get_turn_run(turn_id).await {
+                Ok(Some(turn))
+                    if turn.status == TurnRunStatus::Running
+                        && turn.lease_token == Some(lease_token)
+                        && turn
+                            .lease_expires_at
+                            .is_some_and(|expires_at| expires_at > Utc::now()) =>
+                {
+                    return Ok(turn.steer_revision);
+                }
+                Ok(_) => {
+                    return Err(AgentError::Store(format!(
+                        "turn {turn_id} no longer has live lease {lease_token}"
+                    )));
+                }
+                Err(_) => self.wait_for_durable_store_retry(turn_id).await?,
+            }
+        }
+    }
+
+    async fn list_durable_steers_retry(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+    ) -> Result<Vec<crate::model::TurnSteer>> {
+        loop {
+            match self
+                .store
+                .list_pending_turn_steers(turn_id, lease_token, Utc::now())
+                .await
+            {
+                Ok(Some(steers)) => return Ok(steers),
+                Ok(None) | Err(_) => {
+                    // Heartbeat and admission both advance `updated_at`. A
+                    // timestamp captured just before either commit can produce
+                    // a harmless `None`; prove the exact lease and replay with
+                    // a fresh operational time. The same loop also recovers an
+                    // ambiguous database response.
+                    self.durable_turn_revision_retry(turn_id, lease_token)
+                        .await?;
+                    self.wait_for_durable_store_retry(turn_id).await?;
+                }
+            }
+        }
+    }
+
+    async fn apply_durable_steer_retry(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        steer_id: crate::id::TurnSteerId,
+        preceding_assistant: Option<&Message>,
+    ) -> Result<ApplyTurnSteerOutcome> {
+        loop {
+            match self
+                .store
+                .apply_turn_steer(
+                    turn_id,
+                    lease_token,
+                    steer_id,
+                    preceding_assistant,
+                    Utc::now(),
+                )
+                .await
+            {
+                Ok(Some(applied)) => return Ok(applied),
+                Ok(None) | Err(_) => {
+                    // Retrying the same identity recovers `Existing` when the
+                    // commit won but its response was lost.
+                    self.durable_turn_revision_retry(turn_id, lease_token)
+                        .await?;
+                    self.wait_for_durable_store_retry(turn_id).await?;
+                }
+            }
+        }
+    }
+
+    async fn wait_for_durable_store_retry(&self, turn_id: TurnId) -> Result<()> {
+        if self.cancel.is_cancelled() {
+            return Err(AgentError::Store(format!(
+                "turn {turn_id} was cancelled while retrying durable steering"
+            )));
+        }
+        let mut yielded = false;
+        future::poll_fn(|cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+        if self.cancel.is_cancelled() {
+            return Err(AgentError::Store(format!(
+                "turn {turn_id} was cancelled while retrying durable steering"
+            )));
+        }
+        Ok(())
     }
 
     /// Resolve approval and execute one tool call, returning its output. Tool and
@@ -1198,6 +1405,7 @@ mod tests {
             output,
             usage,
             stop_reason,
+            ..
         } = outcome
         else {
             panic!("claimed turn should complete");
@@ -1458,7 +1666,8 @@ mod tests {
         assert_eq!(
             outcome,
             AgentTurnOutcome::Cancelled {
-                usage: Usage::default()
+                usage: Usage::default(),
+                model_steps: 0,
             }
         );
         let cancellation_events: Vec<AgentEvent> = cancellation_rx.collect().await;

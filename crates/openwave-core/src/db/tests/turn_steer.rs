@@ -221,10 +221,9 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         content: "candidate before steer".into(),
         created_at: Utc::now(),
     };
-    store.append_message(&candidate).await.unwrap();
     let apply_at = Utc::now();
     let applied = store
-        .apply_turn_steer(turn.id, lease_token, steer_id, apply_at)
+        .apply_turn_steer(turn.id, lease_token, steer_id, Some(&candidate), apply_at)
         .await
         .unwrap()
         .unwrap();
@@ -295,13 +294,13 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     ));
 
     let recovered = store
-        .apply_turn_steer(turn.id, lease_token, steer_id, Utc::now())
+        .apply_turn_steer(turn.id, lease_token, steer_id, Some(&candidate), Utc::now())
         .await
         .unwrap()
         .unwrap();
     assert!(matches!(recovered, ApplyTurnSteerOutcome::Existing(_)));
     let second = match store
-        .apply_turn_steer(turn.id, lease_token, second_id, Utc::now())
+        .apply_turn_steer(turn.id, lease_token, second_id, None, Utc::now())
         .await
         .unwrap()
         .unwrap()
@@ -571,21 +570,21 @@ async fn turn_steer_application_enforces_fifo_and_message_sequence_on_timestamp_
     let applied_at = Utc::now();
     assert_eq!(
         store
-            .apply_turn_steer(turn.id, lease, high_id, applied_at)
+            .apply_turn_steer(turn.id, lease, high_id, None, applied_at)
             .await
             .unwrap(),
         None
     );
     assert!(matches!(
         store
-            .apply_turn_steer(turn.id, lease, low_id, applied_at)
+            .apply_turn_steer(turn.id, lease, low_id, None, applied_at)
             .await
             .unwrap(),
         Some(ApplyTurnSteerOutcome::Applied(_))
     ));
     assert!(matches!(
         store
-            .apply_turn_steer(turn.id, lease, high_id, applied_at)
+            .apply_turn_steer(turn.id, lease, high_id, None, applied_at)
             .await
             .unwrap(),
         Some(ApplyTurnSteerOutcome::Applied(_))
@@ -650,7 +649,7 @@ async fn concurrent_apply_and_completion_leave_no_pending_steer() {
     let apply = tokio::spawn(async move {
         apply_barrier.wait().await;
         apply_store
-            .apply_turn_steer(turn.id, lease_token, steer_id, Utc::now())
+            .apply_turn_steer(turn.id, lease_token, steer_id, None, Utc::now())
             .await
             .unwrap()
     });
@@ -851,7 +850,7 @@ async fn concurrent_message_and_steer_reserve_one_shared_identity() {
             assert!(message.is_err());
             assert!(matches!(
                 store
-                    .apply_turn_steer(steer_turn.id, lease, shared_id, Utc::now())
+                    .apply_turn_steer(steer_turn.id, lease, shared_id, None, Utc::now())
                     .await
                     .unwrap(),
                 Some(ApplyTurnSteerOutcome::Applied(_))
@@ -1158,7 +1157,7 @@ async fn failed_steer_message_insert_rolls_back_the_application_receipt() {
     .await
     .unwrap();
     assert!(store
-        .apply_turn_steer(turn.id, lease, steer_id, Utc::now())
+        .apply_turn_steer(turn.id, lease, steer_id, None, Utc::now())
         .await
         .is_err());
     let pending = existing_steer(

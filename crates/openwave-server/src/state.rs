@@ -237,19 +237,13 @@ impl TurnGuard {
         }
     }
 
-    /// Push a steer message into the turn running for `chat_id`, if any. Returns
-    /// whether a turn was found and still accepting steer. When `interrupt` is
-    /// true the agent preempts the provider stream; otherwise the message waits
-    /// for the next step boundary.
-    pub fn steer(
-        &self,
-        chat_id: ChatId,
-        turn_id: TurnId,
-        content: String,
-        interrupt: bool,
-    ) -> bool {
+    /// Wake the exact local worker after durable steering admission commits.
+    ///
+    /// The instruction remains in the store; this process-local signal only
+    /// reduces delivery latency and optionally preempts the provider stream.
+    pub fn signal_steer(&self, chat_id: ChatId, turn_id: TurnId, interrupt: bool) -> bool {
         match self.active.lock().unwrap().get(&chat_id) {
-            Some(handles) if handles.turn_id == turn_id => handles.steer.push(content, interrupt),
+            Some(handles) if handles.turn_id == turn_id => handles.steer.signal_durable(interrupt),
             _ => false,
         }
     }
@@ -272,8 +266,8 @@ impl ActiveTurn {
         self.cancel.clone()
     }
 
-    /// The steer inbox for this turn — handed to the agent so a `POST .../steer`
-    /// routed through [`TurnGuard::steer`] injects mid-turn.
+    /// The steer inbox for this turn — handed to the agent so a durable steer
+    /// notification injects mid-turn.
     pub fn steer_inbox(&self) -> SteerInbox {
         self.steer.clone()
     }
@@ -362,19 +356,18 @@ mod tests {
     }
 
     #[test]
-    fn steer_pushes_into_the_held_inbox() {
+    fn steer_signal_wakes_the_held_inbox() {
         let guard = Arc::new(TurnGuard::default());
         let chat = ChatId::new();
         let turn = TurnId::new();
 
-        assert!(!guard.steer(chat, turn, "x".into(), false));
+        assert!(!guard.signal_steer(chat, turn, false));
         let held = guard
             .register(chat, turn, Uuid::new_v4())
             .expect("register");
-        assert!(!guard.steer(chat, TurnId::new(), "wrong".into(), true));
-        assert!(guard.steer(chat, turn, "course correct".into(), true));
-        let msgs = held.steer_inbox().drain();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].content, "course correct");
+        assert!(!guard.signal_steer(chat, TurnId::new(), true));
+        assert!(guard.signal_steer(chat, turn, true));
+        assert!(held.steer_inbox().interrupt_requested());
+        assert!(held.steer_inbox().drain().is_empty());
     }
 }

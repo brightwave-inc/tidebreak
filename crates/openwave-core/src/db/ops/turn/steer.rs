@@ -238,6 +238,7 @@ pub(in crate::db) async fn apply_turn_steer(
     turn_id: TurnId,
     lease_token: uuid::Uuid,
     steer_id: TurnSteerId,
+    preceding_assistant: Option<&crate::model::Message>,
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<ApplyTurnSteerOutcome>> {
     if turn_id.0.is_nil() || lease_token.is_nil() || steer_id.0.is_nil() {
@@ -277,6 +278,9 @@ pub(in crate::db) async fn apply_turn_steer(
         let exact = steer.turn_id == turn_id.0 && steer.applied_lease_token == Some(lease_token);
         let outcome = if exact {
             ensure_exact_applied_message_on(&transaction, &steer).await?;
+            if let Some(preceding) = preceding_assistant {
+                ensure_exact_preceding_message_on(&transaction, &steer, preceding).await?;
+            }
             Some(ApplyTurnSteerOutcome::Existing(turn_steer_from_model(
                 steer,
             )?))
@@ -336,6 +340,39 @@ pub(in crate::db) async fn apply_turn_steer(
         .steer_revision
         .checked_add(1)
         .ok_or_else(|| AgentError::Store(format!("turn {turn_id} steer revision overflow")))?;
+
+    if let Some(preceding) = preceding_assistant {
+        validate_preceding_assistant(preceding, turn_id, ChatId(turn.chat_id), now)?;
+        if !reserve_message_identity_on(
+            &transaction,
+            preceding.id,
+            preceding.chat_id,
+            preceding.turn_id,
+            MESSAGE_IDENTITY_OWNER_MESSAGE,
+        )
+        .await?
+        {
+            transaction.rollback().await.map_err(store_err)?;
+            return Err(AgentError::Store(format!(
+                "preceding assistant identity {} is already reserved",
+                preceding.id
+            )));
+        }
+        let preceding_created_at = canonical_db_timestamp(preceding.created_at)?;
+        let message = entities::message::ActiveModel {
+            id: Set(preceding.id.0),
+            chat_id: Set(preceding.chat_id.0),
+            turn_id: Set(preceding.turn_id.0),
+            seq: Set(next_message_seq_on(&transaction, preceding.chat_id).await?),
+            role: Set("assistant".into()),
+            content: Set(preceding.content.clone()),
+            created_at: Set(preceding_created_at),
+        };
+        if let Err(error) = message.insert(&transaction).await {
+            transaction.rollback().await.map_err(store_err)?;
+            return Err(store_err(error));
+        }
+    }
 
     if !transfer_steer_message_identity_on(
         &transaction,
@@ -540,6 +577,73 @@ where
             "applied turn steer {} has a different or missing message",
             TurnSteerId(steer.id)
         )));
+    }
+    Ok(())
+}
+
+async fn ensure_exact_preceding_message_on<C>(
+    conn: &C,
+    steer: &entities::turn_steer::Model,
+    preceding: &crate::model::Message,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let created_at = canonical_db_timestamp(preceding.created_at)?;
+    let applied_message = entities::message::Entity::find_by_id(steer.id)
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    let exact = entities::message::Entity::find_by_id(preceding.id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .zip(applied_message)
+        .is_some_and(|(message, applied)| {
+            message.chat_id == preceding.chat_id.0
+                && message.turn_id == preceding.turn_id.0
+                && message.role == "assistant"
+                && message.content == preceding.content
+                && message.created_at == created_at
+                && message.seq.checked_add(1) == Some(applied.seq)
+        });
+    let exact_identity = entities::message_identity::Entity::find_by_id(preceding.id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some_and(|identity| {
+            identity.chat_id == preceding.chat_id.0
+                && identity.turn_id == preceding.turn_id.0
+                && identity.owner == MESSAGE_IDENTITY_OWNER_MESSAGE
+        });
+    if !exact || !exact_identity {
+        return Err(AgentError::Store(format!(
+            "applied turn steer {} has a different or missing preceding assistant {}",
+            TurnSteerId(steer.id),
+            preceding.id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_preceding_assistant(
+    message: &crate::model::Message,
+    turn_id: TurnId,
+    chat_id: ChatId,
+    now: chrono::DateTime<Utc>,
+) -> Result<()> {
+    let created_at = canonical_db_timestamp(message.created_at)?;
+    if message.id.0.is_nil()
+        || message.chat_id != chat_id
+        || message.turn_id != turn_id
+        || message.role != crate::model::Role::Assistant
+        || message.content.is_empty()
+        || message.content.contains('\0')
+        || created_at > now
+    {
+        return Err(AgentError::Store(
+            "preceding assistant must be a valid non-empty message for the exact turn".into(),
+        ));
     }
     Ok(())
 }
