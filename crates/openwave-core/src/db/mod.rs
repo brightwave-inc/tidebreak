@@ -1661,6 +1661,24 @@ impl Store for DbStore {
         ops::conversation::accept_turn(self, id, chat_id, model, content).await
     }
 
+    async fn claim_turn_run(
+        &self,
+        now: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<Option<TurnRun>> {
+        ops::conversation::claim_turn_run(self, now, lease_expires_at).await
+    }
+
+    async fn heartbeat_turn_run(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        ops::conversation::heartbeat_turn_run(self, id, lease_token, now, lease_expires_at).await
+    }
+
     async fn append_message(&self, message: &Message) -> Result<()> {
         ops::conversation::append_message(self, message).await
     }

@@ -188,6 +188,245 @@ pub(in crate::db) async fn accept_turn(
     Ok(AcceptTurnOutcome::Accepted(turn_run_from_model(inserted)?))
 }
 
+pub(in crate::db) async fn claim_turn_run(
+    store: &DbStore,
+    now: chrono::DateTime<Utc>,
+    lease_expires_at: chrono::DateTime<Utc>,
+) -> Result<Option<TurnRun>> {
+    if lease_expires_at <= now {
+        return Err(AgentError::Store(
+            "turn lease expiry must be after claim time".into(),
+        ));
+    }
+
+    loop {
+        let transaction = store.conn.begin().await.map_err(store_err)?;
+        acquire_turn_claim_write_lock(&transaction).await?;
+        let due = entities::turn_run::Entity::find()
+            .filter(entities::turn_run::Column::Status.is_in([
+                TurnRunStatus::Queued.as_str(),
+                TurnRunStatus::RetryWait.as_str(),
+            ]))
+            .filter(entities::turn_run::Column::AvailableAt.lte(now))
+            .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+            .filter(
+                sea_orm::sea_query::Expr::col(entities::turn_run::Column::AttemptCount).lt(
+                    sea_orm::sea_query::Expr::col(entities::turn_run::Column::MaxAttempts),
+                ),
+            )
+            .order_by_asc(entities::turn_run::Column::AvailableAt)
+            .order_by_asc(entities::turn_run::Column::CreatedAt)
+            .order_by_asc(entities::turn_run::Column::Id)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?;
+        let expired = entities::turn_run::Entity::find()
+            .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
+            .filter(entities::turn_run::Column::LeaseExpiresAt.lte(now))
+            .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+            .order_by_asc(entities::turn_run::Column::LeaseExpiresAt)
+            .order_by_asc(entities::turn_run::Column::CreatedAt)
+            .order_by_asc(entities::turn_run::Column::Id)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?;
+        let candidate = match (due, expired) {
+            (Some(due), Some(expired)) => {
+                if turn_run_due_order(&due, &expired).is_le() {
+                    Some(due)
+                } else {
+                    Some(expired)
+                }
+            }
+            (candidate @ Some(_), None) | (None, candidate @ Some(_)) => candidate,
+            (None, None) => None,
+        };
+        let Some(candidate) = candidate else {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(None);
+        };
+
+        let reclaiming = candidate.status == TurnRunStatus::Running.as_str();
+        if reclaiming && candidate.attempt_count >= candidate.max_attempts {
+            let failed = entities::turn_run::Entity::update_many()
+                .col_expr(
+                    entities::turn_run::Column::Status,
+                    sea_orm::sea_query::Expr::value(TurnRunStatus::Failed.as_str()),
+                )
+                .col_expr(
+                    entities::turn_run::Column::LeaseToken,
+                    sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+                )
+                .col_expr(
+                    entities::turn_run::Column::LeaseExpiresAt,
+                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+                )
+                .col_expr(
+                    entities::turn_run::Column::FinishedAt,
+                    sea_orm::sea_query::Expr::value(Some(now)),
+                )
+                .col_expr(
+                    entities::turn_run::Column::LastErrorCode,
+                    sea_orm::sea_query::Expr::value(Some("lease_expired".to_owned())),
+                )
+                .col_expr(
+                    entities::turn_run::Column::LastErrorDetail,
+                    sea_orm::sea_query::Expr::value(Some("final worker lease expired".to_owned())),
+                )
+                .col_expr(
+                    entities::turn_run::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(now),
+                )
+                .filter(entities::turn_run::Column::Id.eq(candidate.id))
+                .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
+                .filter(entities::turn_run::Column::AttemptCount.eq(candidate.attempt_count))
+                .filter(entities::turn_run::Column::LeaseToken.eq(candidate.lease_token))
+                .filter(entities::turn_run::Column::LeaseExpiresAt.eq(candidate.lease_expires_at))
+                .filter(entities::turn_run::Column::UpdatedAt.eq(candidate.updated_at))
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+            if failed.rows_affected != 1 {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            }
+            transaction.commit().await.map_err(store_err)?;
+            continue;
+        }
+
+        let lease_token = uuid::Uuid::new_v4();
+        let next_attempt = candidate.attempt_count.checked_add(1).ok_or_else(|| {
+            AgentError::Store(format!("turn {} attempt overflow", TurnId(candidate.id)))
+        })?;
+        let claim = entities::turn_run::Entity::update_many()
+            .col_expr(
+                entities::turn_run::Column::Status,
+                sea_orm::sea_query::Expr::value(TurnRunStatus::Running.as_str()),
+            )
+            .col_expr(
+                entities::turn_run::Column::AttemptCount,
+                sea_orm::sea_query::Expr::value(next_attempt),
+            )
+            .col_expr(
+                entities::turn_run::Column::LeaseToken,
+                sea_orm::sea_query::Expr::value(Some(lease_token)),
+            )
+            .col_expr(
+                entities::turn_run::Column::LeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
+            )
+            .col_expr(
+                entities::turn_run::Column::StartedAt,
+                sea_orm::sea_query::Expr::value(Some(candidate.started_at.unwrap_or(now))),
+            )
+            .col_expr(
+                entities::turn_run::Column::LastErrorCode,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                entities::turn_run::Column::LastErrorDetail,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                entities::turn_run::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(entities::turn_run::Column::Id.eq(candidate.id))
+            .filter(entities::turn_run::Column::Status.eq(&candidate.status))
+            .filter(entities::turn_run::Column::AttemptCount.eq(candidate.attempt_count))
+            .filter(entities::turn_run::Column::UpdatedAt.eq(candidate.updated_at));
+        let claim = if reclaiming {
+            claim
+                .filter(entities::turn_run::Column::LeaseToken.eq(candidate.lease_token))
+                .filter(entities::turn_run::Column::LeaseExpiresAt.eq(candidate.lease_expires_at))
+        } else {
+            claim.filter(entities::turn_run::Column::AvailableAt.lte(now))
+        };
+        let claimed = claim.exec(&transaction).await.map_err(store_err)?;
+        if claimed.rows_affected != 1 {
+            transaction.rollback().await.map_err(store_err)?;
+            continue;
+        }
+
+        let claimed = entities::turn_run::Entity::find_by_id(candidate.id)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .ok_or_else(|| {
+                AgentError::Store(format!("claimed turn {} disappeared", TurnId(candidate.id)))
+            })
+            .and_then(turn_run_from_model)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(claimed));
+    }
+}
+
+pub(in crate::db) async fn heartbeat_turn_run(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    lease_expires_at: chrono::DateTime<Utc>,
+) -> Result<bool> {
+    if lease_expires_at <= now {
+        return Err(AgentError::Store(
+            "turn lease expiry must be after heartbeat time".into(),
+        ));
+    }
+    let heartbeat = entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
+        )
+        .col_expr(
+            entities::turn_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::turn_run::Column::Id.eq(id.0))
+        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
+        .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::turn_run::Column::LeaseExpiresAt.lt(lease_expires_at))
+        .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(heartbeat.rows_affected == 1)
+}
+
+async fn acquire_turn_claim_write_lock<C>(conn: &C) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::col(entities::turn_run::Column::UpdatedAt).into(),
+        )
+        .filter(entities::turn_run::Column::Id.is_null())
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+fn turn_run_due_order(
+    left: &entities::turn_run::Model,
+    right: &entities::turn_run::Model,
+) -> std::cmp::Ordering {
+    let due_at = |run: &entities::turn_run::Model| {
+        if run.status == TurnRunStatus::Running.as_str() {
+            run.lease_expires_at.unwrap_or(run.available_at)
+        } else {
+            run.available_at
+        }
+    };
+    due_at(left)
+        .cmp(&due_at(right))
+        .then_with(|| left.created_at.cmp(&right.created_at))
+        .then_with(|| left.id.cmp(&right.id))
+}
+
 fn validate_turn_input(model: &str, content: &str) -> Result<()> {
     if model.trim().is_empty()
         || model.contains('\0')

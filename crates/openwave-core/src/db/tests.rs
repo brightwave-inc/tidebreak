@@ -5007,6 +5007,218 @@ async fn concurrent_cross_chat_reuse_of_a_turn_id_commits_once() {
 }
 
 #[tokio::test]
+async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(2),
+        )
+        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    assert!(store.claim_turn_run(claimed_at, claimed_at).await.is_err());
+    let first_expiry = claimed_at + chrono::Duration::minutes(1);
+    let first = store
+        .claim_turn_run(claimed_at, first_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+    let first_token = first.lease_token.unwrap();
+    assert_eq!(first.status, TurnRunStatus::Running);
+    assert_eq!(first.attempt_count, 1);
+    assert_eq!(first.started_at, Some(claimed_at));
+    assert_eq!(first.lease_expires_at, Some(first_expiry));
+
+    let heartbeat_at = claimed_at + chrono::Duration::seconds(10);
+    assert!(!store
+        .heartbeat_turn_run(
+            turn_id,
+            uuid::Uuid::new_v4(),
+            heartbeat_at,
+            first_expiry + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap());
+    assert!(!store
+        .heartbeat_turn_run(turn_id, first_token, heartbeat_at, first_expiry)
+        .await
+        .unwrap());
+    assert!(store
+        .heartbeat_turn_run(turn_id, first_token, heartbeat_at, heartbeat_at)
+        .await
+        .is_err());
+
+    let extended = first_expiry + chrono::Duration::minutes(1);
+    assert!(store
+        .heartbeat_turn_run(turn_id, first_token, heartbeat_at, extended)
+        .await
+        .unwrap());
+    let second_expiry = extended + chrono::Duration::minutes(1);
+    let second = store
+        .claim_turn_run(extended, second_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.id, turn_id);
+    assert_eq!(second.status, TurnRunStatus::Running);
+    assert_eq!(second.attempt_count, 2);
+    assert_eq!(second.started_at, first.started_at);
+    assert_ne!(second.lease_token, Some(first_token));
+    assert_eq!(second.last_error_code, None);
+    assert!(!store
+        .heartbeat_turn_run(
+            turn_id,
+            first_token,
+            extended + chrono::Duration::seconds(1),
+            second_expiry + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap());
+
+    assert_eq!(
+        store
+            .claim_turn_run(second_expiry, second_expiry + chrono::Duration::minutes(1))
+            .await
+            .unwrap(),
+        None
+    );
+    let failed = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    assert_eq!(failed.status, TurnRunStatus::Failed);
+    assert_eq!(failed.attempt_count, 2);
+    assert_eq!(failed.lease_token, None);
+    assert_eq!(failed.lease_expires_at, None);
+    assert_eq!(failed.finished_at, Some(second_expiry));
+    assert_eq!(failed.last_error_code.as_deref(), Some("lease_expired"));
+}
+
+#[tokio::test]
+async fn concurrent_turn_claimers_never_share_a_lease() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let accepted = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let store = std::sync::Arc::new(store);
+    let claim_at = accepted.available_at + chrono::Duration::seconds(1);
+    let lease_expires_at = claim_at + chrono::Duration::minutes(1);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store.claim_turn_run(claim_at, lease_expires_at).await
+        }));
+    }
+
+    let mut claimed = Vec::new();
+    let mut empty = 0;
+    for task in tasks {
+        match task.await.unwrap().unwrap() {
+            Some(turn) => claimed.push(turn),
+            None => empty += 1,
+        }
+    }
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(empty, 7);
+    assert_eq!(claimed[0].id, accepted.id);
+    assert_eq!(claimed[0].attempt_count, 1);
+    assert!(claimed[0].lease_token.is_some());
+}
+
+#[tokio::test]
+async fn turn_claim_orders_queued_and_expired_work_by_effective_due_time() {
+    let (_dir, store) = temp_store().await;
+    let expired_chat = sample_chat();
+    store.create_chat(&expired_chat).await.unwrap();
+    let expired_turn = match store
+        .accept_turn(TurnId::new(), expired_chat.id, "gpt-5", "first")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(2),
+        )
+        .filter(entities::turn_run::Column::Id.eq(expired_turn.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let first_claim_at = expired_turn.available_at + chrono::Duration::seconds(1);
+    let first_expiry = first_claim_at + chrono::Duration::minutes(1);
+    store
+        .claim_turn_run(first_claim_at, first_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let queued_chat = sample_chat();
+    store.create_chat(&queued_chat).await.unwrap();
+    let queued_turn = match store
+        .accept_turn(TurnId::new(), queued_chat.id, "gpt-5", "second")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let queued_due_at = first_expiry - chrono::Duration::seconds(1);
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(queued_due_at),
+        )
+        .col_expr(
+            entities::turn_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(queued_due_at),
+        )
+        .filter(entities::turn_run::Column::Id.eq(queued_turn.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+
+    let claimed_queued = store
+        .claim_turn_run(first_expiry, first_expiry + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed_queued.id, queued_turn.id);
+    let reclaimed_expired = store
+        .claim_turn_run(first_expiry, first_expiry + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed_expired.id, expired_turn.id);
+    assert_eq!(reclaimed_expired.attempt_count, 2);
+}
+
+#[tokio::test]
 async fn turn_acceptance_rolls_back_when_input_message_insert_fails() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
