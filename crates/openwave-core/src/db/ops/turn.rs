@@ -69,7 +69,7 @@ pub(in crate::db) async fn accept_turn(
         let existing =
             exact_accepted_turn_on(&transaction, existing, chat_id, model, content).await?;
         transaction.commit().await.map_err(store_err)?;
-        return Ok(AcceptTurnOutcome::Existing(existing));
+        return Ok(existing);
     }
 
     if let Some(active) = find_active_turn_on(&transaction, chat_id).await? {
@@ -121,9 +121,8 @@ pub(in crate::db) async fn accept_turn(
                 .await
                 .map_err(store_err)?
             {
-                let existing =
-                    exact_accepted_turn_on(&store.conn, existing, chat_id, model, content).await?;
-                return Ok(AcceptTurnOutcome::Existing(existing));
+                return exact_accepted_turn_on(&store.conn, existing, chat_id, model, content)
+                    .await;
             }
             if let Some(active) = find_active_turn_on(&store.conn, chat_id).await? {
                 return Ok(AcceptTurnOutcome::ChatBusy(turn_run_from_model(active)?));
@@ -705,7 +704,7 @@ async fn exact_accepted_turn_on<C>(
     chat_id: ChatId,
     model: &str,
     content: &str,
-) -> Result<TurnRun>
+) -> Result<AcceptTurnOutcome>
 where
     C: ConnectionTrait,
 {
@@ -719,19 +718,22 @@ where
                 TurnId(existing.id)
             ))
         })?;
-    if existing.chat_id != chat_id.0
-        || existing.model != model
-        || message.chat_id != chat_id.0
+    if message.chat_id != existing.chat_id
         || message.turn_id != existing.id
         || message.role != "user"
-        || message.content != content
     {
         return Err(AgentError::Store(format!(
-            "turn {} was already accepted with different input",
+            "turn {} has inconsistent accepted input",
             TurnId(existing.id)
         )));
     }
-    turn_run_from_model(existing)
+    let exact =
+        existing.chat_id == chat_id.0 && existing.model == model && message.content == content;
+    Ok(if exact {
+        AcceptTurnOutcome::Existing(turn_run_from_model(existing)?)
+    } else {
+        AcceptTurnOutcome::IdentityConflict
+    })
 }
 
 fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {

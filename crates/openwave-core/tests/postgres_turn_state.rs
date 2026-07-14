@@ -536,4 +536,52 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         )
         .await
         .is_err());
+
+    // Keep this global-queue fixture last: its winning turn deliberately remains
+    // queued so the race proves only acceptance rollback/recovery behavior.
+    let first_collision_chat = sample_chat();
+    let second_collision_chat = sample_chat();
+    store.create_chat(&first_collision_chat).await.unwrap();
+    store.create_chat(&second_collision_chat).await.unwrap();
+    let collision_turn_id = TurnId::new();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut collision_tasks = Vec::new();
+    for collision_chat_id in [first_collision_chat.id, second_collision_chat.id] {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        collision_tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .accept_turn(
+                    collision_turn_id,
+                    collision_chat_id,
+                    "gpt-5",
+                    "colliding input",
+                )
+                .await
+        }));
+    }
+    let mut collision_accepted = 0;
+    let mut collision_conflicted = 0;
+    for task in collision_tasks {
+        match task.await.unwrap() {
+            Ok(AcceptTurnOutcome::Accepted(_)) => collision_accepted += 1,
+            Ok(AcceptTurnOutcome::IdentityConflict) => collision_conflicted += 1,
+            outcome => panic!("unexpected cross-chat collision outcome: {outcome:?}"),
+        }
+    }
+    assert_eq!((collision_accepted, collision_conflicted), (1, 1));
+    assert_eq!(
+        store
+            .list_messages(first_collision_chat.id)
+            .await
+            .unwrap()
+            .len()
+            + store
+                .list_messages(second_collision_chat.id)
+                .await
+                .unwrap()
+                .len(),
+        1
+    );
 }
