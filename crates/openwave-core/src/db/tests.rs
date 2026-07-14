@@ -7029,6 +7029,57 @@ async fn event_journal_assigns_per_chat_seq_and_replays_after_cursor() {
 }
 
 #[tokio::test]
+async fn concurrent_event_writers_allocate_one_contiguous_chat_sequence() {
+    use crate::event::AgentEvent;
+
+    const WRITERS: i64 = 16;
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let store = std::sync::Arc::new(store);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(WRITERS as usize));
+    let mut tasks = Vec::new();
+    for index in 0..WRITERS {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let event = AgentEvent::TextDelta {
+                text: format!("delta {index}"),
+            };
+            (index, store.append_event(chat.id, &event).await.unwrap())
+        }));
+    }
+
+    let mut assigned = Vec::new();
+    for task in tasks {
+        assigned.push(task.await.unwrap().1);
+    }
+    assigned.sort_unstable();
+    assert_eq!(assigned, (1..=WRITERS).collect::<Vec<_>>());
+
+    let events = store.list_events(chat.id, 0).await.unwrap();
+    assert_eq!(events.len(), WRITERS as usize);
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        (1..=WRITERS).collect::<Vec<_>>()
+    );
+    let mut payloads = events
+        .into_iter()
+        .map(|event| match event.event {
+            AgentEvent::TextDelta { text } => text,
+            event => panic!("unexpected event: {event:?}"),
+        })
+        .collect::<Vec<_>>();
+    payloads.sort();
+    let mut expected = (0..WRITERS)
+        .map(|index| format!("delta {index}"))
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(payloads, expected);
+}
+
+#[tokio::test]
 async fn event_for_unknown_chat_is_rejected() {
     use crate::event::AgentEvent;
 
