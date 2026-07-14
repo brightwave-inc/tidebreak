@@ -208,6 +208,26 @@ pub mod turn_run {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod turn_claim {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "turn_claim")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub token: Uuid,
+        pub turn_id: Uuid,
+        pub attempt_count: i32,
+        pub claimed_at: DateTimeUtc,
+        pub lease_expires_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod tool_call {
     use sea_orm::entity::prelude::*;
 
