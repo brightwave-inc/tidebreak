@@ -92,6 +92,8 @@ pub enum AcceptTurnOutcome {
     Accepted(TurnRun),
     /// This exact turn identity and request were already committed.
     Existing(TurnRun),
+    /// The turn identity was already committed for different request data.
+    IdentityConflict,
     /// Another nonterminal turn already owns the chat's single live slot.
     ChatBusy(TurnRun),
 }
@@ -632,8 +634,10 @@ pub trait Store: Send + Sync {
     ///
     /// `id` is the caller-visible idempotency identity. Repeating the same id,
     /// chat, model, and byte-exact content returns [`AcceptTurnOutcome::Existing`]
-    /// without another message or turn. Reusing an id for different input is an
-    /// error. A different live turn for the chat returns `ChatBusy`.
+    /// without another message or turn. Reusing an id with a different chat,
+    /// model, or byte-exact content returns
+    /// [`AcceptTurnOutcome::IdentityConflict`]. A different live turn for the
+    /// chat returns [`AcceptTurnOutcome::ChatBusy`].
     async fn accept_turn(
         &self,
         _id: TurnId,

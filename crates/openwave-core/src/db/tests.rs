@@ -4979,14 +4979,20 @@ async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
     assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
 
-    assert!(store
-        .accept_turn(turn_id, chat.id, "gpt-5", "different")
-        .await
-        .is_err());
-    assert!(store
-        .accept_turn(turn_id, chat.id, "other-model", "hello")
-        .await
-        .is_err());
+    assert!(matches!(
+        store
+            .accept_turn(turn_id, chat.id, "gpt-5", "different")
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::IdentityConflict
+    ));
+    assert!(matches!(
+        store
+            .accept_turn(turn_id, chat.id, "other-model", "hello")
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::IdentityConflict
+    ));
 
     let busy = match store
         .accept_turn(TurnId::new(), chat.id, "gpt-5", "next")
@@ -5000,10 +5006,13 @@ async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
 
     let other = sample_chat();
     store.create_chat(&other).await.unwrap();
-    assert!(store
-        .accept_turn(turn_id, other.id, "gpt-5", "hello")
-        .await
-        .is_err());
+    assert!(matches!(
+        store
+            .accept_turn(turn_id, other.id, "gpt-5", "hello")
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::IdentityConflict
+    ));
 
     let missing = ChatId::new();
     assert!(store
@@ -5028,6 +5037,20 @@ async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
         .is_err());
     assert!(store.list_turn_runs(other.id).await.unwrap().is_empty());
     assert!(store.list_messages(other.id).await.unwrap().is_empty());
+
+    entities::message::Entity::update_many()
+        .col_expr(
+            entities::message::Column::Role,
+            sea_orm::sea_query::Expr::value("assistant"),
+        )
+        .filter(entities::message::Column::Id.eq(accepted.input_message_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert!(store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -5130,16 +5153,16 @@ async fn concurrent_cross_chat_reuse_of_a_turn_id_commits_once() {
     }
 
     let mut accepted = 0;
-    let mut rejected = 0;
+    let mut conflicted = 0;
     for task in tasks {
         match task.await.unwrap() {
             Ok(AcceptTurnOutcome::Accepted(_)) => accepted += 1,
-            Err(_) => rejected += 1,
+            Ok(AcceptTurnOutcome::IdentityConflict) => conflicted += 1,
             outcome => panic!("unexpected cross-chat outcome: {outcome:?}"),
         }
     }
     assert_eq!(accepted, 1);
-    assert_eq!(rejected, 1);
+    assert_eq!(conflicted, 1);
     assert_eq!(
         store.get_turn_run(turn_id).await.unwrap().unwrap().id,
         turn_id
