@@ -95,6 +95,15 @@ pub enum AcceptTurnOutcome {
     ChatBusy(TurnRun),
 }
 
+/// Result of atomically completing one exact claimed turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompleteTurnRunOutcome {
+    /// This call committed the terminal message and state transition.
+    Completed(TurnRun),
+    /// This exact completion was already committed by an earlier call.
+    Existing(TurnRun),
+}
+
 fn document_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "document storage is not implemented by this Store".into(),
@@ -598,6 +607,25 @@ pub trait Store: Send + Sync {
         _now: chrono::DateTime<chrono::Utc>,
         _lease_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
+        turn_storage_unavailable()
+    }
+
+    /// Atomically persist the final assistant message and complete its turn.
+    ///
+    /// The exact claim must still be live at the fresh operational `now`, and
+    /// the output cannot be dated after it. Repeating the same token and
+    /// exact output identity, content, and database-normalized timestamp after
+    /// an ambiguous commit returns the completed turn even after lease expiry,
+    /// without inserting another message. Returns
+    /// `None` when the token never owned this turn, its lease was lost, or
+    /// another terminal outcome already won.
+    async fn complete_turn_run(
+        &self,
+        _id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+        _output: &Message,
+    ) -> Result<Option<CompleteTurnRunOutcome>> {
         turn_storage_unavailable()
     }
 

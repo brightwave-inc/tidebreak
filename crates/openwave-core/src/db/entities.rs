@@ -187,6 +187,7 @@ pub mod turn_run {
         pub id: Uuid,
         pub chat_id: Uuid,
         pub input_message_id: Uuid,
+        pub output_message_id: Option<Uuid>,
         pub model: String,
         pub status: String,
         pub attempt_count: i32,

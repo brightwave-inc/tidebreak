@@ -63,8 +63,8 @@ pub use provider::{
 };
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
-    AcceptTurnOutcome, BlobStore, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
-    EnsureDocumentParseJobOutcome, SecretProvider, Store,
+    AcceptTurnOutcome, BlobStore, CompleteTurnRunOutcome, DocumentIndexJobReason,
+    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, SecretProvider, Store,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 #[cfg(feature = "tools")]

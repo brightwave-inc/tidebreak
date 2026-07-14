@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use openwave_core::{AcceptTurnOutcome, Chat, ChatId, DbStore, Store, TurnId, TurnRunStatus};
+use openwave_core::{
+    AcceptTurnOutcome, Chat, ChatId, CompleteTurnRunOutcome, DbStore, Message, MessageId, Role,
+    Store, TurnId, TurnRunStatus,
+};
 
 fn sample_chat() -> Chat {
     Chat {
@@ -131,4 +134,45 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         store.get_turn_run(next.id).await.unwrap().unwrap().status,
         TurnRunStatus::Queued
     );
+
+    let completion_token = uuid::Uuid::new_v4();
+    let completion_expiry = delayed_retry_at + Duration::minutes(1);
+    store
+        .claim_turn_run(completion_token, delayed_retry_at, completion_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: next_chat.id,
+        turn_id: next.id,
+        role: Role::Assistant,
+        content: "postgres completion".into(),
+        created_at: delayed_retry_at + Duration::seconds(1),
+    };
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut completions = Vec::new();
+    for _ in 0..2 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        let output = output.clone();
+        completions.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .complete_turn_run(next.id, completion_token, output.created_at, &output)
+                .await
+                .unwrap()
+                .unwrap()
+        }));
+    }
+    let mut committed = 0;
+    let mut existing = 0;
+    for completion in completions {
+        match completion.await.unwrap() {
+            CompleteTurnRunOutcome::Completed(_) => committed += 1,
+            CompleteTurnRunOutcome::Existing(_) => existing += 1,
+        }
+    }
+    assert_eq!((committed, existing), (1, 1));
+    assert_eq!(store.list_messages(next_chat.id).await.unwrap().len(), 2);
 }

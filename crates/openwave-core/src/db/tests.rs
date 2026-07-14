@@ -4598,6 +4598,7 @@ async fn make_queued_turn(
         id: Set(turn_id.0),
         chat_id: Set(chat_id.0),
         input_message_id: Set(input_message_id.0),
+        output_message_id: Set(None),
         model: Set(model.into()),
         status: Set(TurnRunStatus::Queued.as_str().into()),
         attempt_count: Set(0),
@@ -4639,6 +4640,18 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         .await
         .is_err());
 
+    let first_output_id = MessageId::new();
+    entities::message::ActiveModel {
+        id: Set(first_output_id.0),
+        chat_id: Set(chat.id.0),
+        turn_id: Set(first.id),
+        role: Set("assistant".into()),
+        content: Set("done".into()),
+        created_at: Set(now),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
     entities::turn_run::Entity::update_many()
         .col_expr(
             entities::turn_run::Column::Status,
@@ -4647,6 +4660,10 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         .col_expr(
             entities::turn_run::Column::AttemptCount,
             sea_orm::sea_query::Expr::value(1),
+        )
+        .col_expr(
+            entities::turn_run::Column::OutputMessageId,
+            sea_orm::sea_query::Expr::value(Some(first_output_id.0)),
         )
         .col_expr(
             entities::turn_run::Column::StartedAt,
@@ -4688,6 +4705,30 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     failed_without_finish.started_at = Set(Some(now));
     failed_without_finish.last_error_code = Set(Some("provider_error".into()));
     assert!(failed_without_finish.insert(&store.conn).await.is_err());
+
+    let mut completed_without_output =
+        make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
+    completed_without_output.status = Set(TurnRunStatus::Completed.as_str().into());
+    completed_without_output.attempt_count = Set(1);
+    completed_without_output.started_at = Set(Some(now));
+    completed_without_output.finished_at = Set(Some(now));
+    assert!(completed_without_output.insert(&store.conn).await.is_err());
+
+    let mut queued_with_output = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
+    queued_with_output.output_message_id = Set(Some(first_output_id.0));
+    assert!(queued_with_output.insert(&store.conn).await.is_err());
+
+    let mut completed_with_wrong_output =
+        make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
+    completed_with_wrong_output.status = Set(TurnRunStatus::Completed.as_str().into());
+    completed_with_wrong_output.attempt_count = Set(1);
+    completed_with_wrong_output.started_at = Set(Some(now));
+    completed_with_wrong_output.finished_at = Set(Some(now));
+    completed_with_wrong_output.output_message_id = Set(Some(first_output_id.0));
+    assert!(completed_with_wrong_output
+        .insert(&store.conn)
+        .await
+        .is_err());
 
     let mut unknown_status = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     unknown_status.status = Set("waiting_for_magic".into());
@@ -5120,7 +5161,10 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
     assert_eq!(first.started_at, Some(claimed_at));
     assert_eq!(first.lease_expires_at, Some(first_expiry));
 
-    let heartbeat_at = claimed_at + chrono::Duration::seconds(10);
+    let heartbeat_at =
+        claimed_at + chrono::Duration::seconds(10) + chrono::Duration::nanoseconds(900);
+    let canonical_heartbeat_at =
+        DateTime::<Utc>::from_timestamp_micros(heartbeat_at.timestamp_micros()).unwrap();
     assert!(!store
         .heartbeat_turn_run(
             turn_id,
@@ -5144,6 +5188,15 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
         .heartbeat_turn_run(turn_id, first_token, heartbeat_at, extended)
         .await
         .unwrap());
+    assert_eq!(
+        store
+            .get_turn_run(turn_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .updated_at,
+        canonical_heartbeat_at
+    );
     assert!(!store
         .heartbeat_turn_run(
             turn_id,
@@ -5232,6 +5285,413 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
         store.get_turn_run(next.id).await.unwrap().unwrap().status,
         TurnRunStatus::Queued
     );
+}
+
+#[tokio::test]
+async fn turn_completion_atomically_persists_exact_output_and_recovers_retries() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let lease_expires_at = claimed_at + chrono::Duration::minutes(1);
+    let lease_token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(lease_token, claimed_at, lease_expires_at)
+        .await
+        .unwrap()
+        .unwrap();
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "final answer".into(),
+        created_at: claimed_at + chrono::Duration::nanoseconds(1_234_567),
+    };
+
+    assert_eq!(
+        store
+            .complete_turn_run(turn_id, uuid::Uuid::new_v4(), output.created_at, &output)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+
+    let mut invalid = output.clone();
+    invalid.role = Role::User;
+    assert!(store
+        .complete_turn_run(turn_id, lease_token, output.created_at, &invalid)
+        .await
+        .is_err());
+    invalid = output.clone();
+    invalid.turn_id = TurnId::new();
+    assert!(store
+        .complete_turn_run(turn_id, lease_token, output.created_at, &invalid)
+        .await
+        .is_err());
+    invalid = output.clone();
+    invalid.chat_id = ChatId::new();
+    assert!(store
+        .complete_turn_run(turn_id, lease_token, output.created_at, &invalid)
+        .await
+        .is_err());
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+
+    let CompleteTurnRunOutcome::Completed(completed) = store
+        .complete_turn_run(turn_id, lease_token, output.created_at, &output)
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("first exact completion must commit")
+    };
+    let canonical_completed_at =
+        DateTime::<Utc>::from_timestamp_micros(output.created_at.timestamp_micros()).unwrap();
+    assert_eq!(completed.status, TurnRunStatus::Completed);
+    assert_eq!(completed.output_message_id, Some(output.id));
+    assert_eq!(completed.lease_token, None);
+    assert_eq!(completed.lease_expires_at, None);
+    assert_eq!(completed.finished_at, Some(canonical_completed_at));
+    assert_eq!(completed.updated_at, canonical_completed_at);
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1].id, output.id);
+    assert_eq!(messages[1].content, output.content);
+    assert_eq!(messages[1].created_at, canonical_completed_at);
+
+    assert_eq!(
+        store
+            .complete_turn_run(
+                turn_id,
+                lease_token,
+                lease_expires_at + chrono::Duration::seconds(1),
+                &output,
+            )
+            .await
+            .unwrap(),
+        Some(CompleteTurnRunOutcome::Existing(completed.clone()))
+    );
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+
+    let mut mismatched = output.clone();
+    mismatched.content = "different answer".into();
+    assert!(store
+        .complete_turn_run(turn_id, lease_token, lease_expires_at, &mismatched)
+        .await
+        .is_err());
+    mismatched = output.clone();
+    mismatched.id = MessageId::new();
+    assert!(store
+        .complete_turn_run(turn_id, lease_token, lease_expires_at, &mismatched)
+        .await
+        .is_err());
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn turn_completion_uses_the_heartbeated_lease_and_fences_operation_time() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let original_expiry = claimed_at + chrono::Duration::minutes(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, original_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+    let heartbeat_at = claimed_at + chrono::Duration::seconds(30);
+    let extended_expiry = original_expiry + chrono::Duration::minutes(1);
+    assert!(store
+        .heartbeat_turn_run(turn_id, token, heartbeat_at, extended_expiry)
+        .await
+        .unwrap());
+
+    let prepared_output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "prepared before retry".into(),
+        created_at: heartbeat_at - chrono::Duration::microseconds(1),
+    };
+    let future_output = Message {
+        id: MessageId::new(),
+        content: "future output".into(),
+        created_at: heartbeat_at + chrono::Duration::seconds(2),
+        ..prepared_output.clone()
+    };
+    assert!(store
+        .complete_turn_run(
+            turn_id,
+            token,
+            heartbeat_at + chrono::Duration::seconds(1),
+            &future_output,
+        )
+        .await
+        .is_err());
+    let output = Message {
+        id: MessageId::new(),
+        content: "after the original lease".into(),
+        created_at: original_expiry + chrono::Duration::seconds(1),
+        ..prepared_output
+    };
+    assert!(matches!(
+        store
+            .complete_turn_run(turn_id, token, output.created_at, &output)
+            .await
+            .unwrap(),
+        Some(CompleteTurnRunOutcome::Completed(_))
+    ));
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn turn_completion_rejects_prepared_output_retried_after_expiry() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let lease_expires_at = claimed_at + chrono::Duration::minutes(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, lease_expires_at)
+        .await
+        .unwrap()
+        .unwrap();
+    let prepared_output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "prepared while live".into(),
+        created_at: lease_expires_at - chrono::Duration::seconds(1),
+    };
+
+    assert_eq!(
+        store
+            .complete_turn_run(turn_id, token, lease_expires_at, &prepared_output)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+    assert_eq!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        TurnRunStatus::Running
+    );
+}
+
+#[tokio::test]
+async fn stale_turn_attempt_cannot_complete_a_reclaimed_turn() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(2),
+        )
+        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let first_claim_at = accepted.available_at + chrono::Duration::seconds(1);
+    let first_expiry = first_claim_at + chrono::Duration::minutes(1);
+    let first_token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(first_token, first_claim_at, first_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+    let second_token = uuid::Uuid::new_v4();
+    let second_expiry = first_expiry + chrono::Duration::minutes(1);
+    let reclaimed = store
+        .claim_turn_run(second_token, first_expiry, second_expiry)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed.attempt_count, 2);
+
+    let stale_output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "stale answer".into(),
+        created_at: first_expiry + chrono::Duration::seconds(1),
+    };
+    assert_eq!(
+        store
+            .complete_turn_run(turn_id, first_token, stale_output.created_at, &stale_output)
+            .await
+            .unwrap(),
+        None
+    );
+    let output = Message {
+        id: MessageId::new(),
+        content: "current answer".into(),
+        ..stale_output
+    };
+    assert!(matches!(
+        store
+            .complete_turn_run(turn_id, second_token, output.created_at, &output)
+            .await
+            .unwrap(),
+        Some(CompleteTurnRunOutcome::Completed(_))
+    ));
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn concurrent_different_turn_completions_commit_one_output_once() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "one answer".into(),
+        created_at: claimed_at + chrono::Duration::seconds(1),
+    };
+    let competing_output = Message {
+        id: MessageId::new(),
+        content: "different answer".into(),
+        ..output.clone()
+    };
+    let store = std::sync::Arc::new(store);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let mut tasks = Vec::new();
+    for output in [output, competing_output] {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .complete_turn_run(turn_id, token, output.created_at, &output)
+                .await
+        }));
+    }
+    let mut committed = 0;
+    let mut conflicted = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            Ok(Some(CompleteTurnRunOutcome::Completed(_))) => committed += 1,
+            Err(AgentError::Store(message))
+                if message.contains("already completed with different output") =>
+            {
+                conflicted += 1;
+            }
+            outcome => panic!("unexpected concurrent completion outcome: {outcome:?}"),
+        }
+    }
+    assert_eq!((committed, conflicted), (1, 1));
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn turn_completion_rolls_back_output_when_state_update_fails() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_turn_completion
+             BEFORE UPDATE OF status ON turn_run
+             WHEN NEW.status = 'completed'
+             BEGIN SELECT RAISE(FAIL, 'forced turn completion failure'); END",
+        )
+        .await
+        .unwrap();
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "must roll back".into(),
+        created_at: claimed_at + chrono::Duration::seconds(1),
+    };
+    assert!(store
+        .complete_turn_run(turn_id, token, output.created_at, &output)
+        .await
+        .is_err());
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+    let still_running = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    assert_eq!(still_running.status, TurnRunStatus::Running);
+    assert_eq!(still_running.output_message_id, None);
 }
 
 #[tokio::test]
