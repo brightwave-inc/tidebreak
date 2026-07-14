@@ -4,13 +4,14 @@ use sea_orm::{
     TransactionTrait, TryInsertResult,
 };
 
-use crate::error::{AgentError, Result};
+use crate::error::{AgentError, AgentErrorInfo, Result};
+use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, MessageId, TurnId};
 use crate::model::{TurnRun, TurnRunStatus};
-use crate::storage::AcceptTurnOutcome;
+use crate::storage::{AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome};
 
 use super::super::{entities, store_err, DbStore};
-use super::acquire_chat_write_lock;
+use super::{acquire_chat_write_lock, conversation::append_event_on};
 
 mod resolution;
 
@@ -140,7 +141,7 @@ pub(in crate::db) async fn claim_turn_run(
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
     lease_expires_at: chrono::DateTime<Utc>,
-) -> Result<Option<TurnRun>> {
+) -> Result<ClaimTurnRunOutcome> {
     let now = canonical_db_timestamp(now)?;
     let lease_expires_at = canonical_db_timestamp(lease_expires_at)?;
     if lease_token.is_nil() {
@@ -155,6 +156,19 @@ pub(in crate::db) async fn claim_turn_run(
     loop {
         let transaction = store.conn.begin().await.map_err(store_err)?;
         acquire_turn_claim_write_lock(&transaction).await?;
+        if let Some(existing) = entities::event::Entity::find()
+            .filter(entities::event::Column::ScanToken.eq(lease_token))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+        {
+            let terminal_event = claim_scan_terminal_event_from_model(existing, lease_token)?;
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(ClaimTurnRunOutcome {
+                turn: None,
+                terminal_event: Some(terminal_event),
+            });
+        }
         if let Some(receipt) = entities::turn_claim::Entity::find_by_id(lease_token)
             .one(&transaction)
             .await
@@ -175,7 +189,10 @@ pub(in crate::db) async fn claim_turn_run(
                 .map(turn_run_from_model)
                 .transpose()?;
             transaction.commit().await.map_err(store_err)?;
-            return Ok(existing);
+            return Ok(ClaimTurnRunOutcome {
+                turn: existing,
+                terminal_event: None,
+            });
         }
         let due = entities::turn_run::Entity::find()
             .filter(entities::turn_run::Column::Status.is_in([
@@ -221,10 +238,20 @@ pub(in crate::db) async fn claim_turn_run(
         };
         let Some(candidate) = candidate else {
             transaction.commit().await.map_err(store_err)?;
-            return Ok(None);
+            return Ok(ClaimTurnRunOutcome {
+                turn: None,
+                terminal_event: None,
+            });
         };
 
         if candidate.status == TurnRunStatus::Cancelling.as_str() {
+            let chat_id = ChatId(candidate.chat_id);
+            if !acquire_chat_write_lock(&transaction, chat_id).await? {
+                return Err(AgentError::Store(format!(
+                    "turn {} references missing chat {chat_id}",
+                    TurnId(candidate.id)
+                )));
+            }
             let cancelled = entities::turn_run::Entity::update_many()
                 .col_expr(
                     entities::turn_run::Column::Status,
@@ -261,12 +288,37 @@ pub(in crate::db) async fn claim_turn_run(
                 transaction.rollback().await.map_err(store_err)?;
                 continue;
             }
+            let event = AgentEvent::TurnCancelled {
+                usage: crate::provider::Usage::default(),
+            };
+            let sequenced_event = append_claim_scan_terminal_event_on(
+                &transaction,
+                &candidate,
+                chat_id,
+                lease_token,
+                &event,
+            )
+            .await?;
             transaction.commit().await.map_err(store_err)?;
-            continue;
+            return Ok(ClaimTurnRunOutcome {
+                turn: None,
+                terminal_event: Some(ClaimScanTerminalEvent {
+                    chat_id,
+                    turn_id: TurnId(candidate.id),
+                    event: sequenced_event,
+                }),
+            });
         }
 
         let reclaiming = candidate.status == TurnRunStatus::Running.as_str();
         if reclaiming && candidate.attempt_count >= candidate.max_attempts {
+            let chat_id = ChatId(candidate.chat_id);
+            if !acquire_chat_write_lock(&transaction, chat_id).await? {
+                return Err(AgentError::Store(format!(
+                    "turn {} references missing chat {chat_id}",
+                    TurnId(candidate.id)
+                )));
+            }
             let failed = entities::turn_run::Entity::update_many()
                 .col_expr(
                     entities::turn_run::Column::Status,
@@ -309,8 +361,48 @@ pub(in crate::db) async fn claim_turn_run(
                 transaction.rollback().await.map_err(store_err)?;
                 continue;
             }
+            let event = AgentEvent::TurnFailed {
+                error: AgentErrorInfo {
+                    kind: "lease_expired".into(),
+                    message: "final worker lease expired".into(),
+                },
+            };
+            let claim_token = candidate.lease_token.ok_or_else(|| {
+                AgentError::Store(format!(
+                    "terminalized turn {} is missing its claim token",
+                    TurnId(candidate.id)
+                ))
+            })?;
+            entities::turn_failure::ActiveModel {
+                lease_token: Set(claim_token),
+                turn_id: Set(candidate.id),
+                attempt_count: Set(candidate.attempt_count),
+                requested_retry_at: Set(None),
+                error_code: Set("lease_expired".into()),
+                error_detail: Set(Some("final worker lease expired".into())),
+                resolved_at: Set(now),
+                result_status: Set(TurnRunStatus::Failed.as_str().into()),
+            }
+            .insert(&transaction)
+            .await
+            .map_err(store_err)?;
+            let sequenced_event = append_claim_scan_terminal_event_on(
+                &transaction,
+                &candidate,
+                chat_id,
+                lease_token,
+                &event,
+            )
+            .await?;
             transaction.commit().await.map_err(store_err)?;
-            continue;
+            return Ok(ClaimTurnRunOutcome {
+                turn: None,
+                terminal_event: Some(ClaimScanTerminalEvent {
+                    chat_id,
+                    turn_id: TurnId(candidate.id),
+                    event: sequenced_event,
+                }),
+            });
         }
 
         let next_attempt = candidate.attempt_count.checked_add(1).ok_or_else(|| {
@@ -423,7 +515,10 @@ pub(in crate::db) async fn claim_turn_run(
             })
             .and_then(turn_run_from_model)?;
         transaction.commit().await.map_err(store_err)?;
-        return Ok(Some(claimed));
+        return Ok(ClaimTurnRunOutcome {
+            turn: Some(claimed),
+            terminal_event: None,
+        });
     }
 }
 
@@ -474,16 +569,77 @@ async fn acquire_turn_claim_write_lock<C>(conn: &C) -> Result<()>
 where
     C: ConnectionTrait,
 {
-    entities::turn_run::Entity::update_many()
+    let locked = entities::turn_claim_lock::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(entities::turn_run::Column::UpdatedAt).into(),
+            entities::turn_claim_lock::Column::Id,
+            sea_orm::sea_query::Expr::col(entities::turn_claim_lock::Column::Id).into(),
         )
-        .filter(entities::turn_run::Column::Id.is_null())
+        .filter(entities::turn_claim_lock::Column::Id.eq(1))
         .exec(conn)
         .await
         .map_err(store_err)?;
+    if locked.rows_affected != 1 {
+        return Err(AgentError::Store(
+            "durable turn claim lock is missing".into(),
+        ));
+    }
     Ok(())
+}
+
+async fn append_claim_scan_terminal_event_on<C>(
+    conn: &C,
+    candidate: &entities::turn_run::Model,
+    chat_id: ChatId,
+    scan_token: uuid::Uuid,
+    event: &AgentEvent,
+) -> Result<SequencedEvent>
+where
+    C: ConnectionTrait,
+{
+    let lease_token = candidate.lease_token.ok_or_else(|| {
+        AgentError::Store(format!(
+            "terminalized turn {} is missing its claim token",
+            TurnId(candidate.id)
+        ))
+    })?;
+    let seq = append_event_on(
+        conn,
+        chat_id,
+        Some(TurnId(candidate.id)),
+        Some(lease_token),
+        Some(i32::MAX),
+        Some(scan_token),
+        event,
+    )
+    .await?;
+    Ok(SequencedEvent {
+        seq,
+        event: event.clone(),
+    })
+}
+
+fn claim_scan_terminal_event_from_model(
+    model: entities::event::Model,
+    scan_token: uuid::Uuid,
+) -> Result<ClaimScanTerminalEvent> {
+    if model.scan_token != Some(scan_token) || !model.terminal {
+        return Err(AgentError::Store(format!(
+            "claim scan token {scan_token} references an invalid journal receipt"
+        )));
+    }
+    let turn_id = model.turn_id.map(TurnId).ok_or_else(|| {
+        AgentError::Store(format!(
+            "claim scan token {scan_token} references an event without a turn"
+        ))
+    })?;
+    Ok(ClaimScanTerminalEvent {
+        chat_id: ChatId(model.chat_id),
+        turn_id,
+        event: SequencedEvent {
+            seq: model.seq,
+            event: serde_json::from_value(model.payload)?,
+        },
+    })
 }
 
 fn turn_run_due_order(

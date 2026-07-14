@@ -5194,13 +5194,15 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
         .claim_turn_run(first_token, claimed_at, first_expiry)
         .await
         .unwrap()
+        .turn
         .unwrap();
     assert_eq!(first.lease_token, Some(first_token));
     assert_eq!(
         store
             .claim_turn_run(first_token, claimed_at, first_expiry)
             .await
-            .unwrap(),
+            .unwrap()
+            .turn,
         Some(first.clone())
     );
     assert_eq!(first.status, TurnRunStatus::Running);
@@ -5261,7 +5263,8 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
                 extended + chrono::Duration::minutes(1)
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .turn,
         None
     );
     let second_expiry = extended + chrono::Duration::minutes(1);
@@ -5270,6 +5273,7 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
         .claim_turn_run(second_token, extended, second_expiry)
         .await
         .unwrap()
+        .turn
         .unwrap();
     assert_eq!(second.id, turn_id);
     assert_eq!(second.status, TurnRunStatus::Running);
@@ -5287,16 +5291,32 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
         .await
         .unwrap());
 
+    let exhausted = store
+        .claim_turn_run(
+            uuid::Uuid::new_v4(),
+            second_expiry,
+            second_expiry + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exhausted.turn, None);
+    let terminal = exhausted
+        .terminal_event
+        .expect("exhausted attempt must publish a terminal event");
+    assert_eq!(terminal.chat_id, chat.id);
+    assert_eq!(terminal.turn_id, turn_id);
     assert_eq!(
-        store
-            .claim_turn_run(
-                uuid::Uuid::new_v4(),
-                second_expiry,
-                second_expiry + chrono::Duration::minutes(1),
-            )
-            .await
-            .unwrap(),
-        None
+        terminal.event.event,
+        AgentEvent::TurnFailed {
+            error: crate::error::AgentErrorInfo {
+                kind: "lease_expired".into(),
+                message: "final worker lease expired".into(),
+            }
+        }
+    );
+    assert_eq!(
+        store.list_events(chat.id, 0).await.unwrap(),
+        vec![terminal.event.clone()]
     );
     let failed = store.get_turn_run(turn_id).await.unwrap().unwrap();
     assert_eq!(failed.status, TurnRunStatus::Failed);
@@ -5305,6 +5325,23 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
     assert_eq!(failed.lease_expires_at, None);
     assert_eq!(failed.finished_at, Some(second_expiry));
     assert_eq!(failed.last_error_code.as_deref(), Some("lease_expired"));
+    let recovered = store
+        .record_turn_run_failure_and_append_event(
+            turn_id,
+            second_token,
+            second_expiry + chrono::Duration::hours(1),
+            TurnFailureRetry::Permanent,
+            "lease_expired",
+            Some("final worker lease expired"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        recovered.outcome,
+        RecordTurnFailureOutcome::Existing(_)
+    ));
+    assert_eq!(recovered.terminal_event, Some(terminal.event));
 
     let next_chat = sample_chat();
     store.create_chat(&next_chat).await.unwrap();
@@ -5325,7 +5362,8 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
                 delayed_retry_at + chrono::Duration::minutes(1),
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .turn,
         None
     );
     assert_eq!(
@@ -5405,6 +5443,7 @@ async fn turn_completion_atomically_persists_exact_output_and_recovers_retries()
         .claim_turn_run(lease_token, claimed_at, lease_expires_at)
         .await
         .unwrap()
+        .turn
         .unwrap();
     let output = Message {
         id: MessageId::new(),
@@ -5525,6 +5564,7 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
         .claim_turn_run(token, claimed_at, lease_expires_at)
         .await
         .unwrap()
+        .turn
         .unwrap();
     let resolved_at =
         claimed_at + chrono::Duration::seconds(1) + chrono::Duration::nanoseconds(999);
@@ -5638,6 +5678,7 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
         .claim_turn_run(second_token, canonical_retry_at, second_expiry)
         .await
         .unwrap()
+        .turn
         .unwrap();
     assert_eq!(second.attempt_count, 2);
     assert_eq!(second.last_error_code, None);
@@ -5692,6 +5733,7 @@ async fn turn_failure_exhaustion_retains_retry_intent_and_rolls_back_atomically(
         .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(2))
         .await
         .unwrap()
+        .turn
         .unwrap();
     let failed_at = claimed_at + chrono::Duration::seconds(1);
     let retry_at = failed_at + chrono::Duration::minutes(1);
@@ -5788,6 +5830,7 @@ async fn turn_failure_rolls_back_receipt_and_state_when_terminal_event_fails() {
         .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(2))
         .await
         .unwrap()
+        .turn
         .unwrap();
     entities::event::ActiveModel {
         chat_id: Set(chat.id.0),
@@ -5795,6 +5838,7 @@ async fn turn_failure_rolls_back_receipt_and_state_when_terminal_event_fails() {
         turn_id: Set(Some(turn_id.0)),
         lease_token: Set(Some(token)),
         attempt_event_ordinal: Set(Some(i32::MAX)),
+        scan_token: Set(None),
         terminal: Set(true),
         payload: Set(serde_json::to_value(AgentEvent::TurnCompleted {
             usage: Usage::default(),
@@ -5827,6 +5871,11 @@ async fn turn_failure_rolls_back_receipt_and_state_when_terminal_event_fails() {
     assert_eq!(still_running.status, TurnRunStatus::Running);
     assert_eq!(still_running.finished_at, None);
     assert_eq!(still_running.last_error_code, None);
+    assert!(entities::turn_failure::Entity::find_by_id(token)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
 }
 
@@ -5851,6 +5900,7 @@ async fn permanent_turn_failure_uses_the_heartbeated_lease_and_rejects_expiry() 
         .claim_turn_run(token, claimed_at, original_expiry)
         .await
         .unwrap()
+        .turn
         .unwrap();
     let heartbeat_at = claimed_at + chrono::Duration::seconds(30);
     let extended_expiry = original_expiry + chrono::Duration::minutes(1);
@@ -5899,6 +5949,7 @@ async fn permanent_turn_failure_uses_the_heartbeated_lease_and_rejects_expiry() 
         .claim_turn_run(expired_token, expired_claim_at, expired_at)
         .await
         .unwrap()
+        .turn
         .unwrap();
     assert_eq!(
         store
@@ -6028,6 +6079,7 @@ async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
         .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(2))
         .await
         .unwrap()
+        .turn
         .unwrap();
     let failed_at = claimed_at + chrono::Duration::seconds(1);
     let retry_at = failed_at + chrono::Duration::minutes(1);
@@ -6101,6 +6153,7 @@ async fn immediate_cancellation_rolls_back_when_terminal_event_fails() {
         turn_id: Set(Some(turn.id.0)),
         lease_token: Set(None),
         attempt_event_ordinal: Set(None),
+        scan_token: Set(None),
         terminal: Set(true),
         payload: Set(serde_json::to_value(AgentEvent::TurnCompleted {
             usage: Usage::default(),
@@ -6146,6 +6199,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
         .claim_turn_run(token, claimed_at, expires_at)
         .await
         .unwrap()
+        .turn
         .unwrap();
     let requested_at = claimed_at + chrono::Duration::seconds(1);
     let requested = store
@@ -6301,6 +6355,7 @@ async fn claim_scan_terminalizes_an_expired_cancelling_lease() {
         .claim_turn_run(token, claimed_at, expires_at)
         .await
         .unwrap()
+        .turn
         .unwrap();
     assert!(matches!(
         store
@@ -6310,28 +6365,49 @@ async fn claim_scan_terminalizes_an_expired_cancelling_lease() {
         Some(RequestTurnCancellationOutcome::Requested(_))
     ));
 
+    let scan = store
+        .claim_turn_run(
+            uuid::Uuid::new_v4(),
+            expires_at,
+            expires_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(scan.turn, None);
+    let terminal = scan
+        .terminal_event
+        .expect("expired cancellation must publish a terminal event");
+    assert_eq!(terminal.chat_id, chat.id);
+    assert_eq!(terminal.turn_id, turn.id);
     assert_eq!(
-        store
-            .claim_turn_run(
-                uuid::Uuid::new_v4(),
-                expires_at,
-                expires_at + chrono::Duration::minutes(1),
-            )
-            .await
-            .unwrap(),
-        None
+        terminal.event.event,
+        AgentEvent::TurnCancelled {
+            usage: Usage::default()
+        }
+    );
+    assert_eq!(
+        store.list_events(chat.id, 0).await.unwrap(),
+        vec![terminal.event.clone()]
     );
     let cancelled = store.get_turn_run(turn.id).await.unwrap().unwrap();
     assert_eq!(cancelled.status, TurnRunStatus::Cancelled);
     assert_eq!(cancelled.finished_at, Some(expires_at));
     assert_eq!(cancelled.lease_token, None);
+    let recovered = store
+        .finish_turn_cancellation_and_append_event(
+            turn.id,
+            token,
+            expires_at + chrono::Duration::hours(1),
+            Usage::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        store
-            .finish_turn_cancellation(turn.id, token, expires_at + chrono::Duration::hours(1),)
-            .await
-            .unwrap(),
-        Some(FinishTurnCancellationOutcome::Existing(cancelled))
+        recovered.outcome,
+        FinishTurnCancellationOutcome::Existing(cancelled)
     );
+    assert_eq!(recovered.terminal_event, Some(terminal.event));
     assert!(matches!(
         store
             .accept_turn(TurnId::new(), chat.id, "gpt-5", "slot recovered")
@@ -6339,6 +6415,166 @@ async fn claim_scan_terminalizes_an_expired_cancelling_lease() {
             .unwrap(),
         AcceptTurnOutcome::Accepted(_)
     ));
+}
+
+#[tokio::test]
+async fn claim_scan_rolls_back_terminal_state_when_event_append_fails() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "expire and roll back")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = turn.available_at + chrono::Duration::seconds(1);
+    let expires_at = claimed_at + chrono::Duration::minutes(1);
+    let token = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(token, claimed_at, expires_at)
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    entities::event::ActiveModel {
+        chat_id: Set(chat.id.0),
+        seq: Set(1),
+        turn_id: Set(Some(turn.id.0)),
+        lease_token: Set(Some(token)),
+        attempt_event_ordinal: Set(Some(i32::MAX)),
+        scan_token: Set(None),
+        terminal: Set(true),
+        payload: Set(serde_json::to_value(AgentEvent::TurnFailed {
+            error: crate::error::AgentErrorInfo {
+                kind: "forced".into(),
+                message: "occupy terminal slot".into(),
+            },
+        })
+        .unwrap()),
+        created_at: Set(Utc::now()),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+
+    assert!(store
+        .claim_turn_run(
+            uuid::Uuid::new_v4(),
+            expires_at,
+            expires_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .is_err());
+    let still_running = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    assert_eq!(still_running.status, TurnRunStatus::Running);
+    assert_eq!(still_running.lease_token, Some(token));
+    assert_eq!(still_running.lease_expires_at, Some(expires_at));
+    assert_eq!(still_running.finished_at, None);
+    assert_eq!(still_running.last_error_code, None);
+    assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn claim_scan_returns_one_routable_terminal_action_at_a_time() {
+    let (_dir, store) = temp_store().await;
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    let first_turn = match store
+        .accept_turn(TurnId::new(), first_chat.id, "gpt-5", "first expired turn")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let second_turn = match store
+        .accept_turn(
+            TurnId::new(),
+            second_chat.id,
+            "gpt-5",
+            "second expired turn",
+        )
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at =
+        first_turn.available_at.max(second_turn.available_at) + chrono::Duration::seconds(1);
+    let expires_at = claimed_at + chrono::Duration::minutes(1);
+    for _ in 0..2 {
+        store
+            .claim_turn_run(uuid::Uuid::new_v4(), claimed_at, expires_at)
+            .await
+            .unwrap()
+            .turn
+            .expect("both turns must be claimable");
+    }
+
+    let scan_token = uuid::Uuid::new_v4();
+    let first_action = store
+        .claim_turn_run(
+            scan_token,
+            expires_at,
+            expires_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_action.turn, None);
+    assert_eq!(
+        store
+            .claim_turn_run(
+                scan_token,
+                expires_at + chrono::Duration::seconds(1),
+                expires_at + chrono::Duration::minutes(2),
+            )
+            .await
+            .unwrap(),
+        first_action,
+        "an ambiguous scan retry must recover the same routed event"
+    );
+    let second_action = store
+        .claim_turn_run(
+            uuid::Uuid::new_v4(),
+            expires_at + chrono::Duration::seconds(1),
+            expires_at + chrono::Duration::minutes(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_action.turn, None);
+    let routed = vec![
+        first_action
+            .terminal_event
+            .expect("first scan must return its committed action"),
+        second_action
+            .terminal_event
+            .expect("second scan must return its committed action"),
+    ];
+    assert_ne!(routed[0].turn_id, routed[1].turn_id);
+    for terminal in routed {
+        let expected_chat = if terminal.turn_id == first_turn.id {
+            first_chat.id
+        } else if terminal.turn_id == second_turn.id {
+            second_chat.id
+        } else {
+            panic!("scan returned an unknown turn")
+        };
+        assert_eq!(terminal.chat_id, expected_chat);
+        assert!(matches!(
+            terminal.event.event,
+            AgentEvent::TurnFailed { .. }
+        ));
+        assert_eq!(
+            store.list_events(expected_chat, 0).await.unwrap(),
+            vec![terminal.event]
+        );
+    }
 }
 
 #[tokio::test]
@@ -6360,6 +6596,7 @@ async fn concurrent_cancellation_requests_converge_on_one_running_turn() {
         .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
+        .turn
         .unwrap();
     let store = std::sync::Arc::new(store);
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
@@ -6415,6 +6652,7 @@ async fn turn_completion_and_cancellation_serialize_to_one_decision() {
         .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
+        .turn
         .unwrap();
     let decided_at = claimed_at + chrono::Duration::seconds(1);
     let output = Message {
@@ -6492,6 +6730,7 @@ async fn turn_completion_and_failure_serialize_to_one_terminal_decision() {
         .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(2))
         .await
         .unwrap()
+        .turn
         .unwrap();
     let resolved_at = claimed_at + chrono::Duration::seconds(1);
     let output = Message {
@@ -6575,6 +6814,7 @@ async fn turn_completion_uses_the_heartbeated_lease_and_fences_operation_time() 
         .claim_turn_run(token, claimed_at, original_expiry)
         .await
         .unwrap()
+        .turn
         .unwrap();
     let heartbeat_at = claimed_at + chrono::Duration::seconds(30);
     let extended_expiry = original_expiry + chrono::Duration::minutes(1);
@@ -6643,6 +6883,7 @@ async fn turn_completion_rejects_prepared_output_retried_after_expiry() {
         .claim_turn_run(token, claimed_at, lease_expires_at)
         .await
         .unwrap()
+        .turn
         .unwrap();
     let prepared_output = Message {
         id: MessageId::new(),
@@ -6697,6 +6938,7 @@ async fn stale_turn_attempt_cannot_complete_a_reclaimed_turn() {
         .claim_turn_run(first_token, first_claim_at, first_expiry)
         .await
         .unwrap()
+        .turn
         .unwrap();
     let second_token = uuid::Uuid::new_v4();
     let second_expiry = first_expiry + chrono::Duration::minutes(1);
@@ -6704,6 +6946,7 @@ async fn stale_turn_attempt_cannot_complete_a_reclaimed_turn() {
         .claim_turn_run(second_token, first_expiry, second_expiry)
         .await
         .unwrap()
+        .turn
         .unwrap();
     assert_eq!(reclaimed.attempt_count, 2);
 
@@ -6757,6 +7000,7 @@ async fn concurrent_different_turn_completions_commit_one_output_once() {
         .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
+        .turn
         .unwrap();
     let output = Message {
         id: MessageId::new(),
@@ -6821,6 +7065,7 @@ async fn turn_completion_rolls_back_output_when_state_update_fails() {
         .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
+        .turn
         .unwrap();
     store
         .conn
@@ -6874,6 +7119,7 @@ async fn turn_completion_rolls_back_state_and_output_when_terminal_event_fails()
         .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
+        .turn
         .unwrap();
     entities::event::ActiveModel {
         chat_id: Set(chat.id.0),
@@ -6881,6 +7127,7 @@ async fn turn_completion_rolls_back_state_and_output_when_terminal_event_fails()
         turn_id: Set(Some(turn_id.0)),
         lease_token: Set(Some(token)),
         attempt_event_ordinal: Set(Some(i32::MAX)),
+        scan_token: Set(None),
         terminal: Set(true),
         payload: Set(serde_json::to_value(AgentEvent::TurnFailed {
             error: AgentErrorInfo {
@@ -6954,7 +7201,7 @@ async fn concurrent_turn_claimers_never_share_a_lease() {
     let mut claimed = Vec::new();
     let mut empty = 0;
     for task in tasks {
-        match task.await.unwrap().unwrap() {
+        match task.await.unwrap().unwrap().turn {
             Some(turn) => claimed.push(turn),
             None => empty += 1,
         }
@@ -6994,6 +7241,7 @@ async fn turn_claim_orders_queued_and_expired_work_by_effective_due_time() {
         .claim_turn_run(uuid::Uuid::new_v4(), first_claim_at, first_expiry)
         .await
         .unwrap()
+        .turn
         .unwrap();
 
     let queued_chat = sample_chat();
@@ -7029,6 +7277,7 @@ async fn turn_claim_orders_queued_and_expired_work_by_effective_due_time() {
         )
         .await
         .unwrap()
+        .turn
         .unwrap();
     assert_eq!(claimed_queued.id, queued_turn.id);
     let reclaimed_expired = store
@@ -7039,6 +7288,7 @@ async fn turn_claim_orders_queued_and_expired_work_by_effective_due_time() {
         )
         .await
         .unwrap()
+        .turn
         .unwrap();
     assert_eq!(reclaimed_expired.id, expired_turn.id);
     assert_eq!(reclaimed_expired.attempt_count, 2);
@@ -7072,6 +7322,7 @@ async fn turn_claim_prefers_an_earlier_expired_lease_over_queued_work() {
         .claim_turn_run(uuid::Uuid::new_v4(), first_claim_at, first_expiry)
         .await
         .unwrap()
+        .turn
         .unwrap();
 
     let queued_chat = sample_chat();
@@ -7107,6 +7358,7 @@ async fn turn_claim_prefers_an_earlier_expired_lease_over_queued_work() {
         )
         .await
         .unwrap()
+        .turn
         .unwrap();
     assert_eq!(reclaimed.id, expired_turn.id);
     assert_eq!(reclaimed.attempt_count, 2);
@@ -7292,6 +7544,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
         .claim_turn_run(lease_token, claimed_at, lease_expires_at)
         .await
         .unwrap()
+        .turn
         .unwrap();
     let started = AgentEvent::TurnStarted { turn_id: turn.id };
     assert_eq!(
@@ -7391,6 +7644,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
         turn_id: Set(Some(turn.id.0)),
         lease_token: Set(Some(lease_token)),
         attempt_event_ordinal: Set(Some(2)),
+        scan_token: Set(None),
         terminal: Set(true),
         payload: Set(serde_json::to_value(&terminal).unwrap()),
         created_at: Set(Utc::now()),
@@ -7404,6 +7658,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
         turn_id: Set(Some(turn.id.0)),
         lease_token: Set(Some(lease_token)),
         attempt_event_ordinal: Set(Some(3)),
+        scan_token: Set(None),
         terminal: Set(true),
         payload: Set(serde_json::to_value(&terminal).unwrap()),
         created_at: Set(Utc::now()),
@@ -7417,6 +7672,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
         turn_id: Set(None),
         lease_token: Set(None),
         attempt_event_ordinal: Set(None),
+        scan_token: Set(None),
         terminal: Set(true),
         payload: Set(serde_json::to_value(&terminal).unwrap()),
         created_at: Set(Utc::now()),
@@ -7430,6 +7686,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
         turn_id: Set(Some(turn.id.0)),
         lease_token: Set(None),
         attempt_event_ordinal: Set(None),
+        scan_token: Set(None),
         terminal: Set(false),
         payload: Set(serde_json::to_value(&started).unwrap()),
         created_at: Set(Utc::now()),

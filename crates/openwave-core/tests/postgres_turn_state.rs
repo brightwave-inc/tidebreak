@@ -74,7 +74,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     let mut empty = 0;
     for task in tasks {
         let (token, outcome) = task.await.unwrap();
-        match outcome.unwrap() {
+        match outcome.unwrap().turn {
             Some(turn) => {
                 assert!(winner.replace((token, turn)).is_none());
             }
@@ -90,20 +90,34 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         store
             .claim_turn_run(token, claim_at, lease_expires_at)
             .await
-            .unwrap(),
+            .unwrap()
+            .turn,
         Some(claimed)
     );
 
+    let expired = store
+        .claim_turn_run(
+            uuid::Uuid::new_v4(),
+            lease_expires_at,
+            lease_expires_at + Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(expired.turn, None);
+    let terminal = expired
+        .terminal_event
+        .expect("expired attempt must publish a terminal event");
+    assert_eq!(terminal.chat_id, chat.id);
+    assert_eq!(terminal.turn_id, turn_id);
+    assert!(matches!(
+        &terminal.event.event,
+        AgentEvent::TurnFailed { error }
+            if error.kind == "lease_expired"
+                && error.message == "final worker lease expired"
+    ));
     assert_eq!(
-        store
-            .claim_turn_run(
-                uuid::Uuid::new_v4(),
-                lease_expires_at,
-                lease_expires_at + Duration::minutes(1),
-            )
-            .await
-            .unwrap(),
-        None
+        store.list_events(chat.id, 0).await.unwrap(),
+        vec![terminal.event]
     );
     assert_eq!(
         store.get_turn_run(turn_id).await.unwrap().unwrap().status,
@@ -129,7 +143,8 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                 delayed_retry_at + Duration::minutes(1),
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .turn,
         None
     );
     assert_eq!(
@@ -143,6 +158,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         .claim_turn_run(completion_token, delayed_retry_at, completion_expiry)
         .await
         .unwrap()
+        .turn
         .unwrap();
     let output = Message {
         id: MessageId::new(),
@@ -212,6 +228,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         )
         .await
         .unwrap()
+        .turn
         .unwrap();
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let mut failures = Vec::new();
@@ -293,6 +310,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         )
         .await
         .unwrap()
+        .turn
         .unwrap();
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let mut cancellations = Vec::new();
@@ -420,6 +438,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         )
         .await
         .unwrap()
+        .turn
         .unwrap();
     let started = AgentEvent::TurnStarted {
         turn_id: turn_event.id,

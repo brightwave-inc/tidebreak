@@ -145,6 +145,31 @@ pub struct JournaledTurnOutcome<T> {
     pub terminal_event: Option<SequencedEvent>,
 }
 
+/// A terminal event committed while a claim scan cleans expired work.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaimScanTerminalEvent {
+    /// Chat whose per-chat journal assigned the sequence.
+    pub chat_id: ChatId,
+    /// Turn terminalized by the scan.
+    pub turn_id: TurnId,
+    /// Exact committed journal event.
+    pub event: SequencedEvent,
+}
+
+/// Result of one durable claim action.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaimTurnRunOutcome {
+    /// The due turn claimed for execution, if any.
+    pub turn: Option<TurnRun>,
+    /// One expired turn terminalized instead of claiming work, if any.
+    ///
+    /// Exactly one of `turn` and `terminal_event` is present, or both are absent
+    /// when no work is due. Returning after one committed action lets the worker
+    /// publish the event before scanning again without losing an earlier commit
+    /// behind a later scan error.
+    pub terminal_event: Option<ClaimScanTerminalEvent>,
+}
+
 fn document_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "document storage is not implemented by this Store".into(),
@@ -619,21 +644,23 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
-    /// Claim the oldest due turn under a fresh exact lease.
+    /// Perform one durable claim action under a fresh exact lease.
     ///
     /// `lease_token` is the caller's idempotency identity: retrying it while its
     /// lease remains live returns the same running turn. Callers must retain it
     /// across an ambiguous commit and use a fresh token for a new claim attempt.
     /// A successful claim increments `attempt_count` and moves the turn to
     /// `running`. Expired work is reclaimed only while another attempt is
-    /// permitted; an expired final attempt becomes terminally failed and the
-    /// scan continues. `lease_expires_at` must be after `now`.
+    /// permitted. An expired cancellation or final attempt is terminalized with
+    /// its exact routed journal event and returned instead of claiming another
+    /// turn; the caller publishes it before scanning again. `lease_expires_at`
+    /// must be after `now`.
     async fn claim_turn_run(
         &self,
         _lease_token: uuid::Uuid,
         _now: chrono::DateTime<chrono::Utc>,
         _lease_expires_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Option<TurnRun>> {
+    ) -> Result<ClaimTurnRunOutcome> {
         turn_storage_unavailable()
     }
 

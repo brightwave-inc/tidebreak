@@ -160,6 +160,26 @@ impl MigrationTrait for Init {
             )
             .await?;
 
+        manager
+            .create_table(
+                Table::create()
+                    .table(TurnClaimLock::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(TurnClaimLock::Id)
+                            .integer()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .check(Expr::col(TurnClaimLock::Id).eq(1))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .get_connection()
+            .execute_unprepared("INSERT INTO turn_claim_lock (id) VALUES (1)")
+            .await?;
+
         let valid_turn_status = Expr::col(TurnRun::Status).is_in([
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
@@ -588,6 +608,9 @@ impl MigrationTrait for Init {
             .drop_table(Table::drop().table(TurnClaim::Table).to_owned())
             .await?;
         manager
+            .drop_table(Table::drop().table(TurnClaimLock::Table).to_owned())
+            .await?;
+        manager
             .drop_table(Table::drop().table(Chat::Table).to_owned())
             .await?;
         Ok(())
@@ -616,6 +639,7 @@ impl MigrationTrait for AddEventJournal {
                     .col(ColumnDef::new(Event::TurnId).uuid())
                     .col(ColumnDef::new(Event::LeaseToken).uuid())
                     .col(ColumnDef::new(Event::AttemptEventOrdinal).integer())
+                    .col(ColumnDef::new(Event::ScanToken).uuid())
                     .col(
                         ColumnDef::new(Event::Terminal)
                             .boolean()
@@ -683,6 +707,11 @@ impl MigrationTrait for AddEventJournal {
                             .or(Expr::col(Event::Terminal).eq(true))
                             .or(Expr::col(Event::LeaseToken).is_not_null()),
                     )
+                    .check(
+                        Expr::col(Event::ScanToken)
+                            .is_null()
+                            .or(Expr::col(Event::Terminal).eq(true)),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -693,6 +722,16 @@ impl MigrationTrait for AddEventJournal {
                     .table(Event::Table)
                     .col(Event::LeaseToken)
                     .col(Event::AttemptEventOrdinal)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_event_scan_token")
+                    .table(Event::Table)
+                    .col(Event::ScanToken)
                     .unique()
                     .to_owned(),
             )
@@ -1680,6 +1719,12 @@ enum TurnClaim {
 }
 
 #[derive(DeriveIden)]
+enum TurnClaimLock {
+    Table,
+    Id,
+}
+
+#[derive(DeriveIden)]
 enum TurnFailure {
     Table,
     LeaseToken,
@@ -1722,6 +1767,7 @@ enum Event {
     TurnId,
     LeaseToken,
     AttemptEventOrdinal,
+    ScanToken,
     Terminal,
     Payload,
     CreatedAt,
