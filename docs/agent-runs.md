@@ -53,8 +53,8 @@ Starting an agent is an asynchronous state transition, not an in-process task
 spawn:
 
 1. The foreground tool call atomically creates a queued child `AgentRun`.
-2. The tool-call identity is the child's idempotency identity, so an ambiguous
-   retry cannot create a duplicate agent.
+2. The tool-call identity is stored as the child's unique spawn identity, so an
+   ambiguous retry recovers the original run instead of creating a duplicate.
 3. A bounded scheduler claims the child with an exact renewable lease.
 4. The scheduler creates or restores its sandbox and advances the shared agent
    loop.
@@ -145,4 +145,3 @@ The implementation is intentionally incremental:
    background work.
 8. Add richer context lifecycle, parallel-safe tool groups, and further
    orchestration only after these recovery boundaries are proven.
-

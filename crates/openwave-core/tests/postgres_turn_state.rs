@@ -4,16 +4,17 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use openwave_core::{
-    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent,
-    ApplyTurnSteerOutcome, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome, CallId,
-    Chat, ChatId, ChatRootAttachment, ClaimClientToolCallOutcome, ClientToolCallRequest,
-    CompleteTurnRunOutcome, DbStore, FinishRootAttachmentChangeOutcome,
-    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
-    ParkTurnForClientCallOutcome, Project, ProjectId, RecordTurnFailureOutcome,
-    RequestTurnCancellationOutcome, ResolveToolCallOutcome, Role, RootAttachmentChangeAction,
-    RootAttachmentChangeId, RootAttachmentChangeTerminal, RootAttachmentOrigin, StopReason, Store,
-    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress,
-    TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
+    AcceptAgentRunOutcome, AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
+    AgentEvent, AgentRunExecution, AgentRunId, AgentRunStatus, ApplyTurnSteerOutcome,
+    BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome, CallId, Chat, ChatId,
+    ChatRootAttachment, ClaimClientToolCallOutcome, ClientToolCallRequest, CompleteTurnRunOutcome,
+    DbStore, FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
+    HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId, ParkTurnForClientCallOutcome,
+    Project, ProjectId, RecordTurnFailureOutcome, RequestTurnCancellationOutcome,
+    ResolveToolCallOutcome, Role, RootAttachmentChangeAction, RootAttachmentChangeId,
+    RootAttachmentChangeTerminal, RootAttachmentOrigin, StopReason, Store, ToolCallExecution,
+    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry,
+    TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -32,6 +33,159 @@ fn sample_chat() -> Chat {
         root_attachments: Vec::new(),
         created_at: utc_now_at_postgres_precision(),
     }
+}
+
+#[tokio::test]
+async fn postgres_agent_runs_enforce_foreground_parentage_and_idempotency() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let foreground_id = AgentRunId::new();
+    let foreground = match store
+        .accept_agent_run(
+            foreground_id,
+            chat.id,
+            None,
+            None,
+            AgentRunExecution::Foreground,
+            None,
+        )
+        .await
+        .unwrap()
+    {
+        AcceptAgentRunOutcome::Accepted(run) => run,
+        outcome => panic!("unexpected foreground outcome: {outcome:?}"),
+    };
+    assert_eq!(foreground.depth, 0);
+    assert_eq!(foreground.status, AgentRunStatus::Active);
+
+    let child_id = AgentRunId::new();
+    let spawn_call_id = CallId::new();
+    let child = match store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(foreground_id),
+            Some(spawn_call_id),
+            AgentRunExecution::Sandbox,
+            Some("postgres child"),
+        )
+        .await
+        .unwrap()
+    {
+        AcceptAgentRunOutcome::Accepted(run) => run,
+        outcome => panic!("unexpected sandbox outcome: {outcome:?}"),
+    };
+    assert_eq!(child.depth, 1);
+    assert_eq!(child.status, AgentRunStatus::Queued);
+    assert!(matches!(
+        store
+            .accept_agent_run(
+                child_id,
+                chat.id,
+                Some(foreground_id),
+                Some(spawn_call_id),
+                AgentRunExecution::Sandbox,
+                Some("postgres child"),
+            )
+            .await
+            .unwrap(),
+        AcceptAgentRunOutcome::Existing(existing) if existing == child
+    ));
+    assert!(matches!(
+        store
+            .accept_agent_run(
+                AgentRunId::new(),
+                chat.id,
+                Some(child_id),
+                Some(CallId::new()),
+                AgentRunExecution::Sandbox,
+                Some("forbidden grandchild"),
+            )
+            .await
+            .unwrap(),
+        AcceptAgentRunOutcome::ParentUnavailable
+    ));
+}
+
+#[tokio::test]
+async fn postgres_agent_run_identity_collision_recovers_exactly_across_chats() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    let first_parent = AgentRunId::new();
+    let second_parent = AgentRunId::new();
+    for (chat_id, parent_id) in [
+        (first_chat.id, first_parent),
+        (second_chat.id, second_parent),
+    ] {
+        assert!(matches!(
+            store
+                .accept_agent_run(
+                    parent_id,
+                    chat_id,
+                    None,
+                    None,
+                    AgentRunExecution::Foreground,
+                    None,
+                )
+                .await
+                .unwrap(),
+            AcceptAgentRunOutcome::Accepted(_)
+        ));
+    }
+
+    let collision_id = AgentRunId::new();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut tasks = Vec::new();
+    for (chat_id, parent_id) in [
+        (first_chat.id, first_parent),
+        (second_chat.id, second_parent),
+    ] {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .accept_agent_run(
+                    collision_id,
+                    chat_id,
+                    Some(parent_id),
+                    Some(CallId::new()),
+                    AgentRunExecution::Sandbox,
+                    Some("colliding child"),
+                )
+                .await
+        }));
+    }
+    let mut accepted = 0;
+    let mut conflicted = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            Ok(AcceptAgentRunOutcome::Accepted(_)) => accepted += 1,
+            Ok(AcceptAgentRunOutcome::IdentityConflict) => conflicted += 1,
+            outcome => panic!("unexpected cross-chat collision outcome: {outcome:?}"),
+        }
+    }
+    assert_eq!((accepted, conflicted), (1, 1));
 }
 
 #[tokio::test]

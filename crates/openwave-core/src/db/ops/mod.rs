@@ -5,6 +5,7 @@ use crate::id::{CallId, ChatId, TurnId};
 
 use super::{entities, store_err};
 
+pub(in crate::db) mod agent_run;
 pub(in crate::db) mod blob;
 pub(in crate::db) mod client_execution;
 pub(in crate::db) mod conversation;

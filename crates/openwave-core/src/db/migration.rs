@@ -1,8 +1,8 @@
 use sea_orm_migration::prelude::*;
 
 use super::{
-    BlobRetirementStatus, DocumentJobKind, DocumentJobStatus, DocumentProcessingStatus,
-    TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
+    AgentRunExecution, AgentRunStatus, BlobRetirementStatus, DocumentJobKind, DocumentJobStatus,
+    DocumentProcessingStatus, TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
 };
 
 pub struct Migrator;
@@ -17,7 +17,179 @@ impl MigratorTrait for Migrator {
             Box::new(AddChatModel),
             Box::new(AddToolCalls),
             Box::new(AddDocuments),
+            Box::new(AddAgentRuns),
         ]
+    }
+}
+
+struct AddAgentRuns;
+
+impl MigrationName for AddAgentRuns {
+    fn name(&self) -> &str {
+        "m0007_agent_runs"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddAgentRuns {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let foreground_status = Expr::col(AgentRun::Status).is_in([
+            AgentRunStatus::Active.as_str(),
+            AgentRunStatus::Completed.as_str(),
+            AgentRunStatus::Failed.as_str(),
+            AgentRunStatus::Cancelled.as_str(),
+        ]);
+        let sandbox_status = Expr::col(AgentRun::Status).is_in([
+            AgentRunStatus::Queued.as_str(),
+            AgentRunStatus::Running.as_str(),
+            AgentRunStatus::Waiting.as_str(),
+            AgentRunStatus::RetryWait.as_str(),
+            AgentRunStatus::Completed.as_str(),
+            AgentRunStatus::Failed.as_str(),
+            AgentRunStatus::Cancelled.as_str(),
+        ]);
+        let foreground_shape = Expr::col(AgentRun::Execution)
+            .eq(AgentRunExecution::Foreground.as_str())
+            .and(Expr::col(AgentRun::Depth).eq(0))
+            .and(Expr::col(AgentRun::ParentId).is_null())
+            .and(Expr::col(AgentRun::ParentDepth).is_null())
+            .and(Expr::col(AgentRun::SpawnCallId).is_null())
+            .and(Expr::col(AgentRun::Input).is_null())
+            .and(foreground_status);
+        let sandbox_shape = Expr::col(AgentRun::Execution)
+            .eq(AgentRunExecution::Sandbox.as_str())
+            .and(Expr::col(AgentRun::Depth).eq(i32::from(crate::model::AgentRun::MAX_DEPTH)))
+            .and(Expr::col(AgentRun::ParentId).is_not_null())
+            .and(Expr::col(AgentRun::ParentDepth).eq(0))
+            .and(Expr::col(AgentRun::SpawnCallId).is_not_null())
+            .and(Expr::col(AgentRun::Input).is_not_null())
+            .and(
+                Func::char_length(Expr::col(AgentRun::Input))
+                    .between(1, crate::model::AgentRun::MAX_INPUT_LEN as i32),
+            )
+            .and(sandbox_status);
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(AgentRun::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(AgentRun::Id).uuid().not_null())
+                    .col(ColumnDef::new(AgentRun::ChatId).uuid().not_null())
+                    .col(ColumnDef::new(AgentRun::ParentId).uuid())
+                    .col(ColumnDef::new(AgentRun::ParentDepth).small_integer())
+                    .col(ColumnDef::new(AgentRun::SpawnCallId).uuid())
+                    .col(
+                        ColumnDef::new(AgentRun::Execution)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(AgentRun::Depth).small_integer().not_null())
+                    .col(ColumnDef::new(AgentRun::Status).string_len(32).not_null())
+                    .col(ColumnDef::new(AgentRun::Input).text())
+                    .col(
+                        ColumnDef::new(AgentRun::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AgentRun::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .name("pk_agent_run")
+                            .col(AgentRun::Id)
+                            .col(AgentRun::ChatId)
+                            .col(AgentRun::Depth),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_agent_run_chat")
+                            .from(AgentRun::Table, AgentRun::ChatId)
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_agent_run_parent")
+                            .from_tbl(AgentRun::Table)
+                            .from_col(AgentRun::ParentId)
+                            .from_col(AgentRun::ChatId)
+                            .from_col(AgentRun::ParentDepth)
+                            .to_tbl(AgentRun::Table)
+                            .to_col(AgentRun::Id)
+                            .to_col(AgentRun::ChatId)
+                            .to_col(AgentRun::Depth)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(foreground_shape.or(sandbox_shape))
+                    .check(Expr::col(AgentRun::UpdatedAt).gte(Expr::col(AgentRun::CreatedAt)))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_agent_run_id")
+                    .table(AgentRun::Table)
+                    .col(AgentRun::Id)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_agent_run_spawn_call")
+                    .table(AgentRun::Table)
+                    .col(AgentRun::SpawnCallId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_agent_run_one_foreground")
+                    .table(AgentRun::Table)
+                    .col(AgentRun::ChatId)
+                    .unique()
+                    .and_where(
+                        Expr::col(AgentRun::Execution).eq(AgentRunExecution::Foreground.as_str()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_agent_run_parent")
+                    .table(AgentRun::Table)
+                    .col(AgentRun::ParentId)
+                    .col(AgentRun::CreatedAt)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_agent_run_chat_history")
+                    .table(AgentRun::Table)
+                    .col(AgentRun::ChatId)
+                    .col(AgentRun::CreatedAt)
+                    .col(AgentRun::Id)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(AgentRun::Table).to_owned())
+            .await
     }
 }
 
@@ -2690,6 +2862,22 @@ enum Chat {
     Model,
     AttachmentRevision,
     CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum AgentRun {
+    Table,
+    Id,
+    ChatId,
+    ParentId,
+    ParentDepth,
+    SpawnCallId,
+    Execution,
+    Depth,
+    Status,
+    Input,
+    CreatedAt,
+    UpdatedAt,
 }
 
 #[derive(DeriveIden)]
