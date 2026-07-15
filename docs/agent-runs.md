@@ -143,12 +143,18 @@ one parent inbox entry commit together, so an ambiguous worker retry can recover
 its original result but cannot overwrite or double-deliver it. Each inbox entry
 then advances through its own fenced continuation state machine:
 `pending -> claimed -> consumed`. A parent continuation claims one exact child
-result with a database-clock lease, and only that live lease can consume it.
+result only after the matching foreground checkpoint has committed, with a
+database-clock lease, and only that live lease can consume it. A result that
+arrives first remains pending; it is never leased merely because a process saw
+it before the parent reached its durable boundary.
 An expired claim can be reclaimed; a consumed entry retains the exact consuming
 lease as an immutable receipt, so an ambiguous consume retry recovers the same
-boundary without processing the child result twice. This is intentionally
-separate from model/tool execution: a later slice will atomically combine
-consumption with the parent turn checkpoint and wake event. Queued, waiting,
+boundary without processing the child result twice. A foreground worker can
+checkpoint its exact turn against a known child, releasing its turn lease and
+preserving model progress. Consumption then closes that checkpoint and moves
+the turn to `resuming` in the same transaction. `resuming` is the durable wake
+signal: any worker can claim it after restart, without relying on an in-memory
+notification. Queued, waiting,
 and retry-wait work cancels
 immediately; a running worker first enters `cancelling` and must acknowledge its
 exact live lease. That acknowledgement writes its own immutable receipt, so only
@@ -180,10 +186,10 @@ The agent hierarchy preserves the runtime's existing rules:
 5. Waits release workers and resume from committed checkpoints.
 6. Steering and cancellation are resolved at explicit boundaries.
 7. A final result, terminal run state, and immutable parent inbox entry are
-   committed atomically. The inbox entry itself is consumed only under an exact
-   expiring continuation lease, and preserves its consumed receipt for retry
-   recovery. The corresponding parent checkpoint and wake event will join a
-   later continuation transition.
+   committed atomically. A foreground turn may checkpoint against one exact
+   inbox delivery; consuming that delivery under an exact expiring continuation
+   lease also wakes the checkpointed turn to `resuming`, with exact retry
+   recovery.
 8. Clients recover from a durable snapshot plus ordered event replay.
 
 Until a tool satisfies the side-effect receipt contract, OpenWave continues to
@@ -201,10 +207,12 @@ The implementation is intentionally incremental:
 4. Add the parent inbox and atomic child-result delivery. *(Shipped.)*
 5. Generalize client execution into the shared continuation model.
 6. Persist shared model/tool step boundaries and side-effect receipts.
-7. Atomically join durable inbox consumption with a parent wait/checkpoint and
-   wake event.
-8. Route sandbox folder access through the host broker.
-9. Add desktop surfaces for queued, running, waiting, failed, and completed
+7. Atomically join durable inbox consumption with a parent turn checkpoint and
+   durable `resuming` wake signal. *(Shipped.)*
+8. Atomically accept a sandbox spawn and its parent checkpoint from the
+   foreground tool boundary.
+9. Route sandbox folder access through the host broker.
+10. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work.
-10. Add richer context lifecycle, parallel-safe tool groups, and further
+11. Add richer context lifecycle, parallel-safe tool groups, and further
    orchestration only after these recovery boundaries are proven.

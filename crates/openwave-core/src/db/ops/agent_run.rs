@@ -11,13 +11,13 @@ use crate::model::{
     AgentRunStatus,
 };
 use crate::storage::{
-    AcceptAgentRunOutcome, ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxOutcome,
-    FinishAgentRunCancellationOutcome, RequestAgentRunCancellationOutcome,
-    SubmitAgentRunResultOutcome,
+    AcceptAgentRunOutcome, ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
+    ConsumeAgentRunInboxOutcome, FinishAgentRunCancellationOutcome,
+    RequestAgentRunCancellationOutcome, SubmitAgentRunResultOutcome,
 };
 
 use super::super::{entities, store_err, DbStore};
-use super::{acquire_chat_write_lock, turn::canonical_db_timestamp};
+use super::{acquire_chat_write_lock, acquire_turn_write_lock, turn::canonical_db_timestamp};
 
 pub(in crate::db) async fn insert_foreground_agent_run_on<C>(
     conn: &C,
@@ -943,6 +943,14 @@ pub(in crate::db) async fn claim_agent_run_inbox_entry(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
+    // A completed child may arrive before its foreground worker reaches the
+    // checkpoint boundary. Keep that delivery pending until the exact waiting
+    // turn exists: otherwise a continuation lease could expire or be consumed
+    // before there is a durable parent state to wake.
+    if !parent_turn_checkpoint_is_waiting_on(&transaction, parent_run_id, child_run_id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
     let entry = load_agent_run_inbox_entry_on(&transaction, model.clone()).await?;
     match entry.status {
         AgentRunInboxStatus::Pending => {
@@ -1069,6 +1077,32 @@ pub(in crate::db) async fn consume_agent_run_inbox_entry(
     child_run_id: AgentRunId,
     lease_token: uuid::Uuid,
 ) -> Result<Option<ConsumeAgentRunInboxOutcome>> {
+    Ok(consume_agent_run_inbox_entry_and_resume_turn(
+        store,
+        parent_run_id,
+        child_run_id,
+        lease_token,
+    )
+    .await?
+    .map(|outcome| match outcome {
+        ConsumeAgentRunInboxAndResumeTurnOutcome::Resumed { inbox, .. } => {
+            ConsumeAgentRunInboxOutcome::Consumed(inbox)
+        }
+        ConsumeAgentRunInboxAndResumeTurnOutcome::Existing { inbox, .. } => {
+            ConsumeAgentRunInboxOutcome::Existing(inbox)
+        }
+    }))
+}
+
+/// Consume one exact child result and queue its foreground turn to resume in
+/// the same transaction. The turn's durable `resuming` state is the wake
+/// signal; callers can restart after commit and use ordinary turn claiming.
+pub(in crate::db) async fn consume_agent_run_inbox_entry_and_resume_turn(
+    store: &DbStore,
+    parent_run_id: AgentRunId,
+    child_run_id: AgentRunId,
+    lease_token: uuid::Uuid,
+) -> Result<Option<ConsumeAgentRunInboxAndResumeTurnOutcome>> {
     if lease_token.is_nil() {
         return Err(AgentError::Store(
             "agent-run inbox consumption requires a non-nil lease token".into(),
@@ -1088,9 +1122,24 @@ pub(in crate::db) async fn consume_agent_run_inbox_entry(
     };
     let entry = load_agent_run_inbox_entry_on(&transaction, model).await?;
     if entry.status == AgentRunInboxStatus::Consumed {
+        let turn = if entry.consumed_lease_token == Some(lease_token) {
+            super::turn::resume_turn_after_agent_run_inbox_consumption_on(
+                &transaction,
+                parent_run_id,
+                child_run_id,
+                now,
+            )
+            .await?
+        } else {
+            None
+        };
         transaction.commit().await.map_err(store_err)?;
-        return Ok((entry.consumed_lease_token == Some(lease_token))
-            .then_some(ConsumeAgentRunInboxOutcome::Existing(entry)));
+        return Ok(
+            turn.map(|turn| ConsumeAgentRunInboxAndResumeTurnOutcome::Existing {
+                inbox: entry,
+                turn,
+            }),
+        );
     }
     if entry.status != AgentRunInboxStatus::Claimed
         || entry.lease_token != Some(lease_token)
@@ -1101,6 +1150,17 @@ pub(in crate::db) async fn consume_agent_run_inbox_entry(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
+    let Some(turn) = super::turn::resume_turn_after_agent_run_inbox_consumption_on(
+        &transaction,
+        parent_run_id,
+        child_run_id,
+        now,
+    )
+    .await?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
     let updated = entities::agent_run_inbox::Entity::update_many()
         .col_expr(
             entities::agent_run_inbox::Column::Status,
@@ -1135,11 +1195,14 @@ pub(in crate::db) async fn consume_agent_run_inbox_entry(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
-    let consumed = load_agent_run_inbox_by_ids_on(&transaction, parent_run_id, child_run_id)
+    let inbox = load_agent_run_inbox_by_ids_on(&transaction, parent_run_id, child_run_id)
         .await?
         .ok_or_else(|| AgentError::Store("consumed agent-run inbox entry disappeared".into()))?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(Some(ConsumeAgentRunInboxOutcome::Consumed(consumed)))
+    Ok(Some(ConsumeAgentRunInboxAndResumeTurnOutcome::Resumed {
+        inbox,
+        turn,
+    }))
 }
 
 fn validate_claim_request(
@@ -1678,6 +1741,51 @@ where
             && parent.execution == AgentRunExecution::Foreground.as_str()
             && parent.status == AgentRunStatus::Active.as_str()
     }))
+}
+
+/// Confirm the parent has durably yielded the foreground turn that this exact
+/// child result will wake. Holding the turn lock through the inbox claim keeps
+/// cancellation or another wake from leaving a live continuation lease with no
+/// checkpoint to consume.
+async fn parent_turn_checkpoint_is_waiting_on<C>(
+    conn: &C,
+    parent_run_id: AgentRunId,
+    child_run_id: AgentRunId,
+) -> Result<bool>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let Some(wait) = entities::turn_agent_run_wait::Entity::find_by_id(child_run_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(false);
+    };
+    if wait.parent_run_id != parent_run_id.0
+        || wait.status != crate::model::TurnAgentRunWaitStatus::Waiting.as_str()
+        || wait.closed_at.is_some()
+    {
+        return Ok(false);
+    }
+    let turn_id = crate::TurnId(wait.turn_id);
+    if !acquire_turn_write_lock(conn, turn_id).await? {
+        return Err(AgentError::Store(format!(
+            "agent-run checkpoint for child {child_run_id} references missing turn {turn_id}"
+        )));
+    }
+    let turn = entities::turn_run::Entity::find_by_id(wait.turn_id)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .expect("locked agent-run checkpoint turn exists");
+    Ok(turn.chat_id == wait.chat_id
+        && turn.agent_run_id == parent_run_id.0
+        && turn.status == crate::TurnRunStatus::WaitingForAgentRun.as_str()
+        && turn.attempt_count == wait.attempt_count
+        && turn.claim_count == wait.claim_count
+        && turn.lease_token.is_none()
+        && turn.lease_expires_at.is_none())
 }
 
 async fn find_by_id_on<C>(conn: &C, id: AgentRunId) -> Result<Option<entities::agent_run::Model>>

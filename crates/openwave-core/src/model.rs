@@ -1399,6 +1399,9 @@ pub enum TurnRunStatus {
     /// The worker checkpointed safely and released its lease while one exact
     /// durable client call executes on the host.
     WaitingForClient,
+    /// The worker checkpointed safely and released its lease while one exact
+    /// sandbox child result is awaited in the foreground inbox.
+    WaitingForAgentRun,
     /// Cancellation was requested after the client call may have started. The
     /// chat stays occupied until that exact call reports a terminal result.
     CancellingClient,
@@ -1424,6 +1427,7 @@ impl TurnRunStatus {
             Self::Running => "running",
             Self::Cancelling => "cancelling",
             Self::WaitingForClient => "waiting_for_client",
+            Self::WaitingForAgentRun => "waiting_for_agent_run",
             Self::CancellingClient => "cancelling_client",
             Self::Resuming => "resuming",
             Self::RetryWait => "retry_wait",
@@ -1437,6 +1441,63 @@ impl TurnRunStatus {
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// Durable checkpoint linking one foreground turn to an exact sandbox child.
+///
+/// The checkpoint records the worker lease segment that parked the turn and
+/// the progress already committed before it yielded. Once the child's inbox
+/// delivery is consumed under an exact continuation lease, this row becomes
+/// the durable proof that the turn was moved to [`TurnRunStatus::Resuming`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnAgentRunWait {
+    /// Sandboxed child whose immutable result unblocks this checkpoint.
+    pub child_run_id: crate::id::AgentRunId,
+    /// Foreground coordinator shared by the child and turn.
+    pub parent_run_id: crate::id::AgentRunId,
+    /// Foreground turn parked at this continuation boundary.
+    pub turn_id: TurnId,
+    /// Conversation shared by the child and turn.
+    pub chat_id: ChatId,
+    /// Exact worker lease that created the checkpoint.
+    pub park_lease_token: Uuid,
+    /// Failure attempt containing the checkpoint.
+    pub attempt_count: i32,
+    /// Exact lease-segment ordinal containing the checkpoint.
+    pub claim_count: i32,
+    /// Progress committed before releasing the turn worker.
+    pub progress: TurnCheckpointProgress,
+    /// Durable lifecycle of this child-result checkpoint.
+    pub status: TurnAgentRunWaitStatus,
+    /// Database time at which the checkpoint committed.
+    pub parked_at: DateTime<Utc>,
+    /// Database time at which the inbox delivery woke the turn, if any.
+    pub closed_at: Option<DateTime<Utc>>,
+}
+
+/// Durable lifecycle of a [`TurnAgentRunWait`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TurnAgentRunWaitStatus {
+    /// The foreground turn is durably parked awaiting the child result.
+    Waiting,
+    /// The exact child inbox delivery was consumed and woke the turn.
+    Resumed,
+    /// The turn was cancelled before the child result could wake it.
+    Cancelled,
+}
+
+impl TurnAgentRunWaitStatus {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Resumed => "resumed",
+            Self::Cancelled => "cancelled",
+        }
     }
 }
 

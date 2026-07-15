@@ -69,9 +69,10 @@ pub use model::{
     Project, Role, RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
     RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentOrigin,
     RootAttachmentSubjectKind, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
-    ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnClientWait,
-    TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer,
-    TurnSteerStatus, MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
+    ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitStatus,
+    TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
+    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus, MAX_ATTACHMENT_REVISION,
+    MAX_ROOT_ATTACHMENTS,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
@@ -82,14 +83,14 @@ pub use storage::{
     AcceptAgentRunOutcome, AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
     ApplyTurnSteerOutcome, BeginRootAttachmentChangeOutcome, BlobStore, ClaimAgentRunInboxOutcome,
     ClaimClientToolCallOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim,
-    CompleteTurnRunOutcome, ConsumeAgentRunInboxOutcome, DocumentIndexJobReason,
-    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
+    CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
+    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
-    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome,
-    RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
-    ResolveToolCallOutcome, SecretProvider, Store, SubmitAgentRunResultOutcome,
-    MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkTurnForAgentRunInboxOutcome,
+    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
+    RequestTurnCancellationOutcome, ResolveToolCallOutcome, SecretProvider, Store,
+    SubmitAgentRunResultOutcome, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
 #[cfg(feature = "tools")]

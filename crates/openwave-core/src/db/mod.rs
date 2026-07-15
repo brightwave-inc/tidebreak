@@ -33,18 +33,19 @@ use crate::model::{
     DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
     DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
     Project, RootAttachmentChange, RootAttachmentChangeTerminal, SourceRegion, ToolCallRecord,
-    ToolCallResolution, TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun,
-    TurnRunStatus, TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
+    ToolCallResolution, TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWaitStatus,
+    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
     AcceptAgentRunOutcome, AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
     BeginRootAttachmentChangeOutcome, ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome,
-    ClaimTurnRunOutcome, CompleteTurnRunOutcome, ConsumeAgentRunInboxOutcome,
-    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
-    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
-    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
-    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome,
+    ClaimTurnRunOutcome, CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
+    ConsumeAgentRunInboxOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
+    EnsureDocumentParseJobOutcome, FinishAgentRunCancellationOutcome,
+    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
+    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledTurnOutcome,
+    JournaledTurnSteerOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForClientCallOutcome,
     RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
     ResolveToolCallOutcome, Store, SubmitAgentRunResultOutcome,
 };
@@ -1843,6 +1844,21 @@ impl Store for DbStore {
         .await
     }
 
+    async fn consume_agent_run_inbox_entry_and_resume_turn(
+        &self,
+        parent_run_id: AgentRunId,
+        child_run_id: AgentRunId,
+        lease_token: uuid::Uuid,
+    ) -> Result<Option<ConsumeAgentRunInboxAndResumeTurnOutcome>> {
+        ops::agent_run::consume_agent_run_inbox_entry_and_resume_turn(
+            self,
+            parent_run_id,
+            child_run_id,
+            lease_token,
+        )
+        .await
+    }
+
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {
         ops::turn::get_turn_run(self, id).await
     }
@@ -2059,6 +2075,27 @@ impl Store for DbStore {
             progress,
             now,
             call,
+        )
+        .await
+    }
+
+    async fn park_turn_for_agent_run_inbox(
+        &self,
+        turn_id: TurnId,
+        child_run_id: AgentRunId,
+        lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
+        progress: TurnCheckpointProgress,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<ParkTurnForAgentRunInboxOutcome>> {
+        ops::turn::park_turn_for_agent_run_inbox(
+            self,
+            turn_id,
+            child_run_id,
+            lease_token,
+            expected_steer_revision,
+            progress,
+            now,
         )
         .await
     }
