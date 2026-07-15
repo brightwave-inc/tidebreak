@@ -126,9 +126,10 @@ model argument or persisted tool-call payload. The optional `http` feature
 provides a timeout- and response-size-bounded `reqwest` client; hosts may supply
 their own proxy, allow-list, audit, or test client through the same seam.
 
-No model-facing `web_search` tool is registered yet. The follow-on slice must
-wire provider selection and outbound-network policy at the sandbox/foreground
-execution boundary.
+`openwave-server` owns an explicit disabled-by-default Exa/Tavily selection
+and bounded request timeout, but has not connected it to a model-visible tool
+or worker. The follow-on slice must attach that host policy to the sandbox
+execution boundary and define its outbound-domain policy.
 
 **Depends on:** `openwave-core`.
 

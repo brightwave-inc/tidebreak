@@ -13,6 +13,8 @@ Project documentation, versioned alongside the code.
   bounded sandbox scheduling plan.
 - [Tool architecture and roadmap](tools.md) — the current tool surface,
   foreground/sandbox split, provider boundaries, and web-search plan.
+- [Web search configuration](web-search.md) — the local host-owned Exa/Tavily
+  selection boundary and its current no-tool state.
 
 More to come as the product surfaces land (running locally, API reference, and
 writing tools).

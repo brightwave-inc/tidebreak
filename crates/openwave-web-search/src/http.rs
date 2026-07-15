@@ -140,17 +140,30 @@ pub struct ReqwestHttpClient {
 
 #[cfg(feature = "http")]
 impl ReqwestHttpClient {
-    pub fn new() -> Result<Self, WebSearchError> {
+    /// Build a client with one bounded end-to-end request timeout.
+    ///
+    /// The caller owns the policy for the value. Redirects stay disabled for
+    /// every timeout so credentials are never replayed to another origin.
+    pub fn with_timeout(timeout: std::time::Duration) -> Result<Self, WebSearchError> {
+        if timeout.is_zero() {
+            return Err(WebSearchError::Transport(
+                "web search timeout must be greater than zero".into(),
+            ));
+        }
         let client = reqwest::Client::builder()
             // Providers authenticate the initial request. Never follow a
             // 307/308 (or any) redirect that could replay that credential to a
             // different origin.
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(20))
+            .connect_timeout(timeout.min(std::time::Duration::from_secs(10)))
+            .timeout(timeout)
             .build()
             .map_err(|error| WebSearchError::Transport(error.to_string()))?;
         Ok(Self { client })
+    }
+
+    pub fn new() -> Result<Self, WebSearchError> {
+        Self::with_timeout(std::time::Duration::from_secs(20))
     }
 }
 

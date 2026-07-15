@@ -23,6 +23,7 @@ use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
 use crate::state::AppState;
+use crate::web_search::{self, WebSearchConfigInfo, WebSearchConfigUpdate};
 
 mod client_execution;
 mod document;
@@ -104,6 +105,27 @@ pub async fn put_settings(
         model: read_model(&*state.store).await?,
         has_api_key: has_api_key(&*state.secrets).await,
     }))
+}
+
+/// `GET /web-search` — read host-owned web-search selection and readiness.
+/// No model tool is registered by this endpoint.
+pub async fn get_web_search_config(
+    State(state): State<AppState>,
+) -> Result<Json<WebSearchConfigInfo>, ServerError> {
+    Ok(Json(
+        web_search::config_info(&*state.store, &*state.secrets).await?,
+    ))
+}
+
+/// `PUT /web-search` — select a fixed provider and bounded timeout. Provider
+/// credentials remain in the OS keychain under fixed provider-owned names.
+pub async fn put_web_search_config(
+    State(state): State<AppState>,
+    Json(body): Json<WebSearchConfigUpdate>,
+) -> Result<Json<WebSearchConfigInfo>, ServerError> {
+    Ok(Json(
+        web_search::update_config(&*state.store, &*state.secrets, body).await?,
+    ))
 }
 
 /// The configured model, if any.

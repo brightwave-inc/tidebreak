@@ -29,6 +29,8 @@ mod routes;
 mod sandbox_agent_run_worker;
 mod state;
 mod turn_worker;
+/// Host-owned, inert web-search configuration and provider selection.
+pub mod web_search;
 
 use std::fs::{OpenOptions, TryLockError};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -130,6 +132,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::search_project_documents),
         )
         .route("/models", get(routes::list_models))
+        .route(
+            "/web-search",
+            get(routes::get_web_search_config).put(routes::put_web_search_config),
+        )
         .route("/providers", get(routes::list_providers))
         .route(
             "/providers/{kind}",
