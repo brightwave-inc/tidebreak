@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Host-originated request envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +56,12 @@ pub enum ControlRequest {
     RegisterRoot(RegisterRootRequest),
     /// Inspect a durable registration receipt without retrying the mutation.
     LookupRegisterRootReceipt(LookupRegisterRootReceiptRequest),
+    /// Attach an already registered root to one conversation. Idempotent.
+    AttachRoot(RootAttachmentMutationRequest),
+    /// Detach one root from one conversation without globally revoking it.
+    DetachRoot(RootAttachmentMutationRequest),
+    /// Inspect a durable attach/detach receipt without retrying the mutation.
+    LookupRootAttachmentReceipt(LookupRootAttachmentReceiptRequest),
     /// Disconnect a root owned by the exact subject. Idempotent.
     RevokeRoot(RevokeRootRequest),
 }
@@ -83,6 +89,38 @@ pub struct LookupRegisterRootReceiptRequest {
     pub subject: GrantSubject,
     /// Trusted conversation expected on the original registration.
     pub conversation_id: Uuid,
+}
+
+/// Strict payload for an exact conversation attachment mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootAttachmentMutationRequest {
+    /// Stable idempotency identity for this mutation.
+    pub operation_id: OperationId,
+    /// Trusted owner of the registered root.
+    pub subject: GrantSubject,
+    /// Exact conversation whose live broker attachment changes.
+    pub conversation_id: Uuid,
+    pub root_id: RootId,
+}
+
+/// Desired state used to fence recovery-only attachment receipt lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootAttachmentMutationKind {
+    Attach,
+    Detach,
+}
+
+/// Strict payload for recovery-only attachment receipt lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LookupRootAttachmentReceiptRequest {
+    pub operation_id: OperationId,
+    pub subject: GrantSubject,
+    pub conversation_id: Uuid,
+    pub root_id: RootId,
+    pub mutation: RootAttachmentMutationKind,
 }
 
 /// Strict payload for an idempotent root revocation.
@@ -177,6 +215,9 @@ pub enum ControlResult {
     Hello(HelloResult),
     RegisterRoot(RegisterRootResult),
     LookupRegisterRootReceipt(LookupRegisterRootReceiptResult),
+    AttachRoot(RootAttachmentMutationResult),
+    DetachRoot(RootAttachmentMutationResult),
+    LookupRootAttachmentReceipt(LookupRootAttachmentReceiptResult),
     RevokeRoot(RevokeRootResult),
 }
 
@@ -236,6 +277,40 @@ pub enum RegisterRootReceipt {
     Disconnected { root: RootSummary },
     /// Registration durably committed this transport-safe failure.
     Failed { error: ErrorResponse },
+}
+
+/// Durable result of one exact conversation attachment mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootAttachmentMutationResult {
+    pub root_id: RootId,
+    pub mutation: RootAttachmentMutationKind,
+    /// Whether this operation changed the live attachment set.
+    pub changed: bool,
+}
+
+/// Recovery-only view of one durable attachment mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LookupRootAttachmentReceiptResult {
+    pub operation_id: OperationId,
+    pub receipt: RootAttachmentMutationReceipt,
+}
+
+/// Durable state observed without starting or resuming attach/detach work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RootAttachmentMutationReceipt {
+    Unknown,
+    Completed {
+        result: RootAttachmentMutationResult,
+        /// Live state now; a later exact mutation may have changed it.
+        currently_attached: bool,
+    },
+    Failed {
+        error: ErrorResponse,
+    },
 }
 
 /// Result of an idempotent root revocation.
@@ -317,6 +392,21 @@ mod tests {
             RootId::new(),
         );
         assert!(serde_json::from_str::<OperationEnvelope>(&encoded).is_err());
+
+        let conversation_id = Uuid::new_v4();
+        let attachment = ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(),
+            request: ControlRequest::AttachRoot(RootAttachmentMutationRequest {
+                operation_id: OperationId::new(),
+                subject: GrantSubject::conversation(conversation_id).unwrap(),
+                conversation_id,
+                root_id: RootId::new(),
+            }),
+        };
+        let mut encoded = serde_json::to_value(attachment).unwrap();
+        encoded["request"]["payload"]["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<ControlEnvelope>(encoded).is_err());
     }
 
     #[test]
@@ -357,6 +447,24 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ControlResult>(&encoded).unwrap(),
             lookup
+        );
+
+        let attachment_lookup =
+            ControlResult::LookupRootAttachmentReceipt(LookupRootAttachmentReceiptResult {
+                operation_id: OperationId::new(),
+                receipt: RootAttachmentMutationReceipt::Completed {
+                    result: RootAttachmentMutationResult {
+                        root_id: RootId::new(),
+                        mutation: RootAttachmentMutationKind::Attach,
+                        changed: true,
+                    },
+                    currently_attached: false,
+                },
+            });
+        let encoded = serde_json::to_string(&attachment_lookup).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ControlResult>(&encoded).unwrap(),
+            attachment_lookup
         );
 
         let operation = OperationResult::ReadFile(ReadFileResult {

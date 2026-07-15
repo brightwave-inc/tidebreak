@@ -62,6 +62,9 @@ pub enum AuditError {
 pub enum AuditOperation {
     RegisterRoot,
     LookupRegisterRootReceipt,
+    AttachRoot,
+    DetachRoot,
+    LookupRootAttachmentReceipt,
     RevokeRoot,
     ListRoots,
     ListDirectory,

@@ -19,7 +19,7 @@ use crate::{
     RootPolicy, Scope,
 };
 
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 const STATE_FILE_NAME: &str = "host-broker-state.json";
 pub(super) const MAX_STATE_FILE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -293,9 +293,22 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
             return Err(invalid_data("grant subject does not own its root").into());
         }
     }
+    let mut attachment_identities = std::collections::HashSet::new();
     for attachment in &state.attachments {
-        if !state.roots.contains_key(&attachment.root_id()) {
-            return Err(invalid_data("attachment references an unknown root").into());
+        let root = state
+            .roots
+            .get(&attachment.root_id())
+            .ok_or_else(|| invalid_data("attachment references an unknown root"))?;
+        if root.owner.kind() == crate::SubjectKind::Conversation
+            && root.owner.id() != attachment.conversation_id()
+        {
+            return Err(invalid_data(
+                "conversation-owned root is attached to another conversation",
+            )
+            .into());
+        }
+        if !attachment_identities.insert((attachment.conversation_id(), attachment.root_id())) {
+            return Err(invalid_data("duplicate persisted root attachment").into());
         }
     }
     for (root_id, root) in &state.roots {
@@ -310,12 +323,8 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                         } if granted == root_id
                 )
         });
-        let has_attachment = state
-            .attachments
-            .iter()
-            .any(|attachment| attachment.root_id() == *root_id);
-        if !has_grant || !has_attachment {
-            return Err(invalid_data("persisted root is missing its grant or attachment").into());
+        if !has_grant {
+            return Err(invalid_data("persisted root is missing its grant").into());
         }
     }
     for record in state.mutations.values() {
@@ -327,10 +336,6 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                 if let Some(root) = state.roots.get(&result.root.root_id) {
                     if root.owner != request.subject
                         || root.display_name != result.root.display_name
-                        || !state.attachments.iter().any(|attachment| {
-                            attachment.root_id() == result.root.root_id
-                                && attachment.conversation_id() == request.conversation_id
-                        })
                     {
                         return Err(invalid_data(
                             "successful register receipt does not match authoritative state",
@@ -381,6 +386,21 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                     )
                     .into());
                 }
+            }
+            MutationRecord::Attachment {
+                outcome: super::MutationOutcome::Pending,
+                ..
+            } => {
+                return Err(invalid_data("persisted attachment mutation is incomplete").into());
+            }
+            MutationRecord::Attachment {
+                request,
+                outcome: super::MutationOutcome::Complete(Ok(result)),
+            } if result.root_id != request.root_id || result.mutation != request.mutation => {
+                return Err(invalid_data(
+                    "successful attachment receipt does not match its request",
+                )
+                .into());
             }
             _ => {}
         }

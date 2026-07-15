@@ -32,9 +32,11 @@ pub use path_policy::{RootPolicy, RootPolicyError, ValidatedRoot};
 pub use protocol::{
     ControlEnvelope, ControlRequest, ControlResponseEnvelope, ControlResult, DirectoryEntry,
     EntryKind, ErrorCode, ErrorResponse, HelloResult, LookupRegisterRootReceiptRequest,
-    LookupRegisterRootReceiptResult, OperationEnvelope, OperationRequest,
+    LookupRegisterRootReceiptResult, LookupRootAttachmentReceiptRequest,
+    LookupRootAttachmentReceiptResult, OperationEnvelope, OperationRequest,
     OperationResponseEnvelope, OperationResult, PathRequest, ReadFileResult, RegisterRootReceipt,
     RegisterRootRequest, RegisterRootResult, Response, ResponseEnvelope, RevokeRootRequest,
-    RevokeRootResult, RootSummary, PROTOCOL_VERSION,
+    RevokeRootResult, RootAttachmentMutationKind, RootAttachmentMutationReceipt,
+    RootAttachmentMutationRequest, RootAttachmentMutationResult, RootSummary, PROTOCOL_VERSION,
 };
 pub use relative_path::{RelativePath, RelativePathError};
