@@ -130,7 +130,6 @@ async fn complete_turn_run_inner(
             "turn {id} output belongs to a different chat"
         )));
     }
-
     if existing.status == TurnRunStatus::Completed.as_str()
         && existing.attempt_count == receipt.attempt_count
         && existing.claim_count == receipt.claim_count
@@ -162,6 +161,9 @@ async fn complete_turn_run_inner(
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
+    }
+    if let Some(AgentEvent::TurnCompleted { usage, .. }) = terminal_event {
+        validate_terminal_usage(*usage, super::usage_from_turn_model(&existing)?)?;
     }
     let stale_output = existing.steer_revision != expected_steer_revision;
     let steer_pending = entities::turn_steer::Entity::find()
@@ -290,6 +292,19 @@ async fn complete_turn_run_inner(
         outcome: CompleteTurnRunOutcome::Completed(completed),
         terminal_event: sequenced_event,
     }))
+}
+
+fn validate_terminal_usage(total: Usage, checkpoint: Usage) -> Result<()> {
+    let covers_checkpoint = total.input_tokens >= checkpoint.input_tokens
+        && total.output_tokens >= checkpoint.output_tokens
+        && total.cache_read_input_tokens >= checkpoint.cache_read_input_tokens
+        && total.cache_creation_input_tokens >= checkpoint.cache_creation_input_tokens;
+    if !covers_checkpoint {
+        return Err(AgentError::Store(
+            "terminal turn usage regresses its durable checkpoint".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

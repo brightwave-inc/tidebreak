@@ -311,8 +311,39 @@ impl TurnWorker {
                 .record_failure(
                     &turn,
                     lease_token,
+                    turn.usage,
                     "unsupported_retry_policy",
                     "turn execution requires max_attempts = 1",
+                )
+                .await;
+        }
+        let consumed_steps = usize::try_from(turn.model_steps).map_err(|_| {
+            AgentError::msg(format!(
+                "turn {} has invalid durable model-step accounting",
+                turn.id
+            ))
+        })?;
+        let Some(mut remaining_steps) = self.agent_config.max_steps.checked_sub(consumed_steps)
+        else {
+            return self
+                .record_failure(
+                    &turn,
+                    lease_token,
+                    turn.usage,
+                    "invalid_turn_progress",
+                    "durable model-step accounting exceeds the configured turn budget",
+                )
+                .await;
+        };
+        let mut total_usage = turn.usage;
+        if remaining_steps == 0 {
+            return self
+                .record_failure(
+                    &turn,
+                    lease_token,
+                    turn.usage,
+                    "max_steps_exceeded",
+                    "max steps per turn were consumed before this lease segment",
                 )
                 .await;
         }
@@ -321,6 +352,7 @@ impl TurnWorker {
                 .record_failure(
                     &turn,
                     lease_token,
+                    turn.usage,
                     "chat_missing",
                     "claimed turn chat is missing",
                 )
@@ -338,7 +370,7 @@ impl TurnWorker {
             LeaseState::Cancelling => {
                 drop(active);
                 return self
-                    .acknowledge_cancellation(&turn, lease_token, openwave_core::Usage::default())
+                    .acknowledge_cancellation(&turn, lease_token, total_usage)
                     .await;
             }
             LeaseState::Lost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
@@ -349,15 +381,13 @@ impl TurnWorker {
             EventAppend::Cancelling => {
                 drop(active);
                 return self
-                    .acknowledge_cancellation(&turn, lease_token, openwave_core::Usage::default())
+                    .acknowledge_cancellation(&turn, lease_token, total_usage)
                     .await;
             }
             EventAppend::LeaseLost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
         }
 
         let mut ordinal = 2_i32;
-        let mut total_usage = openwave_core::Usage::default();
-        let mut remaining_steps = self.agent_config.max_steps;
         let output_message_id = MessageId::new();
         loop {
             let mut heartbeat = AbortOnDrop(tokio::spawn(self.clone().heartbeat_lease(
@@ -506,7 +536,13 @@ impl TurnWorker {
                         | Ok(AgentTurnOutcome::Cancelled { usage, .. }) => *usage,
                         Err(_) => openwave_core::Usage::default(),
                     };
-                    total_usage += usage;
+                    match checked_usage_sum(total_usage, usage) {
+                        Ok(total) => total_usage = total,
+                        Err(error) => eprintln!(
+                            "openwave: turn {} cancellation usage overflowed; acknowledging the durable baseline: {error}",
+                            turn.id
+                        ),
+                    }
                     drop(active);
                     return self
                         .acknowledge_cancellation(&turn, lease_token, total_usage)
@@ -530,12 +566,26 @@ impl TurnWorker {
                         )));
                     }
                     remaining_steps -= model_steps;
-                    total_usage += usage;
+                    total_usage = match checked_usage_sum(total_usage, usage) {
+                        Ok(total) => total,
+                        Err(_) => {
+                            return self
+                                .record_failure(
+                                    &turn,
+                                    lease_token,
+                                    total_usage,
+                                    "usage_overflow",
+                                    "provider usage exceeded the supported turn total",
+                                )
+                                .await;
+                        }
+                    };
                     if output.content.contains('\0') {
                         return self
                             .record_failure(
                                 &turn,
                                 lease_token,
+                                total_usage,
                                 "invalid_agent_output",
                                 "agent output contained a NUL character",
                             )
@@ -630,6 +680,7 @@ impl TurnWorker {
                                 .record_failure(
                                     &turn,
                                     lease_token,
+                                    total_usage,
                                     "max_steps_exceeded",
                                     "max steps per turn exceeded while applying durable steering",
                                 )
@@ -681,7 +732,13 @@ impl TurnWorker {
                         .await;
                 }
                 Ok(AgentTurnOutcome::Cancelled { usage, .. }) => {
-                    total_usage += usage;
+                    match checked_usage_sum(total_usage, usage) {
+                        Ok(total) => total_usage = total,
+                        Err(error) => eprintln!(
+                            "openwave: turn {} cancellation usage overflowed; acknowledging the durable baseline: {error}",
+                            turn.id
+                        ),
+                    }
                     drop(active);
                     return self
                         .acknowledge_cancellation(&turn, lease_token, total_usage)
@@ -695,7 +752,13 @@ impl TurnWorker {
                             .await;
                     }
                     return self
-                        .record_failure(&turn, lease_token, "agent_error", &error.to_string())
+                        .record_failure(
+                            &turn,
+                            lease_token,
+                            total_usage,
+                            "agent_error",
+                            &error.to_string(),
+                        )
                         .await;
                 }
             }
@@ -958,6 +1021,7 @@ impl TurnWorker {
         &self,
         turn: &TurnRun,
         lease_token: uuid::Uuid,
+        usage: openwave_core::Usage,
         code: &str,
         detail: &str,
     ) -> Result<TurnWorkerOutcome> {
@@ -1005,7 +1069,15 @@ impl TurnWorker {
                         }
                     });
                 }
-                Ok(None) => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
+                Ok(None) => match self.live_turn_state_retry(turn, lease_token).await {
+                    LiveTurnState::Running => tokio::task::yield_now().await,
+                    LiveTurnState::Cancelling => {
+                        return self
+                            .acknowledge_cancellation(turn, lease_token, usage)
+                            .await;
+                    }
+                    LiveTurnState::Lost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
+                },
                 Err(error) => {
                     self.retry_after("failure resolution", turn.id, &error)
                         .await;
@@ -1028,11 +1100,7 @@ impl TurnWorker {
                         }
                         ResolutionState::Cancelling => {
                             return self
-                                .acknowledge_cancellation(
-                                    turn,
-                                    lease_token,
-                                    openwave_core::Usage::default(),
-                                )
+                                .acknowledge_cancellation(turn, lease_token, usage)
                                 .await;
                         }
                         ResolutionState::Lost => {
@@ -1052,6 +1120,15 @@ impl TurnWorker {
     fn publish(&self, chat_id: openwave_core::ChatId, event: SequencedEvent) {
         let _ = self.events.sender(chat_id).send(event);
     }
+}
+
+fn checked_usage_sum(
+    total: openwave_core::Usage,
+    delta: openwave_core::Usage,
+) -> Result<openwave_core::Usage> {
+    total
+        .checked_add(delta)
+        .ok_or_else(|| AgentError::msg("provider usage exceeded the supported turn total"))
 }
 
 fn chrono_duration(duration: Duration) -> Result<chrono::Duration> {
@@ -1106,5 +1183,41 @@ mod committed_event_drain_tests {
             live.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn usage_sum_checks_every_component_without_wrapping() {
+        let total = openwave_core::Usage {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_input_tokens: 3,
+            cache_creation_input_tokens: 4,
+        };
+        let delta = openwave_core::Usage {
+            input_tokens: 5,
+            output_tokens: 6,
+            cache_read_input_tokens: 7,
+            cache_creation_input_tokens: 8,
+        };
+        assert_eq!(
+            checked_usage_sum(total, delta).unwrap(),
+            openwave_core::Usage {
+                input_tokens: 6,
+                output_tokens: 8,
+                cache_read_input_tokens: 10,
+                cache_creation_input_tokens: 12,
+            }
+        );
+        assert!(checked_usage_sum(
+            openwave_core::Usage {
+                input_tokens: u32::MAX,
+                ..openwave_core::Usage::default()
+            },
+            openwave_core::Usage {
+                input_tokens: 1,
+                ..openwave_core::Usage::default()
+            },
+        )
+        .is_err());
     }
 }

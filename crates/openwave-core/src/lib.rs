@@ -58,8 +58,9 @@ pub use model::{
     DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus, DocumentRecord,
     DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
     Message, Project, Role, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
-    ToolCallResolution, ToolCallStatus, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
-    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
+    ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnClientWait,
+    TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer,
+    TurnSteerStatus,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,

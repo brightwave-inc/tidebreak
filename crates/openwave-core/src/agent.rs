@@ -560,7 +560,11 @@ impl Agent {
                             calls[i].args.push_str(&fragment);
                         }
                     }
-                    ProviderEvent::Usage(reported) => total_usage += reported,
+                    ProviderEvent::Usage(reported) => {
+                        total_usage = total_usage.checked_add(reported).ok_or_else(|| {
+                            AgentError::msg("provider usage exceeded the supported turn total")
+                        })?;
+                    }
                     ProviderEvent::Stop { reason } => stop_reason = reason,
                 }
             };

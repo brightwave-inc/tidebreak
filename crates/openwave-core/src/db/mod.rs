@@ -30,7 +30,8 @@ use crate::model::{
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
     DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
     DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, ToolCallResolution,
-    TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus,
+    TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus,
+    TurnSteerStatus,
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
@@ -1845,6 +1846,7 @@ impl Store for DbStore {
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         expected_steer_revision: i64,
+        progress: TurnCheckpointProgress,
         now: chrono::DateTime<Utc>,
         call: &crate::model::ClientToolCallRequest,
     ) -> Result<Option<ParkTurnForClientCallOutcome>> {
@@ -1853,6 +1855,7 @@ impl Store for DbStore {
             turn_id,
             lease_token,
             expected_steer_revision,
+            progress,
             now,
             call,
         )

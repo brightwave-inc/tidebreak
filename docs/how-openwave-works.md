@@ -217,14 +217,20 @@ than loading conversation history first.
 The store can now hand a turn across that process boundary without keeping its
 worker alive. In one transaction it records the immutable client call, records a
 wait receipt tied to the exact worker claim, moves the turn to
-`waiting_for_client`, and releases the worker lease. If the database commit is
-ambiguous, the worker can repeat the exact request and recover that receipt; a
-different request cannot reuse the identity.
+`waiting_for_client`, folds that lease segment's model-step and token-usage delta
+into the turn-wide totals, and releases the worker lease. The immutable receipt
+keeps the same progress delta. If the database commit is ambiguous, the worker
+can repeat the exact request and recover that receipt without charging the delta
+twice; changing the call or its accounting is an identity conflict.
 
 Resolving the client call closes the receipt and moves the turn to `resuming` in
 the same transaction. A turn worker then takes a fresh lease segment without
-spending another failure attempt. This is the durable equivalent of pausing a
-function, doing native work elsewhere, and continuing from a known checkpoint.
+spending another failure attempt. It subtracts the checkpointed model calls from
+the turn-wide step budget and seeds its aggregate usage from the durable total.
+The persisted totals also let cancellation report work performed before the
+pause, including when cancellation wins before the resumed agent starts. This is
+the durable equivalent of pausing a function, doing native work elsewhere, and
+continuing from a known checkpoint.
 The remaining integration work is to have the agent emit this checkpoint for
 folder-access tools and to run those pending calls from the desktop. Notifications
 will be wake-up hints; the pending-work query remains authoritative after a

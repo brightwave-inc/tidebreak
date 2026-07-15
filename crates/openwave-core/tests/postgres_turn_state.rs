@@ -10,8 +10,8 @@ use openwave_core::{
     CompleteTurnRunOutcome, DbStore, FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome,
     Message, MessageId, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
     RequestTurnCancellationOutcome, ResolveToolCallOutcome, Role, StopReason, Store,
-    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnFailureRetry,
-    TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress,
+    TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1030,20 +1030,33 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         arguments: serde_json::json!({"reason": "postgres state test"}),
     };
     let client_wait_parked_at = client_wait_claimed_at + Duration::seconds(1);
+    let client_wait_progress = TurnCheckpointProgress {
+        model_steps: 2,
+        usage: Usage {
+            input_tokens: 13,
+            output_tokens: 8,
+            cache_read_input_tokens: 5,
+            cache_creation_input_tokens: 3,
+        },
+    };
     assert!(matches!(
         store
             .park_turn_for_client_tool_call(
                 client_wait_turn.id,
                 client_wait_turn_token,
                 0,
+                client_wait_progress,
                 client_wait_parked_at,
                 &client_request,
             )
             .await
             .unwrap()
             .unwrap(),
-        ParkTurnForClientCallOutcome::Parked { turn, .. }
+        ParkTurnForClientCallOutcome::Parked { turn, wait, .. }
             if turn.status == TurnRunStatus::WaitingForClient
+                && turn.model_steps == client_wait_progress.model_steps
+                && turn.usage == client_wait_progress.usage
+                && wait.progress == client_wait_progress
     ));
     let client_token = uuid::Uuid::new_v4();
     let client_claimed_at = client_wait_parked_at + Duration::seconds(1);

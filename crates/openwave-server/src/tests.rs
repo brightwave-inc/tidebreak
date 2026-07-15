@@ -12,8 +12,8 @@ use openwave_core::{
     AgentErrorInfo, AgentEvent, ApprovalClass, BlobStore, CallId, Chat, ChatId, ChatRequest,
     ClientToolCallRequest, Message, ModelProvider, ParkTurnForClientCallOutcome, Project,
     ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent, StopReason, Tool,
-    ToolCallExecution, ToolCallRecord, ToolCallStatus, ToolCtx, ToolOutput, ToolSpec, TurnId,
-    TurnRunStatus, TurnSteerId, Usage,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput,
+    ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -2413,6 +2413,7 @@ async fn post_json(
 async fn park_client_wait_for_route_test(
     store: &dyn Store,
     chat_id: ChatId,
+    progress: TurnCheckpointProgress,
 ) -> (TurnId, ClientToolCallRequest) {
     let turn_id = TurnId::new();
     store
@@ -2442,13 +2443,74 @@ async fn park_client_wait_for_route_test(
     };
     assert!(matches!(
         store
-            .park_turn_for_client_tool_call(turn_id, turn_token, 0, chrono::Utc::now(), &call,)
+            .park_turn_for_client_tool_call(
+                turn_id,
+                turn_token,
+                0,
+                progress,
+                chrono::Utc::now(),
+                &call,
+            )
             .await
             .unwrap()
             .unwrap(),
         ParkTurnForClientCallOutcome::Parked { .. }
     ));
     (turn_id, call)
+}
+
+fn test_client_checkpoint_progress(model_steps: i32) -> TurnCheckpointProgress {
+    TurnCheckpointProgress {
+        model_steps,
+        usage: Usage {
+            input_tokens: 13,
+            output_tokens: 8,
+            cache_read_input_tokens: 5,
+            cache_creation_input_tokens: 3,
+        },
+    }
+}
+
+async fn resolve_parked_client_call(
+    store: &dyn Store,
+    chat_id: ChatId,
+    call: &ClientToolCallRequest,
+) {
+    let lease_token = uuid::Uuid::new_v4();
+    let claimed_at = chrono::Utc::now();
+    store
+        .claim_client_tool_call(
+            call.id,
+            chat_id,
+            uuid::Uuid::new_v4(),
+            lease_token,
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    let resolved_at = chrono::Utc::now();
+    let resolved = store
+        .resolve_client_tool_call_and_append_event(
+            call.id,
+            chat_id,
+            lease_token,
+            resolved_at,
+            &ToolCallResolution::Completed {
+                result: "connected-root".into(),
+            },
+            resolved_at,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved.outcome,
+        openwave_core::ResolveToolCallOutcome::Resolved
+    );
+    assert!(matches!(
+        resolved.turn,
+        Some(turn) if turn.status == TurnRunStatus::Resuming
+    ));
 }
 
 #[tokio::test]
@@ -2663,7 +2725,12 @@ async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
     let bearer = format!("Bearer {token}");
 
     let resume_chat = make_chat(&router, &bearer).await;
-    let (resume_turn, resume_call) = park_client_wait_for_route_test(&*store, resume_chat.id).await;
+    let (resume_turn, resume_call) = park_client_wait_for_route_test(
+        &*store,
+        resume_chat.id,
+        test_client_checkpoint_progress(1),
+    )
+    .await;
     let resume_token = uuid::Uuid::new_v4();
     let claimed_at = chrono::Utc::now();
     store
@@ -2709,7 +2776,12 @@ async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
         .unwrap();
 
     let cancel_chat = make_chat(&router, &bearer).await;
-    let (cancel_turn, cancel_call) = park_client_wait_for_route_test(&*store, cancel_chat.id).await;
+    let (cancel_turn, cancel_call) = park_client_wait_for_route_test(
+        &*store,
+        cancel_chat.id,
+        test_client_checkpoint_progress(1),
+    )
+    .await;
     let cancel_token = uuid::Uuid::new_v4();
     let claimed_at = chrono::Utc::now();
     store
@@ -2758,6 +2830,104 @@ async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
         .expect("exact retry must recover the terminal publication receipt")
         .unwrap();
     assert_eq!(recovered_live, first_live);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resumed_worker_preserves_checkpoint_usage_and_step_budget() {
+    struct CountingUsageProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for CountingUsageProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("counting-usage")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "resumed".into(),
+                },
+                ProviderEvent::Usage(Usage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    ..Usage::default()
+                }),
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(CountingUsageProvider {
+            calls: calls.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            max_steps: 2,
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    let router = app(state.clone());
+    let bearer = format!("Bearer {token}");
+
+    let completed_chat = make_chat(&router, &bearer).await;
+    let completed_progress = test_client_checkpoint_progress(1);
+    let (_, completed_call) =
+        park_client_wait_for_route_test(&*store, completed_chat.id, completed_progress).await;
+    resolve_parked_client_call(&*store, completed_chat.id, &completed_call).await;
+    spawn_turn_worker(&state);
+    state.turn_job_wake.notify_one();
+    let completed_events = wait_for_turn(&store, completed_chat.id).await;
+    assert!(matches!(
+        completed_events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { usage, .. })
+            if *usage == Usage {
+                input_tokens: completed_progress.usage.input_tokens + 2,
+                output_tokens: completed_progress.usage.output_tokens + 1,
+                cache_read_input_tokens: completed_progress.usage.cache_read_input_tokens,
+                cache_creation_input_tokens: completed_progress.usage.cache_creation_input_tokens,
+            }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let exhausted_chat = make_chat(&router, &bearer).await;
+    let exhausted_progress = test_client_checkpoint_progress(2);
+    let (_, exhausted_call) =
+        park_client_wait_for_route_test(&*store, exhausted_chat.id, exhausted_progress).await;
+    resolve_parked_client_call(&*store, exhausted_chat.id, &exhausted_call).await;
+    state.turn_job_wake.notify_one();
+    let exhausted_events = wait_for_turn(&store, exhausted_chat.id).await;
+    assert!(matches!(
+        exhausted_events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnFailed { error }) if error.kind == "max_steps_exceeded"
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
