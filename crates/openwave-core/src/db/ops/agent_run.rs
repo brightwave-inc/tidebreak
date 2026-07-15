@@ -11,6 +11,48 @@ use crate::storage::AcceptAgentRunOutcome;
 use super::super::{entities, store_err, DbStore};
 use super::{acquire_chat_write_lock, turn::canonical_db_timestamp};
 
+pub(in crate::db) async fn insert_foreground_agent_run_on<C>(
+    conn: &C,
+    chat_id: ChatId,
+    created_at: chrono::DateTime<Utc>,
+) -> Result<AgentRunId>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let id = AgentRunId::foreground_for_chat(chat_id);
+    let created_at = canonical_db_timestamp(created_at)?;
+    entities::agent_run::ActiveModel {
+        id: Set(id.0),
+        chat_id: Set(chat_id.0),
+        parent_id: Set(None),
+        parent_depth: Set(None),
+        spawn_call_id: Set(None),
+        execution: Set(AgentRunExecution::Foreground.as_str().into()),
+        depth: Set(0),
+        status: Set(AgentRunStatus::Active.as_str().into()),
+        input: Set(None),
+        created_at: Set(created_at),
+        updated_at: Set(created_at),
+    }
+    .insert(conn)
+    .await
+    .map_err(store_err)?;
+    Ok(id)
+}
+
+pub(in crate::db) async fn find_foreground_agent_run_on<C>(
+    conn: &C,
+    chat_id: ChatId,
+) -> Result<Option<AgentRun>>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    find_foreground_on(conn, chat_id)
+        .await?
+        .map(agent_run_from_model)
+        .transpose()
+}
+
 pub(in crate::db) async fn accept_agent_run(
     store: &DbStore,
     id: AgentRunId,

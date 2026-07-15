@@ -6,14 +6,15 @@ use sea_orm::{
 
 use crate::error::{AgentError, AgentErrorInfo, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, MessageId, TurnId};
-use crate::model::{TurnRun, TurnRunStatus};
+use crate::id::{AgentRunId, ChatId, MessageId, TurnId};
+use crate::model::{AgentRunStatus, TurnRun, TurnRunStatus};
 use crate::provider::Usage;
 use crate::storage::{AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome};
 
 use super::super::{entities, store_err, DbStore};
 use super::{
     acquire_chat_write_lock,
+    agent_run::find_foreground_agent_run_on,
     conversation::{
         append_event_on, next_message_seq_on, reserve_message_identity_on,
         MESSAGE_IDENTITY_OWNER_MESSAGE,
@@ -105,16 +106,32 @@ pub(in crate::db) async fn accept_turn(
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
         return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
     }
+    let foreground = find_foreground_agent_run_on(&transaction, chat_id)
+        .await?
+        .ok_or_else(|| AgentError::Store(format!("chat {chat_id} has no foreground agent run")))?;
 
     if let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
     {
-        let existing =
-            exact_accepted_turn_on(&transaction, existing, chat_id, model, content).await?;
+        let existing = exact_accepted_turn_on(
+            &transaction,
+            existing,
+            chat_id,
+            foreground.id,
+            model,
+            content,
+        )
+        .await?;
         transaction.commit().await.map_err(store_err)?;
         return Ok(existing);
+    }
+
+    if foreground.status != AgentRunStatus::Active {
+        return Err(AgentError::Store(format!(
+            "chat {chat_id} foreground agent run is not active"
+        )));
     }
 
     if let Some(active) = find_active_turn_on(&transaction, chat_id).await? {
@@ -156,6 +173,8 @@ pub(in crate::db) async fn accept_turn(
     let run = entities::turn_run::ActiveModel {
         id: Set(id.0),
         chat_id: Set(chat_id.0),
+        agent_run_id: Set(foreground.id.0),
+        agent_run_depth: Set(0),
         input_message_id: Set(input_message_id.0),
         output_message_id: Set(None),
         model: Set(model.into()),
@@ -189,8 +208,15 @@ pub(in crate::db) async fn accept_turn(
                 .await
                 .map_err(store_err)?
             {
-                return exact_accepted_turn_on(&store.conn, existing, chat_id, model, content)
-                    .await;
+                return exact_accepted_turn_on(
+                    &store.conn,
+                    existing,
+                    chat_id,
+                    foreground.id,
+                    model,
+                    content,
+                )
+                .await;
             }
             if let Some(active) = find_active_turn_on(&store.conn, chat_id).await? {
                 return Ok(AcceptTurnOutcome::ChatBusy(turn_run_from_model(active)?));
@@ -807,6 +833,7 @@ async fn exact_accepted_turn_on<C>(
     conn: &C,
     existing: entities::turn_run::Model,
     chat_id: ChatId,
+    agent_run_id: AgentRunId,
     model: &str,
     content: &str,
 ) -> Result<AcceptTurnOutcome>
@@ -832,8 +859,11 @@ where
             TurnId(existing.id)
         )));
     }
-    let exact =
-        existing.chat_id == chat_id.0 && existing.model == model && message.content == content;
+    let exact = existing.chat_id == chat_id.0
+        && existing.agent_run_id == agent_run_id.0
+        && existing.agent_run_depth == 0
+        && existing.model == model
+        && message.content == content;
     Ok(if exact {
         AcceptTurnOutcome::Existing(turn_run_from_model(existing)?)
     } else {
@@ -846,6 +876,7 @@ fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
     Ok(TurnRun {
         id: TurnId(model.id),
         chat_id: ChatId(model.chat_id),
+        agent_run_id: AgentRunId(model.agent_run_id),
         input_message_id: MessageId(model.input_message_id),
         output_message_id: model.output_message_id.map(MessageId),
         model: model.model,

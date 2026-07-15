@@ -31,6 +31,12 @@ conversation segment inside that context. Model steps, tool calls, waits, and
 receipts are resumable work beneath the run rather than independent ad-hoc
 tasks.
 
+Chat creation and foreground-run creation are one atomic database operation.
+The foreground identity is derived from the chat identity, so retries and every
+process agree on the same coordinator without a lookup race. Turn acceptance
+stores a database-enforced reference to that exact depth-zero run; a turn can
+never be admitted under another chat's coordinator or a background child.
+
 Foreground and background agents use the same loop mechanics: durable
 acceptance, exact claim ownership, model and tool checkpoints, steering,
 cancellation, ordered events, and fenced completion. Their product contracts
@@ -135,13 +141,15 @@ fail conservatively after an ambiguous execution rather than replay it.
 
 The implementation is intentionally incremental:
 
-1. Add the durable `AgentRun` hierarchy and depth-one constraints.
-2. Generalize client execution into the shared continuation model.
-3. Persist model/tool step boundaries and side-effect receipts.
-4. Add the bounded sandbox scheduler and sandbox lifecycle.
-5. Add idempotent spawn, wait, cancel, inbox, and result-submission operations.
-6. Route sandbox folder access through the host broker.
-7. Add desktop surfaces for queued, running, waiting, failed, and completed
+1. Add the durable `AgentRun` hierarchy, atomic foreground ownership, and
+   depth-one constraints. *(Shipped.)*
+2. Add the bounded sandbox scheduler and sandbox lifecycle.
+3. Add idempotent spawn, claim, heartbeat, cancellation, and completion.
+4. Generalize client execution into the shared continuation model.
+5. Persist shared model/tool step boundaries and side-effect receipts.
+6. Add wait, inbox, result-submission, and parent wake-up operations.
+7. Route sandbox folder access through the host broker.
+8. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work.
-8. Add richer context lifecycle, parallel-safe tool groups, and further
+9. Add richer context lifecycle, parallel-safe tool groups, and further
    orchestration only after these recovery boundaries are proven.
