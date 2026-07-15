@@ -626,6 +626,12 @@ cancellation, reconnectable event stream, and fail-closed provider routing.
 
 The main next steps are:
 
+- introduce a durable agent-run hierarchy with one foreground coordinator,
+  depth-one sandboxed background agents, and bounded global/per-chat scheduling;
+- unify client execution, approvals, folder consent, user questions, resource
+  waits, and child-agent waits as durable continuations that release workers;
+- persist model/tool step boundaries and side-effect receipts so sandbox and
+  foreground runs can resume safely after process loss;
 - synchronize native picker connections into the pathless project/conversation
   root projection with exact CAS and broker reconciliation;
 - route built-in file tools through explicit broker roots while keeping private
@@ -682,6 +688,10 @@ steps; the migrations should be condensed into a clean baseline before v1.
 - **Connected root:** a user-approved host folder known to tools by an opaque
   root identifier and root-relative paths.
 - **Turn:** one accepted unit of user-to-agent work inside a chat.
+- **Agent run:** one durable foreground or sandboxed background execution
+  context, including lifecycle, ownership, budgets, and result delivery.
+- **Continuation:** a committed checkpoint plus an exact unresolved dependency;
+  it releases worker ownership and becomes claimable after a durable receipt.
 - **Message:** durable user or assistant text; tool calls are stored separately.
 - **Tool call:** an immutable canonical request plus a pending or terminal
   execution state; client-owned calls also carry an exact temporary lease.
