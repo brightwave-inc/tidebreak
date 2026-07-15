@@ -902,6 +902,10 @@ pub struct TurnFailureReceipt {
     pub turn_id: TurnId,
     /// Attempt number recorded in the immutable claim receipt.
     pub attempt_count: i32,
+    /// Cumulative model calls consumed when the failure committed.
+    pub model_steps: i32,
+    /// Cumulative provider usage when the failure committed.
+    pub usage: Usage,
     /// Requested retry time, retained even when exhaustion made the failure
     /// terminal. `None` represents an explicitly permanent failure.
     pub requested_retry_at: Option<DateTime<Utc>>,

@@ -4876,6 +4876,11 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         lease_token: Set(running_token),
         turn_id: Set(running_turn_id),
         attempt_count: Set(1),
+        model_steps: Set(0),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
         requested_retry_at: Set(Some(now + chrono::Duration::minutes(2))),
         error_code: Set("provider_unavailable".into()),
         error_detail: Set(Some("temporary outage".into())),
@@ -4894,6 +4899,32 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     let mut mismatched_failure_claim = valid_failure.clone();
     mismatched_failure_claim.attempt_count = Set(2);
     assert!(mismatched_failure_claim.insert(&store.conn).await.is_err());
+    let mut negative_failure_steps = valid_failure.clone();
+    negative_failure_steps.model_steps = Set(-1);
+    assert!(negative_failure_steps.insert(&store.conn).await.is_err());
+    store
+        .conn
+        .execute_unprepared(&format!(
+            "INSERT INTO turn_failure (
+                lease_token, turn_id, attempt_count, model_steps,
+                input_tokens, output_tokens, cache_read_input_tokens,
+                cache_creation_input_tokens, requested_retry_at, error_code,
+                error_detail, resolved_at, result_status
+            ) VALUES (
+                '{running_token}', '{running_turn_id}', 1, {},
+                0, 0, 0, 0, '{}', 'provider_unavailable',
+                NULL, '{}', '{}'
+            )",
+            i64::from(i32::MAX) + 1,
+            (now + chrono::Duration::minutes(2)).to_rfc3339(),
+            (now + chrono::Duration::seconds(1)).to_rfc3339(),
+            TurnRunStatus::RetryWait.as_str(),
+        ))
+        .await
+        .expect_err("failure model steps above i32::MAX must be rejected");
+    let mut oversized_failure_usage = valid_failure.clone();
+    oversized_failure_usage.input_tokens = Set(i64::from(u32::MAX) + 1);
+    assert!(oversized_failure_usage.insert(&store.conn).await.is_err());
     valid_failure.insert(&store.conn).await.unwrap();
 
     assert!(entities::turn_claim::ActiveModel {
@@ -5427,6 +5458,8 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
             second_token,
             second_expiry + chrono::Duration::hours(1),
             TurnFailureRetry::Permanent,
+            failed.model_steps,
+            failed.usage,
             "lease_expired",
             Some("final worker lease expired"),
         )
@@ -6651,6 +6684,13 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
         DateTime::<Utc>::from_timestamp_micros(resolved_at.timestamp_micros()).unwrap();
     let canonical_retry_at =
         DateTime::<Utc>::from_timestamp_micros(retry_at.timestamp_micros()).unwrap();
+    let progress_steps = 2;
+    let progress_usage = Usage {
+        input_tokens: 13,
+        output_tokens: 5,
+        cache_read_input_tokens: 3,
+        cache_creation_input_tokens: 2,
+    };
 
     assert!(store
         .record_turn_run_failure(
@@ -6658,6 +6698,8 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
             token,
             resolved_at,
             TurnFailureRetry::RetryAt(canonical_resolved_at + chrono::Duration::nanoseconds(999)),
+            0,
+            Usage::default(),
             "provider_unavailable",
             None,
         )
@@ -6670,6 +6712,8 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
                 uuid::Uuid::new_v4(),
                 resolved_at,
                 TurnFailureRetry::RetryAt(retry_at),
+                0,
+                Usage::default(),
                 "provider_unavailable",
                 Some("temporary outage"),
             )
@@ -6684,6 +6728,8 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
             token,
             resolved_at,
             TurnFailureRetry::RetryAt(retry_at),
+            progress_steps,
+            progress_usage,
             "provider_unavailable",
             Some("temporary outage"),
         )
@@ -6701,6 +6747,8 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
     assert_eq!(receipt.requested_retry_at, Some(canonical_retry_at));
     assert_eq!(receipt.resolved_at, canonical_resolved_at);
     assert_eq!(receipt.result_status, TurnRunStatus::RetryWait);
+    assert_eq!(receipt.model_steps, progress_steps);
+    assert_eq!(receipt.usage, progress_usage);
     assert_eq!(receipt.error_code, "provider_unavailable");
     assert_eq!(receipt.error_detail.as_deref(), Some("temporary outage"));
     let waiting = store.get_turn_run(turn_id).await.unwrap().unwrap();
@@ -6708,6 +6756,8 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
     assert_eq!(waiting.available_at, canonical_retry_at);
     assert_eq!(waiting.finished_at, None);
     assert_eq!(waiting.lease_token, None);
+    assert_eq!(waiting.model_steps, progress_steps);
+    assert_eq!(waiting.usage, progress_usage);
     assert_eq!(
         waiting.last_error_code.as_deref(),
         Some("provider_unavailable")
@@ -6720,6 +6770,8 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
                 token,
                 canonical_retry_at + chrono::Duration::hours(1),
                 TurnFailureRetry::RetryAt(retry_at),
+                progress_steps,
+                progress_usage,
                 "provider_unavailable",
                 Some("temporary outage"),
             )
@@ -6733,6 +6785,8 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
             token,
             resolved_at,
             TurnFailureRetry::Permanent,
+            progress_steps,
+            progress_usage,
             "provider_unavailable",
             Some("temporary outage"),
         )
@@ -6744,6 +6798,8 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
             token,
             resolved_at,
             TurnFailureRetry::RetryAt(retry_at),
+            progress_steps,
+            progress_usage,
             "provider_unavailable",
             Some("different outage"),
         )
@@ -6760,6 +6816,8 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
         .unwrap();
     assert_eq!(second.attempt_count, 2);
     assert_eq!(second.last_error_code, None);
+    assert_eq!(second.model_steps, progress_steps);
+    assert_eq!(second.usage, progress_usage);
     let output = Message {
         id: MessageId::new(),
         chat_id: chat.id,
@@ -6782,6 +6840,8 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
                 token,
                 second_expiry + chrono::Duration::hours(1),
                 TurnFailureRetry::RetryAt(retry_at),
+                progress_steps,
+                progress_usage,
                 "provider_unavailable",
                 Some("temporary outage"),
             )
@@ -6831,6 +6891,8 @@ async fn turn_failure_exhaustion_retains_retry_intent_and_rolls_back_atomically(
             token,
             failed_at,
             TurnFailureRetry::RetryAt(retry_at),
+            0,
+            Usage::default(),
             "provider_error",
             None,
         )
@@ -6857,6 +6919,8 @@ async fn turn_failure_exhaustion_retains_retry_intent_and_rolls_back_atomically(
             token,
             failed_at,
             TurnFailureRetry::RetryAt(retry_at),
+            0,
+            Usage::default(),
             "provider_error",
             None,
         )
@@ -6935,6 +6999,8 @@ async fn turn_failure_rolls_back_receipt_and_state_when_terminal_event_fails() {
             token,
             claimed_at + chrono::Duration::seconds(1),
             TurnFailureRetry::Permanent,
+            0,
+            Usage::default(),
             "provider_error",
             Some("terminal insert must fail"),
         )
@@ -6987,12 +7053,20 @@ async fn permanent_turn_failure_uses_the_heartbeated_lease_and_rejects_expiry() 
         .await
         .unwrap());
     let failed_at = original_expiry + chrono::Duration::seconds(1);
+    let failure_usage = Usage {
+        input_tokens: 7,
+        output_tokens: 3,
+        cache_read_input_tokens: 2,
+        cache_creation_input_tokens: 1,
+    };
     let RecordTurnFailureOutcome::Recorded(receipt) = store
         .record_turn_run_failure(
             turn_id,
             token,
             failed_at,
             TurnFailureRetry::Permanent,
+            2,
+            failure_usage,
             "unsafe_to_retry",
             Some("tool outcome is ambiguous"),
         )
@@ -7005,10 +7079,43 @@ async fn permanent_turn_failure_uses_the_heartbeated_lease_and_rejects_expiry() 
     assert_eq!(receipt.requested_retry_at, None);
     assert_eq!(receipt.resolved_at, failed_at);
     assert_eq!(receipt.result_status, TurnRunStatus::Failed);
+    assert_eq!(receipt.model_steps, 2);
+    assert_eq!(receipt.usage, failure_usage);
     let failed = store.get_turn_run(turn_id).await.unwrap().unwrap();
     assert_eq!(failed.status, TurnRunStatus::Failed);
     assert_eq!(failed.finished_at, Some(failed_at));
     assert_eq!(failed.last_error_code.as_deref(), Some("unsafe_to_retry"));
+    assert_eq!(failed.model_steps, 2);
+    assert_eq!(failed.usage, failure_usage);
+    assert_eq!(
+        store
+            .record_turn_run_failure(
+                turn_id,
+                token,
+                failed_at + chrono::Duration::hours(1),
+                TurnFailureRetry::Permanent,
+                2,
+                failure_usage,
+                "unsafe_to_retry",
+                Some("tool outcome is ambiguous"),
+            )
+            .await
+            .unwrap(),
+        Some(RecordTurnFailureOutcome::Existing(receipt.clone()))
+    );
+    assert!(store
+        .record_turn_run_failure(
+            turn_id,
+            token,
+            failed_at + chrono::Duration::hours(1),
+            TurnFailureRetry::Permanent,
+            3,
+            failure_usage,
+            "unsafe_to_retry",
+            Some("tool outcome is ambiguous"),
+        )
+        .await
+        .is_err());
 
     let expired_chat = sample_chat();
     store.create_chat(&expired_chat).await.unwrap();
@@ -7036,6 +7143,8 @@ async fn permanent_turn_failure_uses_the_heartbeated_lease_and_rejects_expiry() 
                 expired_token,
                 expired_at,
                 TurnFailureRetry::Permanent,
+                0,
+                Usage::default(),
                 "too_late",
                 None,
             )
@@ -7167,6 +7276,8 @@ async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
             token,
             failed_at,
             TurnFailureRetry::RetryAt(retry_at),
+            0,
+            Usage::default(),
             "provider_unavailable",
             Some("temporary outage"),
         )
@@ -7203,6 +7314,8 @@ async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
                 token,
                 retry_cancelled_at,
                 TurnFailureRetry::RetryAt(retry_at),
+                0,
+                Usage::default(),
                 "provider_unavailable",
                 Some("temporary outage"),
             )
@@ -7324,6 +7437,8 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
                 token,
                 output.created_at,
                 TurnFailureRetry::Permanent,
+                0,
+                Usage::default(),
                 "too_late",
                 None,
             )
@@ -7843,6 +7958,8 @@ async fn turn_completion_and_failure_serialize_to_one_terminal_decision() {
                     token,
                     resolved_at,
                     TurnFailureRetry::RetryAt(resolved_at + chrono::Duration::minutes(1)),
+                    0,
+                    Usage::default(),
                     "provider_error",
                     None,
                 )

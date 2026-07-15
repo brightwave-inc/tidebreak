@@ -251,8 +251,10 @@ the durable receipt tape; the broadcast channel is only the fast delivery path.
 
 Successful completion commits the final assistant message, the completed turn
 state, and its terminal event as one operational transaction. Failure and
-cancellation have equivalent exact-resolution paths. This prevents a UI from
-seeing “completed” while the answer itself is missing.
+cancellation have equivalent exact-resolution paths. Failure receipts also
+capture cumulative model steps and provider usage, so a retry-wait or terminal
+failure cannot forget work consumed after the preceding client checkpoint. This
+prevents a UI from seeing “completed” while the answer itself is missing.
 
 Completed, failed, and cancelled are **terminal** states: no later worker may
 change that turn without a new explicit workflow.

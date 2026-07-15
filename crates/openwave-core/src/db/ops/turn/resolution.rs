@@ -314,6 +314,8 @@ pub(in crate::db) async fn record_turn_run_failure(
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
     retry: TurnFailureRetry,
+    model_steps: i32,
+    usage: Usage,
     error_code: &str,
     error_detail: Option<&str>,
 ) -> Result<Option<RecordTurnFailureOutcome>> {
@@ -323,6 +325,8 @@ pub(in crate::db) async fn record_turn_run_failure(
         lease_token,
         now,
         retry,
+        model_steps,
+        usage,
         error_code,
         error_detail,
         None,
@@ -338,6 +342,8 @@ pub(in crate::db) async fn record_turn_run_failure_and_append_event(
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
     retry: TurnFailureRetry,
+    model_steps: i32,
+    usage: Usage,
     error_code: &str,
     error_detail: Option<&str>,
 ) -> Result<Option<JournaledTurnOutcome<RecordTurnFailureOutcome>>> {
@@ -353,6 +359,8 @@ pub(in crate::db) async fn record_turn_run_failure_and_append_event(
         lease_token,
         now,
         retry,
+        model_steps,
+        usage,
         error_code,
         error_detail,
         Some(&event),
@@ -367,6 +375,8 @@ async fn record_turn_run_failure_inner(
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
     retry: TurnFailureRetry,
+    model_steps: i32,
+    usage: Usage,
     error_code: &str,
     error_detail: Option<&str>,
     terminal_event: Option<&AgentEvent>,
@@ -383,6 +393,8 @@ async fn record_turn_run_failure_inner(
         id,
         lease_token,
         requested_retry_at,
+        model_steps,
+        usage,
         error_code,
         error_detail,
     )
@@ -428,6 +440,8 @@ async fn record_turn_run_failure_inner(
         id,
         lease_token,
         requested_retry_at,
+        model_steps,
+        usage,
         error_code,
         error_detail,
     )
@@ -476,6 +490,28 @@ async fn record_turn_run_failure_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
+    if model_steps < turn.model_steps {
+        return Err(AgentError::Store(
+            "failed turn model steps regress its durable checkpoint".into(),
+        ));
+    }
+    validate_terminal_usage(
+        usage,
+        Usage {
+            input_tokens: u32::try_from(turn.input_tokens).map_err(|_| {
+                AgentError::Store("turn input token checkpoint is out of range".into())
+            })?,
+            output_tokens: u32::try_from(turn.output_tokens).map_err(|_| {
+                AgentError::Store("turn output token checkpoint is out of range".into())
+            })?,
+            cache_read_input_tokens: u32::try_from(turn.cache_read_input_tokens).map_err(|_| {
+                AgentError::Store("turn cache-read token checkpoint is out of range".into())
+            })?,
+            cache_creation_input_tokens: u32::try_from(turn.cache_creation_input_tokens).map_err(
+                |_| AgentError::Store("turn cache-create token checkpoint is out of range".into()),
+            )?,
+        },
+    )?;
 
     let result_status = if requested_retry_at.is_some() && turn.attempt_count < turn.max_attempts {
         TurnRunStatus::RetryWait
@@ -486,6 +522,11 @@ async fn record_turn_run_failure_inner(
         lease_token: Set(lease_token),
         turn_id: Set(id.0),
         attempt_count: Set(claim.attempt_count),
+        model_steps: Set(model_steps),
+        input_tokens: Set(i64::from(usage.input_tokens)),
+        output_tokens: Set(i64::from(usage.output_tokens)),
+        cache_read_input_tokens: Set(i64::from(usage.cache_read_input_tokens)),
+        cache_creation_input_tokens: Set(i64::from(usage.cache_creation_input_tokens)),
         requested_retry_at: Set(requested_retry_at),
         error_code: Set(error_code.to_owned()),
         error_detail: Set(error_detail.map(str::to_owned)),
@@ -512,6 +553,26 @@ async fn record_turn_run_failure_inner(
         .col_expr(
             entities::turn_run::Column::LastErrorCode,
             sea_orm::sea_query::Expr::value(Some(error_code.to_owned())),
+        )
+        .col_expr(
+            entities::turn_run::Column::ModelSteps,
+            sea_orm::sea_query::Expr::value(model_steps),
+        )
+        .col_expr(
+            entities::turn_run::Column::InputTokens,
+            sea_orm::sea_query::Expr::value(i64::from(usage.input_tokens)),
+        )
+        .col_expr(
+            entities::turn_run::Column::OutputTokens,
+            sea_orm::sea_query::Expr::value(i64::from(usage.output_tokens)),
+        )
+        .col_expr(
+            entities::turn_run::Column::CacheReadInputTokens,
+            sea_orm::sea_query::Expr::value(i64::from(usage.cache_read_input_tokens)),
+        )
+        .col_expr(
+            entities::turn_run::Column::CacheCreationInputTokens,
+            sea_orm::sea_query::Expr::value(i64::from(usage.cache_creation_input_tokens)),
         )
         .col_expr(
             entities::turn_run::Column::LastErrorDetail,
@@ -620,11 +681,14 @@ fn validate_turn_failure(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exact_turn_failure_on<C>(
     conn: &C,
     id: TurnId,
     lease_token: uuid::Uuid,
     requested_retry_at: Option<chrono::DateTime<Utc>>,
+    model_steps: i32,
+    usage: Usage,
     error_code: &str,
     error_detail: Option<&str>,
 ) -> Result<Option<TurnFailureReceipt>>
@@ -640,6 +704,11 @@ where
     };
     if existing.turn_id != id.0
         || existing.requested_retry_at != requested_retry_at
+        || existing.model_steps != model_steps
+        || existing.input_tokens != i64::from(usage.input_tokens)
+        || existing.output_tokens != i64::from(usage.output_tokens)
+        || existing.cache_read_input_tokens != i64::from(usage.cache_read_input_tokens)
+        || existing.cache_creation_input_tokens != i64::from(usage.cache_creation_input_tokens)
         || existing.error_code != error_code
         || existing.error_detail.as_deref() != error_detail
     {
@@ -665,6 +734,25 @@ fn turn_failure_from_model(model: entities::turn_failure::Model) -> Result<TurnF
         lease_token: model.lease_token,
         turn_id: TurnId(model.turn_id),
         attempt_count: model.attempt_count,
+        model_steps: model.model_steps,
+        usage: Usage {
+            input_tokens: u32::try_from(model.input_tokens).map_err(|_| {
+                AgentError::Store("turn failure input token total is out of range".into())
+            })?,
+            output_tokens: u32::try_from(model.output_tokens).map_err(|_| {
+                AgentError::Store("turn failure output token total is out of range".into())
+            })?,
+            cache_read_input_tokens: u32::try_from(model.cache_read_input_tokens).map_err(
+                |_| AgentError::Store("turn failure cache-read token total is out of range".into()),
+            )?,
+            cache_creation_input_tokens: u32::try_from(model.cache_creation_input_tokens).map_err(
+                |_| {
+                    AgentError::Store(
+                        "turn failure cache-create token total is out of range".into(),
+                    )
+                },
+            )?,
+        },
         requested_retry_at: model.requested_retry_at,
         error_code: model.error_code,
         error_detail: model.error_detail,

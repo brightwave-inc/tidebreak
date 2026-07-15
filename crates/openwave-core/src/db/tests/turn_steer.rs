@@ -1007,6 +1007,8 @@ async fn terminal_turn_paths_reject_pending_steers_but_retry_wait_preserves_them
             first_lease,
             failed_at,
             TurnFailureRetry::RetryAt(retry_at),
+            0,
+            Usage::default(),
             "retryable",
             None,
         )
@@ -1063,6 +1065,8 @@ async fn terminal_turn_paths_reject_pending_steers_but_retry_wait_preserves_them
             second_lease,
             terminal_at,
             TurnFailureRetry::Permanent,
+            0,
+            Usage::default(),
             "permanent",
             None,
         )

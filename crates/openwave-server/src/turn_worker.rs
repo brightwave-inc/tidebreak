@@ -303,6 +303,7 @@ impl TurnWorker {
                 turn.id
             )));
         }
+        let mut total_model_steps = turn.model_steps;
         // Intermediate tool/message effects are not yet lease-CAS fenced. Keep
         // execution explicitly single-attempt so a crash can fail conservatively
         // but can never replay a filesystem or external tool side effect.
@@ -311,13 +312,14 @@ impl TurnWorker {
                 .record_failure(
                     &turn,
                     lease_token,
+                    total_model_steps,
                     turn.usage,
                     "unsupported_retry_policy",
                     "turn execution requires max_attempts = 1",
                 )
                 .await;
         }
-        let consumed_steps = usize::try_from(turn.model_steps).map_err(|_| {
+        let consumed_steps = usize::try_from(total_model_steps).map_err(|_| {
             AgentError::msg(format!(
                 "turn {} has invalid durable model-step accounting",
                 turn.id
@@ -329,6 +331,7 @@ impl TurnWorker {
                 .record_failure(
                     &turn,
                     lease_token,
+                    total_model_steps,
                     turn.usage,
                     "invalid_turn_progress",
                     "durable model-step accounting exceeds the configured turn budget",
@@ -341,6 +344,7 @@ impl TurnWorker {
                 .record_failure(
                     &turn,
                     lease_token,
+                    total_model_steps,
                     turn.usage,
                     "max_steps_exceeded",
                     "max steps per turn were consumed before this lease segment",
@@ -352,6 +356,7 @@ impl TurnWorker {
                 .record_failure(
                     &turn,
                     lease_token,
+                    total_model_steps,
                     turn.usage,
                     "chat_missing",
                     "claimed turn chat is missing",
@@ -533,7 +538,8 @@ impl TurnWorker {
                 LeaseState::Cancelling => {
                     let usage = match &drive_result {
                         Ok(AgentTurnOutcome::Completed { usage, .. })
-                        | Ok(AgentTurnOutcome::Cancelled { usage, .. }) => *usage,
+                        | Ok(AgentTurnOutcome::Cancelled { usage, .. })
+                        | Ok(AgentTurnOutcome::Failed { usage, .. }) => *usage,
                         Err(_) => openwave_core::Usage::default(),
                     };
                     match checked_usage_sum(total_usage, usage) {
@@ -566,6 +572,7 @@ impl TurnWorker {
                         )));
                     }
                     remaining_steps -= model_steps;
+                    total_model_steps = checked_model_step_sum(total_model_steps, model_steps)?;
                     total_usage = match checked_usage_sum(total_usage, usage) {
                         Ok(total) => total,
                         Err(_) => {
@@ -573,6 +580,7 @@ impl TurnWorker {
                                 .record_failure(
                                     &turn,
                                     lease_token,
+                                    total_model_steps,
                                     total_usage,
                                     "usage_overflow",
                                     "provider usage exceeded the supported turn total",
@@ -585,6 +593,7 @@ impl TurnWorker {
                             .record_failure(
                                 &turn,
                                 lease_token,
+                                total_model_steps,
                                 total_usage,
                                 "invalid_agent_output",
                                 "agent output contained a NUL character",
@@ -680,6 +689,7 @@ impl TurnWorker {
                                 .record_failure(
                                     &turn,
                                     lease_token,
+                                    total_model_steps,
                                     total_usage,
                                     "max_steps_exceeded",
                                     "max steps per turn exceeded while applying durable steering",
@@ -744,6 +754,45 @@ impl TurnWorker {
                         .acknowledge_cancellation(&turn, lease_token, total_usage)
                         .await;
                 }
+                Ok(AgentTurnOutcome::Failed {
+                    error,
+                    usage,
+                    model_steps,
+                }) => {
+                    if model_steps == 0 || model_steps > remaining_steps {
+                        return Err(AgentError::msg(format!(
+                            "turn {} returned an invalid failed model-step count {model_steps}",
+                            turn.id
+                        )));
+                    }
+                    total_model_steps = checked_model_step_sum(total_model_steps, model_steps)?;
+                    total_usage = match checked_usage_sum(total_usage, usage) {
+                        Ok(total) => total,
+                        Err(_) => {
+                            return self
+                                .record_failure(
+                                    &turn,
+                                    lease_token,
+                                    total_model_steps,
+                                    total_usage,
+                                    "usage_overflow",
+                                    "provider usage exceeded the supported turn total",
+                                )
+                                .await;
+                        }
+                    };
+                    drop(active);
+                    return self
+                        .record_failure(
+                            &turn,
+                            lease_token,
+                            total_model_steps,
+                            total_usage,
+                            &error.kind,
+                            &error.message,
+                        )
+                        .await;
+                }
                 Err(error) => {
                     if self.is_cancelling_retry(&turn, lease_token).await {
                         drop(active);
@@ -755,6 +804,7 @@ impl TurnWorker {
                         .record_failure(
                             &turn,
                             lease_token,
+                            total_model_steps,
                             total_usage,
                             "agent_error",
                             &error.to_string(),
@@ -1021,6 +1071,7 @@ impl TurnWorker {
         &self,
         turn: &TurnRun,
         lease_token: uuid::Uuid,
+        model_steps: i32,
         usage: openwave_core::Usage,
         code: &str,
         detail: &str,
@@ -1053,6 +1104,8 @@ impl TurnWorker {
                     lease_token,
                     Utc::now(),
                     TurnFailureRetry::Permanent,
+                    model_steps,
+                    usage,
                     code,
                     Some(&detail),
                 )
@@ -1129,6 +1182,14 @@ fn checked_usage_sum(
     total
         .checked_add(delta)
         .ok_or_else(|| AgentError::msg("provider usage exceeded the supported turn total"))
+}
+
+fn checked_model_step_sum(total: i32, delta: usize) -> Result<i32> {
+    let delta = i32::try_from(delta)
+        .map_err(|_| AgentError::msg("model-step delta exceeds the durable range"))?;
+    total
+        .checked_add(delta)
+        .ok_or_else(|| AgentError::msg("model-step total exceeds the durable range"))
 }
 
 fn chrono_duration(duration: Duration) -> Result<chrono::Duration> {

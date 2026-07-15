@@ -924,18 +924,21 @@ pub trait Store: Send + Sync {
     ///
     /// `now` is a fresh operational lease fence and is not part of the stable
     /// request identity. An exact retry is identified by the turn, claim token,
-    /// retry intent, error code, and error detail; it returns `Existing` even if
-    /// a later attempt has already advanced the mutable turn. Reusing a token
-    /// with different request data is an error. A requested retry moves the turn
-    /// to `retry_wait` only while attempts remain; otherwise the result is
-    /// terminally `failed`. Returns `None` when this claim did not win the live
-    /// attempt or another resolution already did.
+    /// retry intent, cumulative model steps and usage, error code, and error
+    /// detail; it returns `Existing` even if a later attempt has already advanced
+    /// the mutable turn. Reusing a token with different request data is an error.
+    /// A requested retry moves the turn to `retry_wait` only while attempts
+    /// remain; otherwise the result is terminally `failed`. Returns `None` when
+    /// this claim did not win the live attempt or another resolution already did.
+    #[allow(clippy::too_many_arguments)]
     async fn record_turn_run_failure(
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,
         _now: chrono::DateTime<chrono::Utc>,
         _retry: TurnFailureRetry,
+        _model_steps: i32,
+        _usage: Usage,
         _error_code: &str,
         _error_detail: Option<&str>,
     ) -> Result<Option<RecordTurnFailureOutcome>> {
@@ -955,6 +958,8 @@ pub trait Store: Send + Sync {
         _lease_token: uuid::Uuid,
         _now: chrono::DateTime<chrono::Utc>,
         _retry: TurnFailureRetry,
+        _model_steps: i32,
+        _usage: Usage,
         _error_code: &str,
         _error_detail: Option<&str>,
     ) -> Result<Option<JournaledTurnOutcome<RecordTurnFailureOutcome>>> {
