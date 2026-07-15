@@ -147,7 +147,8 @@ tool-call records. It then loops for a bounded number of model steps:
 
 1. fit the transcript into the model's context window;
 2. call the selected provider and stream its output;
-3. durably accept each tool call's canonical name and arguments, then run it;
+3. either durably accept and run a server tool, or hand one client-owned call to
+   the turn worker for an atomic wait checkpoint;
 4. feed tool results back to the model;
 5. repeat until the model produces a final answer.
 
@@ -164,11 +165,13 @@ product boundary. The desktop can now connect, list, and revoke multiple folders
 through a native picker and capability-gated host-broker sidecar; it exposes only
 opaque root IDs and display names to the renderer. The next tool-routing slice
 will resolve file operations through those roots instead of the legacy workspace.
-See [Host access and connected folders](host-access.md). An agent may later ask
-the desktop to connect another folder, but the request only opens a native consent
-flow; it never grants a named path by itself. The model router supports Anthropic, OpenAI, and
-OpenAI-compatible endpoints. It fails closed: if no enabled provider with a
-usable credential can serve the selected model, no model request is sent.
+See [Host access and connected folders](host-access.md). The agent loop can now
+produce a durable client-wait checkpoint for a registered client-owned tool. The
+folder-request contract and desktop executor are the next layers: such a request
+will only open a native consent flow and will never grant a named path by itself.
+The model router supports Anthropic, OpenAI, and OpenAI-compatible endpoints. It
+fails closed: if no enabled provider with a usable credential can serve the
+selected model, no model request is sent.
 
 ### Tool calls are small state machines too
 
@@ -179,8 +182,13 @@ identity with different arguments is a conflict. A server tool then makes one
 terminal transition to `completed`, `failed`, or `cancelled`, and an exact retry
 recovers that result rather than overwriting it.
 
-The same record can describe work that must execute on a trusted client, such as
-a future native folder-picker request. Client work starts unclaimed and is
+The same record describes work that must execute on a trusted client, such as a
+native folder-picker request. The tool registry advertises these contracts to the
+model without installing a server-side executor. For now, the agent accepts only
+one such call at a model boundary, with no sibling call or assistant text, because
+the durable wait receipt represents one exact continuation. The worker atomically
+stores that call, its immutable wait receipt, provider usage, and consumed model
+steps before releasing its lease. Client work then starts unclaimed and is
 listed from durable storage for reconnect recovery. A client claims it with an
 executor identity and a fresh secret claim token; the store installs that token
 with the expiry. Heartbeat and completion require it, so an old callback from
@@ -582,8 +590,8 @@ The main next steps are:
 
 - replace raw chat/project workspace paths with broker-mediated, per-context
   connected roots while keeping OpenWave's private app data separate;
-- teach the agent to emit client-wait checkpoints, notify clients of durable
-  pending work, and run native folder requests in the desktop;
+- register the folder-request tool, notify the desktop of durable pending work,
+  and execute native folder requests through the picker and broker;
 - add resumable checkpoints and explicit idempotency policy around remaining
   server-side tool effects;
 - make approvals resumable rather than process-local;

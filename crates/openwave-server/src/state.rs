@@ -191,6 +191,7 @@ struct TurnHandles {
 #[derive(Default)]
 pub struct TurnGuard {
     active: Mutex<HashMap<ChatId, TurnHandles>>,
+    released: tokio::sync::Notify,
 }
 
 impl TurnGuard {
@@ -224,6 +225,17 @@ impl TurnGuard {
             cancel,
             steer,
         })
+    }
+
+    /// Wait until no local worker owns this chat.
+    pub async fn wait_until_vacant(&self, chat_id: ChatId) {
+        loop {
+            let released = self.released.notified();
+            if !self.active.lock().unwrap().contains_key(&chat_id) {
+                return;
+            }
+            released.await;
+        }
     }
 
     /// Trip cancellation only for the exact turn currently executing locally.
@@ -280,6 +292,7 @@ impl Drop for ActiveTurn {
             handles.turn_id == self.turn_id && handles.lease_token == self.lease_token
         }) {
             active.remove(&self.chat_id);
+            self.guard.released.notify_waiters();
         }
     }
 }
