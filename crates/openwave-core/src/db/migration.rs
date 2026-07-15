@@ -1424,6 +1424,12 @@ impl MigrationTrait for Init {
                             .not_null(),
                     )
                     .col(
+                        ColumnDef::new(TurnAgentRunWait::AtomicAdmission)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
                         ColumnDef::new(TurnAgentRunWait::AttemptCount)
                             .integer()
                             .not_null(),
@@ -3664,6 +3670,7 @@ enum TurnAgentRunWait {
     TurnId,
     ChatId,
     ParkLeaseToken,
+    AtomicAdmission,
     AttemptCount,
     ClaimCount,
     ModelSteps,

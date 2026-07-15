@@ -38,16 +38,16 @@ use crate::model::{
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
-    AcceptAgentRunOutcome, AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
-    BeginRootAttachmentChangeOutcome, ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome,
-    ClaimTurnRunOutcome, CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
-    ConsumeAgentRunInboxOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
-    EnsureDocumentParseJobOutcome, FinishAgentRunCancellationOutcome,
-    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledTurnOutcome,
-    JournaledTurnSteerOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForClientCallOutcome,
-    RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
-    ResolveToolCallOutcome, Store, SubmitAgentRunResultOutcome,
+    AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptToolCallOutcome,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, BeginRootAttachmentChangeOutcome,
+    ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome, ClaimTurnRunOutcome,
+    CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
+    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
+    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkTurnForAgentRunInboxOutcome,
+    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
+    RequestTurnCancellationOutcome, ResolveToolCallOutcome, Store, SubmitAgentRunResultOutcome,
 };
 
 mod ops;
@@ -1743,6 +1743,31 @@ impl Store for DbStore {
             spawn_call_id,
             execution,
             input,
+        )
+        .await
+    }
+
+    async fn accept_sandbox_agent_run_and_park_turn(
+        &self,
+        child_run_id: AgentRunId,
+        turn_id: TurnId,
+        spawn_call_id: CallId,
+        input: &str,
+        lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
+        progress: TurnCheckpointProgress,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<AcceptSandboxAgentRunAndParkTurnOutcome>> {
+        ops::agent_run::accept_sandbox_agent_run_and_park_turn(
+            self,
+            child_run_id,
+            turn_id,
+            spawn_call_id,
+            input,
+            lease_token,
+            expected_steer_revision,
+            progress,
+            now,
         )
         .await
     }

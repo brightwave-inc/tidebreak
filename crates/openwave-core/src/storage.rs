@@ -162,6 +162,35 @@ pub enum AcceptAgentRunOutcome {
     ParentUnavailable,
 }
 
+/// Result of atomically accepting one sandbox child and checkpointing its
+/// owning foreground turn on that child's inbox delivery.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AcceptSandboxAgentRunAndParkTurnOutcome {
+    /// The child, immutable wait receipt, and foreground lease release
+    /// committed in one transaction.
+    Parked {
+        child: AgentRun,
+        turn: TurnRun,
+        wait: TurnAgentRunWait,
+    },
+    /// An exact retry recovered the same already-committed transition.
+    Existing {
+        child: AgentRun,
+        turn: TurnRun,
+        wait: TurnAgentRunWait,
+    },
+    /// The child id or spawn-call identity is bound to a different request,
+    /// or was accepted outside this atomic transition.
+    IdentityConflict,
+    /// The turn's foreground coordinator is no longer an eligible sandbox
+    /// parent.
+    ParentUnavailable,
+    /// A durable steer won the checkpoint race and must be applied first.
+    SteerPending(TurnRun),
+    /// The request came from provider output generated before an applied steer.
+    OutputSuperseded(TurnRun),
+}
+
 /// Result of requesting durable cancellation for one sandbox run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAgentRunCancellationOutcome {
@@ -1002,6 +1031,28 @@ pub trait Store: Send + Sync {
         _execution: AgentRunExecution,
         _input: Option<&str>,
     ) -> Result<AcceptAgentRunOutcome> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Atomically accept one depth-one sandbox child and release the exact
+    /// owning foreground turn claim into a matching child-result wait.
+    ///
+    /// The parent is derived from the turn rather than supplied by a caller,
+    /// so a sandbox run cannot be parked against a turn owned by another
+    /// coordinator. Exact retries recover the immutable child and checkpoint
+    /// receipt; a child accepted through any other path is never retrofitted
+    /// into this transition.
+    async fn accept_sandbox_agent_run_and_park_turn(
+        &self,
+        _child_run_id: AgentRunId,
+        _turn_id: TurnId,
+        _spawn_call_id: CallId,
+        _input: &str,
+        _lease_token: uuid::Uuid,
+        _expected_steer_revision: i64,
+        _progress: TurnCheckpointProgress,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<AcceptSandboxAgentRunAndParkTurnOutcome>> {
         agent_run_storage_unavailable()
     }
 

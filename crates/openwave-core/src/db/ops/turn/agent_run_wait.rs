@@ -24,7 +24,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
     progress: TurnCheckpointProgress,
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<ParkTurnForAgentRunInboxOutcome>> {
-    validate_request(turn_id, child_run_id, lease_token, progress)?;
+    validate_agent_run_inbox_park_request(turn_id, child_run_id, lease_token, progress)?;
     let now = canonical_db_timestamp(now)?;
     let Some(scope) = entities::turn_run::Entity::find_by_id(turn_id.0)
         .one(&store.conn)
@@ -41,13 +41,43 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
         return Ok(None);
     }
 
+    let outcome = park_turn_for_agent_run_inbox_on(
+        &transaction,
+        turn_id,
+        child_run_id,
+        lease_token,
+        expected_steer_revision,
+        progress,
+        now,
+        false,
+    )
+    .await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(outcome)
+}
+
+/// Checkpoint one foreground turn using a caller-owned transaction with the
+/// chat and turn write locks already held.
+pub(in crate::db) async fn park_turn_for_agent_run_inbox_on<C>(
+    conn: &C,
+    turn_id: TurnId,
+    child_run_id: AgentRunId,
+    lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
+    progress: TurnCheckpointProgress,
+    now: chrono::DateTime<Utc>,
+    atomic_admission: bool,
+) -> Result<Option<ParkTurnForAgentRunInboxOutcome>>
+where
+    C: ConnectionTrait,
+{
     if let Some(wait) = entities::turn_agent_run_wait::Entity::find_by_id(child_run_id.0)
-        .one(&transaction)
+        .one(conn)
         .await
         .map_err(store_err)?
     {
         let turn = entities::turn_run::Entity::find_by_id(wait.turn_id)
-            .one(&transaction)
+            .one(conn)
             .await
             .map_err(store_err)?
             .ok_or_else(|| {
@@ -68,12 +98,11 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
         } else {
             ParkTurnForAgentRunInboxOutcome::IdentityConflict
         };
-        transaction.commit().await.map_err(store_err)?;
         return Ok(Some(outcome));
     }
 
     let turn = entities::turn_run::Entity::find_by_id(turn_id.0)
-        .one(&transaction)
+        .one(conn)
         .await
         .map_err(store_err)?
         .expect("locked turn exists");
@@ -84,19 +113,17 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
             .is_none_or(|lease_expires_at| lease_expires_at <= now)
         || turn.updated_at > now
     {
-        transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
     let steer_pending = entities::turn_steer::Entity::find()
         .filter(entities::turn_steer::Column::TurnId.eq(turn_id.0))
         .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
-        .one(&transaction)
+        .one(conn)
         .await
         .map_err(store_err)?
         .is_some();
     if steer_pending || turn.steer_revision != expected_steer_revision {
         let turn = turn_run_from_model(turn)?;
-        transaction.commit().await.map_err(store_err)?;
         return Ok(Some(if steer_pending {
             ParkTurnForAgentRunInboxOutcome::SteerPending(turn)
         } else {
@@ -105,7 +132,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
     }
     let child = entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::Id.eq(child_run_id.0))
-        .one(&transaction)
+        .one(conn)
         .await
         .map_err(store_err)?;
     let valid_child = child.is_some_and(|child| {
@@ -120,7 +147,6 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
             )
     });
     if !valid_child {
-        transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
     let totals = checked_checkpoint_totals(&turn, progress)?;
@@ -130,6 +156,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
         turn_id: Set(turn_id.0),
         chat_id: Set(turn.chat_id),
         park_lease_token: Set(lease_token),
+        atomic_admission: Set(atomic_admission),
         attempt_count: Set(turn.attempt_count),
         claim_count: Set(turn.claim_count),
         model_steps: Set(progress.model_steps),
@@ -141,7 +168,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
         parked_at: Set(now),
         closed_at: Set(None),
     }
-    .insert(&transaction)
+    .insert(conn)
     .await
     .map_err(store_err)?;
     let parked = entities::turn_run::Entity::update_many()
@@ -191,19 +218,17 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
         .filter(entities::turn_run::Column::SteerRevision.eq(expected_steer_revision))
         .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
         .filter(entities::turn_run::Column::UpdatedAt.lte(now))
-        .exec(&transaction)
+        .exec(conn)
         .await
         .map_err(store_err)?;
     if parked.rows_affected != 1 {
-        transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
     let parked_turn = entities::turn_run::Entity::find_by_id(turn_id.0)
-        .one(&transaction)
+        .one(conn)
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("parked turn {turn_id} disappeared")))?;
-    transaction.commit().await.map_err(store_err)?;
     Ok(Some(ParkTurnForAgentRunInboxOutcome::Parked {
         turn: turn_run_from_model(parked_turn)?,
         wait: wait_from_model(wait)?,
@@ -326,7 +351,7 @@ where
     turn_run_from_model(turn).map(Some)
 }
 
-fn validate_request(
+pub(in crate::db) fn validate_agent_run_inbox_park_request(
     turn_id: TurnId,
     child_run_id: AgentRunId,
     lease_token: uuid::Uuid,
