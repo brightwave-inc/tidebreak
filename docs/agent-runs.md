@@ -119,6 +119,23 @@ waiting agent does not consume a running slot. Cancellation of a foreground run
 also cancels its owned queued or running children in the initial model; detached
 agents are intentionally deferred.
 
+The scheduler's ownership rules are deliberately strict:
+
+- a singleton durable scheduler lock makes global and per-chat running caps
+  atomic across local processes;
+- scheduler ownership uses the database clock rather than a worker-supplied
+  timestamp, so a skewed local process cannot steal a live lease;
+- every claim has a unique receipt, including an empty scan, so retrying a
+  claim token can recover only its original running lease or its original
+  no-work result;
+- a running lease has a monotonically extendable expiry and never outlives the
+  run's absolute wall-clock deadline;
+- an expired lease starts a new attempt only while budget remains; exhausted
+  attempts and deadlines become durable terminal failures, while an expired
+  cancellation fence becomes `cancelled` and releases capacity;
+- a worker's writes must carry its exact live lease token, so a reclaimed or
+  expired worker cannot resume ownership.
+
 ## Reliability contract
 
 The agent hierarchy preserves the runtime's existing rules:

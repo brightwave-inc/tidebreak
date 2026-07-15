@@ -1098,6 +1098,30 @@ pub struct AgentRun {
     pub status: AgentRunStatus,
     /// Exact delegated task for a sandbox run. Foreground runs have no task.
     pub input: Option<String>,
+    /// Failure attempts already started. Reclaiming an expired lease starts a
+    /// new attempt; later continuation resumptions will not.
+    pub attempt_count: i32,
+    /// Maximum failure attempts permitted for this run.
+    pub max_attempts: i32,
+    /// Exact worker lease segments issued over the run's lifetime.
+    pub claim_count: i32,
+    /// Earliest time queued or retry-wait work may be claimed.
+    pub available_at: DateTime<Utc>,
+    /// Absolute wall-clock limit for sandbox work. Foreground coordinators do
+    /// not carry a scheduler deadline.
+    pub deadline_at: Option<DateTime<Utc>>,
+    /// Exact worker claim identity while running or cancelling.
+    pub lease_token: Option<Uuid>,
+    /// When the current worker claim becomes stale.
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    /// When the first worker claim began.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the run entered a terminal state.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Stable machine-readable failure category.
+    pub last_error_code: Option<String>,
+    /// Bounded diagnostic detail for local operators.
+    pub last_error_detail: Option<String>,
     /// When the run was durably accepted.
     pub created_at: DateTime<Utc>,
     /// When its durable state last changed.
@@ -1109,6 +1133,16 @@ impl AgentRun {
     pub const MAX_DEPTH: u8 = 1;
     /// Maximum persisted delegated task length.
     pub const MAX_INPUT_LEN: usize = 65_536;
+    /// Default failure-attempt budget for sandboxed work.
+    pub const DEFAULT_MAX_ATTEMPTS: i32 = 3;
+    /// Default wall-clock budget for one sandbox run.
+    pub const DEFAULT_MAX_DURATION: chrono::Duration = chrono::Duration::hours(1);
+    /// Largest accepted scheduler concurrency bound.
+    pub const MAX_CONCURRENCY_LIMIT: u32 = 1_024;
+    /// Maximum stable failure-category length.
+    pub const MAX_ERROR_CODE_LEN: usize = 128;
+    /// Maximum persisted diagnostic-detail length.
+    pub const MAX_ERROR_DETAIL_LEN: usize = 4_096;
 }
 
 /// Execution boundary for an [`AgentRun`].
@@ -1144,6 +1178,8 @@ pub enum AgentRunStatus {
     Queued,
     /// One exact scheduler lease currently owns the run.
     Running,
+    /// Cancellation was requested while an exact worker lease remained live.
+    Cancelling,
     /// The run checkpointed and released its worker for a durable dependency.
     Waiting,
     /// Replay-safe work awaits another scheduler claim.
@@ -1164,6 +1200,7 @@ impl AgentRunStatus {
             Self::Active => "active",
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Cancelling => "cancelling",
             Self::Waiting => "waiting",
             Self::RetryWait => "retry_wait",
             Self::Completed => "completed",

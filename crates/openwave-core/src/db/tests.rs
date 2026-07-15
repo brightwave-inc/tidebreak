@@ -5424,6 +5424,10 @@ async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
             entities::agent_run::Column::Status,
             sea_orm::sea_query::Expr::value(AgentRunStatus::Completed.as_str()),
         )
+        .col_expr(
+            entities::agent_run::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(accepted.updated_at)),
+        )
         .filter(entities::agent_run::Column::Id.eq(accepted.agent_run_id.0))
         .exec(&store.conn)
         .await

@@ -22,6 +22,99 @@ impl MigratorTrait for Migrator {
 }
 
 async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .create_table(
+            Table::create()
+                .table(AgentRunClaimLock::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(AgentRunClaimLock::Id)
+                        .integer()
+                        .not_null()
+                        .primary_key(),
+                )
+                .check(Expr::col(AgentRunClaimLock::Id).eq(1))
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .get_connection()
+        .execute_unprepared(
+            "INSERT INTO agent_run_claim_lock (id) VALUES (1) ON CONFLICT DO NOTHING",
+        )
+        .await?;
+
+    manager
+        .create_table(
+            Table::create()
+                .table(AgentRunClaim::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(AgentRunClaim::Token)
+                        .uuid()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(ColumnDef::new(AgentRunClaim::AgentRunId).uuid())
+                .col(ColumnDef::new(AgentRunClaim::AttemptCount).integer())
+                .col(ColumnDef::new(AgentRunClaim::ClaimCount).integer())
+                .col(
+                    ColumnDef::new(AgentRunClaim::ClaimedAt)
+                        .timestamp_with_time_zone()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(AgentRunClaim::LeaseExpiresAt).timestamp_with_time_zone())
+                .check(
+                    Expr::col(AgentRunClaim::AgentRunId)
+                        .is_null()
+                        .and(Expr::col(AgentRunClaim::AttemptCount).is_null())
+                        .and(Expr::col(AgentRunClaim::ClaimCount).is_null())
+                        .and(Expr::col(AgentRunClaim::LeaseExpiresAt).is_null())
+                        .or(Expr::col(AgentRunClaim::AgentRunId)
+                            .is_not_null()
+                            .and(Expr::col(AgentRunClaim::AttemptCount).is_not_null())
+                            .and(Expr::col(AgentRunClaim::AttemptCount).gte(1))
+                            .and(
+                                Expr::col(AgentRunClaim::ClaimCount).is_not_null().and(
+                                    Expr::col(AgentRunClaim::ClaimCount)
+                                        .gte(Expr::col(AgentRunClaim::AttemptCount)),
+                                ),
+                            )
+                            .and(
+                                Expr::col(AgentRunClaim::LeaseExpiresAt).is_not_null().and(
+                                    Expr::col(AgentRunClaim::LeaseExpiresAt)
+                                        .gt(Expr::col(AgentRunClaim::ClaimedAt)),
+                                ),
+                            )),
+                )
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_agent_run_claim_identity")
+                .table(AgentRunClaim::Table)
+                .col(AgentRunClaim::Token)
+                .col(AgentRunClaim::AgentRunId)
+                .col(AgentRunClaim::AttemptCount)
+                .col(AgentRunClaim::ClaimCount)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_agent_run_claim_count")
+                .table(AgentRunClaim::Table)
+                .col(AgentRunClaim::AgentRunId)
+                .col(AgentRunClaim::ClaimCount)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+
     let foreground_status = Expr::col(AgentRun::Status).is_in([
         AgentRunStatus::Active.as_str(),
         AgentRunStatus::Completed.as_str(),
@@ -31,6 +124,7 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
     let sandbox_status = Expr::col(AgentRun::Status).is_in([
         AgentRunStatus::Queued.as_str(),
         AgentRunStatus::Running.as_str(),
+        AgentRunStatus::Cancelling.as_str(),
         AgentRunStatus::Waiting.as_str(),
         AgentRunStatus::RetryWait.as_str(),
         AgentRunStatus::Completed.as_str(),
@@ -44,6 +138,12 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
         .and(Expr::col(AgentRun::ParentDepth).is_null())
         .and(Expr::col(AgentRun::SpawnCallId).is_null())
         .and(Expr::col(AgentRun::Input).is_null())
+        .and(Expr::col(AgentRun::AttemptCount).eq(0))
+        .and(Expr::col(AgentRun::MaxAttempts).eq(0))
+        .and(Expr::col(AgentRun::ClaimCount).eq(0))
+        .and(Expr::col(AgentRun::AvailableAt).eq(Expr::col(AgentRun::CreatedAt)))
+        .and(Expr::col(AgentRun::DeadlineAt).is_null())
+        .and(Expr::col(AgentRun::StartedAt).is_null())
         .and(foreground_status);
     let sandbox_shape = Expr::col(AgentRun::Execution)
         .eq(AgentRunExecution::Sandbox.as_str())
@@ -52,11 +152,69 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
         .and(Expr::col(AgentRun::ParentDepth).eq(0))
         .and(Expr::col(AgentRun::SpawnCallId).is_not_null())
         .and(Expr::col(AgentRun::Input).is_not_null())
+        .and(Expr::col(AgentRun::MaxAttempts).gte(1))
+        .and(Expr::col(AgentRun::AttemptCount).gte(0))
+        .and(Expr::col(AgentRun::AttemptCount).lte(Expr::col(AgentRun::MaxAttempts)))
+        .and(Expr::col(AgentRun::ClaimCount).gte(Expr::col(AgentRun::AttemptCount)))
+        .and(Expr::col(AgentRun::AvailableAt).gte(Expr::col(AgentRun::CreatedAt)))
+        .and(Expr::col(AgentRun::DeadlineAt).gt(Expr::col(AgentRun::CreatedAt)))
         .and(
             Func::char_length(Expr::col(AgentRun::Input))
                 .between(1, crate::model::AgentRun::MAX_INPUT_LEN as i32),
         )
         .and(sandbox_status);
+    let active_lease = Expr::col(AgentRun::Status)
+        .is_in([
+            AgentRunStatus::Running.as_str(),
+            AgentRunStatus::Cancelling.as_str(),
+        ])
+        .and(Expr::col(AgentRun::LeaseToken).is_not_null())
+        .and(Expr::col(AgentRun::LeaseExpiresAt).is_not_null())
+        .and(Expr::col(AgentRun::AttemptCount).gte(1))
+        .and(Expr::col(AgentRun::StartedAt).is_not_null());
+    let no_lease = Expr::col(AgentRun::Status)
+        .is_not_in([
+            AgentRunStatus::Running.as_str(),
+            AgentRunStatus::Cancelling.as_str(),
+        ])
+        .and(Expr::col(AgentRun::LeaseToken).is_null())
+        .and(Expr::col(AgentRun::LeaseExpiresAt).is_null());
+    let terminal_finished = Expr::col(AgentRun::Status)
+        .is_in([
+            AgentRunStatus::Completed.as_str(),
+            AgentRunStatus::Failed.as_str(),
+            AgentRunStatus::Cancelled.as_str(),
+        ])
+        .and(Expr::col(AgentRun::FinishedAt).is_not_null());
+    let nonterminal_unfinished = Expr::col(AgentRun::Status)
+        .is_in([
+            AgentRunStatus::Active.as_str(),
+            AgentRunStatus::Queued.as_str(),
+            AgentRunStatus::Running.as_str(),
+            AgentRunStatus::Cancelling.as_str(),
+            AgentRunStatus::Waiting.as_str(),
+            AgentRunStatus::RetryWait.as_str(),
+        ])
+        .and(Expr::col(AgentRun::FinishedAt).is_null());
+    let failure_has_error = Expr::col(AgentRun::Status)
+        .is_in([
+            AgentRunStatus::RetryWait.as_str(),
+            AgentRunStatus::Failed.as_str(),
+        ])
+        .and(Expr::col(AgentRun::LastErrorCode).is_not_null());
+    let success_has_no_error = Expr::col(AgentRun::Status)
+        .is_not_in([
+            AgentRunStatus::RetryWait.as_str(),
+            AgentRunStatus::Failed.as_str(),
+        ])
+        .and(Expr::col(AgentRun::LastErrorCode).is_null())
+        .and(Expr::col(AgentRun::LastErrorDetail).is_null());
+    let queued_pristine = Expr::col(AgentRun::Status)
+        .ne(AgentRunStatus::Queued.as_str())
+        .or(Expr::col(AgentRun::AttemptCount)
+            .eq(0)
+            .and(Expr::col(AgentRun::ClaimCount).eq(0))
+            .and(Expr::col(AgentRun::StartedAt).is_null()));
 
     manager
         .create_table(
@@ -76,6 +234,27 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
                 .col(ColumnDef::new(AgentRun::Depth).small_integer().not_null())
                 .col(ColumnDef::new(AgentRun::Status).string_len(32).not_null())
                 .col(ColumnDef::new(AgentRun::Input).text())
+                .col(ColumnDef::new(AgentRun::AttemptCount).integer().not_null())
+                .col(ColumnDef::new(AgentRun::MaxAttempts).integer().not_null())
+                .col(ColumnDef::new(AgentRun::ClaimCount).integer().not_null())
+                .col(
+                    ColumnDef::new(AgentRun::AvailableAt)
+                        .timestamp_with_time_zone()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(AgentRun::DeadlineAt).timestamp_with_time_zone())
+                .col(ColumnDef::new(AgentRun::LeaseToken).uuid())
+                .col(ColumnDef::new(AgentRun::LeaseExpiresAt).timestamp_with_time_zone())
+                .col(ColumnDef::new(AgentRun::StartedAt).timestamp_with_time_zone())
+                .col(ColumnDef::new(AgentRun::FinishedAt).timestamp_with_time_zone())
+                .col(
+                    ColumnDef::new(AgentRun::LastErrorCode)
+                        .string_len(crate::model::AgentRun::MAX_ERROR_CODE_LEN as u32),
+                )
+                .col(
+                    ColumnDef::new(AgentRun::LastErrorDetail)
+                        .string_len(crate::model::AgentRun::MAX_ERROR_DETAIL_LEN as u32),
+                )
                 .col(
                     ColumnDef::new(AgentRun::CreatedAt)
                         .timestamp_with_time_zone()
@@ -113,7 +292,31 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
                         .to_col(AgentRun::Depth)
                         .on_delete(ForeignKeyAction::Restrict),
                 )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_agent_run_live_claim")
+                        .from_tbl(AgentRun::Table)
+                        .from_col(AgentRun::LeaseToken)
+                        .from_col(AgentRun::Id)
+                        .from_col(AgentRun::AttemptCount)
+                        .from_col(AgentRun::ClaimCount)
+                        .to_tbl(AgentRunClaim::Table)
+                        .to_col(AgentRunClaim::Token)
+                        .to_col(AgentRunClaim::AgentRunId)
+                        .to_col(AgentRunClaim::AttemptCount)
+                        .to_col(AgentRunClaim::ClaimCount)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
                 .check(foreground_shape.or(sandbox_shape))
+                .check(active_lease.or(no_lease))
+                .check(terminal_finished.or(nonterminal_unfinished))
+                .check(failure_has_error.or(success_has_no_error))
+                .check(queued_pristine)
+                .check(
+                    Expr::col(AgentRun::LastErrorDetail)
+                        .is_null()
+                        .or(Expr::col(AgentRun::LastErrorCode).is_not_null()),
+                )
                 .check(Expr::col(AgentRun::UpdatedAt).gte(Expr::col(AgentRun::CreatedAt)))
                 .to_owned(),
         )
@@ -169,6 +372,29 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
                 .col(AgentRun::ChatId)
                 .col(AgentRun::CreatedAt)
                 .col(AgentRun::Id)
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_agent_run_claimable")
+                .table(AgentRun::Table)
+                .col(AgentRun::Status)
+                .col(AgentRun::AvailableAt)
+                .col(AgentRun::CreatedAt)
+                .col(AgentRun::Id)
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_agent_run_live_by_chat")
+                .table(AgentRun::Table)
+                .col(AgentRun::Status)
+                .col(AgentRun::ChatId)
+                .col(AgentRun::LeaseExpiresAt)
                 .to_owned(),
         )
         .await?;
@@ -1135,6 +1361,12 @@ impl MigrationTrait for Init {
             .await?;
         manager
             .drop_table(Table::drop().table(AgentRun::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(AgentRunClaim::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(AgentRunClaimLock::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(Setting::Table).to_owned())
@@ -2884,8 +3116,36 @@ enum AgentRun {
     Depth,
     Status,
     Input,
+    AttemptCount,
+    MaxAttempts,
+    ClaimCount,
+    AvailableAt,
+    DeadlineAt,
+    LeaseToken,
+    LeaseExpiresAt,
+    StartedAt,
+    FinishedAt,
+    LastErrorCode,
+    LastErrorDetail,
     CreatedAt,
     UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum AgentRunClaim {
+    Table,
+    Token,
+    AgentRunId,
+    AttemptCount,
+    ClaimCount,
+    ClaimedAt,
+    LeaseExpiresAt,
+}
+
+#[derive(DeriveIden)]
+enum AgentRunClaimLock {
+    Table,
+    Id,
 }
 
 #[derive(DeriveIden)]
