@@ -75,7 +75,10 @@ async fn request_turn_cancellation_inner(
                 terminal_event: None,
             }));
         }
-        TurnRunStatus::Queued | TurnRunStatus::Running | TurnRunStatus::RetryWait => {}
+        TurnRunStatus::Queued
+        | TurnRunStatus::Running
+        | TurnRunStatus::Resuming
+        | TurnRunStatus::RetryWait => {}
     }
     if turn.updated_at > now {
         transaction.commit().await.map_err(store_err)?;
@@ -224,7 +227,9 @@ async fn finish_turn_cancellation_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    if turn.status == TurnRunStatus::Cancelled.as_str() && turn.attempt_count == claim.attempt_count
+    if turn.status == TurnRunStatus::Cancelled.as_str()
+        && turn.attempt_count == claim.attempt_count
+        && turn.claim_count == claim.claim_count
     {
         let sequenced_event =
             exact_terminal_event_on(&transaction, id, Some(lease_token), terminal_event).await?;
@@ -237,6 +242,7 @@ async fn finish_turn_cancellation_inner(
     }
     if turn.status != TurnRunStatus::Cancelling.as_str()
         || turn.attempt_count != claim.attempt_count
+        || turn.claim_count != claim.claim_count
         || turn.lease_token != Some(lease_token)
         || turn.updated_at > now
     {
@@ -268,6 +274,7 @@ async fn finish_turn_cancellation_inner(
         .filter(entities::turn_run::Column::Id.eq(id.0))
         .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelling.as_str()))
         .filter(entities::turn_run::Column::AttemptCount.eq(claim.attempt_count))
+        .filter(entities::turn_run::Column::ClaimCount.eq(claim.claim_count))
         .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
         .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
         .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))

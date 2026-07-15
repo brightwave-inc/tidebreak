@@ -759,12 +759,14 @@ pub trait Store: Send + Sync {
     /// `lease_token` is the caller's idempotency identity: retrying it while its
     /// lease remains live returns the same running turn. Callers must retain it
     /// across an ambiguous commit and use a fresh token for a new claim attempt.
-    /// A successful claim increments `attempt_count` and moves the turn to
-    /// `running`. Expired work is reclaimed only while another attempt is
-    /// permitted. An expired cancellation or final attempt is terminalized with
-    /// its exact routed journal event and returned instead of claiming another
-    /// turn; the caller publishes it before scanning again. `lease_expires_at`
-    /// must be after `now`.
+    /// Every successful claim increments `claim_count` and moves the turn to
+    /// `running`. Queued, retry-wait, and expired-running claims also increment
+    /// `attempt_count`; resuming claims retain the current failure attempt.
+    /// Expired work is reclaimed only while another attempt is permitted. An
+    /// expired cancellation or final attempt is terminalized with its exact
+    /// routed journal event and returned instead of claiming another turn; the
+    /// caller publishes it before scanning again. `lease_expires_at` must be
+    /// after `now`.
     async fn claim_turn_run(
         &self,
         _lease_token: uuid::Uuid,
@@ -792,8 +794,9 @@ pub trait Store: Send + Sync {
     ///
     /// The non-nil caller-supplied `id` also names the eventual user message.
     /// Exact retries compare chat, turn, byte-exact content, and interrupt intent.
-    /// Queued, running, and retry-wait turns accept instructions; cancelling or
-    /// terminal turns return [`AcceptTurnSteerOutcome::TurnUnavailable`].
+    /// Queued, running, resuming, and retry-wait turns accept instructions;
+    /// cancelling or terminal turns return
+    /// [`AcceptTurnSteerOutcome::TurnUnavailable`].
     async fn accept_turn_steer(
         &self,
         _id: TurnSteerId,
@@ -925,11 +928,12 @@ pub trait Store: Send + Sync {
 
     /// Durably request cancellation for one exact turn.
     ///
-    /// Queued and retry-wait work becomes terminal immediately. Running work
-    /// enters `cancelling` while retaining its exact lease, so the database's
-    /// one-live-turn-per-chat invariant remains held until the cooperative
-    /// worker actually stops. The empty-payload request converges on the exact
-    /// turn identity, so cancelling/cancelled retries return `Existing`.
+    /// Queued, retry-wait, and resuming work becomes terminal immediately.
+    /// Running work enters `cancelling` while retaining its exact lease, so the
+    /// database's one-live-turn-per-chat invariant remains held until the
+    /// cooperative worker actually stops. The empty-payload request converges
+    /// on the exact turn identity, so cancelling/cancelled retries return
+    /// `Existing`.
     async fn request_turn_cancellation(
         &self,
         _id: TurnId,
@@ -940,9 +944,9 @@ pub trait Store: Send + Sync {
 
     /// Request cancellation and publish an immediate terminal outcome atomically.
     ///
-    /// Queued and retry-wait turns commit `TurnCancelled` with their terminal
-    /// transition. Running turns only enter `cancelling`; their worker publishes
-    /// the terminal event when it acknowledges quiescence.
+    /// Queued, retry-wait, and resuming turns commit `TurnCancelled` with their
+    /// terminal transition. Running turns only enter `cancelling`; their worker
+    /// publishes the terminal event when it acknowledges quiescence.
     async fn request_turn_cancellation_and_append_event(
         &self,
         _id: TurnId,

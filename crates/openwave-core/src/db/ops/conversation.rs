@@ -339,6 +339,7 @@ pub(in crate::db) async fn append_turn_event(
     }
     if turn.status != TurnRunStatus::Running.as_str()
         || turn.attempt_count != claim.attempt_count
+        || turn.claim_count != claim.claim_count
         || turn.lease_token != Some(lease_token)
         || turn
             .lease_expires_at

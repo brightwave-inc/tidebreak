@@ -84,7 +84,10 @@ pub(in crate::db) async fn accept_turn_steer(
         && turn.updated_at <= now
         && matches!(
             status,
-            TurnRunStatus::Queued | TurnRunStatus::Running | TurnRunStatus::RetryWait
+            TurnRunStatus::Queued
+                | TurnRunStatus::Running
+                | TurnRunStatus::Resuming
+                | TurnRunStatus::RetryWait
         )
         && (status != TurnRunStatus::Running
             || turn
@@ -212,6 +215,7 @@ pub(in crate::db) async fn list_pending_turn_steers(
         .is_some_and(|turn| {
             turn.status == TurnRunStatus::Running.as_str()
                 && turn.attempt_count == claim.attempt_count
+                && turn.claim_count == claim.claim_count
                 && turn.lease_token == Some(lease_token)
                 && turn
                     .lease_expires_at
@@ -338,6 +342,7 @@ pub(in crate::db) async fn apply_turn_steer(
     };
     if turn.status != TurnRunStatus::Running.as_str()
         || turn.attempt_count != claim.attempt_count
+        || turn.claim_count != claim.claim_count
         || turn.lease_token != Some(lease_token)
         || turn
             .lease_expires_at
@@ -459,6 +464,7 @@ pub(in crate::db) async fn apply_turn_steer(
         .filter(entities::turn_run::Column::Id.eq(turn_id.0))
         .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
         .filter(entities::turn_run::Column::AttemptCount.eq(claim.attempt_count))
+        .filter(entities::turn_run::Column::ClaimCount.eq(claim.claim_count))
         .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
         .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
         .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))

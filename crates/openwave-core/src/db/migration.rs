@@ -141,6 +141,7 @@ impl MigrationTrait for Init {
                     )
                     .col(ColumnDef::new(TurnClaim::TurnId).uuid().not_null())
                     .col(ColumnDef::new(TurnClaim::AttemptCount).integer().not_null())
+                    .col(ColumnDef::new(TurnClaim::ClaimCount).integer().not_null())
                     .col(
                         ColumnDef::new(TurnClaim::ClaimedAt)
                             .timestamp_with_time_zone()
@@ -152,6 +153,7 @@ impl MigrationTrait for Init {
                             .not_null(),
                     )
                     .check(Expr::col(TurnClaim::AttemptCount).gte(1))
+                    .check(Expr::col(TurnClaim::ClaimCount).gte(Expr::col(TurnClaim::AttemptCount)))
                     .check(Expr::col(TurnClaim::LeaseExpiresAt).gt(Expr::col(TurnClaim::ClaimedAt)))
                     .to_owned(),
             )
@@ -164,6 +166,21 @@ impl MigrationTrait for Init {
                     .col(TurnClaim::Token)
                     .col(TurnClaim::TurnId)
                     .col(TurnClaim::AttemptCount)
+                    .col(TurnClaim::ClaimCount)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        // Failure receipts remain attempt-scoped even when one attempt spans
+        // multiple worker lease segments.
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_turn_claim_failure_identity")
+                    .table(TurnClaim::Table)
+                    .col(TurnClaim::Token)
+                    .col(TurnClaim::TurnId)
+                    .col(TurnClaim::AttemptCount)
                     .unique()
                     .to_owned(),
             )
@@ -171,10 +188,10 @@ impl MigrationTrait for Init {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_turn_claim_attempt")
+                    .name("idx_turn_claim_count")
                     .table(TurnClaim::Table)
                     .col(TurnClaim::TurnId)
-                    .col(TurnClaim::AttemptCount)
+                    .col(TurnClaim::ClaimCount)
                     .unique()
                     .to_owned(),
             )
@@ -215,6 +232,7 @@ impl MigrationTrait for Init {
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
             TurnRunStatus::Cancelling.as_str(),
+            TurnRunStatus::Resuming.as_str(),
             TurnRunStatus::RetryWait.as_str(),
             TurnRunStatus::Completed.as_str(),
             TurnRunStatus::Failed.as_str(),
@@ -250,12 +268,14 @@ impl MigrationTrait for Init {
                 TurnRunStatus::Queued.as_str(),
                 TurnRunStatus::Running.as_str(),
                 TurnRunStatus::Cancelling.as_str(),
+                TurnRunStatus::Resuming.as_str(),
                 TurnRunStatus::RetryWait.as_str(),
             ])
             .and(Expr::col(TurnRun::FinishedAt).is_null());
         let queued_attempt = Expr::col(TurnRun::Status)
             .eq(TurnRunStatus::Queued.as_str())
             .and(Expr::col(TurnRun::AttemptCount).eq(0))
+            .and(Expr::col(TurnRun::ClaimCount).eq(0))
             .and(Expr::col(TurnRun::StartedAt).is_null());
         let leased_attempt = Expr::col(TurnRun::Status)
             .is_in([
@@ -269,6 +289,10 @@ impl MigrationTrait for Init {
             .and(Expr::col(TurnRun::AttemptCount).gte(1))
             .and(Expr::col(TurnRun::AttemptCount).lt(Expr::col(TurnRun::MaxAttempts)))
             .and(Expr::col(TurnRun::StartedAt).is_not_null());
+        let resuming_attempt = Expr::col(TurnRun::Status)
+            .eq(TurnRunStatus::Resuming.as_str())
+            .and(Expr::col(TurnRun::AttemptCount).gte(1))
+            .and(Expr::col(TurnRun::StartedAt).is_not_null());
         let resolved_attempt = Expr::col(TurnRun::Status)
             .is_in([
                 TurnRunStatus::Completed.as_str(),
@@ -281,6 +305,7 @@ impl MigrationTrait for Init {
             .and(
                 Expr::col(TurnRun::AttemptCount)
                     .eq(0)
+                    .and(Expr::col(TurnRun::ClaimCount).eq(0))
                     .and(Expr::col(TurnRun::StartedAt).is_null())
                     .or(Expr::col(TurnRun::AttemptCount)
                         .gte(1)
@@ -297,6 +322,7 @@ impl MigrationTrait for Init {
                 TurnRunStatus::Queued.as_str(),
                 TurnRunStatus::Running.as_str(),
                 TurnRunStatus::Cancelling.as_str(),
+                TurnRunStatus::Resuming.as_str(),
                 TurnRunStatus::Completed.as_str(),
                 TurnRunStatus::Cancelled.as_str(),
             ])
@@ -340,6 +366,12 @@ impl MigrationTrait for Init {
                             .integer()
                             .not_null()
                             .default(crate::model::TurnRun::DEFAULT_MAX_ATTEMPTS),
+                    )
+                    .col(
+                        ColumnDef::new(TurnRun::ClaimCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
                     )
                     .col(
                         ColumnDef::new(TurnRun::AvailableAt)
@@ -415,10 +447,12 @@ impl MigrationTrait for Init {
                             .from_col(TurnRun::LeaseToken)
                             .from_col(TurnRun::Id)
                             .from_col(TurnRun::AttemptCount)
+                            .from_col(TurnRun::ClaimCount)
                             .to_tbl(TurnClaim::Table)
                             .to_col(TurnClaim::Token)
                             .to_col(TurnClaim::TurnId)
                             .to_col(TurnClaim::AttemptCount)
+                            .to_col(TurnClaim::ClaimCount)
                             .on_delete(ForeignKeyAction::Restrict),
                     )
                     .check(
@@ -435,12 +469,14 @@ impl MigrationTrait for Init {
                                     .lte(Expr::col(TurnRun::MaxAttempts)),
                             ),
                     )
+                    .check(Expr::col(TurnRun::ClaimCount).gte(Expr::col(TurnRun::AttemptCount)))
                     .check(active_lease.or(no_lease))
                     .check(completed_output.or(no_output))
                     .check(terminal_finished.or(nonterminal_unfinished))
                     .check(
                         queued_attempt
                             .or(leased_attempt)
+                            .or(resuming_attempt)
                             .or(retryable_attempt)
                             .or(resolved_attempt)
                             .or(cancelled_attempt),
@@ -506,6 +542,7 @@ impl MigrationTrait for Init {
                         TurnRunStatus::Queued.as_str(),
                         TurnRunStatus::Running.as_str(),
                         TurnRunStatus::Cancelling.as_str(),
+                        TurnRunStatus::Resuming.as_str(),
                         TurnRunStatus::RetryWait.as_str(),
                     ]))
                     .to_owned(),
@@ -2017,6 +2054,7 @@ enum TurnRun {
     Status,
     AttemptCount,
     MaxAttempts,
+    ClaimCount,
     AvailableAt,
     LeaseToken,
     LeaseExpiresAt,
@@ -2036,6 +2074,7 @@ enum TurnClaim {
     Token,
     TurnId,
     AttemptCount,
+    ClaimCount,
     ClaimedAt,
     LeaseExpiresAt,
 }

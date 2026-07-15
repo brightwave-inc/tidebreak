@@ -633,11 +633,15 @@ pub struct TurnRun {
     pub model: String,
     /// Durable delivery state.
     pub status: TurnRunStatus,
-    /// Claims already made, including the current claim when running.
+    /// Failure attempts already started. Client-execution resumptions stay
+    /// within the same attempt and do not consume this retry budget.
     pub attempt_count: i32,
-    /// Maximum claims permitted for this turn.
+    /// Maximum failure attempts permitted for this turn.
     pub max_attempts: i32,
-    /// Earliest time queued or retry-wait work may be claimed.
+    /// Worker lease segments already issued, including resumptions within one
+    /// failure attempt.
+    pub claim_count: i32,
+    /// Earliest time queued, retry-wait, or resuming work may be claimed.
     pub available_at: DateTime<Utc>,
     /// Exact claim identity required for heartbeat and resolution writes.
     pub lease_token: Option<Uuid>,
@@ -686,6 +690,9 @@ pub enum TurnRunStatus {
     /// The chat remains occupied until that worker acknowledges quiescence or
     /// the expired lease is cleaned up.
     Cancelling,
+    /// The blocking client call resolved and the checkpoint is eligible for a
+    /// fresh worker lease without consuming another failure attempt.
+    Resuming,
     /// Failed safely before an ambiguous side effect and awaits another claim.
     RetryWait,
     /// Produced a final answer successfully.
@@ -704,6 +711,7 @@ impl TurnRunStatus {
             Self::Queued => "queued",
             Self::Running => "running",
             Self::Cancelling => "cancelling",
+            Self::Resuming => "resuming",
             Self::RetryWait => "retry_wait",
             Self::Completed => "completed",
             Self::Failed => "failed",
