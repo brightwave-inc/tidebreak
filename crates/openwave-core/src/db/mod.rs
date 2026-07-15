@@ -41,10 +41,12 @@ use crate::storage::{
     AcceptAgentRunOutcome, AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
     BeginRootAttachmentChangeOutcome, ClaimClientToolCallOutcome, ClaimTurnRunOutcome,
     CompleteTurnRunOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
-    EnsureDocumentParseJobOutcome, FinishRootAttachmentChangeOutcome,
-    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
-    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome,
-    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome, Store,
+    EnsureDocumentParseJobOutcome, FinishAgentRunCancellationOutcome,
+    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
+    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledTurnOutcome,
+    JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
+    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome,
+    Store, SubmitAgentRunResultOutcome,
 };
 
 mod ops;
@@ -1776,6 +1778,30 @@ impl Store for DbStore {
         lease_duration: chrono::Duration,
     ) -> Result<bool> {
         ops::agent_run::heartbeat_agent_run(self, id, lease_token, lease_duration).await
+    }
+
+    async fn request_agent_run_cancellation(
+        &self,
+        id: AgentRunId,
+    ) -> Result<Option<RequestAgentRunCancellationOutcome>> {
+        ops::agent_run::request_agent_run_cancellation(self, id).await
+    }
+
+    async fn finish_agent_run_cancellation(
+        &self,
+        id: AgentRunId,
+        lease_token: uuid::Uuid,
+    ) -> Result<Option<FinishAgentRunCancellationOutcome>> {
+        ops::agent_run::finish_agent_run_cancellation(self, id, lease_token).await
+    }
+
+    async fn submit_agent_run_result(
+        &self,
+        id: AgentRunId,
+        lease_token: uuid::Uuid,
+        text: &str,
+    ) -> Result<Option<SubmitAgentRunResultOutcome>> {
+        ops::agent_run::submit_agent_run_result(self, id, lease_token, text).await
     }
 
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {

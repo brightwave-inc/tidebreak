@@ -1143,6 +1143,29 @@ impl AgentRun {
     pub const MAX_ERROR_CODE_LEN: usize = 128;
     /// Maximum persisted diagnostic-detail length.
     pub const MAX_ERROR_DETAIL_LEN: usize = 4_096;
+    /// Maximum final text stored in an immutable sandbox result receipt.
+    pub const MAX_RESULT_LEN: usize = 65_536;
+}
+
+/// Immutable final text submitted by one exact sandbox worker lease.
+///
+/// This receipt is intentionally separate from [`AgentRun`]: clearing the live
+/// lease at terminal transition must not erase the proof needed to recover an
+/// ambiguous submission retry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunResult {
+    /// The terminal sandbox run.
+    pub agent_run_id: crate::id::AgentRunId,
+    /// Exact worker lease that committed this result.
+    pub lease_token: Uuid,
+    /// Worker attempt that produced the result.
+    pub attempt_count: i32,
+    /// Exact claim segment that produced the result.
+    pub claim_count: i32,
+    /// Bounded final text returned to the parent in a later delivery slice.
+    pub text: String,
+    /// Database time at which the terminal submission committed.
+    pub submitted_at: DateTime<Utc>,
 }
 
 /// Execution boundary for an [`AgentRun`].

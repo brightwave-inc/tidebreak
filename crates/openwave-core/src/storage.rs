@@ -25,10 +25,10 @@ use crate::id::{
     TurnId, TurnSteerId,
 };
 use crate::model::{
-    AgentRun, AgentRunExecution, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
-    Chat, ClientToolCallRequest, DocumentGeneration, DocumentJob, DocumentJobKind,
-    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentRecord, DocumentScope,
-    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project,
+    AgentRun, AgentRunExecution, AgentRunResult, BeginRootAttachmentChange, BlobRetirement,
+    BlobRetirementStatus, Chat, ClientToolCallRequest, DocumentGeneration, DocumentJob,
+    DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentRecord,
+    DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project,
     RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
     TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun,
     TurnSteer,
@@ -160,6 +160,37 @@ pub enum AcceptAgentRunOutcome {
     ForegroundExists(AgentRun),
     /// The requested sandbox parent is missing, cross-chat, or not foreground.
     ParentUnavailable,
+}
+
+/// Result of requesting durable cancellation for one sandbox run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestAgentRunCancellationOutcome {
+    /// Unclaimed work was cancelled immediately.
+    Cancelled(AgentRun),
+    /// A live worker retained its lease and must acknowledge cancellation.
+    Requested(AgentRun),
+    /// The run was already cancelling or cancelled.
+    Existing(AgentRun),
+    /// A successful result or permanent failure already won.
+    AlreadyTerminal(AgentRun),
+}
+
+/// Result of a sandbox worker acknowledging cancellation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishAgentRunCancellationOutcome {
+    /// This exact live lease committed terminal cancellation.
+    Cancelled(AgentRun),
+    /// This exact lease already committed terminal cancellation.
+    Existing(AgentRun),
+}
+
+/// Result of a sandbox worker submitting final text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitAgentRunResultOutcome {
+    /// This exact live lease committed the immutable terminal result.
+    Completed(AgentRunResult),
+    /// The same lease and payload were already committed.
+    Existing(AgentRunResult),
 }
 
 /// Result of atomically accepting one exact steering instruction.
@@ -950,6 +981,37 @@ pub trait Store: Send + Sync {
         _lease_token: uuid::Uuid,
         _lease_duration: chrono::Duration,
     ) -> Result<bool> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Request cancellation using the database clock. Queued, waiting, and
+    /// retry-wait runs become terminal immediately; a running worker retains
+    /// its exact lease in `cancelling` until it acknowledges quiescence.
+    async fn request_agent_run_cancellation(
+        &self,
+        _id: AgentRunId,
+    ) -> Result<Option<RequestAgentRunCancellationOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Acknowledge cancellation with one exact live sandbox lease.
+    async fn finish_agent_run_cancellation(
+        &self,
+        _id: AgentRunId,
+        _lease_token: uuid::Uuid,
+    ) -> Result<Option<FinishAgentRunCancellationOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Atomically persist immutable final text and complete one exact live
+    /// sandbox lease. An exact ambiguous retry returns the original receipt;
+    /// stale, cancelled, or differently-payloaded submissions return `None`.
+    async fn submit_agent_run_result(
+        &self,
+        _id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _text: &str,
+    ) -> Result<Option<SubmitAgentRunResultOutcome>> {
         agent_run_storage_unavailable()
     }
 

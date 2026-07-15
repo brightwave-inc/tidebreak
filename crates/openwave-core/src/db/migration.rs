@@ -401,6 +401,138 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
     Ok(())
 }
 
+async fn create_agent_run_result_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .create_table(
+            Table::create()
+                .table(AgentRunResult::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(AgentRunResult::AgentRunId)
+                        .uuid()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(ColumnDef::new(AgentRunResult::LeaseToken).uuid().not_null())
+                .col(
+                    ColumnDef::new(AgentRunResult::AttemptCount)
+                        .integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunResult::ClaimCount)
+                        .integer()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(AgentRunResult::Text).text().not_null())
+                .col(
+                    ColumnDef::new(AgentRunResult::SubmittedAt)
+                        .timestamp_with_time_zone()
+                        .not_null(),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_agent_run_result_run")
+                        .from(AgentRunResult::Table, AgentRunResult::AgentRunId)
+                        .to(AgentRun::Table, AgentRun::Id)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_agent_run_result_claim")
+                        .from_tbl(AgentRunResult::Table)
+                        .from_col(AgentRunResult::LeaseToken)
+                        .from_col(AgentRunResult::AgentRunId)
+                        .from_col(AgentRunResult::AttemptCount)
+                        .from_col(AgentRunResult::ClaimCount)
+                        .to_tbl(AgentRunClaim::Table)
+                        .to_col(AgentRunClaim::Token)
+                        .to_col(AgentRunClaim::AgentRunId)
+                        .to_col(AgentRunClaim::AttemptCount)
+                        .to_col(AgentRunClaim::ClaimCount)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .check(Expr::col(AgentRunResult::AttemptCount).gte(1))
+                .check(
+                    Expr::col(AgentRunResult::ClaimCount)
+                        .gte(Expr::col(AgentRunResult::AttemptCount)),
+                )
+                .check(
+                    Func::char_length(Expr::col(AgentRunResult::Text))
+                        .between(1, crate::model::AgentRun::MAX_RESULT_LEN as i32),
+                )
+                .to_owned(),
+        )
+        .await
+}
+
+async fn create_agent_run_cancellation_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .create_table(
+            Table::create()
+                .table(AgentRunCancellation::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(AgentRunCancellation::AgentRunId)
+                        .uuid()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunCancellation::LeaseToken)
+                        .uuid()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunCancellation::AttemptCount)
+                        .integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunCancellation::ClaimCount)
+                        .integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunCancellation::CancelledAt)
+                        .timestamp_with_time_zone()
+                        .not_null(),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_agent_run_cancellation_run")
+                        .from(
+                            AgentRunCancellation::Table,
+                            AgentRunCancellation::AgentRunId,
+                        )
+                        .to(AgentRun::Table, AgentRun::Id)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_agent_run_cancellation_claim")
+                        .from_tbl(AgentRunCancellation::Table)
+                        .from_col(AgentRunCancellation::LeaseToken)
+                        .from_col(AgentRunCancellation::AgentRunId)
+                        .from_col(AgentRunCancellation::AttemptCount)
+                        .from_col(AgentRunCancellation::ClaimCount)
+                        .to_tbl(AgentRunClaim::Table)
+                        .to_col(AgentRunClaim::Token)
+                        .to_col(AgentRunClaim::AgentRunId)
+                        .to_col(AgentRunClaim::AttemptCount)
+                        .to_col(AgentRunClaim::ClaimCount)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .check(Expr::col(AgentRunCancellation::AttemptCount).gte(1))
+                .check(
+                    Expr::col(AgentRunCancellation::ClaimCount)
+                        .gte(Expr::col(AgentRunCancellation::AttemptCount)),
+                )
+                .to_owned(),
+        )
+        .await
+}
+
 struct Init;
 
 impl MigrationName for Init {
@@ -475,6 +607,8 @@ impl MigrationTrait for Init {
             .await?;
 
         create_agent_run_table(manager).await?;
+        create_agent_run_result_table(manager).await?;
+        create_agent_run_cancellation_table(manager).await?;
 
         manager
             .create_table(
@@ -1358,6 +1492,12 @@ impl MigrationTrait for Init {
             .await?;
         manager
             .drop_table(Table::drop().table(TurnRun::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(AgentRunResult::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(AgentRunCancellation::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(AgentRun::Table).to_owned())
@@ -3146,6 +3286,27 @@ enum AgentRunClaim {
 enum AgentRunClaimLock {
     Table,
     Id,
+}
+
+#[derive(DeriveIden)]
+enum AgentRunResult {
+    Table,
+    AgentRunId,
+    LeaseToken,
+    AttemptCount,
+    ClaimCount,
+    Text,
+    SubmittedAt,
+}
+
+#[derive(DeriveIden)]
+enum AgentRunCancellation {
+    Table,
+    AgentRunId,
+    LeaseToken,
+    AttemptCount,
+    ClaimCount,
+    CancelledAt,
 }
 
 #[derive(DeriveIden)]
