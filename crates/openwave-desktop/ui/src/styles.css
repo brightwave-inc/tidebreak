@@ -458,7 +458,7 @@ button {
 
 .composer {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   gap: 0.55rem;
   padding: 0.85rem clamp(1rem, 3vw, 2rem) 1rem;
   border-top: 1px solid var(--line);
@@ -473,6 +473,30 @@ button {
   border-radius: 8px;
   padding: 0.6rem 0.7rem;
   background: var(--bg);
+}
+
+.composer-turn-control {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.btn-stop {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  color: var(--danger);
+}
+
+.btn-stop:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: oklch(0.97 0.01 25);
+}
+
+.composer-turn-error {
+  max-width: min(22rem, 32vw);
+  color: var(--danger);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
 }
 
 .settings {
@@ -630,5 +654,18 @@ button {
   .agent-runs-state {
     width: 100%;
     margin-left: 0;
+  }
+
+  .composer {
+    grid-template-columns: 1fr auto;
+  }
+
+  .composer-turn-control {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+
+  .composer-turn-error {
+    max-width: none;
   }
 }
