@@ -214,10 +214,12 @@ the lease from the server's current receive time. Heartbeat and resolution
 enforce the immutable chat owner inside the same locked state transition rather
 than loading conversation history first.
 
-The agent still executes its current built-in tools inside the turn worker.
-Parking a turn atomically while a native client acts and running the desktop
-executor are the next layers. Notifications will be wake-up hints, while the
-pending-work query remains authoritative.
+The agent still executes its current built-in tools inside the turn worker. The
+turn model now distinguishes failure attempts from worker lease segments and
+reserves an explicit resumable claim state for native client work. The atomic
+wait receipt, park/resolve transitions, and desktop executor are the next layers.
+Notifications will be wake-up hints, while the pending-work query remains
+authoritative.
 
 ### 4. Events drive the live client
 
@@ -251,9 +253,15 @@ queued ----claim----> running ----success----> completed
   |
   +----cancel-----------------------------------------------> cancelled
 
-retry_wait exists for safely replayable work, but ordinary turns currently use
-one attempt because external and filesystem tool effects are not checkpointed.
+resuming ----same attempt, fresh claim----> running
 ```
+
+retry_wait exists for safely replayable failures. `attempt_count` tracks that
+failure/replay budget, while `claim_count` advances for every worker lease. A
+resume therefore gets a fresh exact lease without pretending the client round
+trip was a failure or consuming another attempt. Ordinary turns still default
+to one failure attempt because external and filesystem effects are not yet
+fully checkpointed.
 
 ## Cancellation, approvals, and steering
 

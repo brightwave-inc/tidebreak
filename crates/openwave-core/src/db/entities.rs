@@ -193,6 +193,7 @@ pub mod turn_run {
         pub status: String,
         pub attempt_count: i32,
         pub max_attempts: i32,
+        pub claim_count: i32,
         pub available_at: DateTimeUtc,
         pub lease_token: Option<Uuid>,
         pub lease_expires_at: Option<DateTimeUtc>,
@@ -222,6 +223,7 @@ pub mod turn_claim {
         pub token: Uuid,
         pub turn_id: Uuid,
         pub attempt_count: i32,
+        pub claim_count: i32,
         pub claimed_at: DateTimeUtc,
         pub lease_expires_at: DateTimeUtc,
     }

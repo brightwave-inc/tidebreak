@@ -133,6 +133,7 @@ async fn complete_turn_run_inner(
 
     if existing.status == TurnRunStatus::Completed.as_str()
         && existing.attempt_count == receipt.attempt_count
+        && existing.claim_count == receipt.claim_count
     {
         if existing.output_message_id != Some(output.id.0)
             || !exact_completed_output_on(&transaction, output).await?
@@ -152,6 +153,7 @@ async fn complete_turn_run_inner(
     }
     if existing.status != TurnRunStatus::Running.as_str()
         || existing.attempt_count != receipt.attempt_count
+        || existing.claim_count != receipt.claim_count
         || existing.lease_token != Some(lease_token)
         || existing
             .lease_expires_at
@@ -255,6 +257,7 @@ async fn complete_turn_run_inner(
         .filter(entities::turn_run::Column::Id.eq(id.0))
         .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
         .filter(entities::turn_run::Column::AttemptCount.eq(receipt.attempt_count))
+        .filter(entities::turn_run::Column::ClaimCount.eq(receipt.claim_count))
         .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
         .filter(entities::turn_run::Column::LeaseExpiresAt.eq(existing.lease_expires_at))
         .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
@@ -448,6 +451,7 @@ async fn record_turn_run_failure_inner(
     };
     if turn.status != TurnRunStatus::Running.as_str()
         || turn.attempt_count != claim.attempt_count
+        || turn.claim_count != claim.claim_count
         || turn.lease_token != Some(lease_token)
         || turn
             .lease_expires_at
@@ -519,6 +523,7 @@ async fn record_turn_run_failure_inner(
         .filter(entities::turn_run::Column::Id.eq(id.0))
         .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
         .filter(entities::turn_run::Column::AttemptCount.eq(claim.attempt_count))
+        .filter(entities::turn_run::Column::ClaimCount.eq(claim.claim_count))
         .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
         .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
         .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
@@ -676,6 +681,7 @@ async fn exact_completed_turn_on(
     };
     if existing.status != TurnRunStatus::Completed.as_str()
         || existing.attempt_count != receipt.attempt_count
+        || existing.claim_count != receipt.claim_count
     {
         return Ok(None);
     }

@@ -155,6 +155,7 @@ pub(in crate::db) async fn accept_turn(
         status: Set(TurnRunStatus::Queued.as_str().into()),
         attempt_count: Set(0),
         max_attempts: Set(TurnRun::DEFAULT_MAX_ATTEMPTS),
+        claim_count: Set(0),
         available_at: Set(now),
         lease_token: Set(None),
         lease_expires_at: Set(None),
@@ -235,6 +236,7 @@ pub(in crate::db) async fn claim_turn_run(
                 .filter(|run| {
                     run.status == TurnRunStatus::Running.as_str()
                         && run.attempt_count == receipt.attempt_count
+                        && run.claim_count == receipt.claim_count
                         && run.lease_token == Some(lease_token)
                         && run
                             .lease_expires_at
@@ -249,17 +251,27 @@ pub(in crate::db) async fn claim_turn_run(
             });
         }
         let due = entities::turn_run::Entity::find()
-            .filter(entities::turn_run::Column::Status.is_in([
-                TurnRunStatus::Queued.as_str(),
-                TurnRunStatus::RetryWait.as_str(),
-            ]))
+            .filter(
+                sea_orm::Condition::any()
+                    .add(entities::turn_run::Column::Status.eq(TurnRunStatus::Resuming.as_str()))
+                    .add(
+                        sea_orm::Condition::all()
+                            .add(entities::turn_run::Column::Status.is_in([
+                                TurnRunStatus::Queued.as_str(),
+                                TurnRunStatus::RetryWait.as_str(),
+                            ]))
+                            .add(
+                                sea_orm::sea_query::Expr::col(
+                                    entities::turn_run::Column::AttemptCount,
+                                )
+                                .lt(sea_orm::sea_query::Expr::col(
+                                    entities::turn_run::Column::MaxAttempts,
+                                )),
+                            ),
+                    ),
+            )
             .filter(entities::turn_run::Column::AvailableAt.lte(now))
             .filter(entities::turn_run::Column::UpdatedAt.lte(now))
-            .filter(
-                sea_orm::sea_query::Expr::col(entities::turn_run::Column::AttemptCount).lt(
-                    sea_orm::sea_query::Expr::col(entities::turn_run::Column::MaxAttempts),
-                ),
-            )
             .order_by_asc(entities::turn_run::Column::AvailableAt)
             .order_by_asc(entities::turn_run::Column::CreatedAt)
             .order_by_asc(entities::turn_run::Column::Id)
@@ -461,13 +473,22 @@ pub(in crate::db) async fn claim_turn_run(
             });
         }
 
-        let next_attempt = candidate.attempt_count.checked_add(1).ok_or_else(|| {
-            AgentError::Store(format!("turn {} attempt overflow", TurnId(candidate.id)))
+        let resuming = candidate.status == TurnRunStatus::Resuming.as_str();
+        let next_attempt = if resuming {
+            candidate.attempt_count
+        } else {
+            candidate.attempt_count.checked_add(1).ok_or_else(|| {
+                AgentError::Store(format!("turn {} attempt overflow", TurnId(candidate.id)))
+            })?
+        };
+        let next_claim = candidate.claim_count.checked_add(1).ok_or_else(|| {
+            AgentError::Store(format!("turn {} claim overflow", TurnId(candidate.id)))
         })?;
         let receipt = entities::turn_claim::Entity::insert(entities::turn_claim::ActiveModel {
             token: Set(lease_token),
             turn_id: Set(candidate.id),
             attempt_count: Set(next_attempt),
+            claim_count: Set(next_claim),
             claimed_at: Set(now),
             lease_expires_at: Set(lease_expires_at),
         })
@@ -490,9 +511,9 @@ pub(in crate::db) async fn claim_turn_run(
             {
                 continue;
             }
-            let conflicting_attempt = entities::turn_claim::Entity::find()
+            let conflicting_claim = entities::turn_claim::Entity::find()
                 .filter(entities::turn_claim::Column::TurnId.eq(candidate.id))
-                .filter(entities::turn_claim::Column::AttemptCount.eq(next_attempt))
+                .filter(entities::turn_claim::Column::ClaimCount.eq(next_claim))
                 .one(&store.conn)
                 .await
                 .map_err(store_err)?;
@@ -500,15 +521,15 @@ pub(in crate::db) async fn claim_turn_run(
                 .one(&store.conn)
                 .await
                 .map_err(store_err)?;
-            if conflicting_attempt.is_some()
+            if conflicting_claim.is_some()
                 && current
                     .as_ref()
-                    .is_some_and(|turn| turn.attempt_count >= next_attempt)
+                    .is_some_and(|turn| turn.claim_count >= next_claim)
             {
                 continue;
             }
             return Err(AgentError::Store(format!(
-                "turn {} claim receipt for attempt {next_attempt} exists before the turn advanced",
+                "turn {} receipt for claim {next_claim} exists before the turn advanced",
                 TurnId(candidate.id)
             )));
         }
@@ -520,6 +541,10 @@ pub(in crate::db) async fn claim_turn_run(
             .col_expr(
                 entities::turn_run::Column::AttemptCount,
                 sea_orm::sea_query::Expr::value(next_attempt),
+            )
+            .col_expr(
+                entities::turn_run::Column::ClaimCount,
+                sea_orm::sea_query::Expr::value(next_claim),
             )
             .col_expr(
                 entities::turn_run::Column::LeaseToken,
@@ -548,6 +573,7 @@ pub(in crate::db) async fn claim_turn_run(
             .filter(entities::turn_run::Column::Id.eq(candidate.id))
             .filter(entities::turn_run::Column::Status.eq(&candidate.status))
             .filter(entities::turn_run::Column::AttemptCount.eq(candidate.attempt_count))
+            .filter(entities::turn_run::Column::ClaimCount.eq(candidate.claim_count))
             .filter(entities::turn_run::Column::UpdatedAt.eq(candidate.updated_at));
         let claim = if reclaiming {
             claim
@@ -750,6 +776,7 @@ where
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
             TurnRunStatus::Cancelling.as_str(),
+            TurnRunStatus::Resuming.as_str(),
             TurnRunStatus::RetryWait.as_str(),
         ]))
         .one(conn)
@@ -805,6 +832,7 @@ fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
         status: turn_run_status_from_db(&model.status)?,
         attempt_count: model.attempt_count,
         max_attempts: model.max_attempts,
+        claim_count: model.claim_count,
         available_at: model.available_at,
         lease_token: model.lease_token,
         lease_expires_at: model.lease_expires_at,
@@ -824,6 +852,7 @@ fn turn_run_status_from_db(text: &str) -> Result<TurnRunStatus> {
         "queued" => Ok(TurnRunStatus::Queued),
         "running" => Ok(TurnRunStatus::Running),
         "cancelling" => Ok(TurnRunStatus::Cancelling),
+        "resuming" => Ok(TurnRunStatus::Resuming),
         "retry_wait" => Ok(TurnRunStatus::RetryWait),
         "completed" => Ok(TurnRunStatus::Completed),
         "failed" => Ok(TurnRunStatus::Failed),
