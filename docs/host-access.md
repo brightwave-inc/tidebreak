@@ -266,7 +266,12 @@ This will land in independently reviewable pieces:
    can request only pick/list/revoke for its current conversation; it never
    receives a raw control surface or absolute path. Broker state, audit, and
    scratch live under the protected OpenWave application-data directory.
-7. Add the durable agent-request → native-picker → grant → retry workflow.
+7. Add the durable agent-request → native-picker → grant → retry workflow. The
+   generic tool-execution foundation is now present: canonical requests are
+   immutable, client work is durably discoverable, and per-claim fencing tokens
+   guard heartbeat, terminal resolution, and explicit expired-claim recovery.
+   The API, atomic turn parking, folder request tool, and desktop executor remain
+   to be layered on it.
 8. Replace project/chat `workspace_dir` with persisted host-access context
    identity and connected-root APIs. This can update the pre-v1 baseline schema
    directly.

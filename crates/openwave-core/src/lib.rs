@@ -57,8 +57,9 @@ pub use model::{
     DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
     DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
-    Project, Role, SourceLocation, SourceRegion, ToolCallRecord, TurnFailureReceipt,
-    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
+    Project, Role, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
+    ToolCallResolution, ToolCallStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun,
+    TurnRunStatus, TurnSteer, TurnSteerStatus,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
@@ -66,11 +67,13 @@ pub use provider::{
 };
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, ApplyTurnSteerOutcome, BlobStore,
-    ClaimScanTerminalEvent, ClaimTurnRunOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
+    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, ApplyTurnSteerOutcome,
+    BlobStore, ClaimClientToolCallOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome,
+    ClientToolCallClaim, CompleteTurnRunOutcome, DocumentIndexJobReason,
     EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
-    JournaledTurnOutcome, JournaledTurnSteerOutcome, RecordTurnFailureOutcome,
-    RequestTurnCancellationOutcome, SecretProvider, Store,
+    HeartbeatClientToolCallOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
+    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome,
+    SecretProvider, Store,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 #[cfg(feature = "tools")]

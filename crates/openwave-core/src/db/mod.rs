@@ -21,23 +21,24 @@ use serde_json::Value;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
-use crate::id::{CallId, MessageId};
-use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId, TurnId, TurnSteerId};
+use crate::id::MessageId;
+use crate::id::{CallId, ChatId, DocumentId, DocumentJobId, ProjectId, TurnId, TurnSteerId};
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
     BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
     DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
-    DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, TurnFailureRetry, TurnRun,
-    TurnRunStatus, TurnSteerStatus,
+    DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, ToolCallResolution,
+    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus,
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, ClaimTurnRunOutcome, CompleteTurnRunOutcome,
-    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
-    FinishTurnCancellationOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
-    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, Store,
+    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, ClaimClientToolCallOutcome,
+    ClaimTurnRunOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
+    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
+    HeartbeatClientToolCallOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
+    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome, Store,
 };
 
 mod ops;
@@ -1846,8 +1847,97 @@ impl Store for DbStore {
         ops::conversation::list_messages(self, chat_id).await
     }
 
-    async fn upsert_tool_call(&self, call: &ToolCallRecord) -> Result<()> {
-        ops::conversation::upsert_tool_call(self, call).await
+    async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome> {
+        ops::client_execution::accept_tool_call(self, call).await
+    }
+
+    async fn claim_client_tool_call(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        executor_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<ClaimClientToolCallOutcome> {
+        ops::client_execution::claim_client_tool_call(
+            self,
+            id,
+            chat_id,
+            executor_id,
+            lease_token,
+            now,
+            lease_expires_at,
+        )
+        .await
+    }
+
+    async fn heartbeat_client_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<HeartbeatClientToolCallOutcome> {
+        ops::client_execution::heartbeat_client_tool_call(
+            self,
+            id,
+            lease_token,
+            now,
+            lease_expires_at,
+        )
+        .await
+    }
+
+    async fn resolve_server_tool_call(
+        &self,
+        id: CallId,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+    ) -> Result<ResolveToolCallOutcome> {
+        ops::client_execution::resolve_server_tool_call(self, id, resolution, resolved_at).await
+    }
+
+    async fn resolve_client_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+    ) -> Result<ResolveToolCallOutcome> {
+        ops::client_execution::resolve_client_tool_call(
+            self,
+            id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+        )
+        .await
+    }
+
+    async fn resolve_expired_client_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+    ) -> Result<ResolveToolCallOutcome> {
+        ops::client_execution::resolve_expired_client_tool_call(
+            self,
+            id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+        )
+        .await
+    }
+
+    async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
+        ops::client_execution::list_pending_client_tool_calls(self, chat_id).await
     }
 
     async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {

@@ -147,7 +147,7 @@ tool-call records. It then loops for a bounded number of model steps:
 
 1. fit the transcript into the model's context window;
 2. call the selected provider and stream its output;
-3. persist and run any tool calls;
+3. durably accept each tool call's canonical name and arguments, then run it;
 4. feed tool results back to the model;
 5. repeat until the model produces a final answer.
 
@@ -169,6 +169,43 @@ the desktop to connect another folder, but the request only opens a native conse
 flow; it never grants a named path by itself. The model router supports Anthropic, OpenAI, and
 OpenAI-compatible endpoints. It fails closed: if no enabled provider with a
 usable credential can serve the selected model, no model request is sent.
+
+### Tool calls are small state machines too
+
+A tool call is not a mutable log row. Its `CallId`, provider identity, name,
+arguments, owning turn, and execution surface are accepted once and then remain
+immutable. Repeating the same acceptance recovers the existing call; reusing the
+identity with different arguments is a conflict. A server tool then makes one
+terminal transition to `completed`, `failed`, or `cancelled`, and an exact retry
+recovers that result rather than overwriting it.
+
+The same record can describe work that must execute on a trusted client, such as
+a future native folder-picker request. Client work starts unclaimed and is
+listed from durable storage for reconnect recovery. A client claims it with an
+executor identity and a fresh secret claim token; the store installs that token
+with the expiry. Heartbeat and completion require it, so an old callback from
+the same desktop process cannot act as a newer claim. The token is returned only
+by the claim operation; ordinary pending/history records and their serialized
+forms never contain it. Server code cannot complete client work, and a client
+cannot claim ordinary server tools. An expired native interaction
+is deliberately not handed to another client automatically: the first picker or
+broker mutation may have happened even if its receipt was lost. A separate
+exact-token recovery transition can record the broker's known result or an
+authoritative abandonment without replaying the native action.
+
+```text
+                         +----success----> completed
+pending ----execute----->+----failure----> failed
+                         +----decline----> cancelled
+
+client execution adds: unclaimed ----claim/heartbeat----> leased
+```
+
+This is the durable execution boundary. The agent still executes its current
+built-in tools inside the turn worker. Parking a turn while a native client acts,
+exposing the client-execution API, and running the desktop executor are the next
+layers; notifications will be wake-up hints, while the pending-work query
+remains authoritative.
 
 ### 4. Events drive the live client
 
@@ -489,7 +526,10 @@ The main next steps are:
 
 - replace raw chat/project workspace paths with broker-mediated, per-context
   connected roots while keeping OpenWave's private app data separate;
-- add resumable checkpoints and explicit idempotency policy around tool effects;
+- expose durable pending/claim/heartbeat/result client-execution APIs, park turns
+  atomically while a client acts, and run native folder requests in the desktop;
+- add resumable checkpoints and explicit idempotency policy around remaining
+  server-side tool effects;
 - make approvals resumable rather than process-local;
 - expose existing backend capabilities through a real desktop information
   architecture: chat history, projects, documents, search, cancel, and steer;
@@ -541,6 +581,8 @@ steps; the migrations should be condensed into a clean baseline before v1.
   root identifier and root-relative paths.
 - **Turn:** one accepted unit of user-to-agent work inside a chat.
 - **Message:** durable user or assistant text; tool calls are stored separately.
+- **Tool call:** an immutable canonical request plus a pending or terminal
+  execution state; client-owned calls also carry an exact temporary lease.
 - **Event journal:** ordered receipts used to rebuild a live client stream.
 - **Lease:** temporary, renewable worker ownership of exact work.
 - **Revision:** the monotonically increasing version number of a document or the

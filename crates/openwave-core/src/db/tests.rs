@@ -1,6 +1,7 @@
 use super::*;
 use crate::model::{
     ByteSpan, DocumentParseOutput, DocumentSourceBlob, DocumentSourceUpsert, SourceLocation,
+    ToolCallExecution, ToolCallResolution, ToolCallStatus,
 };
 use chrono::{DateTime, Utc};
 
@@ -7846,7 +7847,7 @@ async fn all_roles_round_trip() {
 }
 
 #[tokio::test]
-async fn tool_calls_roundtrip_and_upsert_preserves_created_at() {
+async fn server_tool_call_lifecycle_is_atomic_and_idempotent() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
@@ -7859,29 +7860,454 @@ async fn tool_calls_roundtrip_and_upsert_preserves_created_at() {
         provider_id: "tu_1".into(),
         name: "read_file".into(),
         arguments: serde_json::json!({"path": "note.txt"}),
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
         result: None,
-        is_error: false,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
         created_at: created,
-        completed_at: None,
+        resolved_at: None,
     };
-    store.upsert_tool_call(&call).await.unwrap();
+    assert!(matches!(
+        store.accept_tool_call(&call).await.unwrap(),
+        AcceptToolCallOutcome::Accepted(_)
+    ));
+    assert!(matches!(
+        store.accept_tool_call(&call).await.unwrap(),
+        AcceptToolCallOutcome::Existing(_)
+    ));
+    assert_eq!(
+        store
+            .accept_tool_call(&ToolCallRecord {
+                arguments: serde_json::json!({"path": "other.txt"}),
+                ..call.clone()
+            })
+            .await
+            .unwrap(),
+        AcceptToolCallOutcome::IdentityConflict
+    );
 
     let completed = DateTime::<Utc>::from_timestamp(1_700_000_011, 0).unwrap();
-    store
-        .upsert_tool_call(&ToolCallRecord {
-            result: Some("hello".into()),
-            is_error: false,
-            created_at: Utc::now(), // must not overwrite the original
-            completed_at: Some(completed),
-            ..call.clone()
-        })
-        .await
-        .unwrap();
+    let resolution = ToolCallResolution::Completed {
+        result: "hello".into(),
+    };
+    assert_eq!(
+        store
+            .resolve_server_tool_call(call.id, &resolution, completed)
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Resolved
+    );
+    assert_eq!(
+        store
+            .resolve_server_tool_call(call.id, &resolution, completed)
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Existing
+    );
+    match store.accept_tool_call(&call).await.unwrap() {
+        AcceptToolCallOutcome::Existing(existing) => {
+            assert_eq!(existing.status, ToolCallStatus::Completed);
+            assert_eq!(existing.result.as_deref(), Some("hello"));
+        }
+        outcome => panic!("unexpected terminal acceptance retry: {outcome:?}"),
+    }
+    assert_eq!(
+        store
+            .resolve_server_tool_call(
+                call.id,
+                &ToolCallResolution::Completed {
+                    result: "different".into(),
+                },
+                completed,
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::AlreadyTerminal
+    );
 
     let listed = store.list_tool_calls(chat.id).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].created_at, created);
-    assert_eq!(listed[0].completed_at, Some(completed));
+    assert_eq!(listed[0].resolved_at, Some(completed));
+    assert_eq!(listed[0].status, ToolCallStatus::Completed);
     assert_eq!(listed[0].result.as_deref(), Some("hello"));
     assert_eq!(listed[0].arguments, serde_json::json!({"path": "note.txt"}));
+}
+
+#[tokio::test]
+async fn client_tool_call_is_fenced_by_its_exact_lease() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let created_at = DateTime::<Utc>::from_timestamp(1_700_000_020, 0).unwrap();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "tu_client".into(),
+        name: "select_folder".into(),
+        arguments: serde_json::json!({"hint": "Documents"}),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at,
+        resolved_at: None,
+    };
+    assert!(matches!(
+        store.accept_tool_call(&call).await.unwrap(),
+        AcceptToolCallOutcome::Accepted(_)
+    ));
+    assert_eq!(
+        store
+            .resolve_server_tool_call(
+                call.id,
+                &ToolCallResolution::Cancelled {
+                    result: "not selected".into(),
+                },
+                created_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::LeaseLost
+    );
+    assert_eq!(
+        store.list_pending_client_tool_calls(chat.id).await.unwrap(),
+        vec![call.clone()]
+    );
+
+    let executor = uuid::Uuid::new_v4();
+    let requested_lease_token = uuid::Uuid::new_v4();
+    let claimed_at = created_at + chrono::Duration::seconds(1);
+    let first_expiry = claimed_at + chrono::Duration::minutes(1);
+    let claimed = match store
+        .claim_client_tool_call(
+            call.id,
+            chat.id,
+            executor,
+            requested_lease_token,
+            claimed_at,
+            first_expiry,
+        )
+        .await
+        .unwrap()
+    {
+        ClaimClientToolCallOutcome::Claimed(claim) => claim,
+        outcome => panic!("unexpected claim outcome: {outcome:?}"),
+    };
+    assert_eq!(claimed.call.client_executor_id, Some(executor));
+    let lease_token = claimed.lease_token;
+    assert_eq!(lease_token, requested_lease_token);
+    assert!(!serde_json::to_string(&claimed.call)
+        .unwrap()
+        .contains(&lease_token.to_string()));
+    assert!(!format!("{claimed:?}").contains(&lease_token.to_string()));
+    assert_eq!(claimed.call.client_lease_expires_at, Some(first_expiry));
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                executor,
+                lease_token,
+                claimed_at,
+                first_expiry,
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Existing(_)
+    ));
+    assert_eq!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                executor,
+                uuid::Uuid::new_v4(),
+                claimed_at,
+                first_expiry,
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Unavailable
+    );
+    assert_eq!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                claimed_at,
+                first_expiry,
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Unavailable
+    );
+
+    let extended_expiry = first_expiry + chrono::Duration::minutes(1);
+    assert_eq!(
+        store
+            .heartbeat_client_tool_call(
+                call.id,
+                lease_token,
+                claimed_at + chrono::Duration::seconds(1),
+                extended_expiry,
+            )
+            .await
+            .unwrap(),
+        HeartbeatClientToolCallOutcome::Extended
+    );
+    assert_eq!(
+        store
+            .heartbeat_client_tool_call(
+                call.id,
+                lease_token,
+                claimed_at + chrono::Duration::seconds(1),
+                extended_expiry,
+            )
+            .await
+            .unwrap(),
+        HeartbeatClientToolCallOutcome::Existing
+    );
+    let resolution = ToolCallResolution::Failed {
+        result: "folder picker failed".into(),
+        error_code: "picker_failed".into(),
+        error_detail: Some("native dialog closed unexpectedly".into()),
+    };
+    let resolved_at = claimed_at + chrono::Duration::seconds(2);
+    assert_eq!(
+        store
+            .resolve_client_tool_call(
+                call.id,
+                uuid::Uuid::new_v4(),
+                resolved_at,
+                &resolution,
+                resolved_at,
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::LeaseLost
+    );
+    assert_eq!(
+        store
+            .resolve_client_tool_call(call.id, lease_token, resolved_at, &resolution, resolved_at)
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Resolved
+    );
+    assert_eq!(
+        store
+            .resolve_client_tool_call(call.id, lease_token, resolved_at, &resolution, resolved_at)
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Existing
+    );
+    assert_eq!(
+        store
+            .resolve_client_tool_call(
+                call.id,
+                uuid::Uuid::new_v4(),
+                resolved_at,
+                &resolution,
+                resolved_at,
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::LeaseLost
+    );
+    assert_eq!(
+        store
+            .resolve_server_tool_call(call.id, &resolution, resolved_at)
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::LeaseLost
+    );
+    assert!(store
+        .list_pending_client_tool_calls(chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+    let stored = store.list_tool_calls(chat.id).await.unwrap().pop().unwrap();
+    assert_eq!(stored.status, ToolCallStatus::Failed);
+    assert_eq!(stored.error_code.as_deref(), Some("picker_failed"));
+    assert_eq!(stored.client_executor_id, Some(executor));
+    assert_eq!(stored.client_lease_expires_at, None);
+}
+
+#[tokio::test]
+async fn expired_client_lease_is_not_transferred_implicitly() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let created_at = DateTime::<Utc>::from_timestamp(1_700_000_030, 0).unwrap();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "tu_picker".into(),
+        name: "select_folder".into(),
+        arguments: serde_json::json!({}),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at,
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    assert!(matches!(
+        store.accept_tool_call(&call).await.unwrap(),
+        AcceptToolCallOutcome::Existing(_)
+    ));
+    let first = uuid::Uuid::new_v4();
+    let requested_lease_token = uuid::Uuid::new_v4();
+    let claimed_at = created_at + chrono::Duration::seconds(1);
+    let expiry = claimed_at + chrono::Duration::seconds(5);
+    let lease_token = match store
+        .claim_client_tool_call(
+            call.id,
+            chat.id,
+            first,
+            requested_lease_token,
+            claimed_at,
+            expiry,
+        )
+        .await
+        .unwrap()
+    {
+        ClaimClientToolCallOutcome::Claimed(claim) => claim.lease_token,
+        outcome => panic!("unexpected claim outcome: {outcome:?}"),
+    };
+    let after_expiry = expiry + chrono::Duration::seconds(1);
+    assert_eq!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                after_expiry,
+                after_expiry + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Unavailable
+    );
+    assert_eq!(
+        store
+            .resolve_client_tool_call(
+                call.id,
+                lease_token,
+                after_expiry,
+                &ToolCallResolution::Cancelled {
+                    result: "cancelled".into(),
+                },
+                after_expiry,
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::LeaseLost
+    );
+    let recovered = ToolCallResolution::Cancelled {
+        result: "cancelled after native receipt recovery".into(),
+    };
+    assert_eq!(
+        store
+            .resolve_expired_client_tool_call(
+                call.id,
+                lease_token,
+                after_expiry,
+                &recovered,
+                after_expiry,
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Resolved
+    );
+    assert_eq!(
+        store
+            .resolve_expired_client_tool_call(
+                call.id,
+                lease_token,
+                after_expiry,
+                &recovered,
+                after_expiry,
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Existing
+    );
+}
+
+#[tokio::test]
+async fn concurrent_client_claim_has_one_sqlite_winner() {
+    let (_dir, store) = temp_store().await;
+    let store = std::sync::Arc::new(store);
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let created_at = DateTime::<Utc>::from_timestamp(1_700_000_040, 123_456_789).unwrap();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "tu_race".into(),
+        name: "select_folder".into(),
+        arguments: serde_json::json!({}),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at,
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    let claim_at = created_at + chrono::Duration::seconds(1);
+    let lease_expires_at = claim_at + chrono::Duration::minutes(1);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        let executor_id = uuid::Uuid::new_v4();
+        let lease_token = uuid::Uuid::new_v4();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .claim_client_tool_call(
+                    call.id,
+                    chat.id,
+                    executor_id,
+                    lease_token,
+                    claim_at,
+                    lease_expires_at,
+                )
+                .await
+                .unwrap()
+        }));
+    }
+    let mut claimed = 0;
+    let mut unavailable = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            ClaimClientToolCallOutcome::Claimed(_) => claimed += 1,
+            ClaimClientToolCallOutcome::Unavailable => unavailable += 1,
+            outcome => panic!("unexpected concurrent claim outcome: {outcome:?}"),
+        }
+    }
+    assert_eq!(claimed, 1);
+    assert_eq!(unavailable, 7);
 }

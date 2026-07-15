@@ -9,7 +9,7 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{CallId, ChatId, MessageId, ProjectId, TurnId};
+use crate::id::{ChatId, MessageId, ProjectId, TurnId};
 use crate::model::{Chat, Message, Role, ToolCallRecord, TurnRunStatus};
 
 use super::super::{entities, store_err, DbStore};
@@ -194,49 +194,19 @@ pub(in crate::db) async fn list_messages(store: &DbStore, chat_id: ChatId) -> Re
         .collect()
 }
 
-pub(in crate::db) async fn upsert_tool_call(store: &DbStore, call: &ToolCallRecord) -> Result<()> {
-    let model = entities::tool_call::ActiveModel {
-        id: Set(call.id.0),
-        chat_id: Set(call.chat_id.0),
-        turn_id: Set(call.turn_id.0),
-        provider_id: Set(call.provider_id.clone()),
-        name: Set(call.name.clone()),
-        arguments: Set(call.arguments.clone()),
-        result: Set(call.result.clone()),
-        is_error: Set(call.is_error),
-        created_at: Set(call.created_at),
-        completed_at: Set(call.completed_at),
-    };
-    entities::tool_call::Entity::insert(model)
-        .on_conflict(
-            OnConflict::column(entities::tool_call::Column::Id)
-                .update_columns([
-                    entities::tool_call::Column::Arguments,
-                    entities::tool_call::Column::Result,
-                    entities::tool_call::Column::IsError,
-                    entities::tool_call::Column::CompletedAt,
-                ])
-                .to_owned(),
-        )
-        .exec(&store.conn)
-        .await
-        .map_err(store_err)?;
-    Ok(())
-}
-
 pub(in crate::db) async fn list_tool_calls(
     store: &DbStore,
     chat_id: ChatId,
 ) -> Result<Vec<ToolCallRecord>> {
-    Ok(entities::tool_call::Entity::find()
+    entities::tool_call::Entity::find()
         .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
         .order_by_asc(entities::tool_call::Column::CreatedAt)
         .all(&store.conn)
         .await
         .map_err(store_err)?
         .into_iter()
-        .map(tool_call_from_model)
-        .collect())
+        .map(super::client_execution::tool_call_from_model)
+        .collect()
 }
 
 pub(in crate::db) async fn append_event(
@@ -482,21 +452,6 @@ fn message_from_model(model: entities::message::Model) -> Result<Message> {
         content: model.content,
         created_at: model.created_at,
     })
-}
-
-fn tool_call_from_model(model: entities::tool_call::Model) -> ToolCallRecord {
-    ToolCallRecord {
-        id: CallId(model.id),
-        chat_id: ChatId(model.chat_id),
-        turn_id: TurnId(model.turn_id),
-        provider_id: model.provider_id,
-        name: model.name,
-        arguments: model.arguments,
-        result: model.result,
-        is_error: model.is_error,
-        created_at: model.created_at,
-        completed_at: model.completed_at,
-    }
 }
 
 /// `Role` is persisted as its snake_case name (matching its serde encoding).

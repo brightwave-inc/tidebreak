@@ -5,7 +5,9 @@ use std::sync::Mutex;
 use futures::executor::block_on;
 
 use super::*;
-use crate::model::{DocumentJobKind, DocumentJobStatus, DocumentProcessingStatus};
+use crate::model::{
+    DocumentJobKind, DocumentJobStatus, DocumentProcessingStatus, ToolCallExecution, ToolCallStatus,
+};
 
 /// Minimal in-memory `Store` — proves the trait is object-safe and usable
 /// behind `Arc<dyn Store>`, and exercises the signatures.
@@ -26,6 +28,84 @@ struct MemStore {
     settings: Mutex<HashMap<String, Value>>,
     events: Mutex<Vec<(ChatId, SequencedEvent)>>,
     tool_calls: Mutex<HashMap<crate::id::CallId, ToolCallRecord>>,
+    tool_call_lease_tokens: Mutex<HashMap<crate::id::CallId, uuid::Uuid>>,
+}
+
+impl MemStore {
+    fn resolve_mem_tool_call(
+        &self,
+        id: CallId,
+        client_authority: Option<(uuid::Uuid, chrono::DateTime<chrono::Utc>, bool)>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ResolveToolCallOutcome> {
+        let mut calls = self.tool_calls.lock().unwrap();
+        let Some(call) = calls.get_mut(&id) else {
+            return Ok(ResolveToolCallOutcome::NotFound);
+        };
+        let stored_lease_token = self
+            .tool_call_lease_tokens
+            .lock()
+            .unwrap()
+            .get(&id)
+            .copied();
+        let (error_code, error_detail) = match resolution {
+            ToolCallResolution::Failed {
+                error_code,
+                error_detail,
+                ..
+            } => (Some(error_code.clone()), error_detail.clone()),
+            ToolCallResolution::Completed { .. } | ToolCallResolution::Cancelled { .. } => {
+                (None, None)
+            }
+        };
+        if call.status.is_terminal() {
+            let authority_matches = match client_authority {
+                None => call.execution == ToolCallExecution::Server && stored_lease_token.is_none(),
+                Some((lease_token, _, _)) => {
+                    call.execution == ToolCallExecution::Client
+                        && stored_lease_token == Some(lease_token)
+                }
+            };
+            if !authority_matches {
+                return Ok(ResolveToolCallOutcome::LeaseLost);
+            }
+            let exact = call.status == resolution.status()
+                && call.result.as_deref() == Some(resolution.result())
+                && call.error_code == error_code
+                && call.error_detail == error_detail
+                && call.resolved_at == Some(resolved_at);
+            return Ok(if exact {
+                ResolveToolCallOutcome::Existing
+            } else {
+                ResolveToolCallOutcome::AlreadyTerminal
+            });
+        }
+        let owns = match client_authority {
+            None => call.execution == ToolCallExecution::Server,
+            Some((lease_token, now, expired)) => {
+                call.execution == ToolCallExecution::Client
+                    && stored_lease_token == Some(lease_token)
+                    && call.client_lease_expires_at.is_some_and(|expiry| {
+                        if expired {
+                            expiry <= now
+                        } else {
+                            expiry > now
+                        }
+                    })
+            }
+        };
+        if !owns {
+            return Ok(ResolveToolCallOutcome::LeaseLost);
+        }
+        call.status = resolution.status();
+        call.result = Some(resolution.result().to_owned());
+        call.error_code = error_code;
+        call.error_detail = error_detail;
+        call.client_lease_expires_at = None;
+        call.resolved_at = Some(resolved_at);
+        Ok(ResolveToolCallOutcome::Resolved)
+    }
 }
 
 fn allocate_mem_generation(
@@ -1132,17 +1212,158 @@ impl Store for MemStore {
     async fn list_messages(&self, _chat_id: ChatId) -> Result<Vec<Message>> {
         Ok(vec![])
     }
-    async fn upsert_tool_call(&self, call: &ToolCallRecord) -> Result<()> {
+    async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome> {
         let mut calls = self.tool_calls.lock().unwrap();
-        if let Some(existing) = calls.get_mut(&call.id) {
-            existing.arguments = call.arguments.clone();
-            existing.result = call.result.clone();
-            existing.is_error = call.is_error;
-            existing.completed_at = call.completed_at;
-        } else {
-            calls.insert(call.id, call.clone());
+        if let Some(existing) = calls.get(&call.id) {
+            let matches = existing.chat_id == call.chat_id
+                && existing.turn_id == call.turn_id
+                && existing.provider_id == call.provider_id
+                && existing.name == call.name
+                && existing.arguments == call.arguments
+                && existing.execution == call.execution
+                && existing.created_at == call.created_at;
+            return Ok(if matches {
+                AcceptToolCallOutcome::Existing(existing.clone())
+            } else {
+                AcceptToolCallOutcome::IdentityConflict
+            });
         }
-        Ok(())
+        calls.insert(call.id, call.clone());
+        Ok(AcceptToolCallOutcome::Accepted(call.clone()))
+    }
+    async fn claim_client_tool_call(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        executor_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ClaimClientToolCallOutcome> {
+        let mut calls = self.tool_calls.lock().unwrap();
+        let Some(call) = calls.get_mut(&id) else {
+            return Ok(ClaimClientToolCallOutcome::Unavailable);
+        };
+        if call.chat_id != chat_id
+            || call.execution != ToolCallExecution::Client
+            || call.status != ToolCallStatus::Pending
+        {
+            return Ok(ClaimClientToolCallOutcome::Unavailable);
+        }
+        if call.client_executor_id == Some(executor_id)
+            && call.client_lease_expires_at == Some(lease_expires_at)
+            && lease_expires_at > now
+        {
+            let stored_lease_token = self
+                .tool_call_lease_tokens
+                .lock()
+                .unwrap()
+                .get(&id)
+                .copied()
+                .ok_or_else(|| AgentError::Store("client claim token is missing".into()))?;
+            if stored_lease_token != lease_token {
+                return Ok(ClaimClientToolCallOutcome::Unavailable);
+            }
+            return Ok(ClaimClientToolCallOutcome::Existing(ClientToolCallClaim {
+                call: call.clone(),
+                lease_token: stored_lease_token,
+            }));
+        }
+        if call.client_executor_id.is_some()
+            || executor_id.is_nil()
+            || lease_token.is_nil()
+            || lease_expires_at <= now
+        {
+            return Ok(ClaimClientToolCallOutcome::Unavailable);
+        }
+        call.client_executor_id = Some(executor_id);
+        self.tool_call_lease_tokens
+            .lock()
+            .unwrap()
+            .insert(id, lease_token);
+        call.client_lease_expires_at = Some(lease_expires_at);
+        Ok(ClaimClientToolCallOutcome::Claimed(ClientToolCallClaim {
+            call: call.clone(),
+            lease_token,
+        }))
+    }
+    async fn heartbeat_client_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<HeartbeatClientToolCallOutcome> {
+        let mut calls = self.tool_calls.lock().unwrap();
+        let Some(call) = calls.get_mut(&id) else {
+            return Ok(HeartbeatClientToolCallOutcome::LeaseLost);
+        };
+        let Some(current_expiry) = call.client_lease_expires_at else {
+            return Ok(HeartbeatClientToolCallOutcome::LeaseLost);
+        };
+        if call.execution != ToolCallExecution::Client
+            || call.status != ToolCallStatus::Pending
+            || self
+                .tool_call_lease_tokens
+                .lock()
+                .unwrap()
+                .get(&id)
+                .copied()
+                != Some(lease_token)
+            || current_expiry <= now
+            || lease_expires_at < current_expiry
+        {
+            return Ok(HeartbeatClientToolCallOutcome::LeaseLost);
+        }
+        if lease_expires_at == current_expiry {
+            return Ok(HeartbeatClientToolCallOutcome::Existing);
+        }
+        call.client_lease_expires_at = Some(lease_expires_at);
+        Ok(HeartbeatClientToolCallOutcome::Extended)
+    }
+    async fn resolve_server_tool_call(
+        &self,
+        id: CallId,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ResolveToolCallOutcome> {
+        self.resolve_mem_tool_call(id, None, resolution, resolved_at)
+    }
+    async fn resolve_client_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ResolveToolCallOutcome> {
+        self.resolve_mem_tool_call(id, Some((lease_token, now, false)), resolution, resolved_at)
+    }
+    async fn resolve_expired_client_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ResolveToolCallOutcome> {
+        self.resolve_mem_tool_call(id, Some((lease_token, now, true)), resolution, resolved_at)
+    }
+    async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
+        let mut calls: Vec<_> = self
+            .tool_calls
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|call| {
+                call.chat_id == chat_id
+                    && call.execution == ToolCallExecution::Client
+                    && call.status == ToolCallStatus::Pending
+            })
+            .cloned()
+            .collect();
+        calls.sort_by_key(|call| (call.created_at, call.id.0));
+        Ok(calls)
     }
     async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
         let mut calls: Vec<_> = self

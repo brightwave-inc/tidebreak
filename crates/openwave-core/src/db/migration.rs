@@ -1064,24 +1064,134 @@ impl MigrationTrait for AddToolCalls {
                     .col(ColumnDef::new(ToolCall::ProviderId).text().not_null())
                     .col(ColumnDef::new(ToolCall::Name).text().not_null())
                     .col(ColumnDef::new(ToolCall::Arguments).json_binary().not_null())
+                    .col(ColumnDef::new(ToolCall::Execution).text().not_null())
+                    .col(ColumnDef::new(ToolCall::Status).text().not_null())
                     .col(ColumnDef::new(ToolCall::Result).text())
-                    .col(
-                        ColumnDef::new(ToolCall::IsError)
-                            .boolean()
-                            .not_null()
-                            .default(false),
-                    )
+                    .col(ColumnDef::new(ToolCall::ErrorCode).text())
+                    .col(ColumnDef::new(ToolCall::ErrorDetail).text())
+                    .col(ColumnDef::new(ToolCall::ClientExecutorId).uuid())
+                    .col(ColumnDef::new(ToolCall::ClientLeaseToken).uuid())
+                    .col(ColumnDef::new(ToolCall::ClientLeaseExpiresAt).timestamp_with_time_zone())
                     .col(
                         ColumnDef::new(ToolCall::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(ToolCall::CompletedAt).timestamp_with_time_zone())
+                    .col(ColumnDef::new(ToolCall::ResolvedAt).timestamp_with_time_zone())
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_tool_call_chat")
                             .from(ToolCall::Table, ToolCall::ChatId)
                             .to(Chat::Table, Chat::Id),
+                    )
+                    .check(Expr::col(ToolCall::Execution).is_in([
+                        crate::model::ToolCallExecution::Server.as_str(),
+                        crate::model::ToolCallExecution::Client.as_str(),
+                    ]))
+                    .check(Expr::col(ToolCall::Status).is_in([
+                        crate::model::ToolCallStatus::Pending.as_str(),
+                        crate::model::ToolCallStatus::Completed.as_str(),
+                        crate::model::ToolCallStatus::Failed.as_str(),
+                        crate::model::ToolCallStatus::Cancelled.as_str(),
+                    ]))
+                    .check(
+                        Func::char_length(Expr::col(ToolCall::ProviderId))
+                            .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
+                    )
+                    .check(
+                        Func::char_length(Expr::col(ToolCall::Name))
+                            .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
+                    )
+                    .check(
+                        Expr::col(ToolCall::Result).is_null().or(Func::char_length(
+                            Expr::col(ToolCall::Result),
+                        )
+                        .lte(crate::model::ToolCallRecord::MAX_RESULT_BYTES as i32)),
+                    )
+                    .check(
+                        Expr::col(ToolCall::ErrorCode).is_null().or(Func::char_length(
+                            Expr::col(ToolCall::ErrorCode),
+                        )
+                        .between(
+                            1,
+                            crate::model::ToolCallRecord::MAX_ERROR_CODE_LEN as i32,
+                        )),
+                    )
+                    .check(
+                        Expr::col(ToolCall::ErrorDetail).is_null().or(Func::char_length(
+                            Expr::col(ToolCall::ErrorDetail),
+                        )
+                        .between(
+                            1,
+                            crate::model::ToolCallRecord::MAX_ERROR_DETAIL_LEN as i32,
+                        )),
+                    )
+                    .check(
+                        Expr::col(ToolCall::ResolvedAt)
+                            .is_null()
+                            .or(Expr::col(ToolCall::ResolvedAt)
+                                .gte(Expr::col(ToolCall::CreatedAt))),
+                    )
+                    .check(
+                        Expr::col(ToolCall::ClientLeaseExpiresAt)
+                            .is_null()
+                            .or(Expr::col(ToolCall::ClientLeaseExpiresAt)
+                                .gt(Expr::col(ToolCall::CreatedAt))),
+                    )
+                    .check(
+                        Expr::col(ToolCall::Status)
+                            .eq(crate::model::ToolCallStatus::Pending.as_str())
+                            .and(Expr::col(ToolCall::Result).is_null())
+                            .and(Expr::col(ToolCall::ErrorCode).is_null())
+                            .and(Expr::col(ToolCall::ErrorDetail).is_null())
+                            .and(Expr::col(ToolCall::ResolvedAt).is_null())
+                            .or(Expr::col(ToolCall::Status)
+                                .ne(crate::model::ToolCallStatus::Pending.as_str())
+                                .and(Expr::col(ToolCall::Result).is_not_null())
+                                .and(Expr::col(ToolCall::ResolvedAt).is_not_null())
+                                .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())),
+                    )
+                    .check(
+                        Expr::col(ToolCall::Status)
+                            .eq(crate::model::ToolCallStatus::Failed.as_str())
+                            .and(Expr::col(ToolCall::ErrorCode).is_not_null())
+                            .or(Expr::col(ToolCall::Status)
+                                .ne(crate::model::ToolCallStatus::Failed.as_str())
+                                .and(Expr::col(ToolCall::ErrorCode).is_null())
+                                .and(Expr::col(ToolCall::ErrorDetail).is_null())),
+                    )
+                    .check(
+                        Expr::col(ToolCall::Execution)
+                            .eq(crate::model::ToolCallExecution::Server.as_str())
+                            .and(Expr::col(ToolCall::ClientExecutorId).is_null())
+                            .and(Expr::col(ToolCall::ClientLeaseToken).is_null())
+                            .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())
+                            .or(Expr::col(ToolCall::Execution)
+                                .eq(crate::model::ToolCallExecution::Client.as_str())
+                                .and(
+                                    Expr::col(ToolCall::Status)
+                                        .eq(crate::model::ToolCallStatus::Pending.as_str())
+                                        .and(
+                                            Expr::col(ToolCall::ClientExecutorId)
+                                                .is_null()
+                                                .and(
+                                                    Expr::col(ToolCall::ClientLeaseToken).is_null(),
+                                                )
+                                                .and(
+                                                    Expr::col(ToolCall::ClientLeaseExpiresAt)
+                                                        .is_null(),
+                                                )
+                                                .or(Expr::col(ToolCall::ClientExecutorId)
+                                                    .is_not_null()
+                                                    .and(Expr::col(ToolCall::ClientLeaseToken).is_not_null())
+                                                    .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_not_null())),
+                                        )
+                                        .or(Expr::col(ToolCall::Status)
+                                            .ne(crate::model::ToolCallStatus::Pending.as_str())
+                                            .and(Expr::col(ToolCall::ClientExecutorId).is_not_null())
+                                            .and(Expr::col(ToolCall::ClientLeaseToken).is_not_null())
+                                            .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())),
+                                )),
                     )
                     .to_owned(),
             )
@@ -1094,6 +1204,18 @@ impl MigrationTrait for AddToolCalls {
                     .table(ToolCall::Table)
                     .col(ToolCall::ChatId)
                     .col(ToolCall::CreatedAt)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_tool_call_client_pending")
+                    .table(ToolCall::Table)
+                    .col(ToolCall::ChatId)
+                    .col(ToolCall::Execution)
+                    .col(ToolCall::Status)
+                    .col(ToolCall::ClientLeaseExpiresAt)
                     .to_owned(),
             )
             .await?;
@@ -1961,10 +2083,16 @@ enum ToolCall {
     ProviderId,
     Name,
     Arguments,
+    Execution,
+    Status,
     Result,
-    IsError,
+    ErrorCode,
+    ErrorDetail,
+    ClientExecutorId,
+    ClientLeaseToken,
+    ClientLeaseExpiresAt,
     CreatedAt,
-    CompletedAt,
+    ResolvedAt,
 }
 
 #[derive(DeriveIden)]

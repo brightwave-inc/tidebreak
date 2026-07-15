@@ -33,12 +33,18 @@ use crate::context;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, MessageId, TurnId};
-use crate::model::{Chat, Message, Role, ToolCallRecord, TurnRunStatus};
+use crate::model::{
+    Chat, Message, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
+    TurnRunStatus,
+};
 use crate::provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, StopReason, Usage,
 };
 use crate::steer::SteerInbox;
-use crate::storage::{ApplyTurnSteerOutcome, JournaledTurnSteerOutcome, Store};
+use crate::storage::{
+    AcceptToolCallOutcome, ApplyTurnSteerOutcome, JournaledTurnSteerOutcome,
+    ResolveToolCallOutcome, Store,
+};
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 
 /// A name-keyed registry of the tools available to the agent.
@@ -583,6 +589,7 @@ impl Agent {
                         .await?;
                 }
             }
+            let mut recovered_results: HashMap<CallId, ToolOutput> = HashMap::new();
             for call in &calls {
                 let args = parse_args(&call.args);
                 blocks.push(ContentBlock::ToolUse {
@@ -592,20 +599,52 @@ impl Agent {
                 });
                 // Persist the call as soon as args are known so a crash mid-tool
                 // still leaves a reconstructable ToolUse on the next turn.
-                self.store
-                    .upsert_tool_call(&ToolCallRecord {
+                let outcome = self
+                    .store
+                    .accept_tool_call(&ToolCallRecord {
                         id: call.call_id,
                         chat_id: chat.id,
                         turn_id,
                         provider_id: call.provider_id.clone(),
                         name: call.name.clone(),
                         arguments: args,
+                        execution: ToolCallExecution::Server,
+                        status: ToolCallStatus::Pending,
                         result: None,
-                        is_error: false,
+                        error_code: None,
+                        error_detail: None,
+                        client_executor_id: None,
+                        client_lease_expires_at: None,
                         created_at: Utc::now(),
-                        completed_at: None,
+                        resolved_at: None,
                     })
                     .await?;
+                match outcome {
+                    AcceptToolCallOutcome::Accepted(_) => {}
+                    AcceptToolCallOutcome::Existing(existing) if existing.status.is_terminal() => {
+                        let content = existing.result.ok_or_else(|| {
+                            AgentError::Store(format!(
+                                "terminal tool call {} is missing its result",
+                                call.call_id
+                            ))
+                        })?;
+                        recovered_results.insert(
+                            call.call_id,
+                            ToolOutput {
+                                content,
+                                data: None,
+                                is_error: existing.status != ToolCallStatus::Completed,
+                            },
+                        );
+                    }
+                    AcceptToolCallOutcome::Existing(_) => {}
+                    AcceptToolCallOutcome::IdentityConflict => {
+                        return Err(AgentError::Store(format!(
+                            "tool call {} identity conflicts with its canonical request",
+                            call.call_id
+                        )));
+                    }
+                }
             }
             if !blocks.is_empty() {
                 transcript.push(ChatMessage {
@@ -703,25 +742,40 @@ impl Agent {
             // Run the tool calls and feed the results back for the next step.
             let mut results: Vec<ContentBlock> = Vec::new();
             for call in &calls {
-                let output = self.run_tool(chat, turn_id, call, events).await;
+                let (output, needs_resolution) = match recovered_results.remove(&call.call_id) {
+                    Some(output) => (output, false),
+                    None => (self.run_tool(chat, turn_id, call, events).await, true),
+                };
                 events.send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
                     output: output.clone(),
                 });
-                self.store
-                    .upsert_tool_call(&ToolCallRecord {
-                        id: call.call_id,
-                        chat_id: chat.id,
-                        turn_id,
-                        provider_id: call.provider_id.clone(),
-                        name: call.name.clone(),
-                        arguments: parse_args(&call.args),
-                        result: Some(output.content.clone()),
-                        is_error: output.is_error,
-                        created_at: Utc::now(),
-                        completed_at: Some(Utc::now()),
-                    })
-                    .await?;
+                if needs_resolution {
+                    let resolution = if output.is_error {
+                        ToolCallResolution::Failed {
+                            result: output.content.clone(),
+                            error_code: "tool_error".into(),
+                            error_detail: None,
+                        }
+                    } else {
+                        ToolCallResolution::Completed {
+                            result: output.content.clone(),
+                        }
+                    };
+                    let outcome = self
+                        .store
+                        .resolve_server_tool_call(call.call_id, &resolution, Utc::now())
+                        .await?;
+                    if !matches!(
+                        outcome,
+                        ResolveToolCallOutcome::Resolved | ResolveToolCallOutcome::Existing
+                    ) {
+                        return Err(AgentError::Store(format!(
+                            "tool call {} could not be resolved: {outcome:?}",
+                            call.call_id
+                        )));
+                    }
+                }
                 results.push(ContentBlock::ToolResult {
                     tool_use_id: call.provider_id.clone(),
                     content: output.content,
@@ -1093,7 +1147,7 @@ impl Agent {
 /// Merge text messages and structured tool-call rows into the provider transcript.
 ///
 /// Tool calls are partitioned into *batches*: a new batch starts when a call's
-/// `created_at` is at or after the previous batch's latest `completed_at`. That
+/// `created_at` is at or after the previous batch's latest `resolved_at`. That
 /// matches the agent loop (upsert all args for a model step, then complete them,
 /// then the next model step). Batches that fall after an assistant text message
 /// and before the next message attach as `ToolUse` on that assistant; otherwise
@@ -1179,7 +1233,7 @@ fn batch_tool_calls(tool_calls: &[ToolCallRecord]) -> Vec<Vec<&ToolCallRecord>> 
             }
         }
         current.push(call);
-        if let Some(completed) = call.completed_at {
+        if let Some(completed) = call.resolved_at {
             batch_done_at = Some(match batch_done_at {
                 Some(done) => done.max(completed),
                 None => completed,
@@ -1224,7 +1278,7 @@ fn push_tool_batch(
                 .map(|content| ContentBlock::ToolResult {
                     tool_use_id: call.provider_id.clone(),
                     content: content.clone(),
-                    is_error: call.is_error,
+                    is_error: call.status != ToolCallStatus::Completed,
                 })
         })
         .collect();
@@ -1444,8 +1498,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[0].result.as_deref(), Some("hello from disk"));
-        assert!(!calls[0].is_error);
-        assert!(calls[0].completed_at.is_some());
+        assert_eq!(calls[0].status, ToolCallStatus::Completed);
+        assert!(calls[0].resolved_at.is_some());
     }
 
     #[tokio::test]
@@ -2747,10 +2801,15 @@ mod tests {
             provider_id: "tu_1".into(),
             name: "read_file".into(),
             arguments: serde_json::json!({"path": "a"}),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Completed,
             result: Some("ok".into()),
-            is_error: false,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
             created_at: t2,
-            completed_at: Some(DateTime::<Utc>::from_timestamp(1_003, 0).unwrap()),
+            resolved_at: Some(DateTime::<Utc>::from_timestamp(1_003, 0).unwrap()),
         }];
         let rebuilt = rebuild_transcript(&messages, &calls);
         assert_eq!(rebuilt.len(), 3);
@@ -2804,10 +2863,15 @@ mod tests {
             provider_id: "tu_1".into(),
             name: "read_file".into(),
             arguments: serde_json::json!({}),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Completed,
             result: Some("data".into()),
-            is_error: false,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
             created_at: t1,
-            completed_at: Some(t1),
+            resolved_at: Some(t1),
         }];
         let rebuilt = rebuild_transcript(&messages, &calls);
         assert_eq!(rebuilt.len(), 4);

@@ -1,11 +1,12 @@
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
 
 use crate::error::Result;
-use crate::id::{ChatId, TurnId};
+use crate::id::{CallId, ChatId, TurnId};
 
 use super::{entities, store_err};
 
 pub(in crate::db) mod blob;
+pub(in crate::db) mod client_execution;
 pub(in crate::db) mod conversation;
 pub(in crate::db) mod document;
 pub(in crate::db) mod turn;
@@ -24,6 +25,23 @@ where
             sea_orm::sea_query::Expr::col(entities::chat::Column::Title).into(),
         )
         .filter(entities::chat::Column::Id.eq(chat_id.0))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(locked.rows_affected == 1)
+}
+
+/// Acquire the cross-backend write lock for one tool-call row.
+pub(in crate::db) async fn acquire_tool_call_write_lock<C>(conn: &C, id: CallId) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let locked = entities::tool_call::Entity::update_many()
+        .col_expr(
+            entities::tool_call::Column::ResolvedAt,
+            sea_orm::sea_query::Expr::col(entities::tool_call::Column::ResolvedAt).into(),
+        )
+        .filter(entities::tool_call::Column::Id.eq(id.0))
         .exec(conn)
         .await
         .map_err(store_err)?;

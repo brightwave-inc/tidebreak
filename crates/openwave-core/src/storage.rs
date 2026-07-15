@@ -20,12 +20,12 @@ use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, DocumentId, DocumentJobId, ProjectId, TurnId, TurnSteerId};
+use crate::id::{CallId, ChatId, DocumentId, DocumentJobId, ProjectId, TurnId, TurnSteerId};
 use crate::model::{
     BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentRecord, DocumentScope,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
-    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
+    ToolCallResolution, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
 
@@ -171,6 +171,77 @@ pub enum FinishTurnCancellationOutcome {
     Cancelled(TurnRun),
     /// This exact claimed attempt already reached terminal cancellation.
     Existing(TurnRun),
+}
+
+/// Result of durably accepting canonical tool-call arguments.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AcceptToolCallOutcome {
+    /// The identity and immutable request were inserted.
+    Accepted(ToolCallRecord),
+    /// An exact retry found the same immutable request.
+    Existing(ToolCallRecord),
+    /// The call identity already names different immutable request bytes.
+    IdentityConflict,
+}
+
+/// A client claim and its secret per-claim fencing receipt.
+///
+/// The token is returned only by claim, never by general pending/history reads
+/// or by serializing [`ToolCallRecord`].
+#[derive(Clone, PartialEq)]
+pub struct ClientToolCallClaim {
+    /// Canonical committed work and visible lease metadata.
+    pub call: ToolCallRecord,
+    /// Secret capability required to heartbeat or resolve this claim.
+    pub lease_token: uuid::Uuid,
+}
+
+impl std::fmt::Debug for ClientToolCallClaim {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClientToolCallClaim")
+            .field("call", &self.call)
+            .field("lease_token", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Result of claiming one pending client-executed call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaimClientToolCallOutcome {
+    /// This executor acquired the first lease.
+    Claimed(ClientToolCallClaim),
+    /// An exact retry by the same executor recovered its live lease.
+    Existing(ClientToolCallClaim),
+    /// The call is missing, terminal, server-executed, owned by another client,
+    /// or has an expired ambiguous client lease.
+    Unavailable,
+}
+
+/// Result of extending one exact client-execution lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartbeatClientToolCallOutcome {
+    /// The lease expiry advanced.
+    Extended,
+    /// An exact retry found that expiry already installed.
+    Existing,
+    /// The call, pending state, executor, or live lease no longer matches.
+    LeaseLost,
+}
+
+/// Result of resolving one tool call under its required authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveToolCallOutcome {
+    /// The pending call became terminal.
+    Resolved,
+    /// An exact ambiguous retry recovered the same terminal payload.
+    Existing,
+    /// The call identity was not found.
+    NotFound,
+    /// The call was already terminal under a different payload.
+    AlreadyTerminal,
+    /// The requested execution surface or exact live client lease did not own it.
+    LeaseLost,
 }
 
 /// A durable turn transition together with any terminal event committed by it.
@@ -915,8 +986,62 @@ pub trait Store: Send + Sync {
     /// List a chat's messages in creation order.
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>>;
 
-    /// Upsert a tool call (insert on first sight, update result on completion).
-    async fn upsert_tool_call(&self, call: &ToolCallRecord) -> Result<()>;
+    /// Accept immutable canonical tool-call identity and arguments exactly once.
+    async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome>;
+
+    /// Claim the first lease with a caller-generated secret fencing token.
+    async fn claim_client_tool_call(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        executor_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ClaimClientToolCallOutcome>;
+
+    /// Monotonically extend an exact live client-execution lease.
+    async fn heartbeat_client_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<HeartbeatClientToolCallOutcome>;
+
+    /// Resolve a pending server-executed tool call exactly once.
+    async fn resolve_server_tool_call(
+        &self,
+        id: CallId,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ResolveToolCallOutcome>;
+
+    /// Resolve a pending client call under its exact unexpired executor lease.
+    async fn resolve_client_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ResolveToolCallOutcome>;
+
+    /// Resolve a known outcome after the exact client lease expired.
+    ///
+    /// This is the explicit recovery path for an ambiguous native interaction;
+    /// it never transfers the call to another executor.
+    async fn resolve_expired_client_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ResolveToolCallOutcome>;
+
+    /// List unclaimed and claimed client work for authoritative recovery.
+    async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>>;
 
     /// List a chat's tool calls in creation order.
     async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>>;
