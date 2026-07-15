@@ -276,8 +276,14 @@ This will land in independently reviewable pieces:
    cumulative progress accounting, and the agent/worker handoff for a singular
    client-owned call are now implemented. The bounded `request_folder_access`
    contract is registered without a server executor; its capability list is
-   explicitly an untrusted proposal. The desktop pending-work executor remains
-   to be layered on that boundary.
+   explicitly an untrusted proposal. The broker exposes a de-sensitized,
+   read-only registration-receipt lookup for crash recovery; looking up an
+   operation can never start or resume it. This lets a restarted client resolve
+   a known, still-connected registration without replaying a mutation after
+   losing its client lease. Lookup is fenced by the original trusted subject and
+   conversation and reports a later disconnection separately from a usable
+   grant. The desktop pending-work executor remains to be layered on that
+   boundary.
 8. Replace project/chat `workspace_dir` with persisted host-access context
    identity and connected-root APIs. This can update the pre-v1 baseline schema
    directly.

@@ -243,10 +243,16 @@ The persisted totals also let cancellation report work performed before the
 pause, including when cancellation wins before the resumed agent starts. This is
 the durable equivalent of pausing a function, doing native work elsewhere, and
 continuing from a known checkpoint.
-The remaining integration work is to have the agent emit this checkpoint for
-folder-access tools and to run those pending calls from the desktop. Notifications
-will be wake-up hints; the pending-work query remains authoritative after a
-restart or missed notification.
+The agent and worker now emit this checkpoint for the bounded
+`request_folder_access` contract. The remaining integration work is to run those
+pending calls from the desktop. Notifications will be wake-up hints; the
+pending-work query remains authoritative after a restart or missed notification.
+For crash recovery, the broker exposes a de-sensitized registration-receipt
+lookup keyed by the stable operation ID. That lookup never starts or resumes a
+mutation: a restarted client may reconcile a known committed result, but must
+not replay unknown native work after losing its client lease. The lookup is
+bound to the registration's trusted subject and conversation, and distinguishes
+a currently connected root from one that was disconnected after registration.
 
 ### 4. Events drive the live client
 

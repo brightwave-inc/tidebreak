@@ -13,8 +13,8 @@ use crate::{
     ConsentMethod, ExecutionContext, GrantSubject, OperationId, RelativePath, RequestId, RootId,
 };
 
-/// First public broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Host-originated request envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +54,8 @@ pub enum ControlRequest {
     /// Register the exact folder returned by a native picker and attach it to
     /// the conversation that initiated the trusted interaction.
     RegisterRoot(RegisterRootRequest),
+    /// Inspect a durable registration receipt without retrying the mutation.
+    LookupRegisterRootReceipt(LookupRegisterRootReceiptRequest),
     /// Disconnect a root owned by the exact subject. Idempotent.
     RevokeRoot(RevokeRootRequest),
 }
@@ -69,6 +71,18 @@ pub struct RegisterRootRequest {
     pub conversation_id: Uuid,
     pub path: PathBuf,
     pub consent_method: ConsentMethod,
+}
+
+/// Strict payload for recovery-only registration receipt lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LookupRegisterRootReceiptRequest {
+    /// Exact idempotency identity of the prior registration attempt.
+    pub operation_id: OperationId,
+    /// Trusted authority identity expected on the original registration.
+    pub subject: GrantSubject,
+    /// Trusted conversation expected on the original registration.
+    pub conversation_id: Uuid,
 }
 
 /// Strict payload for an idempotent root revocation.
@@ -162,6 +176,7 @@ pub type OperationResponseEnvelope = ResponseEnvelope<OperationResult>;
 pub enum ControlResult {
     Hello(HelloResult),
     RegisterRoot(RegisterRootResult),
+    LookupRegisterRootReceipt(LookupRegisterRootReceiptResult),
     RevokeRoot(RevokeRootResult),
 }
 
@@ -196,6 +211,31 @@ pub struct RootSummary {
 #[serde(deny_unknown_fields)]
 pub struct RegisterRootResult {
     pub root: RootSummary,
+}
+
+/// Recovery-only view of one durable registration mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LookupRegisterRootReceiptResult {
+    pub operation_id: OperationId,
+    pub receipt: RegisterRootReceipt,
+}
+
+/// Durable state observed without starting or resuming registration work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RegisterRootReceipt {
+    /// No mutation has used this operation identity.
+    Unknown,
+    /// A registration was durably claimed but has no known terminal outcome.
+    Pending,
+    /// Registration durably committed this safe root summary.
+    Completed { root: RootSummary },
+    /// Registration committed historically, but the root is no longer connected.
+    Disconnected { root: RootSummary },
+    /// Registration durably committed this transport-safe failure.
+    Failed { error: ErrorResponse },
 }
 
 /// Result of an idempotent root revocation.
@@ -260,7 +300,7 @@ mod tests {
     #[test]
     fn protocol_paths_cannot_bypass_relative_path_validation() {
         let encoded = format!(
-            r#"{{"protocol_version":1,"request_id":"{}","context":{{"conversation_id":"{}","project_id":null}},"request":{{"operation":"read_file","payload":{{"root_id":"{}","path":"../secret"}}}}}}"#,
+            r#"{{"protocol_version":2,"request_id":"{}","context":{{"conversation_id":"{}","project_id":null}},"request":{{"operation":"read_file","payload":{{"root_id":"{}","path":"../secret"}}}}}}"#,
             RequestId::new(),
             Uuid::new_v4(),
             RootId::new(),
@@ -271,7 +311,7 @@ mod tests {
     #[test]
     fn request_leaf_payloads_reject_unknown_fields() {
         let encoded = format!(
-            r#"{{"protocol_version":1,"request_id":"{}","context":{{"conversation_id":"{}","project_id":null}},"request":{{"operation":"read_file","payload":{{"root_id":"{}","path":"note.txt","unexpected":true}}}}}}"#,
+            r#"{{"protocol_version":2,"request_id":"{}","context":{{"conversation_id":"{}","project_id":null}},"request":{{"operation":"read_file","payload":{{"root_id":"{}","path":"note.txt","unexpected":true}}}}}}"#,
             RequestId::new(),
             Uuid::new_v4(),
             RootId::new(),
@@ -282,12 +322,12 @@ mod tests {
     #[test]
     fn request_variants_reject_unknown_sibling_fields() {
         let control = format!(
-            r#"{{"protocol_version":1,"request_id":"{}","request":{{"control":"hello","extra":true}}}}"#,
+            r#"{{"protocol_version":2,"request_id":"{}","request":{{"control":"hello","extra":true}}}}"#,
             RequestId::new()
         );
         assert!(serde_json::from_str::<ControlEnvelope>(&control).is_err());
         let operation = format!(
-            r#"{{"protocol_version":1,"request_id":"{}","context":{{"conversation_id":"{}","project_id":null}},"request":{{"operation":"list_roots","extra":true}}}}"#,
+            r#"{{"protocol_version":2,"request_id":"{}","context":{{"conversation_id":"{}","project_id":null}},"request":{{"operation":"list_roots","extra":true}}}}"#,
             RequestId::new(),
             Uuid::new_v4(),
         );
@@ -306,6 +346,17 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ControlResult>(&encoded).unwrap(),
             control
+        );
+
+        let operation_id = OperationId::new();
+        let lookup = ControlResult::LookupRegisterRootReceipt(LookupRegisterRootReceiptResult {
+            operation_id,
+            receipt: RegisterRootReceipt::Pending,
+        });
+        let encoded = serde_json::to_string(&lookup).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ControlResult>(&encoded).unwrap(),
+            lookup
         );
 
         let operation = OperationResult::ReadFile(ReadFileResult {
