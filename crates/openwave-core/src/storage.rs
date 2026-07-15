@@ -1165,6 +1165,16 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// List a bounded set of parent deliveries that may need durable
+    /// continuation work. This is an advisory scan: an exact claim remains the
+    /// authority for both pending delivery and expired-lease recovery.
+    async fn list_agent_run_inbox_candidates(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<AgentRunInboxEntry>> {
+        agent_run_storage_unavailable()
+    }
+
     /// Acquire an expiring, exact lease to advance one immutable parent inbox
     /// delivery. Repeating the same live lease recovers its ownership; an
     /// expired lease may be reclaimed by a different continuation worker.

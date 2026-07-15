@@ -70,17 +70,19 @@ spawn:
 6. The result, terminal child state, and immutable parent inbox entry commit
    together. A later wait transition may consume that entry and wake a parent.
 
-The bounded `spawn_sandbox_agent` contract and its foreground checkpoint wiring
-are prepared, but deliberately disabled in the production tool registry. The
-server now runs the executor that can claim and complete a child, but the tool
-will not be advertised until the final wiring wakes that worker after an atomic
-foreground spawn checkpoint. It will be a wait-form tool: it accepts one
-bounded `task`, derives the child identity from that exact tool call, and
-commits the queued child, durable wait, and release of the exact foreground
-worker lease in one transaction. It is advertised only to a claimed foreground
-turn; sandbox workers never receive it, and the store independently enforces
-depth one. A later non-blocking spawn tool can let the foreground continue after
-spawning, but must earn the same checkpoint and replay rules.
+The bounded `spawn_sandbox_agent` contract is available only to a durably
+claimed foreground turn. It is a wait-form tool: one bounded `task` derives a
+child identity from its exact tool call, then commits the queued child, durable
+wait, and release of the foreground lease in one transaction. Only after that
+commit does the server wake the bounded sandbox worker. The notification is a
+latency hint, not a correctness dependency: the worker polls durable child and
+inbox state, so a missed wake or restart cannot lose accepted work. A sandbox
+result is delivered, claimed under an exact continuation lease, consumed, and
+turns the parked foreground turn into a fresh durably claimable `resuming`
+attempt. The tool is never advertised to sandbox workers, and the store
+independently enforces depth one. A later non-blocking spawn tool can let the
+foreground continue after spawning, but must earn the same checkpoint and
+replay rules.
 
 The wait also carries an immutable atomic-admission marker. Only that receipt
 allows a later retry to recover the combined transition; an older path that
@@ -228,7 +230,7 @@ The implementation is intentionally incremental:
    context, over the durable lease/result boundary. *(Shipped.)*
 9. Enable the bounded foreground-only `spawn_sandbox_agent` contract, wake the
    sandbox worker after its atomic checkpoint, and resume the parked turn from
-   the already-delivered inbox receipt.
+   the already-delivered inbox receipt. *(Shipped.)*
 10. Route sandbox folder access through the host broker.
 11. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work.

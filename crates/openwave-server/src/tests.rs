@@ -9,13 +9,13 @@ use axum::http::{header, Request, StatusCode};
 use futures::stream::{self, BoxStream, StreamExt};
 // Tests use the in-memory store; production wires LanceDB in `bind`.
 use openwave_core::{
-    AgentErrorInfo, AgentEvent, ApprovalClass, BeginRootAttachmentChange, BlobStore, CallId, Chat,
-    ChatId, ChatRequest, ChatRootAttachment, ClientToolCallRequest, HostRootId, Message,
-    ModelProvider, ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent, ProviderId,
-    RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentOrigin, SecretProvider,
-    SequencedEvent, StopReason, Tool, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, ToolCtx, ToolOutput, ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus,
-    TurnSteerId, Usage,
+    AgentErrorInfo, AgentEvent, AgentRunInboxStatus, AgentRunStatus, ApprovalClass,
+    BeginRootAttachmentChange, BlobStore, CallId, Chat, ChatId, ChatRequest, ChatRootAttachment,
+    ClientToolCallRequest, HostRootId, Message, ModelProvider, ParkTurnForClientCallOutcome,
+    Project, ProjectId, ProviderEvent, ProviderId, RootAttachmentChangeAction,
+    RootAttachmentChangeId, RootAttachmentOrigin, SecretProvider, SequencedEvent, StopReason, Tool,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput,
+    ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -48,6 +48,62 @@ impl ModelProvider for FakeProvider {
             },
         ])
         .boxed())
+    }
+}
+
+/// Drives the complete foreground-child-foreground round trip. The sandbox
+/// request is identified by its deliberately empty tool surface; foreground
+/// requests retain the registered delegation contract.
+#[derive(Default)]
+struct SandboxRoundTripProvider {
+    foreground_calls: AtomicUsize,
+    requests: std::sync::Mutex<Vec<ChatRequest>>,
+}
+
+#[async_trait]
+impl ModelProvider for SandboxRoundTripProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("sandbox-round-trip")
+    }
+
+    async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        let sandbox = request.tools.is_empty();
+        self.requests.lock().unwrap().push(request);
+        let events = if sandbox {
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "child result".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ]
+        } else if self.foreground_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "delegate-1".into(),
+                    name: openwave_core::SPAWN_SANDBOX_AGENT_TOOL.into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: r#"{"task":"Return a concise child result."}"#.into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ]
+        } else {
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "parent resumed".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ]
+        };
+        Ok(stream::iter(events).boxed())
     }
 }
 
@@ -1286,6 +1342,7 @@ fn spawn_turn_worker_with_config(state: &AppState, config: turn_worker::TurnWork
         state.events.clone(),
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
+        state.agent_run_wake.clone(),
         state.agent_config.clone(),
         None,
         config,
@@ -4868,7 +4925,7 @@ async fn root_search_never_returns_project_owned_vectors() {
 }
 
 #[test]
-fn agent_deps_registers_server_tools_and_the_folder_consent_contract_without_sandbox_spawn() {
+fn agent_deps_registers_server_tools_and_the_foreground_sandbox_contract() {
     let (_retrieval, tools, _config) = agent_deps(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
@@ -4886,14 +4943,14 @@ fn agent_deps_registers_server_tools_and_the_folder_consent_contract_without_san
         !names
             .iter()
             .any(|name| name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL),
-        "production registry must not advertise sandbox spawning before an executor exists"
+        "the sandbox contract must only be advertised to a claimed foreground turn"
     );
     assert!(
-        !tools
+        tools
             .specs_for_foreground(true)
             .iter()
             .any(|spec| spec.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL),
-        "ordinary claimed foreground turns must not expose the disabled sandbox tool"
+        "foreground turns must expose the durable sandbox delegation contract"
     );
     assert_eq!(
         tools.execution(openwave_core::REQUEST_FOLDER_ACCESS_TOOL),
@@ -6243,6 +6300,99 @@ async fn post_message_runs_a_turn_and_journals_its_events() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn foreground_sandbox_spawn_parks_executes_delivers_and_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let provider = Arc::new(SandboxRoundTripProvider::default());
+    let mut tools = ToolRegistry::new();
+    tools.register_foreground_sandbox_spawn();
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(provider.clone())),
+        Arc::new(MemSecrets::default()),
+        Arc::new(tools),
+        build_retrieval(
+            Arc::new(HashEmbedder::default()),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        )
+        .0,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let sandbox_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::new(
+        state.store.clone(),
+        state.resolver.clone(),
+        state.agent_run_wake.clone(),
+        state.turn_job_wake.clone(),
+        state.agent_config.clone(),
+        None,
+        sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default(),
+    );
+    tokio::spawn(sandbox_worker.run());
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "delegate this").await,
+        StatusCode::ACCEPTED
+    );
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+
+    let runs = store.list_agent_runs(chat.id).await.unwrap();
+    let child = runs
+        .iter()
+        .find(|run| run.parent_id.is_some())
+        .expect("foreground delegation should durably create one child");
+    assert_eq!(child.status, AgentRunStatus::Completed);
+    let parent = openwave_core::AgentRunId::foreground_for_chat(chat.id);
+    let inbox = store.list_agent_run_inbox(parent).await.unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].child_run_id, child.id);
+    assert_eq!(inbox[0].result.text, "child result");
+    assert_eq!(inbox[0].status, AgentRunInboxStatus::Consumed);
+    assert_eq!(inbox[0].claim_count, 1);
+    assert!(inbox[0].consumed_lease_token.is_some());
+
+    let turn = store.list_turn_runs(chat.id).await.unwrap().pop().unwrap();
+    assert_eq!(turn.status, TurnRunStatus::Completed);
+    assert_eq!(
+        turn.claim_count, 2,
+        "the resumed turn requires a fresh lease"
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0]
+        .tools
+        .iter()
+        .any(|tool| tool.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL));
+    assert!(
+        requests[1].tools.is_empty(),
+        "sandbox receives no tool surface"
+    );
+    assert!(requests[2]
+        .tools
+        .iter()
+        .any(|tool| tool.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn worker_drains_a_turn_queued_before_startup() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
@@ -6658,6 +6808,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         state.events.clone(),
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
+        state.agent_run_wake.clone(),
         state.agent_config.clone(),
         None,
         turn_worker::TurnWorkerConfig {
@@ -6752,6 +6903,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         state.events.clone(),
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
+        state.agent_run_wake.clone(),
         state.agent_config.clone(),
         None,
         turn_worker::TurnWorkerConfig {

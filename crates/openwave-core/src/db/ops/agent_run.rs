@@ -1,7 +1,7 @@
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseBackend, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, Statement, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
 };
 
 use crate::error::{AgentError, Result};
@@ -1274,6 +1274,48 @@ pub(in crate::db) async fn list_agent_run_inbox(
         .filter(entities::agent_run_inbox::Column::ParentRunId.eq(parent_run_id.0))
         .order_by_asc(entities::agent_run_inbox::Column::DeliveredAt)
         .order_by_asc(entities::agent_run_inbox::Column::ChildRunId)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    let mut inbox = Vec::with_capacity(entries.len());
+    for entry in entries {
+        inbox.push(load_agent_run_inbox_entry_on(&store.conn, entry).await?);
+    }
+    Ok(inbox)
+}
+
+/// Find deliveries that need a foreground continuation attempt.
+///
+/// Selection is deliberately only a bounded recovery hint. The exact claim
+/// below serializes ownership against every other worker and rechecks the
+/// parent checkpoint with the database clock.
+pub(in crate::db) async fn list_agent_run_inbox_candidates(
+    store: &DbStore,
+    limit: u64,
+) -> Result<Vec<AgentRunInboxEntry>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let now = database_now(&store.conn).await?;
+    let entries = entities::agent_run_inbox::Entity::find()
+        .filter(
+            Condition::any()
+                .add(
+                    entities::agent_run_inbox::Column::Status
+                        .eq(AgentRunInboxStatus::Pending.as_str()),
+                )
+                .add(
+                    Condition::all()
+                        .add(
+                            entities::agent_run_inbox::Column::Status
+                                .eq(AgentRunInboxStatus::Claimed.as_str()),
+                        )
+                        .add(entities::agent_run_inbox::Column::LeaseExpiresAt.lte(now)),
+                ),
+        )
+        .order_by_asc(entities::agent_run_inbox::Column::DeliveredAt)
+        .order_by_asc(entities::agent_run_inbox::Column::ChildRunId)
+        .limit(limit)
         .all(&store.conn)
         .await
         .map_err(store_err)?;
