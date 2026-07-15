@@ -47,6 +47,11 @@ impl HostAccess {
             .map_err(|_| "host access store was initialized more than once".to_owned())
     }
 
+    /// Stable private identity shared by native receipts and server recovery.
+    pub(crate) const fn client_executor_id(&self) -> Uuid {
+        self.receipts.executor_id()
+    }
+
     pub(crate) fn initialize_control_plane(
         &self,
         base_url: String,

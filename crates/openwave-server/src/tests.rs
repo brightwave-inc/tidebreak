@@ -9,12 +9,13 @@ use axum::http::{header, Request, StatusCode};
 use futures::stream::{self, BoxStream, StreamExt};
 // Tests use the in-memory store; production wires LanceDB in `bind`.
 use openwave_core::{
-    AgentErrorInfo, AgentEvent, ApprovalClass, BlobStore, CallId, Chat, ChatId, ChatRequest,
-    ChatRootAttachment, ClientToolCallRequest, HostRootId, Message, ModelProvider,
-    ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent, ProviderId,
-    RootAttachmentOrigin, SecretProvider, SequencedEvent, StopReason, Tool, ToolCallExecution,
-    ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput, ToolSpec,
-    TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
+    AgentErrorInfo, AgentEvent, ApprovalClass, BeginRootAttachmentChange, BlobStore, CallId, Chat,
+    ChatId, ChatRequest, ChatRootAttachment, ClientToolCallRequest, HostRootId, Message,
+    ModelProvider, ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent, ProviderId,
+    RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentOrigin, SecretProvider,
+    SequencedEvent, StopReason, Tool, ToolCallExecution, ToolCallRecord, ToolCallResolution,
+    ToolCallStatus, ToolCtx, ToolOutput, ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus,
+    TurnSteerId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -23,6 +24,8 @@ use resolver::ProviderResolver;
 use serde::de::DeserializeOwned;
 use tokio::sync::Notify;
 use tower::ServiceExt;
+
+mod root_attachment;
 
 /// A provider that answers with a one-line completion and no tool calls.
 struct FakeProvider;
@@ -2442,6 +2445,28 @@ async fn post_json(
                 .method("POST")
                 .uri(uri)
                 .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// POST a JSON body through the native-only client-executor boundary.
+async fn post_native_json(
+    router: &Router,
+    bearer: &str,
+    uri: &str,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::AUTHORIZATION, bearer)
                 .header(
                     crate::auth::CLIENT_EXECUTOR_HEADER,
                     crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
@@ -2625,7 +2650,7 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         .unwrap();
     assert_eq!(renderer_only.status(), StatusCode::UNAUTHORIZED);
 
-    let first = post_json(&router, &bearer, &claim_uri, claim_body.clone()).await;
+    let first = post_native_json(&router, &bearer, &claim_uri, claim_body.clone()).await;
     assert_eq!(first.status(), StatusCode::OK);
     let first: serde_json::Value = json_body(first).await;
     assert_eq!(first["disposition"], "claimed");
@@ -2634,13 +2659,13 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
 
     // A lost response can be retried with the stable secret token even though
     // the server calculates a fresh proposed expiry for the second request.
-    let retry = post_json(&router, &bearer, &claim_uri, claim_body).await;
+    let retry = post_native_json(&router, &bearer, &claim_uri, claim_body).await;
     assert_eq!(retry.status(), StatusCode::OK);
     let retry: serde_json::Value = json_body(retry).await;
     assert_eq!(retry["disposition"], "existing");
     assert_eq!(retry["lease_token"], lease_token.to_string());
 
-    let stolen = post_json(
+    let stolen = post_native_json(
         &router,
         &bearer,
         &claim_uri,
@@ -2669,7 +2694,7 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         "authoritative polling must never disclose the secret lease token"
     );
 
-    let wrong_chat_heartbeat = post_json(
+    let wrong_chat_heartbeat = post_native_json(
         &router,
         &bearer,
         &format!(
@@ -2682,7 +2707,7 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
     assert_eq!(wrong_chat_heartbeat.status(), StatusCode::CONFLICT);
 
     tokio::time::sleep(Duration::from_millis(2)).await;
-    let heartbeat = post_json(
+    let heartbeat = post_native_json(
         &router,
         &bearer,
         &format!("/chats/{}/client-executions/{}/heartbeat", chat.id, call.id),
@@ -2698,7 +2723,7 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         "lease_token": lease_token,
         "resolution": {"status": "completed", "result": "folder connected"},
     });
-    let wrong_chat_resolve = post_json(
+    let wrong_chat_resolve = post_native_json(
         &router,
         &bearer,
         &format!(
@@ -2709,7 +2734,7 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
     )
     .await;
     assert_eq!(wrong_chat_resolve.status(), StatusCode::CONFLICT);
-    let wrong_token = post_json(
+    let wrong_token = post_native_json(
         &router,
         &bearer,
         &resolve_uri,
@@ -2721,7 +2746,7 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
     .await;
     assert_eq!(wrong_token.status(), StatusCode::CONFLICT);
 
-    let resolved = post_json(&router, &bearer, &resolve_uri, resolution.clone()).await;
+    let resolved = post_native_json(&router, &bearer, &resolve_uri, resolution.clone()).await;
     assert_eq!(resolved.status(), StatusCode::OK);
     let resolved: serde_json::Value = json_body(resolved).await;
     assert_eq!(resolved["disposition"], "resolved");
@@ -2729,12 +2754,12 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
     // Resolution time is server-owned metadata, not part of the stable command
     // identity, so an ambiguous retry converges on token + terminal payload.
     tokio::time::sleep(Duration::from_millis(2)).await;
-    let retry = post_json(&router, &bearer, &resolve_uri, resolution).await;
+    let retry = post_native_json(&router, &bearer, &resolve_uri, resolution).await;
     assert_eq!(retry.status(), StatusCode::OK);
     let retry: serde_json::Value = json_body(retry).await;
     assert_eq!(retry["disposition"], "existing");
 
-    let conflicting = post_json(
+    let conflicting = post_native_json(
         &router,
         &bearer,
         &resolve_uri,
@@ -2803,7 +2828,7 @@ async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
         )
         .await
         .unwrap();
-    let resume_response = post_json(
+    let resume_response = post_native_json(
         &router,
         &bearer,
         &format!(
@@ -2872,7 +2897,7 @@ async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
         "lease_token": cancel_token,
         "resolution": {"status": "cancelled", "result": "cancelled by user"},
     });
-    let cancelled = post_json(&router, &bearer, &resolve_uri, body.clone()).await;
+    let cancelled = post_native_json(&router, &bearer, &resolve_uri, body.clone()).await;
     assert_eq!(cancelled.status(), StatusCode::OK);
     let first_live = tokio::time::timeout(Duration::from_secs(1), live.recv())
         .await
@@ -2880,7 +2905,7 @@ async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
         .unwrap();
     assert!(matches!(first_live.event, AgentEvent::TurnCancelled { .. }));
 
-    let retry = post_json(&router, &bearer, &resolve_uri, body).await;
+    let retry = post_native_json(&router, &bearer, &resolve_uri, body).await;
     assert_eq!(retry.status(), StatusCode::OK);
     let retry: serde_json::Value = json_body(retry).await;
     assert_eq!(retry["disposition"], "existing");
@@ -3272,7 +3297,7 @@ async fn client_execution_api_reconciles_a_known_result_after_exact_lease_expiry
     ));
     tokio::time::sleep(Duration::from_millis(5)).await;
 
-    let resolved = post_json(
+    let resolved = post_native_json(
         &router,
         &bearer,
         &format!("/chats/{}/client-executions/{}/resolve", chat.id, call.id),
@@ -3328,7 +3353,7 @@ async fn client_execution_api_validates_scope_identity_and_terminal_payloads() {
     };
     store.accept_tool_call(&call).await.unwrap();
     let claim_uri = format!("/chats/{}/client-executions/{}/claim", chat.id, call.id);
-    let nil = post_json(
+    let nil = post_native_json(
         &router,
         &bearer,
         &claim_uri,
@@ -3341,7 +3366,7 @@ async fn client_execution_api_validates_scope_identity_and_terminal_payloads() {
     assert_eq!(nil.status(), StatusCode::BAD_REQUEST);
 
     let lease_token = uuid::Uuid::new_v4();
-    let claimed = post_json(
+    let claimed = post_native_json(
         &router,
         &bearer,
         &claim_uri,
@@ -3353,7 +3378,7 @@ async fn client_execution_api_validates_scope_identity_and_terminal_payloads() {
     .await;
     assert_eq!(claimed.status(), StatusCode::OK);
 
-    let oversized = post_json(
+    let oversized = post_native_json(
         &router,
         &bearer,
         &format!("/chats/{}/client-executions/{}/resolve", chat.id, call.id),

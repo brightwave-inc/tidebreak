@@ -1507,11 +1507,10 @@ impl Store for MemStore {
                 FinishRootAttachmentChangeOutcome::AlreadyTerminal(existing)
             });
         }
-        if finished_at < existing.created_at {
-            return Err(AgentError::Store(
-                "root attachment change finish time precedes creation".into(),
-            ));
-        }
+        // Match the database contract: caller creation time is immutable
+        // identity, while server-owned finish time is clamped under the lock so
+        // clock skew cannot leave the chat permanently busy.
+        let finished_at = finished_at.max(existing.created_at);
         let desired_attached = existing.action == RootAttachmentChangeAction::Attach;
         let broker_state_contradicts_terminal = match terminal {
             RootAttachmentChangeTerminal::Completed {

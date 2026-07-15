@@ -271,7 +271,7 @@ fn mem_root_attachment_attach_projects_intent_and_rolls_back_failure() {
             retryable: false,
         },
     };
-    let finished_at = now + chrono::Duration::seconds(1);
+    let finished_at = now - chrono::Duration::seconds(1);
     assert_eq!(
         block_on(store.finish_root_attachment_change(
             request.id,
@@ -306,6 +306,7 @@ fn mem_root_attachment_attach_projects_intent_and_rolls_back_failure() {
         outcome => panic!("unexpected finish outcome: {outcome:?}"),
     };
     assert_eq!(failed.phase, RootAttachmentChangePhase::Failed);
+    assert_eq!(failed.finished_at, Some(now));
     assert_eq!(failed.result_revision, Some(2));
     assert_eq!(failed.projection_changed, Some(false));
     let rolled_back = block_on(store.get_chat(chat.id)).unwrap().unwrap();

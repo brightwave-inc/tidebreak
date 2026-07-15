@@ -178,7 +178,7 @@ impl ReceiptStore {
         Ok(store)
     }
 
-    pub(super) const fn executor_id(&self) -> Uuid {
+    pub(crate) const fn executor_id(&self) -> Uuid {
         self.executor_id
     }
 

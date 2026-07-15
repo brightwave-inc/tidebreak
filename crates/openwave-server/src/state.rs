@@ -57,6 +57,10 @@ pub struct AppState {
     pub token: Arc<str>,
     /// A second per-launch secret required for client-execution mutations.
     pub(crate) client_executor_token: Arc<str>,
+    /// Stable private identity owning native attachment reconciliation work.
+    pub(crate) client_executor_id: Uuid,
+    /// Whether this embedding supplied a restart-stable attachment executor.
+    pub(crate) root_attachment_routes_enabled: bool,
     /// Process-local cancel/steer handles for exact durably claimed attempts.
     pub active_turns: Arc<TurnGuard>,
     /// Live fan-out of turn events to connected WebSocket clients.
@@ -77,9 +81,40 @@ impl AppState {
         retrieval: Arc<Retriever>,
         agent_config: AgentConfig,
     ) -> Self {
+        let mut state = Self::new_with_client_executor_id(
+            config,
+            store,
+            resolver,
+            secrets,
+            tools,
+            retrieval,
+            agent_config,
+            Uuid::new_v4(),
+        )
+        .expect("a generated client executor id is non-nil");
+        state.root_attachment_routes_enabled = false;
+        state
+    }
+
+    /// Assemble state with a stable native executor identity supplied by an
+    /// app-private embedding boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_client_executor_id(
+        config: Config,
+        store: Arc<dyn Store>,
+        resolver: Arc<dyn ProviderResolver>,
+        secrets: Arc<dyn SecretProvider>,
+        tools: Arc<ToolRegistry>,
+        retrieval: Arc<Retriever>,
+        agent_config: AgentConfig,
+        client_executor_id: Uuid,
+    ) -> Result<Self> {
+        if client_executor_id.is_nil() {
+            return Err(AgentError::config("client executor id must not be nil"));
+        }
         let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
         let blob_writes = Arc::new(BlobWriteGuard::new(config.data_dir.join("blob-locks")));
-        Self {
+        Ok(Self {
             config: Arc::new(config),
             store,
             blobs,
@@ -95,10 +130,12 @@ impl AppState {
             agent_config,
             token: Uuid::new_v4().to_string().into(),
             client_executor_token: mint_client_executor_token(),
+            client_executor_id,
+            root_attachment_routes_enabled: true,
             active_turns: Arc::new(TurnGuard::default()),
             events: Arc::new(EventBus::default()),
             approvals: Arc::new(ApprovalBroker::new()),
-        }
+        })
     }
 }
 

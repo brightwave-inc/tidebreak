@@ -26,8 +26,10 @@ use crate::state::AppState;
 
 mod client_execution;
 mod document;
+mod root_attachment;
 pub use client_execution::*;
 pub use document::*;
+pub use root_attachment::*;
 
 /// The store-settings key for the selected model.
 const MODEL_SETTING: &str = "model";

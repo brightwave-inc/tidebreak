@@ -42,9 +42,46 @@ revision. Project defaults are snapshotted into a new chat's exact attachment
 set; later project changes cannot silently widen that chat. These product rows
 are not grants: they contain no path, capability, consent, or display name, and
 host access still requires the broker's live attachment and authorization. The
-product store now has a durable attachment-change state machine, but the current
-native picker still updates broker state only. Native reconciliation and routes
-are the next slice, before any tool treats the projection as usable context.
+product store now has a durable attachment-change state machine and a
+native-only HTTP boundary for driving it, but the current picker still updates
+broker state directly. A native reconciler is the next slice, before any tool
+treats the projection as usable context.
+
+### Native attachment-change boundary
+
+The local control plane exposes three attachment-change routes to trusted native
+code:
+
+- `POST /chats/{chat_id}/root-attachment-changes/{change_id}/begin` records an
+  exact attach or detach intent against the caller's observed projection
+  revision.
+- `GET /root-attachment-changes/pending?limit=64` recovers awaiting work for
+  this desktop's stable private executor identity, oldest first.
+- `POST /root-attachment-changes/{change_id}/finish` records the broker's exact
+  terminal observation and commits the corresponding projection transition.
+
+These routes require both the ordinary bearer credential and the native
+client-executor credential. The server supplies the stable executor identity;
+it is never accepted from a body, returned in a response, included in server
+discovery, or exposed to the renderer. Begin and finish retries return stable
+`begun`/`existing` and `finished`/`existing` dispositions. A missing change and
+a change owned by another executor are both reported as not found, while busy
+and revision conflicts do not identify the pending operation.
+
+Conflict responses carry stable machine-readable `kind` values so the native
+reconciler never branches on prose: `root_attachment_identity_conflict`,
+`root_attachment_revision_conflict`, `root_attachment_capacity_exceeded`,
+`root_attachment_revision_exhausted`, `root_attachment_chat_busy`,
+`root_attachment_already_terminal`, or
+`root_attachment_broker_state_mismatch`. The generic server embedding does not
+mount these routes because it has no restart-stable native executor identity;
+the desktop supplies its private persisted identity before binding the server.
+Finish timestamps are clamped to immutable creation time under the store lock,
+so clock skew cannot strand a conversation's single pending operation.
+
+This boundary deliberately does not call the broker. Dispatch, unknown-receipt
+recovery, and retry policy belong to the forthcoming desktop reconciler, which
+will use these routes around the broker's idempotent attach/detach operations.
 
 ## The four layers
 
