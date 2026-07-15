@@ -1,0 +1,31 @@
+[package]
+name = "openwave-web-search"
+description = "OpenWave web search: bounded provider-neutral contracts and direct HTTP adapters."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# A small reqwest implementation of the HTTP seam. It is opt-in so consumers
+# that only need the contract do not pull a network client into their process.
+http = ["dep:reqwest", "dep:futures"]
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+openwave-core = { path = "../openwave-core", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+url = "2"
+reqwest = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "time"] }

@@ -12,9 +12,9 @@ libraries.
                                └────── openwave-server
                                             │
       libraries          openwave-mcp   openwave-retrieval   openwave-router
-                         openwave-host-broker                    │
-                               │             │                   │
-                               └─────────────┴───────────────────┘
+                         openwave-web-search   openwave-host-broker │
+                               │             │              │      │
+                               └─────────────┴──────────────┴──────┘
                                             │
       the seam                         openwave-core
 
@@ -112,6 +112,23 @@ lexical+dense search, reranking, and grounded citations behind a `VectorStore`
 seam with in-memory and durable embedded LanceDB backends. Durable source
 revisions and Parse→Index jobs are coordinated by `openwave-core` and
 `openwave-server`.
+
+**Depends on:** `openwave-core`.
+
+## `openwave-web-search` — provider-neutral web search 🟢
+
+The bounded request/result contract and direct HTTP adapters for Exa and
+Tavily. It is intentionally separate from both the model loop and the tool
+registry: loading a credential or constructing an adapter performs no egress,
+and calling search requires an explicit host-owned HTTP client. API keys are
+resolved only through `SecretProvider` under fixed provider keys, never from a
+model argument or persisted tool-call payload. The optional `http` feature
+provides a timeout- and response-size-bounded `reqwest` client; hosts may supply
+their own proxy, allow-list, audit, or test client through the same seam.
+
+No model-facing `web_search` tool is registered yet. The follow-on slice must
+wire provider selection and outbound-network policy at the sandbox/foreground
+execution boundary.
 
 **Depends on:** `openwave-core`.
 
