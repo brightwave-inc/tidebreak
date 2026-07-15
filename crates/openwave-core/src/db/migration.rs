@@ -1243,10 +1243,291 @@ impl MigrationTrait for AddProjects {
                     .to_owned(),
             )
             .await?;
+
+        let projection_metadata_present = Expr::col(RootAttachmentChange::ProjectionExistedBefore)
+            .eq(true)
+            .or(Expr::col(RootAttachmentChange::Action).eq("attach"));
+        let projection_metadata_absent = Expr::col(RootAttachmentChange::ProjectionExistedBefore)
+            .eq(false)
+            .and(Expr::col(RootAttachmentChange::Action).eq("detach"));
+        let awaiting_broker = Expr::col(RootAttachmentChange::Phase)
+            .eq("awaiting_broker")
+            .and(Expr::col(RootAttachmentChange::ResultRevision).is_null())
+            .and(Expr::col(RootAttachmentChange::ProjectionChanged).is_null())
+            .and(Expr::col(RootAttachmentChange::BrokerChanged).is_null())
+            .and(Expr::col(RootAttachmentChange::BrokerCurrentlyAttached).is_null())
+            .and(Expr::col(RootAttachmentChange::FailureCode).is_null())
+            .and(Expr::col(RootAttachmentChange::FailureMessage).is_null())
+            .and(Expr::col(RootAttachmentChange::FailureRetryable).is_null())
+            .and(Expr::col(RootAttachmentChange::FinishedAt).is_null());
+        let completed = Expr::col(RootAttachmentChange::Phase)
+            .eq("completed")
+            .and(Expr::col(RootAttachmentChange::ResultRevision).is_not_null())
+            .and(Expr::col(RootAttachmentChange::ProjectionChanged).is_not_null())
+            .and(Expr::col(RootAttachmentChange::BrokerChanged).is_not_null())
+            .and(Expr::col(RootAttachmentChange::BrokerCurrentlyAttached).is_not_null())
+            .and(Expr::col(RootAttachmentChange::FailureCode).is_null())
+            .and(Expr::col(RootAttachmentChange::FailureMessage).is_null())
+            .and(Expr::col(RootAttachmentChange::FailureRetryable).is_null())
+            .and(Expr::col(RootAttachmentChange::FinishedAt).is_not_null());
+        let failed = Expr::col(RootAttachmentChange::Phase)
+            .eq("failed")
+            .and(Expr::col(RootAttachmentChange::ResultRevision).is_not_null())
+            .and(Expr::col(RootAttachmentChange::ProjectionChanged).is_not_null())
+            .and(Expr::col(RootAttachmentChange::FailureCode).is_not_null())
+            .and(Expr::col(RootAttachmentChange::FailureMessage).is_not_null())
+            .and(Expr::col(RootAttachmentChange::FailureRetryable).is_not_null())
+            .and(Expr::col(RootAttachmentChange::FinishedAt).is_not_null());
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(RootAttachmentChange::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::ChatId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::SubjectKind)
+                            .string_len(24)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::SubjectId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::ExecutorId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::RootId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::Action)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(RootAttachmentChange::Origin).string_len(24))
+                    .col(ColumnDef::new(RootAttachmentChange::ProjectionPosition).integer())
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::ProjectionExistedBefore)
+                            .boolean()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::ExpectedRevision)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::BeforeRevision)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::IntentRevision)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::Phase)
+                            .string_len(24)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(RootAttachmentChange::ResultRevision).big_integer())
+                    .col(ColumnDef::new(RootAttachmentChange::ProjectionChanged).boolean())
+                    .col(ColumnDef::new(RootAttachmentChange::BrokerChanged).boolean())
+                    .col(ColumnDef::new(RootAttachmentChange::BrokerCurrentlyAttached).boolean())
+                    .col(ColumnDef::new(RootAttachmentChange::FailureCode).string_len(64))
+                    .col(ColumnDef::new(RootAttachmentChange::FailureMessage).string_len(256))
+                    .col(ColumnDef::new(RootAttachmentChange::FailureRetryable).boolean())
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(RootAttachmentChange::FinishedAt).timestamp_with_time_zone(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_root_attachment_change_chat")
+                            .from(RootAttachmentChange::Table, RootAttachmentChange::ChatId)
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(Expr::col(RootAttachmentChange::Id).ne(uuid::Uuid::nil()))
+                    .check(Expr::col(RootAttachmentChange::ChatId).ne(uuid::Uuid::nil()))
+                    .check(Expr::col(RootAttachmentChange::SubjectId).ne(uuid::Uuid::nil()))
+                    .check(Expr::col(RootAttachmentChange::ExecutorId).ne(uuid::Uuid::nil()))
+                    .check(Expr::col(RootAttachmentChange::RootId).ne(uuid::Uuid::nil()))
+                    .check(
+                        Expr::col(RootAttachmentChange::SubjectKind)
+                            .is_in(["project", "conversation"]),
+                    )
+                    .check(Expr::col(RootAttachmentChange::Action).is_in(["attach", "detach"]))
+                    .check(
+                        Expr::col(RootAttachmentChange::Origin)
+                            .is_null()
+                            .or(Expr::col(RootAttachmentChange::Origin)
+                                .is_in(["project_default", "conversation"])),
+                    )
+                    .check(
+                        projection_metadata_present
+                            .and(Expr::col(RootAttachmentChange::Origin).is_not_null())
+                            .and(Expr::col(RootAttachmentChange::ProjectionPosition).is_not_null())
+                            .or(projection_metadata_absent
+                                .and(Expr::col(RootAttachmentChange::Origin).is_null())
+                                .and(
+                                    Expr::col(RootAttachmentChange::ProjectionPosition).is_null(),
+                                )),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::ProjectionPosition)
+                            .is_null()
+                            .or(Expr::col(RootAttachmentChange::ProjectionPosition)
+                                .between(0, crate::model::MAX_ROOT_ATTACHMENTS as i32 - 1)),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::Action)
+                            .ne("attach")
+                            .or(Expr::col(RootAttachmentChange::ProjectionExistedBefore).eq(true))
+                            .or(Expr::col(RootAttachmentChange::Origin).eq("conversation")),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::ExpectedRevision)
+                            .between(0, crate::model::MAX_ATTACHMENT_REVISION),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::BeforeRevision)
+                            .between(0, crate::model::MAX_ATTACHMENT_REVISION),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::IntentRevision)
+                            .between(0, crate::model::MAX_ATTACHMENT_REVISION),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::ResultRevision)
+                            .is_null()
+                            .or(Expr::col(RootAttachmentChange::ResultRevision)
+                                .between(0, crate::model::MAX_ATTACHMENT_REVISION)),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::ExpectedRevision)
+                            .equals(RootAttachmentChange::BeforeRevision),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::IntentRevision)
+                            .equals(RootAttachmentChange::BeforeRevision)
+                            .or(Expr::col(RootAttachmentChange::IntentRevision)
+                                .eq(Expr::col(RootAttachmentChange::BeforeRevision).add(1))),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::Action)
+                            .ne("attach")
+                            .or(Expr::col(RootAttachmentChange::ProjectionExistedBefore).eq(true))
+                            .or(Expr::col(RootAttachmentChange::IntentRevision)
+                                .eq(Expr::col(RootAttachmentChange::BeforeRevision).add(1))),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::Action)
+                            .eq("attach")
+                            .and(Expr::col(RootAttachmentChange::ProjectionExistedBefore).eq(false))
+                            .or(Expr::col(RootAttachmentChange::IntentRevision)
+                                .equals(RootAttachmentChange::BeforeRevision)),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::Action)
+                            .ne("attach")
+                            .or(Expr::col(RootAttachmentChange::ProjectionExistedBefore).eq(true))
+                            .or(Expr::col(RootAttachmentChange::BeforeRevision)
+                                .lte(crate::model::MAX_ATTACHMENT_REVISION - 2)),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::Action)
+                            .ne("detach")
+                            .or(Expr::col(RootAttachmentChange::ProjectionExistedBefore).eq(false))
+                            .or(Expr::col(RootAttachmentChange::BeforeRevision)
+                                .lte(crate::model::MAX_ATTACHMENT_REVISION - 1)),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::FailureCode).is_null().or(
+                            Func::char_length(Expr::col(RootAttachmentChange::FailureCode))
+                                .between(1, 64),
+                        ),
+                    )
+                    .check(
+                        Expr::col(RootAttachmentChange::FailureMessage)
+                            .is_null()
+                            .or(
+                                Func::char_length(Expr::col(RootAttachmentChange::FailureMessage))
+                                    .between(1, 256),
+                            ),
+                    )
+                    .check(awaiting_broker.or(completed).or(failed))
+                    .check(
+                        Expr::col(RootAttachmentChange::FinishedAt)
+                            .is_null()
+                            .or(Expr::col(RootAttachmentChange::FinishedAt)
+                                .gte(Expr::col(RootAttachmentChange::CreatedAt))),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_root_attachment_change_one_awaiting")
+                    .table(RootAttachmentChange::Table)
+                    .col(RootAttachmentChange::ChatId)
+                    .unique()
+                    .and_where(Expr::col(RootAttachmentChange::Phase).eq("awaiting_broker"))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_root_attachment_change_pending_scan")
+                    .table(RootAttachmentChange::Table)
+                    .col(RootAttachmentChange::ExecutorId)
+                    .col(RootAttachmentChange::Phase)
+                    .col(RootAttachmentChange::CreatedAt)
+                    .col(RootAttachmentChange::Id)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_root_attachment_change_history")
+                    .table(RootAttachmentChange::Table)
+                    .col(RootAttachmentChange::ChatId)
+                    .col(RootAttachmentChange::CreatedAt)
+                    .col(RootAttachmentChange::Id)
+                    .to_owned(),
+            )
+            .await?;
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(RootAttachmentChange::Table).to_owned())
+            .await?;
         manager
             .drop_table(Table::drop().table(ChatRootAttachment::Table).to_owned())
             .await?;
@@ -2426,6 +2707,34 @@ enum ChatRootAttachment {
     RootId,
     Position,
     Origin,
+}
+
+#[derive(DeriveIden)]
+enum RootAttachmentChange {
+    Table,
+    Id,
+    ChatId,
+    SubjectKind,
+    SubjectId,
+    ExecutorId,
+    RootId,
+    Action,
+    Origin,
+    ProjectionPosition,
+    ProjectionExistedBefore,
+    ExpectedRevision,
+    BeforeRevision,
+    IntentRevision,
+    Phase,
+    ResultRevision,
+    ProjectionChanged,
+    BrokerChanged,
+    BrokerCurrentlyAttached,
+    FailureCode,
+    FailureMessage,
+    FailureRetryable,
+    CreatedAt,
+    FinishedAt,
 }
 
 #[derive(DeriveIden)]

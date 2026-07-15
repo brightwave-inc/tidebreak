@@ -8,7 +8,9 @@ use super::*;
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project,
     validate_project_root_projection, ChatRootAttachment, DocumentJobKind, DocumentJobStatus,
-    DocumentProcessingStatus, RootAttachmentOrigin, ToolCallExecution, ToolCallStatus,
+    DocumentProcessingStatus, RootAttachmentChangeAction, RootAttachmentChangeFailure,
+    RootAttachmentChangePhase, RootAttachmentOrigin, RootAttachmentSubjectKind, ToolCallExecution,
+    ToolCallStatus, MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
 };
 
 /// Minimal in-memory `Store` — proves the trait is object-safe and usable
@@ -27,6 +29,7 @@ struct MemStore {
     projects: Mutex<HashMap<ProjectId, Project>>,
     document_state: Mutex<MemDocumentState>,
     chats: Mutex<HashMap<ChatId, Chat>>,
+    root_attachment_changes: Mutex<HashMap<RootAttachmentChangeId, RootAttachmentChange>>,
     settings: Mutex<HashMap<String, Value>>,
     events: Mutex<Vec<(ChatId, SequencedEvent)>>,
     tool_calls: Mutex<HashMap<crate::id::CallId, ToolCallRecord>>,
@@ -147,6 +150,82 @@ fn reset_mem_document_job(
     job.last_error_code = None;
     job.last_error_detail = None;
     job.updated_at = now;
+}
+
+fn root_attachment_terminal_matches(
+    change: &RootAttachmentChange,
+    terminal: &RootAttachmentChangeTerminal,
+) -> bool {
+    match terminal {
+        RootAttachmentChangeTerminal::Completed {
+            broker_changed,
+            broker_currently_attached,
+        } => {
+            change.phase == RootAttachmentChangePhase::Completed
+                && change.broker_changed == Some(*broker_changed)
+                && change.broker_currently_attached == Some(*broker_currently_attached)
+                && change.failure.is_none()
+        }
+        RootAttachmentChangeTerminal::Failed {
+            broker_changed,
+            broker_currently_attached,
+            failure,
+        } => {
+            change.phase == RootAttachmentChangePhase::Failed
+                && change.broker_changed == *broker_changed
+                && change.broker_currently_attached == *broker_currently_attached
+                && change.failure.as_ref() == Some(failure)
+        }
+    }
+}
+
+fn canonical_root_attachment_timestamp(
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::from_timestamp_micros(timestamp.timestamp_micros())
+        .ok_or_else(|| AgentError::Store("timestamp is outside the database range".into()))
+}
+
+fn remove_exact_attachment(chat: &mut Chat, change: &RootAttachmentChange) -> Result<()> {
+    let position = change
+        .projection_position
+        .ok_or_else(|| AgentError::Store("root attachment change is missing its position".into()))?
+        as usize;
+    if chat
+        .root_attachments
+        .get(position)
+        .is_none_or(|attachment| attachment.root_id != change.root_id)
+    {
+        return Err(AgentError::Store(
+            "root attachment change projection no longer matches its intent".into(),
+        ));
+    }
+    chat.root_attachments.remove(position);
+    Ok(())
+}
+
+fn validate_mem_pending_attachment(chat: &Chat, change: &RootAttachmentChange) -> Result<()> {
+    let found = chat
+        .root_attachments
+        .iter()
+        .position(|attachment| attachment.root_id == change.root_id);
+    let expected_present =
+        change.projection_existed_before || change.action == RootAttachmentChangeAction::Attach;
+    if found.is_some() != expected_present {
+        return Err(AgentError::Store(
+            "root attachment change pending projection is inconsistent".into(),
+        ));
+    }
+    if let Some(position) = found {
+        if change.projection_position.map(|position| position as usize) != Some(position)
+            || change.origin != Some(chat.root_attachments[position].origin)
+        {
+            return Err(AgentError::Store(
+                "root attachment change pending projection metadata changed".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -1262,6 +1341,289 @@ impl Store for MemStore {
         }
         Ok(())
     }
+    async fn begin_root_attachment_change(
+        &self,
+        request: &BeginRootAttachmentChange,
+    ) -> Result<BeginRootAttachmentChangeOutcome> {
+        request
+            .validate()
+            .map_err(|message| AgentError::Store(message.into()))?;
+        let created_at = canonical_root_attachment_timestamp(request.created_at)?;
+
+        let mut chats = self.chats.lock().unwrap();
+        let mut changes = self.root_attachment_changes.lock().unwrap();
+        if let Some(existing) = changes.get(&request.id) {
+            let exact = existing.chat_id == request.chat_id
+                && existing.executor_id == request.executor_id
+                && existing.root_id == request.root_id
+                && existing.action == request.action
+                && existing.expected_revision == request.expected_attachment_revision
+                && existing.created_at == created_at;
+            return Ok(if exact {
+                BeginRootAttachmentChangeOutcome::Existing(existing.clone())
+            } else {
+                BeginRootAttachmentChangeOutcome::IdentityConflict
+            });
+        }
+
+        let Some(chat) = chats.get_mut(&request.chat_id) else {
+            return Ok(BeginRootAttachmentChangeOutcome::ChatNotFound);
+        };
+        if changes.values().any(|change| {
+            change.chat_id == request.chat_id
+                && change.phase == RootAttachmentChangePhase::AwaitingBroker
+        }) {
+            return Ok(BeginRootAttachmentChangeOutcome::ChatBusy);
+        }
+        if chat.attachment_revision != request.expected_attachment_revision {
+            return Ok(BeginRootAttachmentChangeOutcome::RevisionConflict {
+                current_attachment_revision: chat.attachment_revision,
+            });
+        }
+
+        let before_revision = chat.attachment_revision;
+        let existing_position = chat
+            .root_attachments
+            .iter()
+            .position(|attachment| attachment.root_id == request.root_id);
+        let projection_existed_before = existing_position.is_some();
+        let (origin, projection_position) = if let Some(position) = existing_position {
+            (
+                Some(chat.root_attachments[position].origin),
+                Some(u32::try_from(position).expect("bounded attachment position")),
+            )
+        } else if request.action == RootAttachmentChangeAction::Attach {
+            if chat.root_attachments.len() == MAX_ROOT_ATTACHMENTS {
+                return Ok(BeginRootAttachmentChangeOutcome::CapacityExceeded);
+            }
+            (
+                Some(RootAttachmentOrigin::Conversation),
+                Some(
+                    u32::try_from(chat.root_attachments.len())
+                        .expect("bounded attachment position"),
+                ),
+            )
+        } else {
+            (None, None)
+        };
+
+        let revisions_required = match (request.action, projection_existed_before) {
+            // Reserve both the intent revision and a possible failure rollback.
+            (RootAttachmentChangeAction::Attach, false) => 2,
+            // Successful detach removes the projection only after broker success.
+            (RootAttachmentChangeAction::Detach, true) => 1,
+            _ => 0,
+        };
+        if before_revision > MAX_ATTACHMENT_REVISION - revisions_required {
+            return Ok(BeginRootAttachmentChangeOutcome::RevisionExhausted);
+        }
+
+        let (subject_kind, subject_id) = match chat.project_id {
+            Some(project_id) if project_id.as_uuid().is_nil() => {
+                return Err(AgentError::Store(format!(
+                    "chat {} has a nil root attachment project subject",
+                    request.chat_id
+                )));
+            }
+            Some(project_id) => (RootAttachmentSubjectKind::Project, *project_id.as_uuid()),
+            None => (
+                RootAttachmentSubjectKind::Conversation,
+                *request.chat_id.as_uuid(),
+            ),
+        };
+        let intent_revision =
+            if request.action == RootAttachmentChangeAction::Attach && !projection_existed_before {
+                chat.root_attachments.push(ChatRootAttachment {
+                    root_id: request.root_id,
+                    origin: RootAttachmentOrigin::Conversation,
+                });
+                chat.attachment_revision += 1;
+                chat.attachment_revision
+            } else {
+                before_revision
+            };
+        let change = RootAttachmentChange {
+            id: request.id,
+            chat_id: request.chat_id,
+            executor_id: request.executor_id,
+            root_id: request.root_id,
+            action: request.action,
+            subject_kind,
+            subject_id,
+            origin,
+            projection_position,
+            projection_existed_before,
+            expected_revision: request.expected_attachment_revision,
+            before_revision,
+            intent_revision,
+            phase: RootAttachmentChangePhase::AwaitingBroker,
+            result_revision: None,
+            projection_changed: None,
+            broker_changed: None,
+            broker_currently_attached: None,
+            failure: None,
+            created_at,
+            finished_at: None,
+        };
+        change
+            .validate()
+            .map_err(|message| AgentError::Store(message.into()))?;
+        changes.insert(change.id, change.clone());
+        Ok(BeginRootAttachmentChangeOutcome::Begun(change))
+    }
+
+    async fn finish_root_attachment_change(
+        &self,
+        id: RootAttachmentChangeId,
+        executor_id: uuid::Uuid,
+        terminal: &RootAttachmentChangeTerminal,
+        finished_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<FinishRootAttachmentChangeOutcome> {
+        if executor_id.is_nil() {
+            return Err(AgentError::Store(
+                "root attachment change executor id must not be nil".into(),
+            ));
+        }
+        terminal
+            .validate()
+            .map_err(|message| AgentError::Store(message.into()))?;
+        let finished_at = canonical_root_attachment_timestamp(finished_at)?;
+
+        let mut chats = self.chats.lock().unwrap();
+        let mut changes = self.root_attachment_changes.lock().unwrap();
+        let Some(existing) = changes.get(&id).cloned() else {
+            return Ok(FinishRootAttachmentChangeOutcome::NotFound);
+        };
+        if existing.executor_id != executor_id {
+            return Ok(FinishRootAttachmentChangeOutcome::ExecutorMismatch);
+        }
+        if existing.phase != RootAttachmentChangePhase::AwaitingBroker {
+            let exact = root_attachment_terminal_matches(&existing, terminal);
+            return Ok(if exact {
+                FinishRootAttachmentChangeOutcome::Existing(existing)
+            } else {
+                FinishRootAttachmentChangeOutcome::AlreadyTerminal(existing)
+            });
+        }
+        if finished_at < existing.created_at {
+            return Err(AgentError::Store(
+                "root attachment change finish time precedes creation".into(),
+            ));
+        }
+        let desired_attached = existing.action == RootAttachmentChangeAction::Attach;
+        let broker_state_contradicts_terminal = match terminal {
+            RootAttachmentChangeTerminal::Completed {
+                broker_currently_attached,
+                ..
+            } => *broker_currently_attached != desired_attached,
+            RootAttachmentChangeTerminal::Failed {
+                broker_currently_attached: Some(broker_currently_attached),
+                ..
+            } => *broker_currently_attached == desired_attached,
+            RootAttachmentChangeTerminal::Failed {
+                broker_currently_attached: None,
+                ..
+            } => false,
+        };
+        if broker_state_contradicts_terminal {
+            return Ok(FinishRootAttachmentChangeOutcome::BrokerStateMismatch);
+        }
+
+        let chat = chats.get_mut(&existing.chat_id).ok_or_else(|| {
+            AgentError::Store("root attachment change references a missing chat".into())
+        })?;
+        if chat.attachment_revision != existing.intent_revision {
+            return Err(AgentError::Store(
+                "root attachment change intent revision no longer matches its chat".into(),
+            ));
+        }
+        validate_mem_pending_attachment(chat, &existing)?;
+
+        let mut finished = existing.clone();
+        match terminal {
+            RootAttachmentChangeTerminal::Completed {
+                broker_changed,
+                broker_currently_attached,
+            } => {
+                let projection_changed = match existing.action {
+                    RootAttachmentChangeAction::Attach => !existing.projection_existed_before,
+                    RootAttachmentChangeAction::Detach if existing.projection_existed_before => {
+                        remove_exact_attachment(chat, &existing)?;
+                        chat.attachment_revision += 1;
+                        true
+                    }
+                    RootAttachmentChangeAction::Detach => false,
+                };
+                finished.phase = RootAttachmentChangePhase::Completed;
+                finished.result_revision = Some(chat.attachment_revision);
+                finished.projection_changed = Some(projection_changed);
+                finished.broker_changed = Some(*broker_changed);
+                finished.broker_currently_attached = Some(*broker_currently_attached);
+            }
+            RootAttachmentChangeTerminal::Failed {
+                broker_changed,
+                broker_currently_attached,
+                failure,
+            } => {
+                if existing.action == RootAttachmentChangeAction::Attach
+                    && !existing.projection_existed_before
+                {
+                    remove_exact_attachment(chat, &existing)?;
+                    chat.attachment_revision += 1;
+                }
+                finished.phase = RootAttachmentChangePhase::Failed;
+                finished.result_revision = Some(chat.attachment_revision);
+                finished.projection_changed = Some(false);
+                finished.broker_changed = *broker_changed;
+                finished.broker_currently_attached = *broker_currently_attached;
+                finished.failure = Some(failure.clone());
+            }
+        }
+        finished.finished_at = Some(finished_at);
+        finished
+            .validate()
+            .map_err(|message| AgentError::Store(message.into()))?;
+        changes.insert(id, finished.clone());
+        Ok(FinishRootAttachmentChangeOutcome::Finished(finished))
+    }
+
+    async fn get_root_attachment_change(
+        &self,
+        id: RootAttachmentChangeId,
+    ) -> Result<Option<RootAttachmentChange>> {
+        Ok(self
+            .root_attachment_changes
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned())
+    }
+
+    async fn list_pending_root_attachment_changes(
+        &self,
+        executor_id: uuid::Uuid,
+        limit: u64,
+    ) -> Result<Vec<RootAttachmentChange>> {
+        if executor_id.is_nil() || !(1..=MAX_PENDING_ROOT_ATTACHMENT_CHANGES).contains(&limit) {
+            return Err(AgentError::Store(
+                "invalid pending root attachment change scan".into(),
+            ));
+        }
+        let mut pending: Vec<_> = self
+            .root_attachment_changes
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|change| {
+                change.executor_id == executor_id
+                    && change.phase == RootAttachmentChangePhase::AwaitingBroker
+            })
+            .cloned()
+            .collect();
+        pending.sort_by_key(|change| (change.created_at, *change.id.as_uuid()));
+        pending.truncate(limit.try_into().expect("validated pending scan limit"));
+        Ok(pending)
+    }
     async fn append_message(&self, _message: &Message) -> Result<()> {
         Ok(())
     }
@@ -1679,6 +2041,588 @@ fn store_is_object_safe_and_roundtrips() {
         .unwrap(),
         Some(DocumentJobStatus::RetryWait)
     );
+}
+
+fn mem_root_id() -> crate::id::HostRootId {
+    crate::id::HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap()
+}
+
+fn mem_attachment_chat(
+    project_id: Option<ProjectId>,
+    roots: Vec<ChatRootAttachment>,
+    attachment_revision: i64,
+) -> Chat {
+    Chat {
+        id: ChatId::new(),
+        project_id,
+        title: None,
+        model: None,
+        attachment_revision,
+        root_attachments: roots,
+        created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(10, 0).unwrap(),
+    }
+}
+
+fn mem_attachment_request(
+    chat: &Chat,
+    executor_id: uuid::Uuid,
+    root_id: crate::id::HostRootId,
+    action: RootAttachmentChangeAction,
+    expected_attachment_revision: i64,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> BeginRootAttachmentChange {
+    BeginRootAttachmentChange {
+        id: RootAttachmentChangeId::new(),
+        chat_id: chat.id,
+        executor_id,
+        root_id,
+        action,
+        expected_attachment_revision,
+        created_at,
+    }
+}
+
+#[test]
+fn mem_root_attachment_begin_derives_authority_and_enforces_atomic_guards() {
+    let store = MemStore::default();
+    let executor_id = uuid::Uuid::new_v4();
+    let project_root = mem_root_id();
+    let project = Project {
+        id: ProjectId::new(),
+        title: None,
+        attachment_revision: 1,
+        root_attachments: vec![project_root],
+        created_at: chrono::Utc::now(),
+    };
+    block_on(store.create_project(&project)).unwrap();
+    let base = mem_attachment_chat(Some(project.id), Vec::new(), 0);
+    let chat = block_on(store.create_chat_with_project_defaults(&base)).unwrap();
+    let root_id = mem_root_id();
+    let now = chrono::DateTime::<chrono::Utc>::from_timestamp(20, 0).unwrap();
+    let request = mem_attachment_request(
+        &chat,
+        executor_id,
+        root_id,
+        RootAttachmentChangeAction::Attach,
+        1,
+        now,
+    );
+
+    let begun = match block_on(store.begin_root_attachment_change(&request)).unwrap() {
+        BeginRootAttachmentChangeOutcome::Begun(change) => change,
+        outcome => panic!("unexpected begin outcome: {outcome:?}"),
+    };
+    assert_eq!(begun.subject_kind, RootAttachmentSubjectKind::Project);
+    assert_eq!(begun.subject_id, *project.id.as_uuid());
+    assert_eq!(begun.before_revision, 1);
+    assert_eq!(begun.intent_revision, 2);
+    assert_eq!(begun.origin, Some(RootAttachmentOrigin::Conversation));
+    assert_eq!(begun.projection_position, Some(1));
+    assert!(!begun.projection_existed_before);
+    assert_eq!(
+        block_on(store.get_chat(chat.id))
+            .unwrap()
+            .unwrap()
+            .root_attachments,
+        vec![
+            ChatRootAttachment {
+                root_id: project_root,
+                origin: RootAttachmentOrigin::ProjectDefault,
+            },
+            ChatRootAttachment {
+                root_id,
+                origin: RootAttachmentOrigin::Conversation,
+            },
+        ]
+    );
+    assert_eq!(
+        block_on(store.begin_root_attachment_change(&request)).unwrap(),
+        BeginRootAttachmentChangeOutcome::Existing(begun.clone())
+    );
+    assert_eq!(
+        block_on(
+            store.begin_root_attachment_change(&BeginRootAttachmentChange {
+                created_at: request.created_at + chrono::Duration::nanoseconds(999),
+                ..request
+            })
+        )
+        .unwrap(),
+        BeginRootAttachmentChangeOutcome::Existing(begun.clone())
+    );
+    assert_eq!(
+        block_on(
+            store.begin_root_attachment_change(&BeginRootAttachmentChange {
+                root_id: mem_root_id(),
+                ..request
+            })
+        )
+        .unwrap(),
+        BeginRootAttachmentChangeOutcome::IdentityConflict
+    );
+
+    let busy = mem_attachment_request(
+        &chat,
+        executor_id,
+        mem_root_id(),
+        RootAttachmentChangeAction::Attach,
+        2,
+        now + chrono::Duration::seconds(1),
+    );
+    assert_eq!(
+        block_on(store.begin_root_attachment_change(&busy)).unwrap(),
+        BeginRootAttachmentChangeOutcome::ChatBusy
+    );
+
+    let standalone = mem_attachment_chat(None, Vec::new(), 4);
+    block_on(store.create_chat(&standalone)).unwrap();
+    let stale = mem_attachment_request(
+        &standalone,
+        executor_id,
+        mem_root_id(),
+        RootAttachmentChangeAction::Attach,
+        3,
+        now,
+    );
+    assert_eq!(
+        block_on(store.begin_root_attachment_change(&stale)).unwrap(),
+        BeginRootAttachmentChangeOutcome::RevisionConflict {
+            current_attachment_revision: 4
+        }
+    );
+
+    let full_roots: Vec<_> = (0..MAX_ROOT_ATTACHMENTS)
+        .map(|_| ChatRootAttachment {
+            root_id: mem_root_id(),
+            origin: RootAttachmentOrigin::Conversation,
+        })
+        .collect();
+    let full = mem_attachment_chat(None, full_roots, 1);
+    block_on(store.create_chat(&full)).unwrap();
+    let at_capacity = mem_attachment_request(
+        &full,
+        executor_id,
+        mem_root_id(),
+        RootAttachmentChangeAction::Attach,
+        1,
+        now,
+    );
+    assert_eq!(
+        block_on(store.begin_root_attachment_change(&at_capacity)).unwrap(),
+        BeginRootAttachmentChangeOutcome::CapacityExceeded
+    );
+
+    let exhausted = mem_attachment_chat(None, Vec::new(), MAX_ATTACHMENT_REVISION - 1);
+    block_on(store.create_chat(&exhausted)).unwrap();
+    let cannot_reserve_rollback = mem_attachment_request(
+        &exhausted,
+        executor_id,
+        mem_root_id(),
+        RootAttachmentChangeAction::Attach,
+        MAX_ATTACHMENT_REVISION - 1,
+        now,
+    );
+    assert_eq!(
+        block_on(store.begin_root_attachment_change(&cannot_reserve_rollback)).unwrap(),
+        BeginRootAttachmentChangeOutcome::RevisionExhausted
+    );
+
+    let existing_root = mem_root_id();
+    let detach_exhausted = mem_attachment_chat(
+        None,
+        vec![ChatRootAttachment {
+            root_id: existing_root,
+            origin: RootAttachmentOrigin::Conversation,
+        }],
+        MAX_ATTACHMENT_REVISION,
+    );
+    block_on(store.create_chat(&detach_exhausted)).unwrap();
+    let cannot_reserve_removal = mem_attachment_request(
+        &detach_exhausted,
+        executor_id,
+        existing_root,
+        RootAttachmentChangeAction::Detach,
+        MAX_ATTACHMENT_REVISION,
+        now,
+    );
+    assert_eq!(
+        block_on(store.begin_root_attachment_change(&cannot_reserve_removal)).unwrap(),
+        BeginRootAttachmentChangeOutcome::RevisionExhausted
+    );
+
+    let invalid_project_chat =
+        mem_attachment_chat(Some(ProjectId(uuid::Uuid::nil())), Vec::new(), 0);
+    store
+        .chats
+        .lock()
+        .unwrap()
+        .insert(invalid_project_chat.id, invalid_project_chat.clone());
+    let invalid_request = mem_attachment_request(
+        &invalid_project_chat,
+        executor_id,
+        mem_root_id(),
+        RootAttachmentChangeAction::Attach,
+        0,
+        now,
+    );
+    assert!(block_on(store.begin_root_attachment_change(&invalid_request)).is_err());
+    assert_eq!(
+        block_on(store.get_chat(invalid_project_chat.id)).unwrap(),
+        Some(invalid_project_chat)
+    );
+    assert!(
+        block_on(store.get_root_attachment_change(invalid_request.id))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn mem_root_attachment_attach_projects_intent_and_rolls_back_failure() {
+    let store = MemStore::default();
+    let executor_id = uuid::Uuid::new_v4();
+    let chat = mem_attachment_chat(None, Vec::new(), 0);
+    block_on(store.create_chat(&chat)).unwrap();
+    let root_id = mem_root_id();
+    let now = chrono::DateTime::<chrono::Utc>::from_timestamp(30, 0).unwrap();
+    let request = mem_attachment_request(
+        &chat,
+        executor_id,
+        root_id,
+        RootAttachmentChangeAction::Attach,
+        0,
+        now,
+    );
+    let awaiting = match block_on(store.begin_root_attachment_change(&request)).unwrap() {
+        BeginRootAttachmentChangeOutcome::Begun(change) => change,
+        outcome => panic!("unexpected begin outcome: {outcome:?}"),
+    };
+    assert_eq!(
+        awaiting.subject_kind,
+        RootAttachmentSubjectKind::Conversation
+    );
+    assert_eq!(awaiting.subject_id, *chat.id.as_uuid());
+    let intent_chat = block_on(store.get_chat(chat.id)).unwrap().unwrap();
+    assert_eq!(intent_chat.attachment_revision, 1);
+    assert_eq!(intent_chat.root_attachments.len(), 1);
+
+    let failure = RootAttachmentChangeTerminal::Failed {
+        broker_changed: Some(false),
+        broker_currently_attached: Some(false),
+        failure: RootAttachmentChangeFailure {
+            code: "denied".into(),
+            message: "host access was denied".into(),
+            retryable: false,
+        },
+    };
+    let finished_at = now + chrono::Duration::seconds(1);
+    assert_eq!(
+        block_on(store.finish_root_attachment_change(
+            request.id,
+            executor_id,
+            &RootAttachmentChangeTerminal::Failed {
+                broker_changed: Some(true),
+                broker_currently_attached: Some(true),
+                failure: RootAttachmentChangeFailure {
+                    code: "ambiguous".into(),
+                    message: "broker reports the requested state".into(),
+                    retryable: true,
+                },
+            },
+            finished_at,
+        ))
+        .unwrap(),
+        FinishRootAttachmentChangeOutcome::BrokerStateMismatch
+    );
+    assert_eq!(
+        block_on(store.get_root_attachment_change(request.id)).unwrap(),
+        Some(awaiting)
+    );
+    let failed = match block_on(store.finish_root_attachment_change(
+        request.id,
+        executor_id,
+        &failure,
+        finished_at,
+    ))
+    .unwrap()
+    {
+        FinishRootAttachmentChangeOutcome::Finished(change) => change,
+        outcome => panic!("unexpected finish outcome: {outcome:?}"),
+    };
+    assert_eq!(failed.phase, RootAttachmentChangePhase::Failed);
+    assert_eq!(failed.result_revision, Some(2));
+    assert_eq!(failed.projection_changed, Some(false));
+    let rolled_back = block_on(store.get_chat(chat.id)).unwrap().unwrap();
+    assert_eq!(rolled_back.attachment_revision, 2);
+    assert!(rolled_back.root_attachments.is_empty());
+    assert_eq!(
+        block_on(store.finish_root_attachment_change(
+            request.id,
+            executor_id,
+            &failure,
+            finished_at,
+        ))
+        .unwrap(),
+        FinishRootAttachmentChangeOutcome::Existing(failed.clone())
+    );
+    assert_eq!(
+        block_on(store.finish_root_attachment_change(
+            request.id,
+            executor_id,
+            &failure,
+            finished_at + chrono::Duration::seconds(1),
+        ))
+        .unwrap(),
+        FinishRootAttachmentChangeOutcome::Existing(failed)
+    );
+
+    let success_request = mem_attachment_request(
+        &rolled_back,
+        executor_id,
+        root_id,
+        RootAttachmentChangeAction::Attach,
+        2,
+        now + chrono::Duration::seconds(2),
+    );
+    block_on(store.begin_root_attachment_change(&success_request)).unwrap();
+    let success = RootAttachmentChangeTerminal::Completed {
+        broker_changed: true,
+        broker_currently_attached: true,
+    };
+    let completed = match block_on(store.finish_root_attachment_change(
+        success_request.id,
+        executor_id,
+        &success,
+        now + chrono::Duration::seconds(3),
+    ))
+    .unwrap()
+    {
+        FinishRootAttachmentChangeOutcome::Finished(change) => change,
+        outcome => panic!("unexpected finish outcome: {outcome:?}"),
+    };
+    assert_eq!(completed.phase, RootAttachmentChangePhase::Completed);
+    assert_eq!(completed.result_revision, Some(3));
+    assert_eq!(completed.projection_changed, Some(true));
+    assert_eq!(
+        block_on(store.get_root_attachment_change(success_request.id)).unwrap(),
+        Some(completed)
+    );
+}
+
+#[test]
+fn mem_root_attachment_detach_waits_for_broker_and_preserves_position() {
+    let store = MemStore::default();
+    let executor_id = uuid::Uuid::new_v4();
+    let roots = [mem_root_id(), mem_root_id(), mem_root_id()];
+    let chat = mem_attachment_chat(
+        None,
+        roots
+            .into_iter()
+            .map(|root_id| ChatRootAttachment {
+                root_id,
+                origin: RootAttachmentOrigin::Conversation,
+            })
+            .collect(),
+        1,
+    );
+    block_on(store.create_chat(&chat)).unwrap();
+    let now = chrono::DateTime::<chrono::Utc>::from_timestamp(40, 0).unwrap();
+    let request = mem_attachment_request(
+        &chat,
+        executor_id,
+        roots[1],
+        RootAttachmentChangeAction::Detach,
+        1,
+        now,
+    );
+    let awaiting = match block_on(store.begin_root_attachment_change(&request)).unwrap() {
+        BeginRootAttachmentChangeOutcome::Begun(change) => change,
+        outcome => panic!("unexpected begin outcome: {outcome:?}"),
+    };
+    assert_eq!(awaiting.intent_revision, 1);
+    assert_eq!(awaiting.projection_position, Some(1));
+    assert_eq!(
+        block_on(store.get_chat(chat.id))
+            .unwrap()
+            .unwrap()
+            .root_attachments,
+        chat.root_attachments
+    );
+    let completed = RootAttachmentChangeTerminal::Completed {
+        broker_changed: true,
+        broker_currently_attached: false,
+    };
+    assert_eq!(
+        block_on(store.finish_root_attachment_change(
+            request.id,
+            uuid::Uuid::new_v4(),
+            &completed,
+            now + chrono::Duration::seconds(1),
+        ))
+        .unwrap(),
+        FinishRootAttachmentChangeOutcome::ExecutorMismatch
+    );
+    assert_eq!(
+        block_on(store.finish_root_attachment_change(
+            request.id,
+            executor_id,
+            &RootAttachmentChangeTerminal::Completed {
+                broker_changed: false,
+                broker_currently_attached: true,
+            },
+            now + chrono::Duration::seconds(1),
+        ))
+        .unwrap(),
+        FinishRootAttachmentChangeOutcome::BrokerStateMismatch
+    );
+    let finished = match block_on(store.finish_root_attachment_change(
+        request.id,
+        executor_id,
+        &completed,
+        now + chrono::Duration::seconds(1),
+    ))
+    .unwrap()
+    {
+        FinishRootAttachmentChangeOutcome::Finished(change) => change,
+        outcome => panic!("unexpected finish outcome: {outcome:?}"),
+    };
+    assert_eq!(finished.result_revision, Some(2));
+    assert_eq!(finished.projection_changed, Some(true));
+    let detached = block_on(store.get_chat(chat.id)).unwrap().unwrap();
+    assert_eq!(detached.attachment_revision, 2);
+    assert_eq!(
+        detached
+            .root_attachments
+            .iter()
+            .map(|attachment| attachment.root_id)
+            .collect::<Vec<_>>(),
+        vec![roots[0], roots[2]]
+    );
+
+    let absent = mem_attachment_request(
+        &detached,
+        executor_id,
+        roots[1],
+        RootAttachmentChangeAction::Detach,
+        2,
+        now + chrono::Duration::seconds(2),
+    );
+    let absent_change = match block_on(store.begin_root_attachment_change(&absent)).unwrap() {
+        BeginRootAttachmentChangeOutcome::Begun(change) => change,
+        outcome => panic!("unexpected begin outcome: {outcome:?}"),
+    };
+    assert!(!absent_change.projection_existed_before);
+    assert_eq!(absent_change.origin, None);
+    let absent_finished = match block_on(store.finish_root_attachment_change(
+        absent.id,
+        executor_id,
+        &RootAttachmentChangeTerminal::Completed {
+            broker_changed: false,
+            broker_currently_attached: false,
+        },
+        now + chrono::Duration::seconds(3),
+    ))
+    .unwrap()
+    {
+        FinishRootAttachmentChangeOutcome::Finished(change) => change,
+        outcome => panic!("unexpected finish outcome: {outcome:?}"),
+    };
+    assert_eq!(absent_finished.result_revision, Some(2));
+    assert_eq!(absent_finished.projection_changed, Some(false));
+
+    let failure_chat = mem_attachment_chat(
+        None,
+        vec![ChatRootAttachment {
+            root_id: roots[1],
+            origin: RootAttachmentOrigin::Conversation,
+        }],
+        5,
+    );
+    block_on(store.create_chat(&failure_chat)).unwrap();
+    let failed_detach = mem_attachment_request(
+        &failure_chat,
+        executor_id,
+        roots[1],
+        RootAttachmentChangeAction::Detach,
+        5,
+        now + chrono::Duration::seconds(4),
+    );
+    block_on(store.begin_root_attachment_change(&failed_detach)).unwrap();
+    let failed = match block_on(store.finish_root_attachment_change(
+        failed_detach.id,
+        executor_id,
+        &RootAttachmentChangeTerminal::Failed {
+            broker_changed: None,
+            broker_currently_attached: None,
+            failure: RootAttachmentChangeFailure {
+                code: "unavailable".into(),
+                message: "broker was unavailable".into(),
+                retryable: true,
+            },
+        },
+        now + chrono::Duration::seconds(5),
+    ))
+    .unwrap()
+    {
+        FinishRootAttachmentChangeOutcome::Finished(change) => change,
+        outcome => panic!("unexpected finish outcome: {outcome:?}"),
+    };
+    assert_eq!(failed.result_revision, Some(5));
+    assert_eq!(failed.projection_changed, Some(false));
+    assert_eq!(
+        block_on(store.get_chat(failure_chat.id)).unwrap(),
+        Some(failure_chat)
+    );
+}
+
+#[test]
+fn mem_root_attachment_pending_scan_is_bounded_filtered_and_ordered() {
+    let store = MemStore::default();
+    let executor_id = uuid::Uuid::new_v4();
+    let other_executor_id = uuid::Uuid::new_v4();
+    let time = chrono::DateTime::<chrono::Utc>::from_timestamp(50, 0).unwrap();
+    let mut expected = Vec::new();
+    for (id, executor, created_at) in [
+        (1_u128, executor_id, time),
+        (3, executor_id, time + chrono::Duration::seconds(1)),
+        (2, executor_id, time),
+        (4, other_executor_id, time),
+    ] {
+        let chat = mem_attachment_chat(None, Vec::new(), 0);
+        block_on(store.create_chat(&chat)).unwrap();
+        let mut request = mem_attachment_request(
+            &chat,
+            executor,
+            mem_root_id(),
+            RootAttachmentChangeAction::Detach,
+            0,
+            created_at,
+        );
+        request.id = RootAttachmentChangeId::from_uuid(uuid::Uuid::from_u128(id)).unwrap();
+        let change = match block_on(store.begin_root_attachment_change(&request)).unwrap() {
+            BeginRootAttachmentChangeOutcome::Begun(change) => change,
+            outcome => panic!("unexpected begin outcome: {outcome:?}"),
+        };
+        if executor == executor_id {
+            expected.push(change);
+        }
+    }
+    expected.sort_by_key(|change| (change.created_at, *change.id.as_uuid()));
+
+    assert_eq!(
+        block_on(store.list_pending_root_attachment_changes(executor_id, 2)).unwrap(),
+        expected[..2]
+    );
+    assert_eq!(
+        block_on(store.list_pending_root_attachment_changes(executor_id, 3)).unwrap(),
+        expected
+    );
+    assert!(block_on(store.list_pending_root_attachment_changes(executor_id, 0)).is_err());
+    assert!(block_on(store.list_pending_root_attachment_changes(
+        executor_id,
+        MAX_PENDING_ROOT_ATTACHMENT_CHANGES + 1,
+    ))
+    .is_err());
+    assert!(block_on(store.list_pending_root_attachment_changes(uuid::Uuid::nil(), 1)).is_err());
 }
 
 #[test]

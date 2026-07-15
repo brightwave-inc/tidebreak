@@ -161,6 +161,78 @@ id_type!(
     /// Identifies a persistent conversation.
     ChatId
 );
+
+/// Stable product and broker idempotency identity for one root-attachment change.
+///
+/// The same UUID is used when reconciling the change with the host broker. Nil
+/// is reserved so a missing operation identity cannot become durable work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct RootAttachmentChangeId(Uuid);
+
+impl RootAttachmentChangeId {
+    /// Generate a fresh change identity.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Build a change identity from a non-nil UUID.
+    pub fn from_uuid(uuid: Uuid) -> Result<Self, RootAttachmentChangeIdError> {
+        if uuid.is_nil() {
+            Err(RootAttachmentChangeIdError::Nil)
+        } else {
+            Ok(Self(uuid))
+        }
+    }
+
+    /// Borrow the UUID also used as the broker operation identity.
+    #[must_use]
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for RootAttachmentChangeId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'de> Deserialize<'de> for RootAttachmentChangeId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let uuid = Uuid::deserialize(deserializer)?;
+        Self::from_uuid(uuid).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for RootAttachmentChangeId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for RootAttachmentChangeId {
+    type Err = RootAttachmentChangeIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::from_uuid(Uuid::parse_str(value)?)
+    }
+}
+
+/// Invalid durable root-attachment change identity.
+#[derive(Debug, Error)]
+pub enum RootAttachmentChangeIdError {
+    /// The value is not a UUID.
+    #[error("invalid root attachment change id: {0}")]
+    InvalidUuid(#[from] uuid::Error),
+    /// Nil is reserved and never identifies durable attachment work.
+    #[error("root attachment change id must not be nil")]
+    Nil,
+}
 id_type!(
     /// Identifies a persisted message within a chat.
     MessageId
@@ -214,6 +286,22 @@ mod tests {
         assert!(
             serde_json::from_str::<HostRootId>("\"00000000-0000-0000-0000-000000000000\"").is_err()
         );
+    }
+
+    #[test]
+    fn root_attachment_change_ids_reject_nil_and_roundtrip() {
+        let uuid = Uuid::new_v4();
+        let id = RootAttachmentChangeId::from_uuid(uuid).unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RootAttachmentChangeId>(&json).unwrap(),
+            id
+        );
+        assert!(RootAttachmentChangeId::from_uuid(Uuid::nil()).is_err());
+        assert!(serde_json::from_str::<RootAttachmentChangeId>(
+            "\"00000000-0000-0000-0000-000000000000\""
+        )
+        .is_err());
     }
 
     #[test]

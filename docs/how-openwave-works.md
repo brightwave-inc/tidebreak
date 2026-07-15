@@ -168,9 +168,10 @@ Today these file tools still operate inside a server-derived, pinned per-chat
 scratch capability. Its path is neither persisted on the chat nor returned by
 the product API. The desktop can connect, list, and revoke multiple folders
 through a native picker and capability-gated host-broker sidecar; it exposes only
-opaque root IDs and display names to the renderer. The next native CAS slice will
-synchronize broker connections into the product's pathless root projection, and
-the following tool-routing slice will resolve operations through those roots.
+opaque root IDs and display names to the renderer. The next native slice will
+synchronize broker connections through core's durable attachment-change state
+machine, and the following tool-routing slice will resolve operations through
+those roots.
 See [Host access and connected folders](host-access.md). The agent loop can now
 produce a durable client-wait checkpoint for the registered folder-request
 contract. The desktop discovers those pending requests from durable state and

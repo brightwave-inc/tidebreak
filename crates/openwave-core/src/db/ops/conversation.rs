@@ -567,14 +567,14 @@ fn validate_chat_attachments(chat: &Chat, project_roots: &[HostRootId]) -> Resul
         .map_err(|message| AgentError::Store(message.into()))
 }
 
-fn attachment_origin_to_db(origin: RootAttachmentOrigin) -> &'static str {
+pub(in crate::db) fn attachment_origin_to_db(origin: RootAttachmentOrigin) -> &'static str {
     match origin {
         RootAttachmentOrigin::ProjectDefault => "project_default",
         RootAttachmentOrigin::Conversation => "conversation",
     }
 }
 
-fn attachment_origin_from_db(value: &str) -> Result<RootAttachmentOrigin> {
+pub(in crate::db) fn attachment_origin_from_db(value: &str) -> Result<RootAttachmentOrigin> {
     match value {
         "project_default" => Ok(RootAttachmentOrigin::ProjectDefault),
         "conversation" => Ok(RootAttachmentOrigin::Conversation),

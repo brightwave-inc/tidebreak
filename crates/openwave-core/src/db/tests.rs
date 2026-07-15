@@ -7,6 +7,7 @@ use crate::model::{
 use crate::storage::ApplyTurnSteerOutcome;
 use chrono::{DateTime, Utc};
 
+mod root_attachment;
 mod turn_steer;
 
 async fn temp_store() -> (tempfile::TempDir, DbStore) {
