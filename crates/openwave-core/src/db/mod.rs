@@ -43,7 +43,7 @@ use crate::storage::{
     ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome, ClaimTurnRunOutcome,
     CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
     DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
-    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    FailAgentRunOutcome, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
     JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkTurnForAgentRunInboxOutcome,
     ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
@@ -1828,6 +1828,18 @@ impl Store for DbStore {
         text: &str,
     ) -> Result<Option<SubmitAgentRunResultOutcome>> {
         ops::agent_run::submit_agent_run_result(self, id, lease_token, text).await
+    }
+
+    async fn fail_agent_run(
+        &self,
+        id: AgentRunId,
+        lease_token: uuid::Uuid,
+        error_code: &str,
+        error_detail: &str,
+        retry_delay: chrono::Duration,
+    ) -> Result<Option<FailAgentRunOutcome>> {
+        ops::agent_run::fail_agent_run(self, id, lease_token, error_code, error_detail, retry_delay)
+            .await
     }
 
     async fn list_agent_run_inbox(

@@ -12,7 +12,7 @@ use crate::model::{
 };
 use crate::storage::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, ClaimAgentRunInboxOutcome,
-    ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
+    ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome, FailAgentRunOutcome,
     FinishAgentRunCancellationOutcome, ParkTurnForAgentRunInboxOutcome,
     RequestAgentRunCancellationOutcome, SubmitAgentRunResultOutcome,
 };
@@ -951,6 +951,174 @@ pub(in crate::db) async fn finish_agent_run_cancellation(
         .and_then(agent_run_from_model)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(FinishAgentRunCancellationOutcome::Cancelled(updated)))
+}
+
+/// Resolve an exact live sandbox lease after a provider/executor failure.
+///
+/// Intermediate failures release only the current lease and remain replay-safe.
+/// The final attempt also writes the same immutable parent inbox receipt used
+/// by successful completion, but transitions the child to `failed`.
+pub(in crate::db) async fn fail_agent_run(
+    store: &DbStore,
+    id: AgentRunId,
+    lease_token: uuid::Uuid,
+    error_code: &str,
+    error_detail: &str,
+    retry_delay: chrono::Duration,
+) -> Result<Option<FailAgentRunOutcome>> {
+    if lease_token.is_nil()
+        || error_code.is_empty()
+        || error_code.chars().count() > AgentRun::MAX_ERROR_CODE_LEN
+        || error_detail.chars().count() > AgentRun::MAX_ERROR_DETAIL_LEN
+        || retry_delay <= chrono::Duration::zero()
+    {
+        return Err(AgentError::Store(
+            "invalid sandbox agent failure resolution".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    let Some(run) = find_by_id_on(&transaction, id).await? else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    // A completed final receipt lets an ambiguous retry recover exactly; a
+    // later different terminal outcome never overwrites it.
+    if let Some(result) = entities::agent_run_result::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    {
+        let result = agent_run_result_from_model(result)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok((result.lease_token == lease_token
+            && run.status == AgentRunStatus::Failed.as_str())
+        .then_some(FailAgentRunOutcome::ExistingFailed(result)));
+    }
+    let valid = run.execution == AgentRunExecution::Sandbox.as_str()
+        && run.status == AgentRunStatus::Running.as_str()
+        && run.lease_token == Some(lease_token)
+        && run.lease_expires_at.is_some_and(|expiry| expiry > now)
+        && run.deadline_at.is_some_and(|deadline| deadline > now)
+        && run.updated_at <= now;
+    if !valid {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let terminal = run.attempt_count >= run.max_attempts;
+    let available_at = now.checked_add_signed(retry_delay).ok_or_else(|| {
+        AgentError::Store("agent-run retry delay overflows timestamp range".into())
+    })?;
+    let status = if terminal {
+        AgentRunStatus::Failed
+    } else {
+        AgentRunStatus::RetryWait
+    };
+    let mut update = entities::agent_run::Entity::update_many()
+        .col_expr(
+            entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(status.as_str()),
+        )
+        .col_expr(
+            entities::agent_run::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Some(error_code.to_owned())),
+        )
+        .col_expr(
+            entities::agent_run::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(Some(error_detail.to_owned())),
+        )
+        .col_expr(
+            entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::agent_run::Column::Id.eq(id.0))
+        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Running.as_str()))
+        .filter(entities::agent_run::Column::LeaseToken.eq(lease_token))
+        .filter(entities::agent_run::Column::LeaseExpiresAt.eq(run.lease_expires_at))
+        .filter(entities::agent_run::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::agent_run::Column::DeadlineAt.gt(now))
+        .filter(entities::agent_run::Column::UpdatedAt.eq(run.updated_at));
+    if terminal {
+        update = update.col_expr(
+            entities::agent_run::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        );
+    } else {
+        update = update.col_expr(
+            entities::agent_run::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(available_at),
+        );
+    }
+    if update
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?
+        .rows_affected
+        != 1
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let updated = find_by_id_on(&transaction, id)
+        .await?
+        .expect("updated agent run exists");
+    if !terminal {
+        let updated = agent_run_from_model(updated)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(FailAgentRunOutcome::RetryScheduled(updated)));
+    }
+    let Some(parent_id) = run.parent_id.map(AgentRunId) else {
+        return Err(AgentError::Store("sandbox run missing parent".into()));
+    };
+    let text = format!("Sandbox task failed ({error_code}): {error_detail}");
+    entities::agent_run_result::ActiveModel {
+        agent_run_id: Set(id.0),
+        lease_token: Set(lease_token),
+        attempt_count: Set(run.attempt_count),
+        claim_count: Set(run.claim_count),
+        text: Set(text),
+        submitted_at: Set(now),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+    entities::agent_run_inbox::ActiveModel {
+        child_run_id: Set(id.0),
+        parent_run_id: Set(parent_id.0),
+        chat_id: Set(run.chat_id),
+        parent_depth: Set(0),
+        result_lease_token: Set(lease_token),
+        result_attempt_count: Set(run.attempt_count),
+        result_claim_count: Set(run.claim_count),
+        status: Set(AgentRunInboxStatus::Pending.as_str().into()),
+        claim_count: Set(0),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        consumed_lease_token: Set(None),
+        consumed_at: Set(None),
+        delivered_at: Set(now),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+    let result = entities::agent_run_result::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .expect("inserted result exists");
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(FailAgentRunOutcome::Failed(
+        agent_run_result_from_model(result)?,
+    )))
 }
 
 pub(in crate::db) async fn submit_agent_run_result(

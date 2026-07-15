@@ -222,6 +222,21 @@ pub enum SubmitAgentRunResultOutcome {
     Existing(AgentRunResult),
 }
 
+/// Resolution of one exact sandbox execution failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailAgentRunOutcome {
+    /// The leased attempt was released for a bounded retry.
+    RetryScheduled(AgentRun),
+    /// The leased attempt exhausted its budget and delivered a terminal failure
+    /// receipt to the parent inbox.
+    Failed(AgentRunResult),
+    /// An exact ambiguous retry recovered the already-recorded retry or final
+    /// failure transition.
+    ExistingRetry(AgentRun),
+    /// An exact ambiguous retry recovered the final failure receipt.
+    ExistingFailed(AgentRunResult),
+}
+
 /// Result of acquiring durable ownership of one exact parent inbox delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimAgentRunInboxOutcome {
@@ -1123,6 +1138,20 @@ pub trait Store: Send + Sync {
         _lease_token: uuid::Uuid,
         _text: &str,
     ) -> Result<Option<SubmitAgentRunResultOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Fence one exact sandbox lease after an execution failure. Attempts below
+    /// the run budget become replay-safe retry work; the final attempt writes a
+    /// parent-visible terminal receipt in the same transaction as `failed`.
+    async fn fail_agent_run(
+        &self,
+        _id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _error_code: &str,
+        _error_detail: &str,
+        _retry_delay: chrono::Duration,
+    ) -> Result<Option<FailAgentRunOutcome>> {
         agent_run_storage_unavailable()
     }
 
