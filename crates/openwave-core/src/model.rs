@@ -94,7 +94,7 @@ pub fn validate_source_regions(
 }
 
 use crate::id::{
-    CallId, ChatId, DocumentId, DocumentJobId, HostRootId, MessageId, ProjectId,
+    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, HostRootId, MessageId, ProjectId,
     RootAttachmentChangeId, TurnId,
 };
 
@@ -1191,6 +1191,8 @@ pub struct TurnRun {
     pub id: TurnId,
     /// Conversation this turn belongs to.
     pub chat_id: ChatId,
+    /// Foreground coordinator that owns this conversation segment.
+    pub agent_run_id: AgentRunId,
     /// Exact persisted user message that supplied this turn's initial input.
     pub input_message_id: MessageId,
     /// Exact designated terminal assistant message committed with successful

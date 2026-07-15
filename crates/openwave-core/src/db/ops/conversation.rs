@@ -16,7 +16,9 @@ use crate::model::{
 
 use super::super::{entities, project_from_models, store_err, DbStore};
 use super::turn::canonical_db_timestamp;
-use super::{acquire_chat_write_lock, acquire_turn_write_lock};
+use super::{
+    acquire_chat_write_lock, acquire_turn_write_lock, agent_run::insert_foreground_agent_run_on,
+};
 
 pub(in crate::db) const MESSAGE_IDENTITY_OWNER_MESSAGE: &str = "message";
 pub(in crate::db) const MESSAGE_IDENTITY_OWNER_STEER: &str = "turn_steer";
@@ -96,6 +98,7 @@ pub(in crate::db) async fn create_chat(store: &DbStore, chat: &Chat) -> Result<(
     let project_roots = load_chat_project_roots(&transaction, chat.project_id).await?;
     validate_chat_attachments(chat, &project_roots)?;
     insert_chat_on(&transaction, chat).await?;
+    insert_foreground_agent_run_on(&transaction, chat.id, chat.created_at).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(())
 }
@@ -124,6 +127,7 @@ pub(in crate::db) async fn create_chat_with_project_defaults(
     }
     validate_chat_root_projection(&chat).map_err(|message| AgentError::Store(message.into()))?;
     insert_chat_on(&transaction, &chat).await?;
+    insert_foreground_agent_run_on(&transaction, chat.id, chat.created_at).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(chat)
 }

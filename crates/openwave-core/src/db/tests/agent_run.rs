@@ -10,22 +10,12 @@ async fn foreground_and_sandbox_runs_roundtrip_with_exact_idempotency() {
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
 
-    let foreground_id = AgentRunId::new();
-    let foreground = match store
-        .accept_agent_run(
-            foreground_id,
-            chat.id,
-            None,
-            None,
-            AgentRunExecution::Foreground,
-            None,
-        )
+    let foreground_id = AgentRunId::foreground_for_chat(chat.id);
+    let foreground = store
+        .get_agent_run(foreground_id)
         .await
         .unwrap()
-    {
-        AcceptAgentRunOutcome::Accepted(run) => run,
-        outcome => panic!("unexpected foreground outcome: {outcome:?}"),
-    };
+        .expect("chat creation should create its foreground agent run");
     assert_eq!(foreground.id, foreground_id);
     assert_eq!(foreground.chat_id, chat.id);
     assert_eq!(foreground.parent_id, None);
@@ -133,21 +123,7 @@ async fn agent_run_acceptance_enforces_one_foreground_and_depth_one_children() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let foreground_id = AgentRunId::new();
-    assert!(matches!(
-        store
-            .accept_agent_run(
-                foreground_id,
-                chat.id,
-                None,
-                None,
-                AgentRunExecution::Foreground,
-                None,
-            )
-            .await
-            .unwrap(),
-        AcceptAgentRunOutcome::Accepted(_)
-    ));
+    let foreground_id = AgentRunId::foreground_for_chat(chat.id);
     assert!(matches!(
         store
             .accept_agent_run(
@@ -216,18 +192,7 @@ async fn agent_run_acceptance_rejects_invalid_shapes_and_identity_reuse() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let foreground_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            foreground_id,
-            chat.id,
-            None,
-            None,
-            AgentRunExecution::Foreground,
-            None,
-        )
-        .await
-        .unwrap();
+    let foreground_id = AgentRunId::foreground_for_chat(chat.id);
 
     assert!(store
         .accept_agent_run(
@@ -313,18 +278,7 @@ async fn agent_run_schema_rejects_cross_chat_parentage() {
     let child_chat = sample_chat();
     store.create_chat(&parent_chat).await.unwrap();
     store.create_chat(&child_chat).await.unwrap();
-    let parent_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            parent_id,
-            parent_chat.id,
-            None,
-            None,
-            AgentRunExecution::Foreground,
-            None,
-        )
-        .await
-        .unwrap();
+    let parent_id = AgentRunId::foreground_for_chat(parent_chat.id);
 
     let now = chrono::Utc::now();
     let malformed = crate::db::entities::agent_run::ActiveModel {

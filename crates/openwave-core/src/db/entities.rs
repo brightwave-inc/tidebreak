@@ -363,6 +363,8 @@ pub mod turn_run {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
         pub chat_id: Uuid,
+        pub agent_run_id: Uuid,
+        pub agent_run_depth: i16,
         pub input_message_id: Uuid,
         pub output_message_id: Option<Uuid>,
         pub model: String,

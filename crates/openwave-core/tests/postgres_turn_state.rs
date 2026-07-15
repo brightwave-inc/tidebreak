@@ -48,22 +48,12 @@ async fn postgres_agent_runs_enforce_foreground_parentage_and_idempotency() {
     let store = DbStore::connect(&url).await.unwrap();
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let foreground_id = AgentRunId::new();
-    let foreground = match store
-        .accept_agent_run(
-            foreground_id,
-            chat.id,
-            None,
-            None,
-            AgentRunExecution::Foreground,
-            None,
-        )
+    let foreground_id = AgentRunId::foreground_for_chat(chat.id);
+    let foreground = store
+        .get_agent_run(foreground_id)
         .await
         .unwrap()
-    {
-        AcceptAgentRunOutcome::Accepted(run) => run,
-        outcome => panic!("unexpected foreground outcome: {outcome:?}"),
-    };
+        .expect("chat creation should create its foreground agent run");
     assert_eq!(foreground.depth, 0);
     assert_eq!(foreground.status, AgentRunStatus::Active);
 
@@ -131,27 +121,8 @@ async fn postgres_agent_run_identity_collision_recovers_exactly_across_chats() {
     let second_chat = sample_chat();
     store.create_chat(&first_chat).await.unwrap();
     store.create_chat(&second_chat).await.unwrap();
-    let first_parent = AgentRunId::new();
-    let second_parent = AgentRunId::new();
-    for (chat_id, parent_id) in [
-        (first_chat.id, first_parent),
-        (second_chat.id, second_parent),
-    ] {
-        assert!(matches!(
-            store
-                .accept_agent_run(
-                    parent_id,
-                    chat_id,
-                    None,
-                    None,
-                    AgentRunExecution::Foreground,
-                    None,
-                )
-                .await
-                .unwrap(),
-            AcceptAgentRunOutcome::Accepted(_)
-        ));
-    }
+    let first_parent = AgentRunId::foreground_for_chat(first_chat.id);
+    let second_parent = AgentRunId::foreground_for_chat(second_chat.id);
 
     let collision_id = AgentRunId::new();
     let barrier = Arc::new(tokio::sync::Barrier::new(2));

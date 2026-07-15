@@ -166,6 +166,20 @@ id_type!(
     AgentRunId
 );
 
+impl AgentRunId {
+    /// Namespace for the one foreground coordinator derived for each chat.
+    const FOREGROUND_NAMESPACE: Uuid = Uuid::from_u128(0x38fd_6a64_b02f_4e91_a60c_7173_9af0_5b21);
+
+    /// Derive the stable foreground coordinator identity for a chat.
+    #[must_use]
+    pub fn foreground_for_chat(chat_id: ChatId) -> Self {
+        Self(Uuid::new_v5(
+            &Self::FOREGROUND_NAMESPACE,
+            chat_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
 /// Stable product and broker idempotency identity for one root-attachment change.
 ///
 /// The same UUID is used when reconciling the change with the host broker. Nil
@@ -267,6 +281,20 @@ mod tests {
         let chat = ChatId::new();
         let turn = TurnId::new();
         assert_ne!(chat.0, turn.0);
+    }
+
+    #[test]
+    fn foreground_agent_run_ids_are_stable_and_chat_scoped() {
+        let first_chat = ChatId::new();
+        let second_chat = ChatId::new();
+        assert_eq!(
+            AgentRunId::foreground_for_chat(first_chat),
+            AgentRunId::foreground_for_chat(first_chat)
+        );
+        assert_ne!(
+            AgentRunId::foreground_for_chat(first_chat),
+            AgentRunId::foreground_for_chat(second_chat)
+        );
     }
 
     #[test]

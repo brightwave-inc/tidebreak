@@ -4886,6 +4886,8 @@ async fn make_queued_turn(
     entities::turn_run::ActiveModel {
         id: Set(turn_id.0),
         chat_id: Set(chat_id.0),
+        agent_run_id: Set(crate::id::AgentRunId::foreground_for_chat(chat_id).0),
+        agent_run_depth: Set(0),
         input_message_id: Set(input_message_id.0),
         output_message_id: Set(None),
         model: Set(model.into()),
@@ -4926,6 +4928,10 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     let stored = store.get_turn_run(TurnId(first.id)).await.unwrap().unwrap();
     assert_eq!(stored.id, TurnId(first.id));
     assert_eq!(stored.chat_id, chat.id);
+    assert_eq!(
+        stored.agent_run_id,
+        crate::id::AgentRunId::foreground_for_chat(chat.id)
+    );
     assert_eq!(stored.model, "claude-sonnet-4-5");
     assert_eq!(stored.status, TurnRunStatus::Queued);
     assert_eq!(stored.model_steps, 0);
@@ -4992,6 +4998,11 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
 
     let invalid_chat = sample_chat();
     store.create_chat(&invalid_chat).await.unwrap();
+
+    let mut cross_chat_coordinator = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
+    cross_chat_coordinator.agent_run_id =
+        Set(crate::id::AgentRunId::foreground_for_chat(chat.id).0);
+    assert!(cross_chat_coordinator.insert(&store.conn).await.is_err());
 
     let mut negative_accounting = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     negative_accounting.input_tokens = Set(-1);
@@ -5408,6 +5419,26 @@ async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
     assert!(store.list_turn_runs(other.id).await.unwrap().is_empty());
     assert!(store.list_messages(other.id).await.unwrap().is_empty());
 
+    entities::agent_run::Entity::update_many()
+        .col_expr(
+            entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(AgentRunStatus::Completed.as_str()),
+        )
+        .filter(entities::agent_run::Column::Id.eq(accepted.agent_run_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::Existing(turn) if turn == accepted
+    ));
+    assert!(store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "new work")
+        .await
+        .is_err());
     entities::message::Entity::update_many()
         .col_expr(
             entities::message::Column::Role,
