@@ -52,8 +52,18 @@ selection are deliberately separate actions, matching the API boundary above.
 ## Current boundary
 
 `openwave-server::web_search::resolve_provider` is the host-only construction
-seam for a future approved execution worker. It is inert until that caller
-invokes `search`; no route invokes it. No model-visible `web_search` tool or
-sandbox tool loop exists yet. The next slice must explicitly attach this host
-policy to a sandbox worker, define an outbound-domain policy, and preserve the
-turn/checkpoint idempotency guarantees before search can be used by an agent.
+seam. It is inert until a caller invokes `search`; no route invokes it. The
+server's sandbox checkpoint executor may invoke it only after it has claimed a
+persisted `web_search` checkpoint. It resolves host settings and credentials,
+then revalidates the exact lease, cancellation state, and run deadline with the
+database clock immediately before calling the provider. It keeps its local
+execution timeout below that database-derived lease budget and resolves one
+immutable receipt.
+
+Malformed arguments, disabled selection, missing credentials, provider failure,
+timeout, and invalid output resolve a bounded redacted
+failure receipt rather than leaving a sandbox waiting. There is still no
+model-visible `web_search` tool or sandbox tool loop: without a durable
+checkpoint the executor does not construct a provider or make an outbound
+request. A later slice must add model-loop checkpoint emission and an explicit
+outbound-domain policy before search is model-usable.

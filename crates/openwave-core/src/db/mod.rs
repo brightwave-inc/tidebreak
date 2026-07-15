@@ -1833,6 +1833,32 @@ impl Store for DbStore {
         ops::sandbox_tool::claim_sandbox_tool_call(self, id, lease_token, lease_duration).await
     }
 
+    async fn claim_sandbox_tool_call_named(
+        &self,
+        id: CallId,
+        name: &str,
+        lease_token: uuid::Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<ClaimSandboxToolCallOutcome> {
+        ops::sandbox_tool::claim_sandbox_tool_call_named(
+            self,
+            id,
+            name,
+            lease_token,
+            lease_duration,
+        )
+        .await
+    }
+
+    async fn heartbeat_sandbox_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<Option<chrono::Duration>> {
+        ops::sandbox_tool::heartbeat_sandbox_tool_call(self, id, lease_token, lease_duration).await
+    }
+
     async fn resolve_sandbox_tool_call(
         &self,
         id: CallId,
@@ -1855,6 +1881,14 @@ impl Store for DbStore {
 
     async fn list_sandbox_tool_call_candidates(&self, limit: u64) -> Result<Vec<SandboxToolCall>> {
         ops::sandbox_tool::list_sandbox_tool_call_candidates(self, limit).await
+    }
+
+    async fn list_sandbox_tool_call_candidates_named(
+        &self,
+        name: &str,
+        limit: u64,
+    ) -> Result<Vec<SandboxToolCall>> {
+        ops::sandbox_tool::list_sandbox_tool_call_candidates_named(self, name, limit).await
     }
 
     async fn request_agent_run_cancellation(

@@ -27,6 +27,7 @@ mod providers;
 mod resolver;
 mod routes;
 mod sandbox_agent_run_worker;
+mod sandbox_web_search_worker;
 mod state;
 mod turn_worker;
 /// Host-owned, inert web-search configuration and provider selection.
@@ -238,6 +239,7 @@ pub struct Server {
     _document_worker: AbortTask,
     _turn_worker: AbortTask,
     _sandbox_agent_run_worker: AbortTask,
+    _sandbox_web_search_worker: AbortTask,
     _blob_retirement_worker: AbortTask,
     _blob_orphan_auditor: AbortTask,
     _instance_lock: InstanceLock,
@@ -429,6 +431,12 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
         Some(state.config.data_dir.join("scratch")),
         sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default(),
     );
+    let sandbox_web_search_worker = sandbox_web_search_worker::SandboxWebSearchWorker::new(
+        state.store.clone(),
+        state.secrets.clone(),
+        state.agent_run_wake.clone(),
+        sandbox_web_search_worker::SandboxWebSearchWorkerConfig::default(),
+    );
     let server_store = state.store.clone();
     let router = app(state);
 
@@ -443,6 +451,7 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
     let document_worker = tokio::spawn(document_worker.run());
     let turn_worker = tokio::spawn(turn_worker.run());
     let sandbox_agent_run_worker = tokio::spawn(sandbox_agent_run_worker.run());
+    let sandbox_web_search_worker = tokio::spawn(sandbox_web_search_worker.run());
     let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
     let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
 
@@ -457,6 +466,7 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
         _document_worker: AbortTask(document_worker),
         _turn_worker: AbortTask(turn_worker),
         _sandbox_agent_run_worker: AbortTask(sandbox_agent_run_worker),
+        _sandbox_web_search_worker: AbortTask(sandbox_web_search_worker),
         _blob_retirement_worker: AbortTask(blob_retirement_worker),
         _blob_orphan_auditor: AbortTask(blob_orphan_auditor),
         _instance_lock: instance_lock,
