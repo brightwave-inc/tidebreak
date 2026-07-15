@@ -55,7 +55,10 @@ pub struct ToolRegistry {
 
 enum RegisteredTool {
     Server(Box<dyn Tool>),
-    Client(ToolSpec),
+    Client {
+        spec: ToolSpec,
+        validate_arguments: Option<fn(&Value) -> bool>,
+    },
 }
 
 impl ToolRegistry {
@@ -73,8 +76,28 @@ impl ToolRegistry {
 
     /// Register a client-owned tool contract with no server-side executor.
     pub fn register_client(&mut self, spec: ToolSpec) {
-        self.tools
-            .insert(spec.name.clone(), RegisteredTool::Client(spec));
+        self.tools.insert(
+            spec.name.clone(),
+            RegisteredTool::Client {
+                spec,
+                validate_arguments: None,
+            },
+        );
+    }
+
+    /// Register a client-owned contract with payload validation at checkpoint time.
+    pub fn register_validated_client(
+        &mut self,
+        spec: ToolSpec,
+        validate_arguments: fn(&Value) -> bool,
+    ) {
+        self.tools.insert(
+            spec.name.clone(),
+            RegisteredTool::Client {
+                spec,
+                validate_arguments: Some(validate_arguments),
+            },
+        );
     }
 
     /// Builder-style [`register`](Self::register).
@@ -89,7 +112,7 @@ impl ToolRegistry {
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         match self.tools.get(name) {
             Some(RegisteredTool::Server(tool)) => Some(tool.as_ref()),
-            Some(RegisteredTool::Client(_)) | None => None,
+            Some(RegisteredTool::Client { .. }) | None => None,
         }
     }
 
@@ -98,7 +121,7 @@ impl ToolRegistry {
     pub fn execution(&self, name: &str) -> Option<ToolCallExecution> {
         self.tools.get(name).map(|tool| match tool {
             RegisteredTool::Server(_) => ToolCallExecution::Server,
-            RegisteredTool::Client(_) => ToolCallExecution::Client,
+            RegisteredTool::Client { .. } => ToolCallExecution::Client,
         })
     }
 
@@ -109,9 +132,25 @@ impl ToolRegistry {
             .values()
             .map(|tool| match tool {
                 RegisteredTool::Server(tool) => tool.spec(),
-                RegisteredTool::Client(spec) => spec.clone(),
+                RegisteredTool::Client { spec, .. } => spec.clone(),
             })
             .collect()
+    }
+
+    /// Validate canonical arguments against a registered client-owned contract.
+    #[must_use]
+    pub fn client_arguments_are_valid(&self, name: &str, arguments: &Value) -> bool {
+        match self.tools.get(name) {
+            Some(RegisteredTool::Client {
+                validate_arguments: Some(validate),
+                ..
+            }) => validate(arguments),
+            Some(RegisteredTool::Client {
+                validate_arguments: None,
+                ..
+            }) => true,
+            Some(RegisteredTool::Server(_)) | None => false,
+        }
     }
 
     /// Whether no tools are registered.
@@ -693,7 +732,11 @@ impl Agent {
                     name: call.name.clone(),
                     arguments,
                 };
-                if !request.is_well_formed() {
+                if !request.is_well_formed()
+                    || !self
+                        .tools
+                        .client_arguments_are_valid(&request.name, &request.arguments)
+                {
                     events.send(AgentEvent::StreamInterrupted);
                     transcript.push(ChatMessage {
                         role: Role::User,
@@ -1519,6 +1562,8 @@ mod tests {
 
     struct ClientToolProvider {
         assistant_text: bool,
+        name: &'static str,
+        arguments: &'static str,
     }
 
     struct ContextRecordingTool {
@@ -1601,11 +1646,11 @@ mod tests {
                 ProviderEvent::ToolCallStarted {
                     index: 0,
                     id: "native_1".into(),
-                    name: "connect_folder".into(),
+                    name: self.name.into(),
                 },
                 ProviderEvent::ToolCallArgsDelta {
                     index: 0,
-                    fragment: r#"{"hint":"Documents"}"#.into(),
+                    fragment: self.arguments.into(),
                 },
                 ProviderEvent::Usage(Usage {
                     input_tokens: 5,
@@ -1680,6 +1725,8 @@ mod tests {
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
                 assistant_text: false,
+                name: "connect_folder",
+                arguments: r#"{"hint":"Documents"}"#,
             }),
             Arc::new(registry),
             store.clone(),
@@ -1719,6 +1766,41 @@ mod tests {
             event,
             AgentEvent::ToolCallStarted { name, .. } if name == "connect_folder"
         )));
+
+        let mut validated_registry = ToolRegistry::new();
+        validated_registry.register_validated_client(
+            crate::request_folder_access_tool_spec(),
+            crate::validate_request_folder_access_arguments,
+        );
+        let invalid_agent = Agent::new(
+            Arc::new(ClientToolProvider {
+                assistant_text: false,
+                name: crate::REQUEST_FOLDER_ACCESS_TOOL,
+                arguments: r#"{"reason":"Read reports","requested_capabilities":["write_files"],"path":"/Users/example/Documents"}"#,
+            }),
+            Arc::new(validated_registry),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                max_steps: 1,
+                ..AgentConfig::default()
+            },
+        )
+        .with_durable_steer(lease_token);
+        let (invalid_tx, _invalid_rx) = unbounded();
+        let invalid_outcome = invalid_agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &invalid_tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            invalid_outcome,
+            AgentTurnOutcome::Failed {
+                error,
+                model_steps: 1,
+                ..
+            } if error.kind == "max_steps_exceeded"
+        ));
+        assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1766,6 +1848,8 @@ mod tests {
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
                 assistant_text: true,
+                name: "connect_folder",
+                arguments: r#"{"hint":"Documents"}"#,
             }),
             Arc::new(registry),
             store.clone(),

@@ -104,6 +104,19 @@ async fn drain_committed_events(
     }
 }
 
+fn client_checkpoint_is_valid(
+    tools: &ToolRegistry,
+    chat_id: openwave_core::ChatId,
+    turn_id: TurnId,
+    request: &openwave_core::ClientToolCallRequest,
+) -> bool {
+    request.chat_id == chat_id
+        && request.turn_id == turn_id
+        && request.is_well_formed()
+        && tools.client_arguments_are_valid(&request.name, &request.arguments)
+        && tools.execution(&request.name) == Some(openwave_core::ToolCallExecution::Client)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LeaseState {
     Running,
@@ -823,12 +836,12 @@ impl TurnWorker {
                             )
                             .await;
                     }
-                    if request.chat_id != turn.chat_id
-                        || request.turn_id != turn.id
-                        || !request.is_well_formed()
-                        || self.tools.execution(&request.name)
-                            != Some(openwave_core::ToolCallExecution::Client)
-                    {
+                    if !client_checkpoint_is_valid(
+                        self.tools.as_ref(),
+                        turn.chat_id,
+                        turn.id,
+                        &request,
+                    ) {
                         drop(active);
                         return self
                             .record_failure(
@@ -1532,5 +1545,40 @@ mod committed_event_drain_tests {
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn client_checkpoint_fence_rejects_invalid_payloads_before_parking() {
+        let mut tools = ToolRegistry::new();
+        tools.register_validated_client(
+            openwave_core::request_folder_access_tool_spec(),
+            openwave_core::validate_request_folder_access_arguments,
+        );
+        let chat_id = openwave_core::ChatId::new();
+        let turn_id = TurnId::new();
+        let mut request = openwave_core::ClientToolCallRequest {
+            id: openwave_core::CallId::new(),
+            chat_id,
+            turn_id,
+            provider_id: "provider-call-1".into(),
+            name: openwave_core::REQUEST_FOLDER_ACCESS_TOOL.into(),
+            arguments: serde_json::json!({
+                "reason": "Read the reports needed for this project",
+                "requested_capabilities": ["read_files"],
+                "folder_hint": "documents"
+            }),
+        };
+        assert!(client_checkpoint_is_valid(
+            &tools, chat_id, turn_id, &request
+        ));
+
+        request.arguments = serde_json::json!({
+            "reason": "Read reports",
+            "requested_capabilities": ["write_files"],
+            "path": "/Users/example/Documents"
+        });
+        assert!(!client_checkpoint_is_valid(
+            &tools, chat_id, turn_id, &request
+        ));
     }
 }
