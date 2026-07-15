@@ -2,7 +2,8 @@ use sea_orm_migration::prelude::*;
 
 use super::{
     AgentRunExecution, AgentRunStatus, BlobRetirementStatus, DocumentJobKind, DocumentJobStatus,
-    DocumentProcessingStatus, TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
+    DocumentProcessingStatus, TurnAgentRunWaitStatus, TurnClientWaitStatus, TurnRunStatus,
+    TurnSteerStatus,
 };
 
 pub struct Migrator;
@@ -958,6 +959,7 @@ impl MigrationTrait for Init {
             TurnRunStatus::Running.as_str(),
             TurnRunStatus::Cancelling.as_str(),
             TurnRunStatus::WaitingForClient.as_str(),
+            TurnRunStatus::WaitingForAgentRun.as_str(),
             TurnRunStatus::CancellingClient.as_str(),
             TurnRunStatus::Resuming.as_str(),
             TurnRunStatus::RetryWait.as_str(),
@@ -996,6 +998,7 @@ impl MigrationTrait for Init {
                 TurnRunStatus::Running.as_str(),
                 TurnRunStatus::Cancelling.as_str(),
                 TurnRunStatus::WaitingForClient.as_str(),
+                TurnRunStatus::WaitingForAgentRun.as_str(),
                 TurnRunStatus::CancellingClient.as_str(),
                 TurnRunStatus::Resuming.as_str(),
                 TurnRunStatus::RetryWait.as_str(),
@@ -1018,9 +1021,10 @@ impl MigrationTrait for Init {
             .and(Expr::col(TurnRun::AttemptCount).gte(1))
             .and(Expr::col(TurnRun::AttemptCount).lt(Expr::col(TurnRun::MaxAttempts)))
             .and(Expr::col(TurnRun::StartedAt).is_not_null());
-        let client_checkpoint_attempt = Expr::col(TurnRun::Status)
+        let continuation_checkpoint_attempt = Expr::col(TurnRun::Status)
             .is_in([
                 TurnRunStatus::WaitingForClient.as_str(),
+                TurnRunStatus::WaitingForAgentRun.as_str(),
                 TurnRunStatus::CancellingClient.as_str(),
                 TurnRunStatus::Resuming.as_str(),
             ])
@@ -1056,6 +1060,7 @@ impl MigrationTrait for Init {
                 TurnRunStatus::Running.as_str(),
                 TurnRunStatus::Cancelling.as_str(),
                 TurnRunStatus::WaitingForClient.as_str(),
+                TurnRunStatus::WaitingForAgentRun.as_str(),
                 TurnRunStatus::CancellingClient.as_str(),
                 TurnRunStatus::Resuming.as_str(),
                 TurnRunStatus::Completed.as_str(),
@@ -1262,7 +1267,7 @@ impl MigrationTrait for Init {
                     .check(
                         queued_attempt
                             .or(leased_attempt)
-                            .or(client_checkpoint_attempt)
+                            .or(continuation_checkpoint_attempt)
                             .or(retryable_attempt)
                             .or(resolved_attempt)
                             .or(cancelled_attempt),
@@ -1345,6 +1350,7 @@ impl MigrationTrait for Init {
                         TurnRunStatus::Running.as_str(),
                         TurnRunStatus::Cancelling.as_str(),
                         TurnRunStatus::WaitingForClient.as_str(),
+                        TurnRunStatus::WaitingForAgentRun.as_str(),
                         TurnRunStatus::CancellingClient.as_str(),
                         TurnRunStatus::Resuming.as_str(),
                         TurnRunStatus::RetryWait.as_str(),
@@ -1390,6 +1396,158 @@ impl MigrationTrait for Init {
                     .table(TurnRun::Table)
                     .col(TurnRun::ChatId)
                     .col(TurnRun::CreatedAt)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(TurnAgentRunWait::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(TurnAgentRunWait::ChildRunId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnAgentRunWait::ParentRunId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(TurnAgentRunWait::TurnId).uuid().not_null())
+                    .col(ColumnDef::new(TurnAgentRunWait::ChatId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(TurnAgentRunWait::ParkLeaseToken)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnAgentRunWait::AttemptCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnAgentRunWait::ClaimCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnAgentRunWait::ModelSteps)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnAgentRunWait::InputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnAgentRunWait::OutputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnAgentRunWait::CacheReadInputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnAgentRunWait::CacheCreationInputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(TurnAgentRunWait::Status).text().not_null())
+                    .col(
+                        ColumnDef::new(TurnAgentRunWait::ParkedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(TurnAgentRunWait::ClosedAt).timestamp_with_time_zone())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_agent_run_wait_turn")
+                            .from_tbl(TurnAgentRunWait::Table)
+                            .from_col(TurnAgentRunWait::TurnId)
+                            .to_tbl(TurnRun::Table)
+                            .to_col(TurnRun::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_agent_run_wait_child")
+                            .from_tbl(TurnAgentRunWait::Table)
+                            .from_col(TurnAgentRunWait::ChildRunId)
+                            .from_col(TurnAgentRunWait::ParentRunId)
+                            .from_col(TurnAgentRunWait::ChatId)
+                            .to_tbl(AgentRun::Table)
+                            .to_col(AgentRun::Id)
+                            .to_col(AgentRun::ParentId)
+                            .to_col(AgentRun::ChatId)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_agent_run_wait_claim")
+                            .from_tbl(TurnAgentRunWait::Table)
+                            .from_col(TurnAgentRunWait::ParkLeaseToken)
+                            .from_col(TurnAgentRunWait::TurnId)
+                            .from_col(TurnAgentRunWait::AttemptCount)
+                            .from_col(TurnAgentRunWait::ClaimCount)
+                            .to_tbl(TurnClaim::Table)
+                            .to_col(TurnClaim::Token)
+                            .to_col(TurnClaim::TurnId)
+                            .to_col(TurnClaim::AttemptCount)
+                            .to_col(TurnClaim::ClaimCount)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(Expr::col(TurnAgentRunWait::Status).is_in([
+                        TurnAgentRunWaitStatus::Waiting.as_str(),
+                        TurnAgentRunWaitStatus::Resumed.as_str(),
+                        TurnAgentRunWaitStatus::Cancelled.as_str(),
+                    ]))
+                    .check(
+                        Expr::col(TurnAgentRunWait::Status)
+                            .eq(TurnAgentRunWaitStatus::Waiting.as_str())
+                            .and(Expr::col(TurnAgentRunWait::ClosedAt).is_null())
+                            .or(Expr::col(TurnAgentRunWait::Status)
+                                .ne(TurnAgentRunWaitStatus::Waiting.as_str())
+                                .and(Expr::col(TurnAgentRunWait::ClosedAt).is_not_null())),
+                    )
+                    .check(Expr::col(TurnAgentRunWait::AttemptCount).gte(1))
+                    .check(
+                        Expr::col(TurnAgentRunWait::ClaimCount)
+                            .gte(Expr::col(TurnAgentRunWait::AttemptCount)),
+                    )
+                    .check(
+                        Expr::col(TurnAgentRunWait::ModelSteps)
+                            .gt(0)
+                            .and(Expr::col(TurnAgentRunWait::InputTokens).gte(0))
+                            .and(Expr::col(TurnAgentRunWait::OutputTokens).gte(0))
+                            .and(Expr::col(TurnAgentRunWait::CacheReadInputTokens).gte(0))
+                            .and(Expr::col(TurnAgentRunWait::CacheCreationInputTokens).gte(0)),
+                    )
+                    .check(
+                        Expr::col(TurnAgentRunWait::ClosedAt)
+                            .is_null()
+                            .or(Expr::col(TurnAgentRunWait::ClosedAt)
+                                .gte(Expr::col(TurnAgentRunWait::ParkedAt))),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_turn_agent_run_wait_one_open")
+                    .table(TurnAgentRunWait::Table)
+                    .col(TurnAgentRunWait::TurnId)
+                    .unique()
+                    .and_where(
+                        Expr::col(TurnAgentRunWait::Status)
+                            .eq(TurnAgentRunWaitStatus::Waiting.as_str()),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -1653,6 +1811,9 @@ impl MigrationTrait for Init {
             .await?;
         manager
             .drop_table(Table::drop().table(TurnFailure::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(TurnAgentRunWait::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(TurnRun::Table).to_owned())
@@ -3493,6 +3654,26 @@ enum AgentRunInbox {
     ConsumedLeaseToken,
     ConsumedAt,
     DeliveredAt,
+}
+
+#[derive(DeriveIden)]
+enum TurnAgentRunWait {
+    Table,
+    ChildRunId,
+    ParentRunId,
+    TurnId,
+    ChatId,
+    ParkLeaseToken,
+    AttemptCount,
+    ClaimCount,
+    ModelSteps,
+    InputTokens,
+    OutputTokens,
+    CacheReadInputTokens,
+    CacheCreationInputTokens,
+    Status,
+    ParkedAt,
+    ClosedAt,
 }
 
 #[derive(DeriveIden)]

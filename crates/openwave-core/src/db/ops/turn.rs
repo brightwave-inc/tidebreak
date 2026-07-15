@@ -21,10 +21,14 @@ use super::{
     },
 };
 
+mod agent_run_wait;
 mod client_wait;
 mod resolution;
 mod steer;
 
+pub(in crate::db) use agent_run_wait::{
+    park_turn_for_agent_run_inbox, resume_turn_after_agent_run_inbox_consumption_on,
+};
 pub(in crate::db) use client_wait::{
     advance_turn_after_client_resolution_on, park_turn_for_client_tool_call,
     recover_turn_after_client_resolution_on,
@@ -820,6 +824,7 @@ where
             TurnRunStatus::Running.as_str(),
             TurnRunStatus::Cancelling.as_str(),
             TurnRunStatus::WaitingForClient.as_str(),
+            TurnRunStatus::WaitingForAgentRun.as_str(),
             TurnRunStatus::CancellingClient.as_str(),
             TurnRunStatus::Resuming.as_str(),
             TurnRunStatus::RetryWait.as_str(),
@@ -926,6 +931,7 @@ fn turn_run_status_from_db(text: &str) -> Result<TurnRunStatus> {
         "running" => Ok(TurnRunStatus::Running),
         "cancelling" => Ok(TurnRunStatus::Cancelling),
         "waiting_for_client" => Ok(TurnRunStatus::WaitingForClient),
+        "waiting_for_agent_run" => Ok(TurnRunStatus::WaitingForAgentRun),
         "cancelling_client" => Ok(TurnRunStatus::CancellingClient),
         "resuming" => Ok(TurnRunStatus::Resuming),
         "retry_wait" => Ok(TurnRunStatus::RetryWait),

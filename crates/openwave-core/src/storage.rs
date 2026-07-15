@@ -30,8 +30,8 @@ use crate::model::{
     DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
     DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
     Message, Project, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
-    ToolCallResolution, TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt,
-    TurnFailureRetry, TurnRun, TurnSteer,
+    ToolCallResolution, TurnAgentRunWait, TurnCheckpointProgress, TurnClientWait,
+    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
 
@@ -211,6 +211,27 @@ pub enum ConsumeAgentRunInboxOutcome {
     Existing(AgentRunInboxEntry),
 }
 
+/// Result of atomically consuming a child inbox delivery and waking its parked
+/// foreground turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsumeAgentRunInboxAndResumeTurnOutcome {
+    /// The exact continuation lease consumed the delivery and queued the turn
+    /// for a fresh foreground worker claim.
+    Resumed {
+        /// Immutable inbox receipt now marked consumed.
+        inbox: AgentRunInboxEntry,
+        /// Foreground turn now durably ready to resume.
+        turn: TurnRun,
+    },
+    /// An ambiguous retry recovered the exact prior consumption and wake.
+    Existing {
+        /// Immutable inbox receipt consumed by this lease.
+        inbox: AgentRunInboxEntry,
+        /// Foreground turn already durably ready to resume.
+        turn: TurnRun,
+    },
+}
+
 /// Result of atomically accepting one exact steering instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptTurnSteerOutcome {
@@ -373,6 +394,27 @@ pub enum ParkTurnForClientCallOutcome {
         wait: TurnClientWait,
     },
     /// The call identity already names a different immutable request.
+    IdentityConflict,
+    /// A durable steer won the checkpoint race and must be applied first.
+    SteerPending(TurnRun),
+    /// The request came from provider output generated before an applied steer.
+    OutputSuperseded(TurnRun),
+}
+
+/// Result of checkpointing a foreground turn while it awaits one sandbox child.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParkTurnForAgentRunInboxOutcome {
+    /// The immutable wait receipt and foreground lease release committed together.
+    Parked {
+        turn: TurnRun,
+        wait: TurnAgentRunWait,
+    },
+    /// An exact retry recovered the previously committed checkpoint.
+    Existing {
+        turn: TurnRun,
+        wait: TurnAgentRunWait,
+    },
+    /// The child delivery identity is already bound to another checkpoint.
     IdentityConflict,
     /// A durable steer won the checkpoint race and must be applied first.
     SteerPending(TurnRun),
@@ -1068,6 +1110,19 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Atomically consume one exact child result and wake the foreground turn
+    /// that checkpointed on it. The durable turn transition is the wake signal;
+    /// callers may use ordinary turn claiming after this commit and never rely
+    /// on a process-local notification.
+    async fn consume_agent_run_inbox_entry_and_resume_turn(
+        &self,
+        _parent_run_id: AgentRunId,
+        _child_run_id: AgentRunId,
+        _lease_token: uuid::Uuid,
+    ) -> Result<Option<ConsumeAgentRunInboxAndResumeTurnOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
     /// Fetch one durable turn by its exact idempotency identity.
     async fn get_turn_run(&self, _id: TurnId) -> Result<Option<TurnRun>> {
         turn_storage_unavailable()
@@ -1348,6 +1403,21 @@ pub trait Store: Send + Sync {
         _now: chrono::DateTime<chrono::Utc>,
         _call: &ClientToolCallRequest,
     ) -> Result<Option<ParkTurnForClientCallOutcome>> {
+        turn_storage_unavailable()
+    }
+
+    /// Persist a foreground turn checkpoint while it awaits one exact sandbox
+    /// child result. The live worker lease is released in the same transaction,
+    /// and its committed progress becomes the baseline for the resumed worker.
+    async fn park_turn_for_agent_run_inbox(
+        &self,
+        _turn_id: TurnId,
+        _child_run_id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _expected_steer_revision: i64,
+        _progress: TurnCheckpointProgress,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<ParkTurnForAgentRunInboxOutcome>> {
         turn_storage_unavailable()
     }
 

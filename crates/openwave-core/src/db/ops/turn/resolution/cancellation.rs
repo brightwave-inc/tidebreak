@@ -78,6 +78,7 @@ async fn request_turn_cancellation_inner(
         TurnRunStatus::Queued
         | TurnRunStatus::Running
         | TurnRunStatus::WaitingForClient
+        | TurnRunStatus::WaitingForAgentRun
         | TurnRunStatus::Resuming
         | TurnRunStatus::RetryWait => {}
     }
@@ -130,6 +131,54 @@ async fn request_turn_cancellation_inner(
         }
         if call.client_executor_id.is_none() {
             cancel_unclaimed_call = Some((wait, call));
+        }
+    }
+
+    if status == TurnRunStatus::WaitingForAgentRun {
+        let wait = entities::turn_agent_run_wait::Entity::find()
+            .filter(entities::turn_agent_run_wait::Column::TurnId.eq(id.0))
+            .filter(
+                entities::turn_agent_run_wait::Column::Status
+                    .eq(crate::model::TurnAgentRunWaitStatus::Waiting.as_str()),
+            )
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .ok_or_else(|| {
+                AgentError::Store(format!("waiting turn {id} is missing its child receipt"))
+            })?;
+        if wait.chat_id != turn.chat_id
+            || wait.parent_run_id != turn.agent_run_id
+            || wait.attempt_count != turn.attempt_count
+            || wait.claim_count != turn.claim_count
+        {
+            return Err(AgentError::Store(format!(
+                "waiting turn {id} has a mismatched child receipt"
+            )));
+        }
+        let closed = entities::turn_agent_run_wait::Entity::update_many()
+            .col_expr(
+                entities::turn_agent_run_wait::Column::Status,
+                sea_orm::sea_query::Expr::value(
+                    crate::model::TurnAgentRunWaitStatus::Cancelled.as_str(),
+                ),
+            )
+            .col_expr(
+                entities::turn_agent_run_wait::Column::ClosedAt,
+                sea_orm::sea_query::Expr::value(Some(now)),
+            )
+            .filter(entities::turn_agent_run_wait::Column::ChildRunId.eq(wait.child_run_id))
+            .filter(
+                entities::turn_agent_run_wait::Column::Status
+                    .eq(crate::model::TurnAgentRunWaitStatus::Waiting.as_str()),
+            )
+            .filter(entities::turn_agent_run_wait::Column::ClosedAt.is_null())
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+        if closed.rows_affected != 1 {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(None);
         }
     }
 

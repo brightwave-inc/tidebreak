@@ -1,9 +1,11 @@
 use super::{sample_chat, temp_store};
 use crate::{
-    AcceptAgentRunOutcome, AgentRun, AgentRunExecution, AgentRunId, AgentRunInboxStatus,
-    AgentRunStatus, CallId, ChatId, ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxOutcome,
-    DbStore, FinishAgentRunCancellationOutcome, RequestAgentRunCancellationOutcome, Store,
-    SubmitAgentRunResultOutcome,
+    AcceptAgentRunOutcome, AcceptTurnOutcome, AgentRun, AgentRunExecution, AgentRunId,
+    AgentRunInboxStatus, AgentRunStatus, CallId, ChatId, ClaimAgentRunInboxOutcome,
+    ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome, DbStore,
+    FinishAgentRunCancellationOutcome, ParkTurnForAgentRunInboxOutcome,
+    RequestAgentRunCancellationOutcome, Store, SubmitAgentRunResultOutcome, TurnCheckpointProgress,
+    TurnId, TurnRunStatus, Usage,
 };
 use chrono::{Duration, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -82,6 +84,55 @@ async fn submit_sandbox_result(
         outcome => panic!("unexpected result submission outcome: {outcome:?}"),
     };
     (child_id, result)
+}
+
+async fn park_foreground_turn_on_child(
+    store: &DbStore,
+    chat_id: ChatId,
+    child_run_id: AgentRunId,
+) -> crate::TurnRun {
+    let queued = match store
+        .accept_turn(TurnId::new(), chat_id, "gpt-5", "wait for the child")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected turn acceptance: {outcome:?}"),
+    };
+    let lease_token = uuid::Uuid::new_v4();
+    let now = Utc::now();
+    let running = store
+        .claim_turn_run(lease_token, now, now + Duration::minutes(5))
+        .await
+        .unwrap()
+        .turn
+        .expect("foreground turn should claim");
+    assert_eq!(running.id, queued.id);
+    let progress = TurnCheckpointProgress {
+        model_steps: 1,
+        usage: Usage {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        },
+    };
+    match store
+        .park_turn_for_agent_run_inbox(
+            running.id,
+            child_run_id,
+            lease_token,
+            running.steer_revision,
+            progress,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .expect("foreground turn should park")
+    {
+        ParkTurnForAgentRunInboxOutcome::Parked { turn, .. } => turn,
+        outcome => panic!("unexpected child checkpoint outcome: {outcome:?}"),
+    }
 }
 
 #[tokio::test]
@@ -622,6 +673,26 @@ async fn parent_inbox_consumption_is_fenced_and_idempotent() {
     )
     .await;
 
+    // A child can finish before the parent reaches the tool boundary. The
+    // delivery stays pending until that exact foreground checkpoint exists.
+    let early_lease = uuid::Uuid::new_v4();
+    assert!(store
+        .claim_agent_run_inbox_entry(parent_id, child_id, early_lease, Duration::minutes(1))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .consume_agent_run_inbox_entry_and_resume_turn(parent_id, child_id, early_lease)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store.list_agent_run_inbox(parent_id).await.unwrap()[0].status,
+        AgentRunInboxStatus::Pending
+    );
+    let parked = park_foreground_turn_on_child(&store, chat.id, child_id).await;
+    assert_eq!(parked.status, TurnRunStatus::WaitingForAgentRun);
+
     let token = uuid::Uuid::new_v4();
     let claimed = match store
         .claim_agent_run_inbox_entry(parent_id, child_id, token, Duration::minutes(1))
@@ -699,6 +770,139 @@ async fn parent_inbox_consumption_is_fenced_and_idempotent() {
 }
 
 #[tokio::test]
+async fn child_inbox_consumption_atomically_wakes_a_parked_foreground_turn() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let parent_id = AgentRunId::foreground_for_chat(chat.id);
+    let queued = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "delegate the research")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected turn acceptance: {outcome:?}"),
+    };
+    let turn_lease = uuid::Uuid::new_v4();
+    let now = Utc::now();
+    let running = store
+        .claim_turn_run(turn_lease, now, now + Duration::minutes(5))
+        .await
+        .unwrap()
+        .turn
+        .expect("foreground turn should claim");
+    assert_eq!(running.id, queued.id);
+    let child_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(parent_id),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("research the question"),
+        )
+        .await
+        .unwrap();
+    let progress = TurnCheckpointProgress {
+        model_steps: 1,
+        usage: Usage {
+            input_tokens: 11,
+            output_tokens: 7,
+            cache_read_input_tokens: 3,
+            cache_creation_input_tokens: 2,
+        },
+    };
+    let parked = match store
+        .park_turn_for_agent_run_inbox(
+            running.id,
+            child_id,
+            turn_lease,
+            running.steer_revision,
+            progress,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .expect("running turn should checkpoint")
+    {
+        ParkTurnForAgentRunInboxOutcome::Parked { turn, wait } => (turn, wait),
+        outcome => panic!("unexpected child checkpoint outcome: {outcome:?}"),
+    };
+    assert_eq!(parked.0.status, TurnRunStatus::WaitingForAgentRun);
+    assert_eq!(parked.1.child_run_id, child_id);
+    assert_eq!(parked.1.parent_run_id, parent_id);
+    assert_eq!(parked.1.progress, progress);
+
+    let child_lease = uuid::Uuid::new_v4();
+    let claimed_child = store
+        .claim_agent_run(child_lease, Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .expect("sandbox child should claim");
+    assert_eq!(claimed_child.id, child_id);
+    store
+        .submit_agent_run_result(child_id, child_lease, "research complete")
+        .await
+        .unwrap()
+        .expect("sandbox result should deliver");
+    let continuation_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run_inbox_entry(
+            parent_id,
+            child_id,
+            continuation_lease,
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .expect("delivered child result should claim");
+    let resumed = match store
+        .consume_agent_run_inbox_entry_and_resume_turn(parent_id, child_id, continuation_lease)
+        .await
+        .unwrap()
+        .expect("claimed child result should wake its parent turn")
+    {
+        ConsumeAgentRunInboxAndResumeTurnOutcome::Resumed { inbox, turn } => (inbox, turn),
+        outcome => panic!("unexpected inbox wake outcome: {outcome:?}"),
+    };
+    assert_eq!(resumed.0.status, AgentRunInboxStatus::Consumed);
+    assert_eq!(resumed.0.consumed_lease_token, Some(continuation_lease));
+    assert_eq!(resumed.1.status, TurnRunStatus::Resuming);
+    assert_eq!(resumed.1.attempt_count, running.attempt_count);
+    assert_eq!(resumed.1.claim_count, running.claim_count);
+    assert_eq!(resumed.1.model_steps, progress.model_steps);
+    assert_eq!(resumed.1.usage, progress.usage);
+    assert!(matches!(
+        store
+            .consume_agent_run_inbox_entry_and_resume_turn(parent_id, child_id, continuation_lease)
+            .await
+            .unwrap(),
+        Some(ConsumeAgentRunInboxAndResumeTurnOutcome::Existing { inbox, turn })
+            if inbox == resumed.0 && turn == resumed.1
+    ));
+    assert!(store
+        .consume_agent_run_inbox_entry_and_resume_turn(parent_id, child_id, uuid::Uuid::new_v4())
+        .await
+        .unwrap()
+        .is_none());
+
+    let resumed_lease = uuid::Uuid::new_v4();
+    let resumed_claim = store
+        .claim_turn_run(resumed_lease, Utc::now(), Utc::now() + Duration::minutes(5))
+        .await
+        .unwrap()
+        .turn
+        .expect("durable wake should make the turn claimable");
+    assert_eq!(resumed_claim.id, running.id);
+    assert_eq!(resumed_claim.status, TurnRunStatus::Running);
+    assert_eq!(resumed_claim.attempt_count, running.attempt_count);
+    assert_eq!(resumed_claim.claim_count, running.claim_count + 1);
+    assert_eq!(resumed_claim.model_steps, progress.model_steps);
+    assert_eq!(resumed_claim.usage, progress.usage);
+}
+
+#[tokio::test]
 async fn expired_parent_inbox_lease_can_be_reclaimed_but_not_consumed_by_stale_owner() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
@@ -711,6 +915,7 @@ async fn expired_parent_inbox_lease_can_be_reclaimed_but_not_consumed_by_stale_o
         "recoverable child result",
     )
     .await;
+    park_foreground_turn_on_child(&store, chat.id, child_id).await;
     let first_token = uuid::Uuid::new_v4();
     store
         .claim_agent_run_inbox_entry(parent_id, child_id, first_token, Duration::minutes(1))
