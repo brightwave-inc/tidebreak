@@ -1,11 +1,13 @@
 :root {
   color-scheme: light;
-  --bg: oklch(0.988 0.002 0);
+  --bg: oklch(0.975 0.003 95);
   --bg-elevated: oklch(1 0 0);
   --ink: oklch(0.21 0.006 285.885);
-  --muted: oklch(0.552 0.016 285.938);
-  --line: oklch(0.924 0.001 0);
-  --accent: oklch(0.87 0.2 102);
+  --muted: oklch(0.54 0.014 285.938);
+  --line: oklch(0.9 0.004 95);
+  --sidebar: oklch(0.955 0.006 95);
+  --sidebar-active: oklch(0.91 0.015 95);
+  --accent: oklch(0.73 0.16 150);
   --accent-ink: oklch(0.21 0.006 285.885);
   --danger: oklch(0.505 0.213 27.518);
   --user-bg: oklch(0.924 0.001 0);
@@ -46,48 +48,127 @@ button {
   cursor: pointer;
 }
 
-.app {
+.app-shell {
   height: 100%;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-columns: 244px minmax(0, 1fr);
+  overflow: hidden;
 }
 
-.topbar {
+.sidebar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.7rem 1rem;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-elevated);
+  min-width: 0;
+  flex-direction: column;
+  gap: 1.4rem;
+  padding: 1rem 0.75rem 0.75rem;
+  border-right: 1px solid var(--line);
+  background: var(--sidebar);
 }
 
-.brand {
+.sidebar-brand {
   display: flex;
   align-items: center;
   gap: 0.55rem;
+  padding: 0.25rem 0.4rem;
   font-weight: 600;
   font-size: 0.95rem;
   letter-spacing: -0.01em;
 }
 
-.brand svg {
+.sidebar-brand svg {
   width: 1.15rem;
   height: auto;
   color: var(--ink);
 }
 
-.topbar-actions {
+.new-chat {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 2.35rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--bg-elevated);
+  font-weight: 550;
+  text-align: left;
+}
+
+.new-chat:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ink) 28%, var(--line));
+  background: var(--sidebar-active);
+}
+
+.new-chat span {
+  font-size: 1.15rem;
+  font-weight: 400;
+  line-height: 0;
+}
+
+.sidebar-section {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.sidebar-label {
+  padding: 0 0.4rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.conversation-item,
+.sidebar-action {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 0.55rem;
+  border: 0;
+  border-radius: 7px;
+  padding: 0.48rem 0.55rem;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.84rem;
+  text-align: left;
+}
+
+.conversation-item.is-active,
+.sidebar-action.is-active,
+.sidebar-action:hover {
+  color: var(--ink);
+  background: var(--sidebar-active);
+}
+
+.conversation-item span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-dot {
+  width: 0.42rem;
+  height: 0.42rem;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.sidebar-footer {
+  display: grid;
+  gap: 0.15rem;
+  margin-top: auto;
 }
 
 .btn {
   border: 1px solid var(--line);
-  background: var(--bg-elevated);
-  border-radius: 6px;
+  border-radius: 7px;
   padding: 0.35rem 0.7rem;
+  background: var(--bg-elevated);
 }
 
 .btn:hover {
@@ -95,8 +176,8 @@ button {
 }
 
 .btn-primary {
-  background: var(--ink);
   border-color: var(--ink);
+  background: var(--ink);
   color: var(--bg);
 }
 
@@ -104,7 +185,8 @@ button {
   filter: brightness(1.15);
 }
 
-.btn:disabled {
+.btn:disabled,
+.new-chat:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -113,6 +195,7 @@ button {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   min-height: 0;
+  background: var(--bg);
 }
 
 .main.with-settings {
@@ -121,9 +204,56 @@ button {
 
 .chat-pane {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto;
   min-height: 0;
   min-width: 0;
+}
+
+.conversation-header {
+  display: flex;
+  min-height: 4.45rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.8rem clamp(1rem, 3vw, 2rem);
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-elevated) 86%, var(--bg));
+}
+
+.conversation-header h1,
+.conversation-header p {
+  margin: 0;
+}
+
+.conversation-header h1 {
+  font-size: 1rem;
+  font-weight: 620;
+  letter-spacing: -0.015em;
+}
+
+.conversation-header-actions,
+.mobile-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.mobile-settings-actions {
+  display: none;
+}
+
+.mobile-settings-actions .btn.is-active {
+  border-color: var(--ink);
+  background: var(--sidebar-active);
+}
+
+.eyebrow {
+  margin-bottom: 0.1rem !important;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .chat-meta {
@@ -131,7 +261,7 @@ button {
   flex-wrap: wrap;
   gap: 0.75rem;
   align-items: center;
-  padding: 0.65rem 1rem;
+  padding: 0.55rem clamp(1rem, 3vw, 2rem);
   border-bottom: 1px solid var(--line);
   color: var(--muted);
   font-size: 0.85rem;
@@ -154,7 +284,7 @@ button {
 
 .messages {
   overflow: auto;
-  padding: 1rem;
+  padding: 1.25rem clamp(1rem, 7vw, 7rem);
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
@@ -250,7 +380,7 @@ button {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 0.55rem;
-  padding: 0.85rem 1rem 1rem;
+  padding: 0.85rem clamp(1rem, 3vw, 2rem) 1rem;
   border-top: 1px solid var(--line);
   background: var(--bg-elevated);
 }
@@ -383,4 +513,36 @@ button {
   gap: 0.5rem;
   align-items: center;
   margin-top: 0.5rem;
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .mobile-settings-actions {
+    display: flex;
+  }
+
+  .main.with-settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings {
+    grid-row: 2;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .messages {
+    padding-inline: 1rem;
+  }
+
+  .conversation-header .status {
+    display: none;
+  }
 }

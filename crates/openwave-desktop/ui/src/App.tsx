@@ -60,11 +60,13 @@ export default function App() {
   >({});
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [creatingChat, setCreatingChat] = useState(false);
   const [settingsPanel, setSettingsPanel] = useState<
     "providers" | "folders" | null
   >(null);
   const [status, setStatus] = useState("starting…");
   const socketRef = useRef<WebSocket | null>(null);
+  const socketGenerationRef = useRef(0);
   const lastSeqRef = useRef(0);
   const assistantBufRef = useRef("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -119,14 +121,28 @@ export default function App() {
     if (!client || !chat) return;
     socketRef.current?.close();
     lastSeqRef.current = 0;
+    const generation = ++socketGenerationRef.current;
     const socket = client.openEvents(chat.id, 0, (event) => {
+      if (socketGenerationRef.current !== generation) return;
       handleEvent(event);
     });
-    socket.onopen = () => setStatus((s) => `${s} · live`);
-    socket.onerror = () => setStatus("websocket error");
+    socket.onopen = () => {
+      if (socketGenerationRef.current === generation) {
+        setStatus((s) => `${s} · live`);
+      }
+    };
+    socket.onerror = () => {
+      if (socketGenerationRef.current === generation) {
+        setStatus("websocket error");
+      }
+    };
     socketRef.current = socket;
     return () => {
       socket.close();
+      if (socketRef.current === socket) socketRef.current = null;
+      if (socketGenerationRef.current === generation) {
+        socketGenerationRef.current += 1;
+      }
     };
   }, [client, chat?.id]);
 
@@ -313,6 +329,36 @@ export default function App() {
     }
   }
 
+  async function onNewChat() {
+    if (!client || creatingChat || busy) return;
+    setCreatingChat(true);
+    try {
+      const created = await client.createChat(chat?.model ?? models[0]?.id);
+      socketGenerationRef.current += 1;
+      socketRef.current?.close();
+      socketRef.current = null;
+      assistantBufRef.current = "";
+      lastSeqRef.current = 0;
+      setMessages([]);
+      setFolderAccessRequests([]);
+      setFolderAccessErrors({});
+      setDraft("");
+      setChat(created);
+      setStatus(`chat ${created.id.slice(0, 8)}…`);
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: nextId(),
+          role: "error",
+          text: `Could not create a chat: ${String(err)}`,
+        },
+      ]);
+    } finally {
+      setCreatingChat(false);
+    }
+  }
+
   async function onModelChange(modelId: string) {
     if (!client || !chat) return;
     const updated = await client.patchChatModel(chat.id, modelId || null);
@@ -414,43 +460,99 @@ export default function App() {
   }
 
   return (
-    <div className="app">
-      <header className="topbar">
-        <div className="brand">
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="sidebar-brand">
           <Logomark />
-          OpenWave
+          <span>OpenWave</span>
         </div>
-        <div className="topbar-actions">
-          <span className="status">{status}</span>
+
+        <button
+          type="button"
+          className="new-chat"
+          onClick={() => void onNewChat()}
+          disabled={busy || creatingChat}
+        >
+          <span aria-hidden="true">+</span>
+          {creatingChat ? "Starting…" : "New chat"}
+        </button>
+
+        <div className="sidebar-section">
+          <span className="sidebar-label">Workspace</span>
+          <div className="conversation-item is-active">
+            <span className="conversation-dot" aria-hidden="true" />
+            <span>{chat.title?.trim() || "New conversation"}</span>
+          </div>
+        </div>
+
+        <div className="sidebar-footer">
           {hasNativeHost() && (
             <button
               type="button"
-              className="btn"
+              className={`sidebar-action${settingsPanel === "folders" ? " is-active" : ""}`}
               onClick={() =>
                 setSettingsPanel((panel) =>
                   panel === "folders" ? null : "folders",
                 )
               }
             >
-              {settingsPanel === "folders" ? "Hide folders" : "Folders"}
+              Folders
             </button>
           )}
           <button
             type="button"
-            className="btn"
+            className={`sidebar-action${settingsPanel === "providers" ? " is-active" : ""}`}
             onClick={() =>
               setSettingsPanel((panel) =>
                 panel === "providers" ? null : "providers",
               )
             }
           >
-            {settingsPanel === "providers" ? "Hide providers" : "Providers"}
+            Providers
           </button>
         </div>
-      </header>
+      </aside>
 
       <div className={`main${settingsPanel ? " with-settings" : ""}`}>
         <section className="chat-pane">
+          <header className="conversation-header">
+            <div>
+              <p className="eyebrow">Conversation</p>
+              <h1>{chat.title?.trim() || "New conversation"}</h1>
+            </div>
+            <div className="conversation-header-actions">
+              <div className="mobile-settings-actions">
+                {hasNativeHost() && (
+                  <button
+                    type="button"
+                    className={`btn${settingsPanel === "folders" ? " is-active" : ""}`}
+                    onClick={() =>
+                      setSettingsPanel((panel) =>
+                        panel === "folders" ? null : "folders",
+                      )
+                    }
+                  >
+                    Folders
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={`btn${settingsPanel === "providers" ? " is-active" : ""}`}
+                  onClick={() =>
+                    setSettingsPanel((panel) =>
+                      panel === "providers" ? null : "providers",
+                    )
+                  }
+                >
+                  Providers
+                </button>
+              </div>
+              <span className="status" title={status}>
+                {status}
+              </span>
+            </div>
+          </header>
+
           <div className="chat-meta">
             <label>
               Model{" "}
