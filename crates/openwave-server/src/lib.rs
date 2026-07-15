@@ -157,6 +157,7 @@ pub fn app(state: AppState) -> Router {
             "/chats/{id}",
             get(routes::get_chat).patch(routes::patch_chat),
         )
+        .route("/chats/{id}/agent-runs", get(routes::list_agent_runs))
         .route(
             "/settings/api-key",
             axum::routing::put(routes::put_api_key).delete(routes::delete_api_key),
