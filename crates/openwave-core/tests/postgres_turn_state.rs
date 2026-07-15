@@ -362,6 +362,11 @@ async fn postgres_sandbox_terminal_transitions_are_exact_and_fenced() {
         Some(SubmitAgentRunResultOutcome::Completed(result))
             if result.agent_run_id == completed_id && result.text == "postgres result"
     ));
+    let inbox = store.list_agent_run_inbox(parent_id).await.unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].parent_run_id, parent_id);
+    assert_eq!(inbox[0].child_run_id, completed_id);
+    assert_eq!(inbox[0].result.text, "postgres result");
     assert!(matches!(
         store
             .submit_agent_run_result(completed_id, completed_token, "postgres result")

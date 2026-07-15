@@ -443,6 +443,29 @@ pub mod agent_run_cancellation {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod agent_run_inbox {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "agent_run_inbox")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub child_run_id: Uuid,
+        pub parent_run_id: Uuid,
+        pub chat_id: Uuid,
+        pub parent_depth: i16,
+        pub result_lease_token: Uuid,
+        pub result_attempt_count: i32,
+        pub result_claim_count: i32,
+        pub delivered_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod turn_run {
     use sea_orm::entity::prelude::*;
 

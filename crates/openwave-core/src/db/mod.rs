@@ -27,12 +27,12 @@ use crate::id::{
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
-    validate_project_root_projection, AgentRun, AgentRunExecution, AgentRunStatus,
-    BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration,
-    DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
-    DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSourceBlob,
-    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project,
-    RootAttachmentChange, RootAttachmentChangeTerminal, SourceRegion, ToolCallRecord,
+    validate_project_root_projection, AgentRun, AgentRunExecution, AgentRunInboxEntry,
+    AgentRunStatus, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat,
+    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
+    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
+    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
+    Project, RootAttachmentChange, RootAttachmentChangeTerminal, SourceRegion, ToolCallRecord,
     ToolCallResolution, TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun,
     TurnRunStatus, TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
 };
@@ -1802,6 +1802,13 @@ impl Store for DbStore {
         text: &str,
     ) -> Result<Option<SubmitAgentRunResultOutcome>> {
         ops::agent_run::submit_agent_run_result(self, id, lease_token, text).await
+    }
+
+    async fn list_agent_run_inbox(
+        &self,
+        parent_run_id: AgentRunId,
+    ) -> Result<Vec<AgentRunInboxEntry>> {
+        ops::agent_run::list_agent_run_inbox(self, parent_run_id).await
     }
 
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {

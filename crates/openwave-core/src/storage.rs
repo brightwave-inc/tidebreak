@@ -25,13 +25,13 @@ use crate::id::{
     TurnId, TurnSteerId,
 };
 use crate::model::{
-    AgentRun, AgentRunExecution, AgentRunResult, BeginRootAttachmentChange, BlobRetirement,
-    BlobRetirementStatus, Chat, ClientToolCallRequest, DocumentGeneration, DocumentJob,
-    DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentRecord,
-    DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project,
-    RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
-    TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun,
-    TurnSteer,
+    AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult, BeginRootAttachmentChange,
+    BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest, DocumentGeneration,
+    DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
+    DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
+    Message, Project, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
+    ToolCallResolution, TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt,
+    TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
 
@@ -1012,6 +1012,16 @@ pub trait Store: Send + Sync {
         _lease_token: uuid::Uuid,
         _text: &str,
     ) -> Result<Option<SubmitAgentRunResultOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// List immutable child results delivered to one foreground coordinator.
+    /// Consuming or waking a parent continuation is intentionally a separate
+    /// state-machine transition.
+    async fn list_agent_run_inbox(
+        &self,
+        _parent_run_id: AgentRunId,
+    ) -> Result<Vec<AgentRunInboxEntry>> {
         agent_run_storage_unavailable()
     }
 

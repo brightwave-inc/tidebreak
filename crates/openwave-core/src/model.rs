@@ -1168,6 +1168,24 @@ pub struct AgentRunResult {
     pub submitted_at: DateTime<Utc>,
 }
 
+/// One immutable result delivered from a sandbox child to its foreground parent.
+///
+/// Delivery is written in the same transaction as the child's terminal result;
+/// waking or consuming a parent continuation is deliberately a later concern.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunInboxEntry {
+    /// Foreground coordinator that owns this child result.
+    pub parent_run_id: crate::id::AgentRunId,
+    /// Completed sandbox child. One child has exactly one inbox entry.
+    pub child_run_id: crate::id::AgentRunId,
+    /// Chat shared by parent and child.
+    pub chat_id: ChatId,
+    /// Exact result receipt that was delivered.
+    pub result: AgentRunResult,
+    /// Database time when the durable parent delivery committed.
+    pub delivered_at: DateTime<Utc>,
+}
+
 /// Execution boundary for an [`AgentRun`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

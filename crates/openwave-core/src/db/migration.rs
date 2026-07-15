@@ -334,6 +334,18 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
     manager
         .create_index(
             Index::create()
+                .name("idx_agent_run_id_parent_chat")
+                .table(AgentRun::Table)
+                .col(AgentRun::Id)
+                .col(AgentRun::ParentId)
+                .col(AgentRun::ChatId)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
                 .name("idx_agent_run_spawn_call")
                 .table(AgentRun::Table)
                 .col(AgentRun::SpawnCallId)
@@ -460,6 +472,110 @@ async fn create_agent_run_result_table(manager: &SchemaManager<'_>) -> Result<()
                 .check(
                     Func::char_length(Expr::col(AgentRunResult::Text))
                         .between(1, crate::model::AgentRun::MAX_RESULT_LEN as i32),
+                )
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_agent_run_result_identity")
+                .table(AgentRunResult::Table)
+                .col(AgentRunResult::AgentRunId)
+                .col(AgentRunResult::LeaseToken)
+                .col(AgentRunResult::AttemptCount)
+                .col(AgentRunResult::ClaimCount)
+                .unique()
+                .to_owned(),
+        )
+        .await
+}
+
+async fn create_agent_run_inbox_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .create_table(
+            Table::create()
+                .table(AgentRunInbox::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(AgentRunInbox::ChildRunId)
+                        .uuid()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(ColumnDef::new(AgentRunInbox::ParentRunId).uuid().not_null())
+                .col(ColumnDef::new(AgentRunInbox::ChatId).uuid().not_null())
+                .col(
+                    ColumnDef::new(AgentRunInbox::ParentDepth)
+                        .small_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunInbox::ResultLeaseToken)
+                        .uuid()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunInbox::ResultAttemptCount)
+                        .integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunInbox::ResultClaimCount)
+                        .integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunInbox::DeliveredAt)
+                        .timestamp_with_time_zone()
+                        .not_null(),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_agent_run_inbox_child")
+                        .from_tbl(AgentRunInbox::Table)
+                        .from_col(AgentRunInbox::ChildRunId)
+                        .from_col(AgentRunInbox::ParentRunId)
+                        .from_col(AgentRunInbox::ChatId)
+                        .to_tbl(AgentRun::Table)
+                        .to_col(AgentRun::Id)
+                        .to_col(AgentRun::ParentId)
+                        .to_col(AgentRun::ChatId)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_agent_run_inbox_parent")
+                        .from_tbl(AgentRunInbox::Table)
+                        .from_col(AgentRunInbox::ParentRunId)
+                        .from_col(AgentRunInbox::ChatId)
+                        .from_col(AgentRunInbox::ParentDepth)
+                        .to_tbl(AgentRun::Table)
+                        .to_col(AgentRun::Id)
+                        .to_col(AgentRun::ChatId)
+                        .to_col(AgentRun::Depth)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_agent_run_inbox_result")
+                        .from_tbl(AgentRunInbox::Table)
+                        .from_col(AgentRunInbox::ChildRunId)
+                        .from_col(AgentRunInbox::ResultLeaseToken)
+                        .from_col(AgentRunInbox::ResultAttemptCount)
+                        .from_col(AgentRunInbox::ResultClaimCount)
+                        .to_tbl(AgentRunResult::Table)
+                        .to_col(AgentRunResult::AgentRunId)
+                        .to_col(AgentRunResult::LeaseToken)
+                        .to_col(AgentRunResult::AttemptCount)
+                        .to_col(AgentRunResult::ClaimCount)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .check(Expr::col(AgentRunInbox::ParentDepth).eq(0))
+                .check(Expr::col(AgentRunInbox::ResultAttemptCount).gte(1))
+                .check(
+                    Expr::col(AgentRunInbox::ResultClaimCount)
+                        .gte(Expr::col(AgentRunInbox::ResultAttemptCount)),
                 )
                 .to_owned(),
         )
@@ -609,6 +725,7 @@ impl MigrationTrait for Init {
         create_agent_run_table(manager).await?;
         create_agent_run_result_table(manager).await?;
         create_agent_run_cancellation_table(manager).await?;
+        create_agent_run_inbox_table(manager).await?;
 
         manager
             .create_table(
@@ -1492,6 +1609,9 @@ impl MigrationTrait for Init {
             .await?;
         manager
             .drop_table(Table::drop().table(TurnRun::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(AgentRunInbox::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(AgentRunResult::Table).to_owned())
@@ -3307,6 +3427,19 @@ enum AgentRunCancellation {
     AttemptCount,
     ClaimCount,
     CancelledAt,
+}
+
+#[derive(DeriveIden)]
+enum AgentRunInbox {
+    Table,
+    ChildRunId,
+    ParentRunId,
+    ChatId,
+    ParentDepth,
+    ResultLeaseToken,
+    ResultAttemptCount,
+    ResultClaimCount,
+    DeliveredAt,
 }
 
 #[derive(DeriveIden)]

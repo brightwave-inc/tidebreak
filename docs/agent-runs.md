@@ -66,8 +66,8 @@ spawn:
    loop.
 5. The child submits an immutable terminal result or the scheduler records a
    durable terminal failure.
-6. A follow-on delivery transition writes that result to the parent's durable
-   inbox and wakes an explicit parent wait, if one exists.
+6. The result, terminal child state, and immutable parent inbox entry commit
+   together. A later wait transition may consume that entry and wake a parent.
 
 The foreground agent may continue or finish its current turn after spawning a
 child. If it needs the result before proceeding, it parks on a durable wait and
@@ -138,9 +138,10 @@ The scheduler's ownership rules are deliberately strict:
   expired worker cannot resume ownership.
 
 Final sandbox text is stored as an immutable receipt keyed by the child run and
-the exact lease segment that submitted it. The receipt and `completed` state
-commit together, so an ambiguous worker retry can recover its original result
-but cannot overwrite it. Queued, waiting, and retry-wait work cancels
+the exact lease segment that submitted it. The receipt, `completed` state, and
+one parent inbox entry commit together, so an ambiguous worker retry can recover
+its original result but cannot overwrite or double-deliver it. Queued, waiting,
+and retry-wait work cancels
 immediately; a running worker first enters `cancelling` and must acknowledge its
 exact live lease. That acknowledgement writes its own immutable receipt, so only
 the worker that actually committed terminal cancellation can recover an
@@ -159,9 +160,9 @@ The agent hierarchy preserves the runtime's existing rules:
    receipt before it becomes safely retryable.
 5. Waits release workers and resume from committed checkpoints.
 6. Steering and cancellation are resolved at explicit boundaries.
-7. A final result and terminal run state are committed atomically. Parent
-   delivery and the corresponding terminal event will join that transaction
-   when the durable inbox exists.
+7. A final result, terminal run state, and immutable parent inbox entry are
+   committed atomically. Wait consumption and the corresponding terminal event
+   will join a later continuation transition.
 8. Clients recover from a durable snapshot plus ordered event replay.
 
 Until a tool satisfies the side-effect receipt contract, OpenWave continues to
@@ -176,11 +177,10 @@ The implementation is intentionally incremental:
 2. Add the bounded sandbox scheduler and lease lifecycle. *(Shipped.)*
 3. Add idempotent cancellation and immutable fenced result submission.
    *(Shipped.)*
-4. Add the parent inbox, atomic child-result delivery, and parent wake-up
-   operations.
+4. Add the parent inbox and atomic child-result delivery. *(Shipped.)*
 5. Generalize client execution into the shared continuation model.
 6. Persist shared model/tool step boundaries and side-effect receipts.
-7. Add waits that consume durable inbox receipts.
+7. Add waits that consume durable inbox receipts and wake a parent.
 7. Route sandbox folder access through the host broker.
 8. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work.
