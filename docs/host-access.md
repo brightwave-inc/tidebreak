@@ -134,7 +134,8 @@ two-step product workflow, not a privileged broker operation:
 
 1. The agent records an access request with a stable identity, a user-readable
    reason, untrusted proposals for the capabilities it needs, and an optional
-   folder hint such as `Documents`, `Downloads`, or a project name.
+   well-known folder hint for `Documents` or `Downloads`. The contract does not
+   accept free-form labels or paths.
 2. The desktop renders a request card. Only after the user accepts that card does
    it open a native folder picker. A hint may choose the picker's starting
    location, but it confers no authority. Durable coalescing and rate limits keep
@@ -273,8 +274,10 @@ This will land in independently reviewable pieces:
    Authenticated per-chat pending/claim/heartbeat/resolve routes now expose that
    state machine without leaking tokens through polling. Atomic turn parking,
    cumulative progress accounting, and the agent/worker handoff for a singular
-   client-owned call are now implemented. The folder request contract and desktop
-   executor remain to be layered on that boundary.
+   client-owned call are now implemented. The bounded `request_folder_access`
+   contract is registered without a server executor; its capability list is
+   explicitly an untrusted proposal. The desktop pending-work executor remains
+   to be layered on that boundary.
 8. Replace project/chat `workspace_dir` with persisted host-access context
    identity and connected-root APIs. This can update the pre-v1 baseline schema
    directly.

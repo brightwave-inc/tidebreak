@@ -4821,7 +4821,7 @@ async fn root_search_never_returns_project_owned_vectors() {
 }
 
 #[test]
-fn agent_deps_registers_the_search_tool_alongside_the_file_tools() {
+fn agent_deps_registers_server_tools_and_the_folder_consent_contract() {
     let (_retrieval, tools, _config) = agent_deps(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
@@ -4835,6 +4835,35 @@ fn agent_deps_registers_the_search_tool_alongside_the_file_tools() {
         names.iter().any(|n| n == "read_file"),
         "file tools still present"
     );
+    assert_eq!(
+        tools.execution(openwave_core::REQUEST_FOLDER_ACCESS_TOOL),
+        Some(ToolCallExecution::Client)
+    );
+    assert!(tools
+        .get(openwave_core::REQUEST_FOLDER_ACCESS_TOOL)
+        .is_none());
+    let spec = tools
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL)
+        .expect("folder consent tool is advertised");
+    assert_eq!(spec, openwave_core::request_folder_access_tool_spec());
+    assert!(tools.client_arguments_are_valid(
+        openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
+        &serde_json::json!({
+            "reason": "Read the reports needed for this project",
+            "requested_capabilities": ["read_files"],
+            "folder_hint": "documents"
+        })
+    ));
+    assert!(!tools.client_arguments_are_valid(
+        openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
+        &serde_json::json!({
+            "reason": "Read reports",
+            "requested_capabilities": ["write_files"],
+            "path": "/Users/example/Documents"
+        })
+    ));
 }
 
 #[tokio::test]

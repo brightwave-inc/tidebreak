@@ -40,8 +40,9 @@ use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use openwave_core::{
-    AgentConfig, AgentError, Config, DbStore, KeychainSecretProvider, ListDir, Profile, ReadFile,
-    Result, SecretProvider, Store, ToolRegistry, WriteFile,
+    request_folder_access_tool_spec, validate_request_folder_access_arguments, AgentConfig,
+    AgentError, Config, DbStore, KeychainSecretProvider, ListDir, Profile, ReadFile, Result,
+    SecretProvider, Store, ToolRegistry, WriteFile,
 };
 use openwave_retrieval::{
     Embedder, HashEmbedder, LanceVectorStore, OpenAiEmbedder, ParserRegistry, PlainTextParser,
@@ -373,13 +374,16 @@ fn agent_deps(
     store: Arc<dyn VectorStore>,
 ) -> (Arc<Retriever>, Arc<ToolRegistry>, AgentConfig) {
     let (retrieval, search) = build_retrieval(embedder, store);
-    let tools = Arc::new(
-        ToolRegistry::new()
-            .with(Box::new(ReadFile))
-            .with(Box::new(ListDir))
-            .with(Box::new(WriteFile))
-            .with(search),
+    let mut tools = ToolRegistry::new()
+        .with(Box::new(ReadFile))
+        .with(Box::new(ListDir))
+        .with(Box::new(WriteFile))
+        .with(search);
+    tools.register_validated_client(
+        request_folder_access_tool_spec(),
+        validate_request_folder_access_arguments,
     );
+    let tools = Arc::new(tools);
     let model = std::env::var("OPENWAVE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let agent_config = AgentConfig {
         model,

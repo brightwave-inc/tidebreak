@@ -157,7 +157,11 @@ The built-in server registry currently contains:
 - `read_file` and `list_dir`, which are read-only;
 - `write_file`, which is workspace-confined and runs without a prompt;
 - `search`, which queries the indexed corpus and requires approval only when its
-  embedder, store, or reranker can send data outside the machine.
+  embedder, store, or reranker can send data outside the machine;
+- `request_folder_access`, a client-owned consent proposal with a bounded
+  user-facing reason, one read capability proposal, and an optional well-known
+  picker hint for Documents or Downloads. It has no server executor and grants
+  nothing.
 
 Today these file tools still operate inside one directly opened workspace
 directory stored on the chat. That temporary tool path is not the intended
@@ -166,9 +170,9 @@ through a native picker and capability-gated host-broker sidecar; it exposes onl
 opaque root IDs and display names to the renderer. The next tool-routing slice
 will resolve file operations through those roots instead of the legacy workspace.
 See [Host access and connected folders](host-access.md). The agent loop can now
-produce a durable client-wait checkpoint for a registered client-owned tool. The
-folder-request contract and desktop executor are the next layers: such a request
-will only open a native consent flow and will never grant a named path by itself.
+produce a durable client-wait checkpoint for the registered folder-request
+contract. The desktop executor is the next layer: the request will only open a
+native consent flow and will never grant a named path by itself.
 The model router supports Anthropic, OpenAI, and OpenAI-compatible endpoints. It
 fails closed: if no enabled provider with a usable credential can serve the
 selected model, no model request is sent.
@@ -590,8 +594,8 @@ The main next steps are:
 
 - replace raw chat/project workspace paths with broker-mediated, per-context
   connected roots while keeping OpenWave's private app data separate;
-- register the folder-request tool, notify the desktop of durable pending work,
-  and execute native folder requests through the picker and broker;
+- notify the desktop of durable pending folder requests and execute them through
+  the picker and broker;
 - add resumable checkpoints and explicit idempotency policy around remaining
   server-side tool effects;
 - make approvals resumable rather than process-local;
