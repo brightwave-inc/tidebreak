@@ -111,7 +111,9 @@ This is a single Cargo workspace. Libraries never depend on clients — the
 dependency graph only flows downward toward `openwave-core`. For a fuller
 walkthrough of each crate, see [`docs/crates.md`](docs/crates.md). For an
 end-to-end, less technical tour of the runtime and its state machines, see
-[`docs/how-openwave-works.md`](docs/how-openwave-works.md).
+[`docs/how-openwave-works.md`](docs/how-openwave-works.md). The planned shared
+foreground/background execution model is described in
+[`docs/agent-runs.md`](docs/agent-runs.md).
 
 | Crate | What it is |
 | --- | --- |
