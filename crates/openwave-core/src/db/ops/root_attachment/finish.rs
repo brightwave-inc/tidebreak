@@ -68,12 +68,10 @@ pub(in crate::db) async fn finish_root_attachment_change(
         transaction.commit().await.map_err(store_err)?;
         return Ok(outcome);
     }
-    if finished_at < change.created_at {
-        transaction.rollback().await.map_err(store_err)?;
-        return Err(AgentError::Store(
-            "root attachment change finish time precedes creation".into(),
-        ));
-    }
+    // Creation time is immutable caller identity, while finish time is
+    // server-owned metadata. Clamp under the operation lock so clock skew or a
+    // wall-clock rollback cannot wedge this chat's single pending slot.
+    let finished_at = finished_at.max(change.created_at);
 
     if let RootAttachmentChangeTerminal::Completed {
         broker_currently_attached,

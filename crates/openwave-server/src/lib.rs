@@ -39,6 +39,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use uuid::Uuid;
 
 use openwave_core::{
     request_folder_access_tool_spec, validate_request_folder_access_arguments, AgentConfig,
@@ -73,11 +74,28 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/chats/{id}/client-executions/{call_id}/resolve",
             post(routes::resolve_client_execution),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth::require_client_executor_token,
-        ));
+        );
+    let client_executor_api = if state.root_attachment_routes_enabled {
+        client_executor_api
+            .route(
+                "/chats/{chat_id}/root-attachment-changes/{change_id}/begin",
+                post(routes::begin_root_attachment_change),
+            )
+            .route(
+                "/root-attachment-changes/pending",
+                get(routes::list_pending_root_attachment_changes),
+            )
+            .route(
+                "/root-attachment-changes/{change_id}/finish",
+                post(routes::finish_root_attachment_change),
+            )
+    } else {
+        client_executor_api
+    }
+    .route_layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        auth::require_client_executor_token,
+    ));
 
     let api = Router::new()
         .route(
@@ -282,7 +300,28 @@ impl Server {
 const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
 /// Wire the store from `config` and bind the API to an ephemeral loopback port.
+///
+/// This generic embedding does not expose durable root-attachment mutations,
+/// because it has no restart-stable native executor identity.
 pub async fn bind(config: Config) -> Result<Server> {
+    bind_inner(config, None).await
+}
+
+/// Bind the API with a stable app-private native executor identity.
+///
+/// The desktop persists this identity outside renderer-visible state so pending
+/// attachment work remains recoverable across launches.
+pub async fn bind_with_client_executor_id(
+    config: Config,
+    client_executor_id: Uuid,
+) -> Result<Server> {
+    if client_executor_id.is_nil() {
+        return Err(AgentError::config("client executor id must not be nil"));
+    }
+    bind_inner(config, Some(client_executor_id)).await
+}
+
+async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<Server> {
     // Desktop live delivery, steer, and approvals are process-local. Until the
     // self-host control plane makes those paths durable, one process owns the
     // complete data directory and its worker set.
@@ -296,15 +335,27 @@ pub async fn bind(config: Config) -> Result<Server> {
     let embedder = resolve_embedder(&*store, &*secrets).await;
     let vector_store = connect_vector_store(&config, embedder.dimensions()).await?;
     let (retrieval, tools, agent_config) = agent_deps(embedder, vector_store);
-    let state = AppState::new(
-        config,
-        store,
-        resolver,
-        secrets,
-        tools,
-        retrieval,
-        agent_config,
-    );
+    let state = match client_executor_id {
+        Some(client_executor_id) => AppState::new_with_client_executor_id(
+            config,
+            store,
+            resolver,
+            secrets,
+            tools,
+            retrieval,
+            agent_config,
+            client_executor_id,
+        )?,
+        None => AppState::new(
+            config,
+            store,
+            resolver,
+            secrets,
+            tools,
+            retrieval,
+            agent_config,
+        ),
+    };
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();
     let document_worker = document_worker::DocumentWorker::new(

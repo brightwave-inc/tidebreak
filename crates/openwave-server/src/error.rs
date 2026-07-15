@@ -67,6 +67,17 @@ impl ServerError {
         }
     }
 
+    /// A `409 Conflict` with a route-specific stable machine-readable kind.
+    pub(crate) fn conflict_kind(kind: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            info: AgentErrorInfo {
+                kind: kind.to_owned(),
+                message: message.into(),
+            },
+        }
+    }
+
     /// A `500 Internal Server Error` for an unexpected server-side failure that
     /// isn't an [`AgentError`] (e.g. a retrieval backend fault). Carries a stable
     /// `kind` so a client sees the same `{ kind, message }` shape as any error.

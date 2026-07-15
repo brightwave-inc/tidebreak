@@ -836,7 +836,9 @@ pub trait Store: Send + Sync {
     /// Atomically finish one exact change under its stable executor.
     ///
     /// Exact terminal retries return `Existing`. Implementations apply the
-    /// final projection, terminal receipt, and result revision together.
+    /// final projection, terminal receipt, and result revision together. The
+    /// server-owned finish time is clamped to the immutable creation time under
+    /// the operation lock so wall-clock skew cannot wedge pending work.
     /// Adapters must first bind the broker receipt to this exact persisted
     /// operation; arbitrary transport failures are not durable broker failures.
     async fn finish_root_attachment_change(

@@ -121,9 +121,13 @@ async fn boot_server(
     info_tx: watch::Sender<Option<ServerInfo>>,
     data_dir: PathBuf,
 ) -> Result<(), String> {
-    let server = openwave_server::bind(Config::desktop(data_dir))
-        .await
-        .map_err(|e| e.to_string())?;
+    let client_executor_id = app.state::<host_access::HostAccess>().client_executor_id();
+    let server = openwave_server::bind_with_client_executor_id(
+        Config::desktop(data_dir),
+        client_executor_id,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     app.state::<host_access::HostAccess>()
         .initialize_store(server.store())?;
     let base_url = format!("http://{}", server.local_addr());
