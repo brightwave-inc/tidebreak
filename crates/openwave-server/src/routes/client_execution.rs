@@ -3,6 +3,8 @@
 //! Polling is authoritative; event streams are only a latency hint. A client
 //! generates a fresh secret lease token before claiming, then retains it across
 //! ambiguous HTTP responses and presents it for every heartbeat or resolution.
+//! Claim, heartbeat, and resolve also require the server's native-only executor
+//! credential; pending polling uses ordinary API authentication.
 
 use axum::extract::State;
 use serde::{Deserialize, Serialize};

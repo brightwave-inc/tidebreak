@@ -45,8 +45,8 @@ pub use blob::FsBlobStore;
 pub use cancel::{CancelToken, Cancelled};
 pub use client_tools::{
     request_folder_access_tool_spec, validate_request_folder_access_arguments,
-    RequestFolderAccessArgs, RequestedFolderCapability, RequestedFolderHint,
-    MAX_FOLDER_ACCESS_REASON_CHARS, REQUEST_FOLDER_ACCESS_TOOL,
+    RequestFolderAccessArgs, RequestFolderAccessResult, RequestedFolderCapability,
+    RequestedFolderHint, MAX_FOLDER_ACCESS_REASON_CHARS, REQUEST_FOLDER_ACCESS_TOOL,
 };
 pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

@@ -15,10 +15,11 @@ use tokio::sync::watch;
 use openwave_core::Config;
 
 mod broker;
+mod client_execution;
 mod host_access;
 
 /// Connection details the webview needs to reach the in-process API.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
     /// Base URL, e.g. `http://127.0.0.1:54321`.
@@ -103,6 +104,7 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             server_info,
+            client_execution::resolve_folder_access_request,
             host_access::connect_folder,
             host_access::list_connected_folders,
             host_access::disconnect_folder
@@ -112,11 +114,8 @@ pub fn run() {
             let data = data_dir(&handle)?;
             let home = home_dir(&handle)?;
             let scratch = private_scratch(&data)?;
-            app.manage(host_access::HostAccess::new(
-                handle.clone(),
-                data.clone(),
-                home,
-            ));
+            let host_access = host_access::HostAccess::new(handle.clone(), data.clone(), home)?;
+            app.manage(host_access);
 
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = boot_server(handle, info_tx, data, scratch).await {
@@ -146,11 +145,20 @@ async fn boot_server(
         .map_err(|e| e.to_string())?;
     app.state::<host_access::HostAccess>()
         .initialize_store(server.store())?;
+    let base_url = format!("http://{}", server.local_addr());
+    let token = server.token().to_string();
+    let executor_token = server.client_executor_token().to_string();
+    app.state::<host_access::HostAccess>()
+        .initialize_control_plane(base_url.clone(), token.clone(), executor_token)?;
     let info = ServerInfo {
-        base_url: format!("http://{}", server.local_addr()),
-        token: server.token().to_string(),
+        base_url,
+        token,
         scratch_dir: scratch_dir.display().to_string(),
     };
     let _ = info_tx.send(Some(info));
+    let recovery_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        client_execution::recover_folder_access_receipts(recovery_app).await;
+    });
     server.serve().await.map_err(|e| e.to_string())
 }

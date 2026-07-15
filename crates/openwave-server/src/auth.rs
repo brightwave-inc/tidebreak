@@ -14,7 +14,7 @@
 use axum::extract::{Request, State};
 use axum::http::{
     header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL, UPGRADE},
-    HeaderMap, StatusCode,
+    HeaderMap, HeaderName, StatusCode,
 };
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -31,6 +31,10 @@ pub const WS_HANDSHAKE_SUBPROTOCOL: &str = "openwave-v1";
 /// subprotocol token-char sequence.
 pub const WS_TOKEN_SUBPROTOCOL_PREFIX: &str = "openwave-token.";
 
+/// Native-only credential header for claim, heartbeat, and resolve mutations.
+pub const CLIENT_EXECUTOR_HEADER: HeaderName =
+    HeaderName::from_static("x-openwave-client-executor");
+
 /// Reject requests without a valid bearer token — from
 /// `Authorization: Bearer <token>`, or (on WebSocket upgrades only)
 /// `Sec-WebSocket-Protocol: openwave-token.<token>`.
@@ -43,6 +47,26 @@ pub async fn require_token(
 
     match presented {
         Some(token) if constant_time_eq(token.as_bytes(), state.token.as_bytes()) => {
+            next.run(request).await
+        }
+        _ => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+/// Require the second credential held only by the trusted native executor.
+pub async fn require_client_executor_token(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let presented = request
+        .headers()
+        .get(&CLIENT_EXECUTOR_HEADER)
+        .and_then(|value| value.to_str().ok());
+    match presented {
+        Some(token)
+            if constant_time_eq(token.as_bytes(), state.client_executor_token.as_bytes()) =>
+        {
             next.run(request).await
         }
         _ => StatusCode::UNAUTHORIZED.into_response(),

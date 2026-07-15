@@ -3,6 +3,7 @@ import {
   ApiClient,
   type Chat,
   type ModelInfo,
+  type PendingFolderAccessRequest,
   type ProviderInfo,
   type ProviderKind,
   type SequencedEvent,
@@ -14,8 +15,11 @@ import {
   disconnectFolder,
   hasNativeHost,
   listConnectedFolders,
+  resolveFolderAccessRequest,
   type ConnectedFolder,
+  type FolderAccessDecision,
 } from "./host";
+import { FolderAccessCard } from "./FolderAccessCard";
 import { Logomark } from "./Logomark";
 
 type Msg =
@@ -45,6 +49,15 @@ export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [messages, setMessages] = useState<Msg[]>([]);
+  const [folderAccessRequests, setFolderAccessRequests] = useState<
+    PendingFolderAccessRequest[]
+  >([]);
+  const [resolvingFolderCalls, setResolvingFolderCalls] = useState<Set<string>>(
+    new Set(),
+  );
+  const [folderAccessErrors, setFolderAccessErrors] = useState<
+    Record<string, string>
+  >({});
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [settingsPanel, setSettingsPanel] = useState<
@@ -55,6 +68,9 @@ export default function App() {
   const lastSeqRef = useRef(0);
   const assistantBufRef = useRef("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const refreshFolderAccessRef = useRef<(() => void) | null>(null);
+  const resolvingFolderCallsRef = useRef<Set<string>>(new Set());
+  const visibleFolderCallIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -118,8 +134,53 @@ export default function App() {
   }, [client, chat?.id]);
 
   useEffect(() => {
+    if (!client || !chat) return;
+    let cancelled = false;
+    let requestSeq = 0;
+
+    const refresh = async () => {
+      const seq = ++requestSeq;
+      try {
+        const requests = await client.listPendingFolderAccessRequests(chat.id);
+        if (!cancelled && seq === requestSeq) {
+          setFolderAccessRequests(requests);
+        }
+      } catch (err) {
+        if (!cancelled && seq === requestSeq) {
+          console.error("failed to refresh pending folder access", err);
+          setFolderAccessRequests([]);
+        }
+      }
+    };
+
+    refreshFolderAccessRef.current = () => void refresh();
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), 10_000);
+    return () => {
+      cancelled = true;
+      requestSeq += 1;
+      window.clearInterval(interval);
+      if (refreshFolderAccessRef.current) {
+        refreshFolderAccessRef.current = null;
+      }
+      setFolderAccessRequests([]);
+    };
+  }, [client, chat?.id]);
+
+  useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
+
+  useEffect(() => {
+    const next = new Set(folderAccessRequests.map((request) => request.callId));
+    const gainedRequest = [...next].some(
+      (callId) => !visibleFolderCallIdsRef.current.has(callId),
+    );
+    visibleFolderCallIdsRef.current = next;
+    if (gainedRequest) {
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    }
+  }, [folderAccessRequests]);
 
   function handleEvent(framed: SequencedEvent) {
     if (framed.seq <= lastSeqRef.current) return;
@@ -165,6 +226,9 @@ export default function App() {
     }
 
     if (event.type === "tool_call_started") {
+      if (event.name === "request_folder_access") {
+        refreshFolderAccessRef.current?.();
+      }
       setMessages((prev) => [
         ...prev,
         {
@@ -268,6 +332,64 @@ export default function App() {
           : m,
       ),
     );
+  }
+
+  async function onFolderAccessDecision(
+    callId: string,
+    decision: FolderAccessDecision,
+  ) {
+    if (!chat || !hasNativeHost()) return;
+    if (resolvingFolderCallsRef.current.size > 0) return;
+    resolvingFolderCallsRef.current.add(callId);
+    setResolvingFolderCalls((calls) => new Set(calls).add(callId));
+    setFolderAccessErrors((errors) => {
+      const next = { ...errors };
+      delete next[callId];
+      return next;
+    });
+    try {
+      await resolveFolderAccessRequest(chat.id, callId, decision);
+    } catch (err) {
+      setFolderAccessErrors((errors) => ({
+        ...errors,
+        [callId]: String(err),
+      }));
+    } finally {
+      resolvingFolderCallsRef.current.delete(callId);
+      setResolvingFolderCalls((calls) => {
+        const next = new Set(calls);
+        next.delete(callId);
+        return next;
+      });
+      refreshFolderAccessRef.current?.();
+    }
+  }
+
+  async function onFolderAccessCancel(callId: string, turnId: string) {
+    if (!client || !chat || resolvingFolderCallsRef.current.size > 0) return;
+    resolvingFolderCallsRef.current.add(callId);
+    setResolvingFolderCalls((calls) => new Set(calls).add(callId));
+    setFolderAccessErrors((errors) => {
+      const next = { ...errors };
+      delete next[callId];
+      return next;
+    });
+    try {
+      await client.cancel(chat.id, turnId);
+    } catch (err) {
+      setFolderAccessErrors((errors) => ({
+        ...errors,
+        [callId]: String(err),
+      }));
+    } finally {
+      resolvingFolderCallsRef.current.delete(callId);
+      setResolvingFolderCalls((calls) => {
+        const next = new Set(calls);
+        next.delete(callId);
+        return next;
+      });
+      refreshFolderAccessRef.current?.();
+    }
   }
 
   if (bootError) {
@@ -376,7 +498,7 @@ export default function App() {
           </div>
 
           <div className="messages" ref={scrollRef}>
-            {messages.length === 0 && (
+            {messages.length === 0 && folderAccessRequests.length === 0 && (
               <div className="bubble system">
                 Configure a provider, pick a model, then send a message.
               </div>
@@ -413,6 +535,22 @@ export default function App() {
                 </div>
               );
             })}
+            {folderAccessRequests.map((request) => (
+              <FolderAccessCard
+                key={request.callId}
+                request={request}
+                nativeHost={hasNativeHost()}
+                nativeBusy={resolvingFolderCalls.size > 0}
+                working={resolvingFolderCalls.has(request.callId)}
+                error={folderAccessErrors[request.callId]}
+                onDecision={(decision) =>
+                  void onFolderAccessDecision(request.callId, decision)
+                }
+                onCancel={() =>
+                  void onFolderAccessCancel(request.callId, request.turnId)
+                }
+              />
+            ))}
           </div>
 
           <form

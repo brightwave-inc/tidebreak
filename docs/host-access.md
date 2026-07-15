@@ -282,8 +282,14 @@ This will land in independently reviewable pieces:
    a known, still-connected registration without replaying a mutation after
    losing its client lease. Lookup is fenced by the original trusted subject and
    conversation and reports a later disconnection separately from a usable
-   grant. The desktop pending-work executor remains to be layered on that
-   boundary.
+   grant. The desktop now polls that authoritative pending-work boundary, shows
+   a bounded consent card, and keeps the picker, claim token, selected path, and
+   broker mutation inside the native process. App-private receipts preserve the
+   exact operation ID, claim token, intent, and terminal payload across a crash.
+   A pre-effect phase is synced before the one registration dispatch, and the
+   dispatch must begin inside a short post-heartbeat deadline. Recovery runs in
+   the background with bounded backoff; it may query the broker receipt and
+   publish a known result, but it never starts or replays registration.
 8. Replace project/chat `workspace_dir` with persisted host-access context
    identity and connected-root APIs. This can update the pre-v1 baseline schema
    directly.

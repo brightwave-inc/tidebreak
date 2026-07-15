@@ -14,20 +14,31 @@ use tokio::sync::{oneshot, Mutex, OnceCell};
 use uuid::Uuid;
 
 use crate::broker::BrokerClient;
+use crate::client_execution::{ControlPlaneClient, ReceiptStore};
 
 pub(crate) struct HostAccess {
-    broker: BrokerClient,
-    picker: Mutex<()>,
+    pub(super) broker: BrokerClient,
+    pub(super) picker: Mutex<()>,
     store: OnceCell<std::sync::Arc<dyn Store>>,
+    pub(super) control_plane: OnceCell<ControlPlaneClient>,
+    pub(super) receipts: ReceiptStore,
 }
 
 impl HostAccess {
-    pub(crate) fn new(app: AppHandle, data_dir: PathBuf, home_dir: PathBuf) -> Self {
-        Self {
+    pub(crate) fn new(
+        app: AppHandle,
+        data_dir: PathBuf,
+        home_dir: PathBuf,
+    ) -> Result<Self, String> {
+        let receipts = ReceiptStore::open(&data_dir)
+            .map_err(|_| "could not open private client-execution receipts".to_owned())?;
+        Ok(Self {
             broker: BrokerClient::new(app, data_dir, home_dir),
             picker: Mutex::const_new(()),
             store: OnceCell::new(),
-        }
+            control_plane: OnceCell::new(),
+            receipts,
+        })
     }
 
     pub(crate) fn initialize_store(&self, store: std::sync::Arc<dyn Store>) -> Result<(), String> {
@@ -36,7 +47,20 @@ impl HostAccess {
             .map_err(|_| "host access store was initialized more than once".to_owned())
     }
 
-    async fn context(&self, chat_id: Uuid) -> Result<AuthoritativeContext, String> {
+    pub(crate) fn initialize_control_plane(
+        &self,
+        base_url: String,
+        token: String,
+        executor_token: String,
+    ) -> Result<(), String> {
+        let client = ControlPlaneClient::new(base_url, token, executor_token)
+            .map_err(|_| "could not initialize the local control plane".to_owned())?;
+        self.control_plane
+            .set(client)
+            .map_err(|_| "local control plane was initialized more than once".to_owned())
+    }
+
+    pub(super) async fn context(&self, chat_id: Uuid) -> Result<AuthoritativeContext, String> {
         if chat_id.is_nil() {
             return Err("invalid conversation id".to_owned());
         }
@@ -59,10 +83,10 @@ impl HostAccess {
 }
 
 #[derive(Clone, Copy)]
-struct AuthoritativeContext {
-    chat_id: Uuid,
-    execution: ExecutionContext,
-    subject: GrantSubject,
+pub(super) struct AuthoritativeContext {
+    pub(super) chat_id: Uuid,
+    pub(super) execution: ExecutionContext,
+    pub(super) subject: GrantSubject,
 }
 
 fn authoritative_context(
@@ -117,7 +141,7 @@ pub(crate) async fn connect_folder(
         .picker
         .try_lock()
         .map_err(|_| "a folder picker is already open".to_owned())?;
-    let path = pick_folder(&app).await?;
+    let path = pick_folder(&app, None).await?;
     let Some(path) = path else {
         return Ok(None);
     };
@@ -195,12 +219,18 @@ pub(crate) async fn disconnect_folder(
     Ok(result.revoked)
 }
 
-async fn pick_folder(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+pub(super) async fn pick_folder(
+    app: &AppHandle,
+    starting_directory: Option<PathBuf>,
+) -> Result<Option<PathBuf>, String> {
     let (tx, rx) = oneshot::channel();
     let mut picker = app
         .dialog()
         .file()
         .set_title("Choose a folder OpenWave can read");
+    if let Some(starting_directory) = starting_directory {
+        picker = picker.set_directory(starting_directory);
+    }
     if let Some(window) = app.get_webview_window("main") {
         picker = picker.set_parent(&window);
     }

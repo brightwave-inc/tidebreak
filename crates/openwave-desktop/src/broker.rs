@@ -20,7 +20,7 @@ use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{mpsc, oneshot},
-    time::timeout,
+    time::{timeout, timeout_at, Instant},
 };
 
 const SIDECAR_NAME: &str = "openwave-host-broker";
@@ -28,6 +28,7 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const COMMAND_QUEUE_CAPACITY: usize = 32;
+pub(crate) const MUTATION_DISPATCH_WINDOW: Duration = Duration::from_secs(5);
 
 const MINIMAL_ENV_KEYS: &[&str] = &[
     "PATH",
@@ -73,9 +74,33 @@ impl BrokerClient {
         &self,
         request: ControlRequest,
     ) -> Result<ControlResult, BrokerClientError> {
+        self.send_control(request, true, None).await
+    }
+
+    /// Send one control frame without replaying an ambiguous native mutation.
+    pub(crate) async fn control_without_retry(
+        &self,
+        request: ControlRequest,
+        dispatch_deadline: Instant,
+    ) -> Result<ControlResult, BrokerClientError> {
+        self.send_control(request, false, Some(dispatch_deadline))
+            .await
+    }
+
+    async fn send_control(
+        &self,
+        request: ControlRequest,
+        retry: bool,
+        dispatch_deadline: Option<Instant>,
+    ) -> Result<ControlResult, BrokerClientError> {
         let (reply, result) = oneshot::channel();
         self.commands
-            .try_send(BrokerCommand::Control { request, reply })
+            .try_send(BrokerCommand::Control {
+                request,
+                retry,
+                dispatch_deadline,
+                reply,
+            })
             .map_err(map_admission_error)?;
         result.await.map_err(|_| BrokerClientError::Closed)?
     }
@@ -121,6 +146,8 @@ impl BrokerClient {
 enum BrokerCommand {
     Control {
         request: ControlRequest,
+        retry: bool,
+        dispatch_deadline: Option<Instant>,
         reply: oneshot::Sender<Result<ControlResult, BrokerClientError>>,
     },
     Operation {
@@ -150,8 +177,18 @@ impl BrokerWorker {
     async fn run(mut self, mut commands: mpsc::Receiver<BrokerCommand>) {
         while let Some(command) = commands.recv().await {
             match command {
-                BrokerCommand::Control { request, reply } => {
-                    let _ = reply.send(self.control(request).await);
+                BrokerCommand::Control {
+                    request,
+                    retry,
+                    dispatch_deadline,
+                    reply,
+                } => {
+                    let result = if retry {
+                        self.control(request).await
+                    } else {
+                        self.control_once(request, dispatch_deadline).await
+                    };
+                    let _ = reply.send(result);
                 }
                 BrokerCommand::Operation { envelope, reply } => {
                     let result = self
@@ -177,12 +214,12 @@ impl BrokerWorker {
         &mut self,
         request: ControlRequest,
     ) -> Result<ControlResult, BrokerClientError> {
-        let first = self.control_once(request.clone()).await;
+        let first = self.control_once(request.clone(), None).await;
         if first
             .as_ref()
             .is_err_and(BrokerClientError::retryable_control)
         {
-            return self.control_once(request).await;
+            return self.control_once(request, None).await;
         }
         first
     }
@@ -190,13 +227,17 @@ impl BrokerWorker {
     async fn control_once(
         &mut self,
         request: ControlRequest,
+        dispatch_deadline: Option<Instant>,
     ) -> Result<ControlResult, BrokerClientError> {
         let envelope = ControlEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id: RequestId::new(),
             request,
         };
-        match self.exchange(SidecarRequest::Control(envelope)).await? {
+        match self
+            .exchange_before(SidecarRequest::Control(envelope), dispatch_deadline)
+            .await?
+        {
             ExchangeResult::Control(result) => Ok(result),
             ExchangeResult::Operation(_) => Err(BrokerClientError::Protocol),
         }
@@ -206,19 +247,38 @@ impl BrokerWorker {
         &mut self,
         request: SidecarRequest,
     ) -> Result<ExchangeResult, BrokerClientError> {
+        self.exchange_before(request, None).await
+    }
+
+    async fn exchange_before(
+        &mut self,
+        request: SidecarRequest,
+        dispatch_deadline: Option<Instant>,
+    ) -> Result<ExchangeResult, BrokerClientError> {
+        if dispatch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(BrokerClientError::DispatchExpired);
+        }
         if self.session.is_none() {
             self.session = Some(Session::start(&self.app, &self.data_dir, &self.home_dir).await?);
         }
-        let result = timeout(
-            REQUEST_TIMEOUT,
-            self.session
-                .as_mut()
-                .expect("session initialized")
-                .exchange(request),
-        )
-        .await
-        .map_err(|_| BrokerClientError::Timeout)
-        .and_then(|result| result);
+        if dispatch_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(BrokerClientError::DispatchExpired);
+        }
+        let exchange = self
+            .session
+            .as_mut()
+            .expect("session initialized")
+            .exchange(request);
+        let result = match dispatch_deadline {
+            Some(deadline) => timeout_at(deadline, exchange)
+                .await
+                .map_err(|_| BrokerClientError::DispatchExpired)
+                .and_then(|result| result),
+            None => timeout(REQUEST_TIMEOUT, exchange)
+                .await
+                .map_err(|_| BrokerClientError::Timeout)
+                .and_then(|result| result),
+        };
         if result
             .as_ref()
             .is_err_and(BrokerClientError::poisons_session)
@@ -445,6 +505,8 @@ pub(crate) enum BrokerClientError {
     Start,
     #[error("host broker is busy; try again")]
     Busy,
+    #[error("host broker mutation could not start before its authority deadline")]
+    DispatchExpired,
     #[error("host broker connection closed")]
     Closed,
     #[error("host broker request timed out")]

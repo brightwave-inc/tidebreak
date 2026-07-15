@@ -5801,9 +5801,11 @@ dependencies = [
 name = "openwave-desktop"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "openwave-core",
  "openwave-host-broker",
  "openwave-server",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",
@@ -5811,9 +5813,11 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

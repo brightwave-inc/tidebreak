@@ -55,6 +55,8 @@ pub struct AppState {
     pub agent_config: AgentConfig,
     /// The secret every request must present as `Authorization: Bearer <token>`.
     pub token: Arc<str>,
+    /// A second per-launch secret required for client-execution mutations.
+    pub(crate) client_executor_token: Arc<str>,
     /// Process-local cancel/steer handles for exact durably claimed attempts.
     pub active_turns: Arc<TurnGuard>,
     /// Live fan-out of turn events to connected WebSocket clients.
@@ -92,11 +94,23 @@ impl AppState {
             blob_writes,
             agent_config,
             token: Uuid::new_v4().to_string().into(),
+            client_executor_token: mint_client_executor_token(),
             active_turns: Arc::new(TurnGuard::default()),
             events: Arc::new(EventBus::default()),
             approvals: Arc::new(ApprovalBroker::new()),
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) const TEST_CLIENT_EXECUTOR_TOKEN: &str = "test-native-client-executor";
+
+fn mint_client_executor_token() -> Arc<str> {
+    #[cfg(test)]
+    return TEST_CLIENT_EXECUTOR_TOKEN.into();
+
+    #[cfg(not(test))]
+    return Uuid::new_v4().to_string().into();
 }
 
 /// Cross-process exclusion for one content-addressed blob lifecycle.
