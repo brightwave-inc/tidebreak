@@ -60,17 +60,18 @@ pub use id::{
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
 pub use model::{
-    validate_source_regions, AgentRun, AgentRunExecution, AgentRunResult, AgentRunStatus,
-    BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, ByteSpan, Chat,
-    ChatRootAttachment, ClientToolCallRequest, DocumentGeneration, DocumentJob, DocumentJobKind,
-    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
-    DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
-    DocumentUpsert, Message, Project, Role, RootAttachmentChange, RootAttachmentChangeAction,
-    RootAttachmentChangeFailure, RootAttachmentChangePhase, RootAttachmentChangeTerminal,
-    RootAttachmentOrigin, RootAttachmentSubjectKind, SourceLocation, SourceRegion,
-    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress,
-    TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun,
-    TurnRunStatus, TurnSteer, TurnSteerStatus, MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
+    validate_source_regions, AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult,
+    AgentRunStatus, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, ByteSpan,
+    Chat, ChatRootAttachment, ClientToolCallRequest, DocumentGeneration, DocumentJob,
+    DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
+    DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSourceBlob,
+    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project, Role,
+    RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
+    RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentOrigin,
+    RootAttachmentSubjectKind, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
+    ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnClientWait,
+    TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer,
+    TurnSteerStatus, MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,

@@ -6,7 +6,9 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId};
-use crate::model::{AgentRun, AgentRunExecution, AgentRunResult, AgentRunStatus};
+use crate::model::{
+    AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult, AgentRunStatus,
+};
 use crate::storage::{
     AcceptAgentRunOutcome, FinishAgentRunCancellationOutcome, RequestAgentRunCancellationOutcome,
     SubmitAgentRunResultOutcome,
@@ -785,6 +787,26 @@ pub(in crate::db) async fn submit_agent_run_result(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
+    let Some(parent_id) = run.parent_id.map(AgentRunId) else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "sandbox agent run {id} is missing its parent"
+        )));
+    };
+    let Some(parent) = find_by_id_on(&transaction, parent_id).await? else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "sandbox agent run {id} references missing parent {parent_id}"
+        )));
+    };
+    if parent.chat_id != run.chat_id
+        || parent.depth != 0
+        || parent.execution != AgentRunExecution::Foreground.as_str()
+        || parent.status != AgentRunStatus::Active.as_str()
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
     entities::agent_run_result::ActiveModel {
         agent_run_id: Set(id.0),
         lease_token: Set(lease_token),
@@ -792,6 +814,19 @@ pub(in crate::db) async fn submit_agent_run_result(
         claim_count: Set(run.claim_count),
         text: Set(text.to_owned()),
         submitted_at: Set(now),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+    entities::agent_run_inbox::ActiveModel {
+        child_run_id: Set(id.0),
+        parent_run_id: Set(parent_id.0),
+        chat_id: Set(run.chat_id),
+        parent_depth: Set(0),
+        result_lease_token: Set(lease_token),
+        result_attempt_count: Set(run.attempt_count),
+        result_claim_count: Set(run.claim_count),
+        delivered_at: Set(now),
     }
     .insert(&transaction)
     .await
@@ -850,6 +885,34 @@ pub(in crate::db) async fn submit_agent_run_result(
         .and_then(agent_run_result_from_model)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(SubmitAgentRunResultOutcome::Completed(result)))
+}
+
+pub(in crate::db) async fn list_agent_run_inbox(
+    store: &DbStore,
+    parent_run_id: AgentRunId,
+) -> Result<Vec<AgentRunInboxEntry>> {
+    let entries = entities::agent_run_inbox::Entity::find()
+        .filter(entities::agent_run_inbox::Column::ParentRunId.eq(parent_run_id.0))
+        .order_by_asc(entities::agent_run_inbox::Column::DeliveredAt)
+        .order_by_asc(entities::agent_run_inbox::Column::ChildRunId)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    let mut inbox = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let result = entities::agent_run_result::Entity::find_by_id(entry.child_run_id)
+            .one(&store.conn)
+            .await
+            .map_err(store_err)?
+            .ok_or_else(|| {
+                AgentError::Store(format!(
+                    "agent-run inbox child {} is missing its result receipt",
+                    entry.child_run_id
+                ))
+            })?;
+        inbox.push(agent_run_inbox_from_models(entry, result)?);
+    }
+    Ok(inbox)
 }
 
 fn validate_claim_request(
@@ -1247,6 +1310,38 @@ fn agent_run_result_from_model(model: entities::agent_run_result::Model) -> Resu
         claim_count: model.claim_count,
         text: model.text,
         submitted_at: model.submitted_at,
+    })
+}
+
+fn agent_run_inbox_from_models(
+    model: entities::agent_run_inbox::Model,
+    result: entities::agent_run_result::Model,
+) -> Result<AgentRunInboxEntry> {
+    if model.parent_depth != 0
+        || model.result_lease_token.is_nil()
+        || model.result_attempt_count < 1
+        || model.result_claim_count < model.result_attempt_count
+    {
+        return Err(AgentError::Store(
+            "invalid stored agent-run inbox entry".into(),
+        ));
+    }
+    let result = agent_run_result_from_model(result)?;
+    if result.agent_run_id != AgentRunId(model.child_run_id)
+        || result.lease_token != model.result_lease_token
+        || result.attempt_count != model.result_attempt_count
+        || result.claim_count != model.result_claim_count
+    {
+        return Err(AgentError::Store(
+            "agent-run inbox does not match its result receipt".into(),
+        ));
+    }
+    Ok(AgentRunInboxEntry {
+        parent_run_id: AgentRunId(model.parent_run_id),
+        child_run_id: AgentRunId(model.child_run_id),
+        chat_id: ChatId(model.chat_id),
+        result,
+        delivered_at: model.delivered_at,
     })
 }
 

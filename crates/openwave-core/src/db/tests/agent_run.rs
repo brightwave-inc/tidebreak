@@ -528,6 +528,19 @@ async fn sandbox_result_submission_is_fenced_and_idempotent() {
     assert_eq!(result.agent_run_id, child_id);
     assert_eq!(result.lease_token, lease_token);
     assert_eq!(result.text, "finished analysis");
+    assert_eq!(
+        store
+            .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+            .await
+            .unwrap(),
+        vec![crate::AgentRunInboxEntry {
+            parent_run_id: AgentRunId::foreground_for_chat(chat.id),
+            child_run_id: child_id,
+            chat_id: chat.id,
+            result: result.clone(),
+            delivered_at: result.submitted_at,
+        }]
+    );
     let completed = store.get_agent_run(child_id).await.unwrap().unwrap();
     assert_eq!(completed.status, AgentRunStatus::Completed);
     assert_eq!(completed.lease_token, None);
@@ -708,6 +721,80 @@ async fn expired_sandbox_cancellation_is_terminal_and_cannot_fake_worker_acknowl
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn unavailable_parent_rejects_result_without_holding_the_scheduler_lock() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    let other_chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    store.create_chat(&other_chat).await.unwrap();
+    let child_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("parent may finish first"),
+        )
+        .await
+        .unwrap();
+    let lease_token = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(lease_token, Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let other_child_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            other_child_id,
+            other_chat.id,
+            Some(AgentRunId::foreground_for_chat(other_chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("scheduler remains usable"),
+        )
+        .await
+        .unwrap();
+    let now = Utc::now();
+    crate::db::entities::agent_run::Entity::update_many()
+        .col_expr(
+            crate::db::entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(AgentRunStatus::Completed.as_str()),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(
+            crate::db::entities::agent_run::Column::Id
+                .eq(AgentRunId::foreground_for_chat(chat.id).0),
+        )
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert!(store
+        .submit_agent_run_result(child_id, lease_token, "orphaned result")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store
+            .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 2, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        other_child_id
+    );
 }
 
 #[tokio::test]
