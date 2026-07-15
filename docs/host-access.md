@@ -272,7 +272,9 @@ This will land in independently reviewable pieces:
    guard heartbeat, terminal resolution, and explicit expired-claim recovery.
    Authenticated per-chat pending/claim/heartbeat/resolve routes now expose that
    state machine without leaking tokens through polling. Atomic turn parking,
-   the folder request tool, and the desktop executor remain to be layered on it.
+   cumulative progress accounting, and the agent/worker handoff for a singular
+   client-owned call are now implemented. The folder request contract and desktop
+   executor remain to be layered on that boundary.
 8. Replace project/chat `workspace_dir` with persisted host-access context
    identity and connected-root APIs. This can update the pre-v1 baseline schema
    directly.

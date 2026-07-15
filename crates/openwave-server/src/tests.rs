@@ -307,6 +307,7 @@ struct PauseTerminalStore {
     pause_after_claim_commit: std::sync::atomic::AtomicBool,
     fail_after_heartbeat_commit: std::sync::atomic::AtomicBool,
     fail_after_completion_commit: std::sync::atomic::AtomicBool,
+    fail_after_park_commit: std::sync::atomic::AtomicBool,
     fail_after_apply_steer_commit: std::sync::atomic::AtomicBool,
     cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool,
     pause_before_steer_read: std::sync::atomic::AtomicBool,
@@ -332,6 +333,7 @@ impl PauseTerminalStore {
             pause_after_claim_commit: std::sync::atomic::AtomicBool::new(false),
             fail_after_heartbeat_commit: std::sync::atomic::AtomicBool::new(false),
             fail_after_completion_commit: std::sync::atomic::AtomicBool::new(false),
+            fail_after_park_commit: std::sync::atomic::AtomicBool::new(false),
             fail_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
             cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
             pause_before_steer_read: std::sync::atomic::AtomicBool::new(false),
@@ -366,6 +368,10 @@ impl PauseTerminalStore {
     fn fail_after_next_completion_commit(&self) {
         self.fail_after_completion_commit
             .store(true, Ordering::SeqCst);
+    }
+
+    fn fail_after_next_park_commit(&self) {
+        self.fail_after_park_commit.store(true, Ordering::SeqCst);
     }
 
     fn fail_after_next_apply_steer_commit(&self) {
@@ -839,6 +845,33 @@ impl Store for PauseTerminalStore {
         {
             return Err(AgentError::Store(
                 "injected ambiguous completion response".into(),
+            ));
+        }
+        Ok(outcome)
+    }
+    async fn park_turn_for_client_tool_call(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
+        progress: TurnCheckpointProgress,
+        now: chrono::DateTime<chrono::Utc>,
+        call: &ClientToolCallRequest,
+    ) -> Result<Option<ParkTurnForClientCallOutcome>> {
+        let outcome = self
+            .inner
+            .park_turn_for_client_tool_call(
+                turn_id,
+                lease_token,
+                expected_steer_revision,
+                progress,
+                now,
+                call,
+            )
+            .await?;
+        if outcome.is_some() && self.fail_after_park_commit.swap(false, Ordering::SeqCst) {
+            return Err(AgentError::Store(
+                "injected ambiguous client checkpoint response".into(),
             ));
         }
         Ok(outcome)
@@ -2932,6 +2965,248 @@ async fn resumed_worker_preserves_checkpoint_usage_and_step_budget() {
         Some(AgentEvent::TurnFailed { error }) if error.kind == "max_steps_exceeded"
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
+    struct ClientThenFinishProvider {
+        requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ClientThenFinishProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("client-then-finish")
+        }
+
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(req);
+            let events = if requests.len() == 1 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "native_1".into(),
+                        name: "connect_folder".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: r#"{"hint":"Documents"}"#.into(),
+                    },
+                    ProviderEvent::Usage(Usage {
+                        input_tokens: 5,
+                        output_tokens: 2,
+                        ..Usage::default()
+                    }),
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta {
+                        text: "folder connected".into(),
+                    },
+                    ProviderEvent::Usage(Usage {
+                        input_tokens: 3,
+                        output_tokens: 4,
+                        ..Usage::default()
+                    }),
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            drop(requests);
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let injected = Arc::new(PauseTerminalStore::new(
+        inner,
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+    ));
+    injected.do_not_pause_terminal();
+    injected.fail_after_next_park_commit();
+    let store: Arc<dyn Store> = injected;
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let mut tools = ToolRegistry::new();
+    tools.register_client(ToolSpec {
+        name: "connect_folder".into(),
+        description: "Ask the desktop to connect a folder".into(),
+        input_schema: serde_json::json!({"type": "object"}),
+    });
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(ClientThenFinishProvider {
+            requests: requests.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(tools),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let router = app(state.clone());
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "connect documents").await,
+        StatusCode::ACCEPTED
+    );
+
+    let pending = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let pending = store.list_pending_client_tool_calls(chat.id).await.unwrap();
+            if let Some(call) = pending.into_iter().next() {
+                break call;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker should durably checkpoint the client tool");
+    let parked = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    assert_eq!(parked.status, TurnRunStatus::WaitingForClient);
+    assert_eq!(parked.model_steps, 1);
+    assert_eq!(parked.usage.input_tokens, 5);
+    assert_eq!(parked.usage.output_tokens, 2);
+    assert_eq!(pending.name, "connect_folder");
+    assert_eq!(pending.execution, ToolCallExecution::Client);
+    assert_eq!(pending.arguments, serde_json::json!({"hint": "Documents"}));
+
+    resolve_parked_client_call(
+        &*store,
+        chat.id,
+        &ClientToolCallRequest {
+            id: pending.id,
+            chat_id: pending.chat_id,
+            turn_id: pending.turn_id,
+            provider_id: pending.provider_id.clone(),
+            name: pending.name.clone(),
+            arguments: pending.arguments.clone(),
+        },
+    )
+    .await;
+    state.turn_job_wake.notify_one();
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { usage, .. })
+            if usage.input_tokens == 8 && usage.output_tokens == 6
+    ));
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    openwave_core::ContentBlock::ToolUse { id, name, .. }
+                        if id == "native_1" && name == "connect_folder"
+                )
+            })
+        }));
+        assert!(requests[1].messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    openwave_core::ContentBlock::ToolResult { tool_use_id, content, .. }
+                        if tool_use_id == "native_1" && content == "connected-root"
+                )
+            })
+        }));
+    }
+
+    let exhausted_dir = tempfile::tempdir().unwrap();
+    let exhausted_store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            exhausted_dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let (exhausted_retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let mut exhausted_tools = ToolRegistry::new();
+    exhausted_tools.register_client(ToolSpec {
+        name: "connect_folder".into(),
+        description: "Ask the desktop to connect a folder".into(),
+        input_schema: serde_json::json!({"type": "object"}),
+    });
+    let exhausted_state = AppState::new(
+        Config::desktop(exhausted_dir.path()),
+        exhausted_store.clone(),
+        Arc::new(FixedResolver(Arc::new(ClientThenFinishProvider {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(exhausted_tools),
+        exhausted_retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            max_steps: 1,
+            ..AgentConfig::default()
+        },
+    );
+    let exhausted_token = exhausted_state.token.clone();
+    spawn_turn_worker(&exhausted_state);
+    let exhausted_router = app(exhausted_state);
+    let exhausted_bearer = format!("Bearer {exhausted_token}");
+    let exhausted_chat = make_chat(&exhausted_router, &exhausted_bearer).await;
+    let exhausted_turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(
+            &exhausted_router,
+            &exhausted_bearer,
+            exhausted_chat.id,
+            exhausted_turn_id,
+            "connect documents",
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    let exhausted_events = wait_for_turn(&exhausted_store, exhausted_chat.id).await;
+    assert!(matches!(
+        exhausted_events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnFailed { error }) if error.kind == "max_steps_exceeded"
+    ));
+    let exhausted_turn = exhausted_store
+        .get_turn_run(exhausted_turn_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exhausted_turn.model_steps, 1);
+    assert_eq!(exhausted_turn.usage.input_tokens, 5);
+    assert_eq!(exhausted_turn.usage.output_tokens, 2);
+    assert!(exhausted_store
+        .list_pending_client_tool_calls(exhausted_chat.id)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

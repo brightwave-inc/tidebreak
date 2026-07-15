@@ -50,7 +50,12 @@ use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 /// A name-keyed registry of the tools available to the agent.
 #[derive(Default)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: HashMap<String, RegisteredTool>,
+}
+
+enum RegisteredTool {
+    Server(Box<dyn Tool>),
+    Client(ToolSpec),
 }
 
 impl ToolRegistry {
@@ -62,7 +67,14 @@ impl ToolRegistry {
 
     /// Register a tool under its advertised name (replacing any existing one).
     pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.spec().name, tool);
+        self.tools
+            .insert(tool.spec().name, RegisteredTool::Server(tool));
+    }
+
+    /// Register a client-owned tool contract with no server-side executor.
+    pub fn register_client(&mut self, spec: ToolSpec) {
+        self.tools
+            .insert(spec.name.clone(), RegisteredTool::Client(spec));
     }
 
     /// Builder-style [`register`](Self::register).
@@ -75,13 +87,31 @@ impl ToolRegistry {
     /// Look up a tool by name.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.get(name).map(Box::as_ref)
+        match self.tools.get(name) {
+            Some(RegisteredTool::Server(tool)) => Some(tool.as_ref()),
+            Some(RegisteredTool::Client(_)) | None => None,
+        }
+    }
+
+    /// Resolve the trusted execution surface for a registered tool name.
+    #[must_use]
+    pub fn execution(&self, name: &str) -> Option<ToolCallExecution> {
+        self.tools.get(name).map(|tool| match tool {
+            RegisteredTool::Server(_) => ToolCallExecution::Server,
+            RegisteredTool::Client(_) => ToolCallExecution::Client,
+        })
     }
 
     /// The specs of every registered tool, to advertise to the model.
     #[must_use]
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.tools.values().map(|tool| tool.spec()).collect()
+        self.tools
+            .values()
+            .map(|tool| match tool {
+                RegisteredTool::Server(tool) => tool.spec(),
+                RegisteredTool::Client(spec) => spec.clone(),
+            })
+            .collect()
     }
 
     /// Whether no tools are registered.
@@ -159,6 +189,17 @@ pub enum AgentTurnOutcome {
         /// Aggregate provider usage for the eventual terminal event.
         usage: Usage,
         /// Model-call steps consumed from the turn-wide execution budget.
+        model_steps: usize,
+    },
+    /// The model requested one tool that must execute on a trusted client.
+    ClientToolCall {
+        /// Immutable call identity and canonical arguments to checkpoint.
+        request: crate::model::ClientToolCallRequest,
+        /// Provider usage incurred in this agent invocation.
+        usage: Usage,
+        /// Durable steering epoch captured before the producing model call.
+        steer_revision: i64,
+        /// Model-call steps consumed in this agent invocation.
         model_steps: usize,
     },
     /// Execution failed after consuming provider work that must be retained.
@@ -432,7 +473,16 @@ impl Agent {
         }
         let mut progress = AgentProgress::default();
         match self.drive(chat, execution, events, &mut progress).await {
-            Ok(outcome) => Ok(outcome),
+            Ok(outcome) => {
+                if execution.publish_terminal {
+                    if let AgentTurnOutcome::Failed { error, .. } = &outcome {
+                        events.send(AgentEvent::TurnFailed {
+                            error: error.clone(),
+                        });
+                    }
+                }
+                Ok(outcome)
+            }
             Err(err) => {
                 if execution.publish_terminal {
                     events.send(AgentEvent::TurnFailed {
@@ -607,6 +657,61 @@ impl Agent {
                 self.apply_steers(chat, turn_id, &mut transcript, None, events)
                     .await?;
                 continue;
+            }
+
+            let client_calls = calls
+                .iter()
+                .filter(|call| self.tools.execution(&call.name) == Some(ToolCallExecution::Client))
+                .collect::<Vec<_>>();
+            if !client_calls.is_empty() {
+                if calls.len() != 1 || client_calls.len() != 1 || !text.is_empty() {
+                    events.send(AgentEvent::StreamInterrupted);
+                    transcript.push(ChatMessage {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "A client-executed tool must be requested alone, without assistant text or sibling tool calls. Retry the request in that form.".into(),
+                        }],
+                    });
+                    continue;
+                }
+                let call = client_calls[0];
+                let Some(arguments) = parse_client_args(&call.args) else {
+                    events.send(AgentEvent::StreamInterrupted);
+                    transcript.push(ChatMessage {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "The client tool arguments were not valid JSON. Retry the request with a complete JSON value.".into(),
+                        }],
+                    });
+                    continue;
+                };
+                let request = crate::model::ClientToolCallRequest {
+                    id: call.call_id,
+                    chat_id: chat.id,
+                    turn_id,
+                    provider_id: call.provider_id.clone(),
+                    name: call.name.clone(),
+                    arguments,
+                };
+                if !request.is_well_formed() {
+                    events.send(AgentEvent::StreamInterrupted);
+                    transcript.push(ChatMessage {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "The client tool request was too large or malformed. Retry it with a valid tool identity and smaller arguments.".into(),
+                        }],
+                    });
+                    continue;
+                }
+                let steer_revision = generation_steer_revision.ok_or_else(|| {
+                    AgentError::Store("client-executed tools require a durably claimed turn".into())
+                })?;
+                return Ok(AgentTurnOutcome::ClientToolCall {
+                    request,
+                    usage: total_usage,
+                    steer_revision,
+                    model_steps: step + 1,
+                });
             }
 
             // Record the assistant message (text + any tool-use blocks).
@@ -831,7 +936,17 @@ impl Agent {
                 .await?;
         }
 
-        Err(AgentError::msg("max steps per turn exceeded"))
+        if self.config.max_steps == 0 {
+            return Err(AgentError::msg("max steps per turn exceeded"));
+        }
+        Ok(AgentTurnOutcome::Failed {
+            error: crate::error::AgentErrorInfo {
+                kind: "max_steps_exceeded".into(),
+                message: "max steps per turn exceeded".into(),
+            },
+            usage: total_usage,
+            model_steps: self.config.max_steps,
+        })
     }
 
     /// Emit the cancellation terminal event and end the turn as a (non-error)
@@ -1346,6 +1461,15 @@ fn parse_args(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or(Value::Object(Default::default()))
 }
 
+/// Client-owned calls cross a trusted execution boundary, so malformed input
+/// must be retried by the model rather than silently changed before dispatch.
+fn parse_client_args(raw: &str) -> Option<Value> {
+    if raw.trim().is_empty() {
+        return Some(Value::Object(Default::default()));
+    }
+    serde_json::from_str(raw).ok()
+}
+
 // The end-to-end test needs the SQLite store and the built-in tools.
 #[cfg(all(test, feature = "sqlite", feature = "tools"))]
 mod tests {
@@ -1375,9 +1499,26 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn client_tool_arguments_are_parsed_without_forgiving_malformed_json() {
+        assert_eq!(
+            parse_client_args(""),
+            Some(Value::Object(Default::default()))
+        );
+        assert_eq!(
+            parse_client_args(r#"{"hint":"Documents"}"#),
+            Some(serde_json::json!({"hint": "Documents"}))
+        );
+        assert_eq!(parse_client_args(r#"{"hint":"Documents""#), None);
+    }
+
     /// A scripted provider: step 0 calls `read_file`, step 1 gives a final answer.
     struct FakeProvider {
         calls: AtomicUsize,
+    }
+
+    struct ClientToolProvider {
+        assistant_text: bool,
     }
 
     struct ContextRecordingTool {
@@ -1447,6 +1588,212 @@ mod tests {
             };
             Ok(stream::iter(events).boxed())
         }
+    }
+
+    #[async_trait]
+    impl ModelProvider for ClientToolProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("client-tool")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let mut events = vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "native_1".into(),
+                    name: "connect_folder".into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: r#"{"hint":"Documents"}"#.into(),
+                },
+                ProviderEvent::Usage(Usage {
+                    input_tokens: 5,
+                    output_tokens: 2,
+                    ..Usage::default()
+                }),
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ];
+            if self.assistant_text {
+                events.insert(
+                    0,
+                    ProviderEvent::TextDelta {
+                        text: "I will connect it".into(),
+                    },
+                );
+            }
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn claimed_agent_returns_a_client_tool_checkpoint_without_executing_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            workspace_dir: workspace.path().to_path_buf(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "connect documents")
+            .await
+            .unwrap();
+        let lease_token = uuid::Uuid::new_v4();
+        let claimed_at = Utc::now();
+        store
+            .claim_turn_run(
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap();
+        let client_spec = ToolSpec {
+            name: "connect_folder".into(),
+            description: "Ask the desktop to connect a folder".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        let mut registry = ToolRegistry::new();
+        registry.register_client(client_spec.clone());
+        assert_eq!(
+            registry.execution("connect_folder"),
+            Some(ToolCallExecution::Client)
+        );
+        assert!(registry.get("connect_folder").is_none());
+        assert_eq!(registry.specs(), vec![client_spec]);
+        let agent = Agent::new(
+            Arc::new(ClientToolProvider {
+                assistant_text: false,
+            }),
+            Arc::new(registry),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        )
+        .with_durable_steer(lease_token);
+        let (tx, rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        drop(tx);
+        let events = emitted_events(rx.collect().await);
+        let AgentTurnOutcome::ClientToolCall {
+            request,
+            usage,
+            steer_revision,
+            model_steps,
+        } = outcome
+        else {
+            panic!("claimed agent should return a client checkpoint");
+        };
+        assert_eq!(request.chat_id, chat.id);
+        assert_eq!(request.turn_id, turn_id);
+        assert_eq!(request.provider_id, "native_1");
+        assert_eq!(request.name, "connect_folder");
+        assert_eq!(request.arguments, serde_json::json!({"hint": "Documents"}));
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(steer_revision, 0);
+        assert_eq!(model_steps, 1);
+        assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallStarted { name, .. } if name == "connect_folder"
+        )));
+    }
+
+    #[tokio::test]
+    async fn claimed_agent_retries_a_mixed_client_call_then_preserves_exhausted_usage() {
+        let workspace = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            workspace_dir: workspace.path().to_path_buf(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "connect documents")
+            .await
+            .unwrap();
+        let lease_token = uuid::Uuid::new_v4();
+        let claimed_at = Utc::now();
+        store
+            .claim_turn_run(
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register_client(ToolSpec {
+            name: "connect_folder".into(),
+            description: "Ask the desktop to connect a folder".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        });
+        let agent = Agent::new(
+            Arc::new(ClientToolProvider {
+                assistant_text: true,
+            }),
+            Arc::new(registry),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                max_steps: 2,
+                ..AgentConfig::default()
+            },
+        )
+        .with_durable_steer(lease_token);
+        let (tx, _rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            AgentTurnOutcome::Failed {
+                error,
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 4,
+                    ..
+                },
+                model_steps: 2,
+            } if error.kind == "max_steps_exceeded"
+        ));
+        assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]

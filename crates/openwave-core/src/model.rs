@@ -744,7 +744,7 @@ impl TurnRunStatus {
 
 /// Immutable request for one tool operation that must execute in a trusted
 /// client rather than the server process.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientToolCallRequest {
     /// Caller-supplied idempotency identity.
     pub id: CallId,
@@ -758,6 +758,26 @@ pub struct ClientToolCallRequest {
     pub name: String,
     /// Canonical model-supplied arguments.
     pub arguments: serde_json::Value,
+}
+
+impl ClientToolCallRequest {
+    /// Whether this request fits the durable client-execution contract.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        let labels_valid = [self.provider_id.as_str(), self.name.as_str()]
+            .into_iter()
+            .all(|value| {
+                !value.is_empty()
+                    && value.len() <= ToolCallRecord::MAX_LABEL_LEN
+                    && !value.contains('\0')
+            });
+        self.id.0 != Uuid::nil()
+            && self.chat_id.0 != Uuid::nil()
+            && self.turn_id.0 != Uuid::nil()
+            && labels_valid
+            && serde_json::to_vec(&self.arguments)
+                .is_ok_and(|arguments| arguments.len() <= ToolCallRecord::MAX_ARGUMENT_BYTES)
+    }
 }
 
 /// Progress atomically committed with one client-execution checkpoint.

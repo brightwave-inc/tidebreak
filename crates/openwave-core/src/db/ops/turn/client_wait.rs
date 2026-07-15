@@ -6,8 +6,8 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::model::{
-    ClientToolCallRequest, ToolCallExecution, ToolCallRecord, ToolCallStatus,
-    TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
+    ClientToolCallRequest, ToolCallExecution, ToolCallStatus, TurnCheckpointProgress,
+    TurnClientWait, TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
 };
 use crate::storage::ParkTurnForClientCallOutcome;
 use crate::{AgentEvent, ChatId, SequencedEvent, TurnId, TurnRun};
@@ -260,24 +260,11 @@ fn validate_request(
     progress: TurnCheckpointProgress,
     call: &ClientToolCallRequest,
 ) -> Result<()> {
-    let labels_valid = [call.provider_id.as_str(), call.name.as_str()]
-        .into_iter()
-        .all(|value| {
-            !value.is_empty()
-                && value.len() <= ToolCallRecord::MAX_LABEL_LEN
-                && !value.contains('\0')
-        });
-    let args_len = serde_json::to_vec(&call.arguments)
-        .map_err(|error| AgentError::Store(format!("serialize tool arguments: {error}")))?
-        .len();
     if turn_id.0.is_nil()
         || lease_token.is_nil()
-        || call.id.0.is_nil()
-        || call.chat_id.0.is_nil()
         || call.turn_id != turn_id
         || progress.model_steps <= 0
-        || !labels_valid
-        || args_len > ToolCallRecord::MAX_ARGUMENT_BYTES
+        || !call.is_well_formed()
     {
         return Err(AgentError::Store(
             "invalid client tool call checkpoint request".into(),
