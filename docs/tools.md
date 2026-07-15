@@ -100,11 +100,14 @@ WebSearchTool
 ```
 
 The first slice supplies the normalized bounded contract, fixed secret keys,
-and direct Exa/Tavily adapters through an injected HTTP seam. It does **not**
-register `WebSearchTool` or grant any worker network access. Constructing an
-adapter is inert; only an explicit `search` call can send a request. The next
-slice must make a host-owned provider-selection and outbound-domain policy
-available to the worker that is allowed to invoke it.
+and direct Exa/Tavily adapters through an injected HTTP seam. The server now
+also owns a disabled-by-default provider selection and a 1–60 second request
+timeout at `GET`/`PUT /web-search`. That setting has no endpoint or credential
+reference, returns only whether the selected fixed key is present, and does not
+construct or call a provider. It does **not** register `WebSearchTool` or grant
+any worker network access. Constructing an adapter is inert; only an explicit
+`search` call can send a request. A later execution slice must still attach the
+host policy to a sandbox worker and define its outbound-domain policy.
 
 The normalized contract should cover query text, optional date/domain filters,
 bounded result count, canonical URL, title, snippet or extracted text, rank or
