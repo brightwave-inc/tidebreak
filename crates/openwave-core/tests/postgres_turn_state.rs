@@ -16,6 +16,10 @@ use openwave_core::{
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+fn utc_now_at_postgres_precision() -> chrono::DateTime<Utc> {
+    chrono::DateTime::<Utc>::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap()
+}
+
 fn sample_chat() -> Chat {
     Chat {
         id: ChatId::new(),
@@ -24,7 +28,7 @@ fn sample_chat() -> Chat {
         model: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
-        created_at: Utc::now(),
+        created_at: utc_now_at_postgres_precision(),
     }
 }
 
@@ -46,7 +50,7 @@ async fn postgres_ordered_root_projection_roundtrips_and_snapshots_atomically() 
         title: Some("postgres roots".into()),
         attachment_revision: 1,
         root_attachments: vec![root_b, root_a],
-        created_at: Utc::now(),
+        created_at: utc_now_at_postgres_precision(),
     };
     store.create_project(&project).await.unwrap();
     assert_eq!(
