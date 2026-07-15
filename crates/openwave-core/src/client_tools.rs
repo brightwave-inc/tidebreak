@@ -58,6 +58,23 @@ pub struct RequestFolderAccessArgs {
     pub folder_hint: Option<RequestedFolderHint>,
 }
 
+/// Model-facing result returned after the trusted desktop handles consent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RequestFolderAccessResult {
+    /// The user selected a folder and the broker reports live read access.
+    Connected {
+        /// Opaque broker-local root identity, never a host path.
+        root_id: uuid::Uuid,
+        /// Bounded leaf name safe for display.
+        display_name: String,
+        /// Capabilities the trusted host actually granted.
+        capabilities: Vec<RequestedFolderCapability>,
+    },
+    /// The user declined or closed the picker; no access was granted.
+    Declined,
+}
+
 fn deserialize_optional_hint<'de, D>(
     deserializer: D,
 ) -> Result<Option<RequestedFolderHint>, D::Error>
@@ -181,5 +198,25 @@ mod tests {
             serde_json::json!(["reason", "requested_capabilities"])
         );
         assert!(spec.description.contains("grants no access"));
+    }
+
+    #[test]
+    fn folder_access_results_never_need_a_host_path() {
+        let result = RequestFolderAccessResult::Connected {
+            root_id: uuid::Uuid::new_v4(),
+            display_name: "Documents".into(),
+            capabilities: vec![RequestedFolderCapability::ReadFiles],
+        };
+        let encoded = serde_json::to_value(&result).unwrap();
+        assert_eq!(encoded["status"], "connected");
+        assert!(encoded.get("path").is_none());
+        assert_eq!(
+            serde_json::from_value::<RequestFolderAccessResult>(encoded).unwrap(),
+            result
+        );
+        assert_eq!(
+            serde_json::to_value(RequestFolderAccessResult::Declined).unwrap(),
+            serde_json::json!({ "status": "declined" })
+        );
     }
 }

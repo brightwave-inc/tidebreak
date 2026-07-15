@@ -171,8 +171,12 @@ opaque root IDs and display names to the renderer. The next tool-routing slice
 will resolve file operations through those roots instead of the legacy workspace.
 See [Host access and connected folders](host-access.md). The agent loop can now
 produce a durable client-wait checkpoint for the registered folder-request
-contract. The desktop executor is the next layer: the request will only open a
-native consent flow and will never grant a named path by itself.
+contract. The desktop discovers those pending requests from durable state and
+shows a consent card. If the user allows it, only native code can open the
+folder picker, claim the request, and ask the broker to register the selected
+folder. The selected path never enters the renderer or product HTTP API. The
+secret claim token is never renderer-visible; native code sends it only through
+the separately credentialed loopback client-execution API.
 The model router supports Anthropic, OpenAI, and OpenAI-compatible endpoints. It
 fails closed: if no enabled provider with a usable credential can serve the
 selected model, no model request is sent.
@@ -208,7 +212,7 @@ authoritative abandonment without replaying the native action.
 ```text
                          +----success----> completed
 pending ----execute----->+----failure----> failed
-                         +----decline----> cancelled
+                         +----decline----> completed (typed `declined`)
 
 client execution adds: unclaimed ----claim/heartbeat----> leased
 ```
@@ -244,9 +248,27 @@ pause, including when cancellation wins before the resumed agent starts. This is
 the durable equivalent of pausing a function, doing native work elsewhere, and
 continuing from a known checkpoint.
 The agent and worker now emit this checkpoint for the bounded
-`request_folder_access` contract. The remaining integration work is to run those
-pending calls from the desktop. Notifications will be wake-up hints; the
-pending-work query remains authoritative after a restart or missed notification.
+`request_folder_access` contract. The desktop runs those pending calls through a
+native consent state machine. Notifications are wake-up hints; an immediate
+query and periodic polling of pending work remain authoritative after a restart
+or missed notification. The picker opens before the claim, so the client does
+not hold a lease while the user is deciding. Once a choice exists, an app-private
+receipt binds the conversation, call, stable executor, fresh claim token, and
+intent. The call ID is also the broker registration operation ID.
+
+The native executor retries only exact, idempotent control-plane operations.
+Claim, heartbeat, and resolve also require a second per-launch native credential
+that is never given to the renderer. Immediately before broker admission, the
+executor syncs a durable pre-effect phase. The broker registration is then
+queued once with a short dispatch deadline inside the renewed lease. After a
+response, disconnect, or crash, the executor asks the broker for the registration
+receipt and records the de-sensitized terminal payload before resolving the
+client call. A background reconciler retries read-only lookup and exact result
+publication with bounded backoff. On restart it can publish a stored payload or
+reconcile a known broker outcome; it never starts registration from a recovery
+receipt. Declining or closing the picker completes the call with a typed
+`declined` result rather than treating consent as an execution error.
+
 For crash recovery, the broker exposes a de-sensitized registration-receipt
 lookup keyed by the stable operation ID. That lookup never starts or resumes a
 mutation: a restarted client may reconcile a known committed result, but must

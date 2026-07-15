@@ -2439,6 +2439,10 @@ async fn post_json(
                 .method("POST")
                 .uri(uri)
                 .header(header::AUTHORIZATION, bearer)
+                .header(
+                    crate::auth::CLIENT_EXECUTOR_HEADER,
+                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+                )
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
@@ -2603,6 +2607,21 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         "executor_id": executor_id,
         "lease_token": lease_token,
     });
+    let renderer_only = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&claim_uri)
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(claim_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renderer_only.status(), StatusCode::UNAUTHORIZED);
+
     let first = post_json(&router, &bearer, &claim_uri, claim_body.clone()).await;
     assert_eq!(first.status(), StatusCode::OK);
     let first: serde_json::Value = json_body(first).await;

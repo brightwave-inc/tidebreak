@@ -53,6 +53,17 @@ export type AgentEvent =
   | { type: "turn_cancelled"; usage: unknown }
   | { type: "user_steered"; content: string };
 
+export type FolderAccessHint = "documents" | "downloads";
+
+/** A validated, pending request that the renderer may safely present. */
+export type PendingFolderAccessRequest = {
+  callId: string;
+  turnId: string;
+  reason: string;
+  folderHint: FolderAccessHint | null;
+  claimedByDesktop: boolean;
+};
+
 const WS_HANDSHAKE = "openwave-v1";
 const WS_TOKEN_PREFIX = "openwave-token.";
 
@@ -181,6 +192,25 @@ export class ApiClient {
     });
   }
 
+  async listPendingFolderAccessRequests(
+    chatId: string,
+  ): Promise<PendingFolderAccessRequest[]> {
+    const body = await this.json<unknown>(
+      `/chats/${chatId}/client-executions/pending`,
+      { headers: this.headers() },
+    );
+    if (!Array.isArray(body)) return [];
+
+    const requests = new Map<string, PendingFolderAccessRequest>();
+    for (const item of body) {
+      const request = parseFolderAccessRequest(item, chatId);
+      if (request && !requests.has(request.callId)) {
+        requests.set(request.callId, request);
+      }
+    }
+    return [...requests.values()];
+  }
+
   /** Open the chat event stream; auth via Sec-WebSocket-Protocol. */
   openEvents(chatId: string, after: number, onEvent: (e: SequencedEvent) => void): WebSocket {
     const url = `${this.baseUrl.replace(/^http/, "ws")}/chats/${chatId}/events?after=${after}`;
@@ -195,4 +225,67 @@ export class ApiClient {
     };
     return socket;
   }
+}
+
+function parseFolderAccessRequest(
+  value: unknown,
+  chatId: string,
+): PendingFolderAccessRequest | null {
+  if (!isRecord(value)) return null;
+  if (
+    typeof value.id !== "string" ||
+    value.id.length === 0 ||
+    typeof value.turn_id !== "string" ||
+    value.turn_id.length === 0 ||
+    value.chat_id !== chatId ||
+    value.name !== "request_folder_access" ||
+    value.execution !== "client" ||
+    value.status !== "pending" ||
+    !(value.client_executor_id === null ||
+      typeof value.client_executor_id === "string")
+  ) {
+    return null;
+  }
+
+  const args = value.arguments;
+  if (!isRecord(args)) return null;
+  const keys = Object.keys(args);
+  if (
+    keys.some(
+      (key) =>
+        key !== "reason" &&
+        key !== "requested_capabilities" &&
+        key !== "folder_hint",
+    ) ||
+    typeof args.reason !== "string" ||
+    args.reason.trim().length === 0 ||
+    [...args.reason].length > 500 ||
+    args.reason.includes("\0") ||
+    !Array.isArray(args.requested_capabilities) ||
+    args.requested_capabilities.length !== 1 ||
+    args.requested_capabilities[0] !== "read_files"
+  ) {
+    return null;
+  }
+
+  const folderHint = args.folder_hint;
+  if (
+    folderHint !== undefined &&
+    folderHint !== "documents" &&
+    folderHint !== "downloads"
+  ) {
+    return null;
+  }
+
+  return {
+    callId: value.id,
+    turnId: value.turn_id,
+    reason: args.reason,
+    folderHint: folderHint ?? null,
+    claimedByDesktop: value.client_executor_id !== null,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

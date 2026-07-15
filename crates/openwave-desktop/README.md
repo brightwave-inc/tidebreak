@@ -6,6 +6,16 @@ webview. The UI talks to that local API over HTTP + WebSocket (subprotocol auth)
 The native host also owns the folder picker and a private host-broker sidecar;
 the renderer receives opaque folder IDs and display names, never absolute paths.
 
+When an agent needs a folder outside the current context, the chat UI renders a
+bounded consent card from the local API's authoritative pending-work list. The
+user can decline or ask the native host to open a picker. Native code then owns
+the fenced claim, broker registration, and durable recovery receipt. A broker
+mutation is marked durably before its single bounded dispatch and is never
+replayed after an ambiguous response. Background and restart recovery only query
+its exact operation receipt and publish a known result. Native mutation routes
+require a second credential that is never exposed to the webview. Closing the
+picker is a normal decline, and paths remain confined to app-private native state.
+
 ## Prerequisites
 
 - Rust toolchain (`rust-toolchain.toml` at the repo root)

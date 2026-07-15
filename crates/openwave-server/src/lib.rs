@@ -4,7 +4,8 @@
 //! one local API rather than linking the loop directly, so all surfaces share a
 //! single wiring of `Config`, `Store`, and (next slice) the agent. The server
 //! binds to an ephemeral **loopback** port and mints a per-launch **bearer
-//! token**: only the local process it was handed to can reach it.
+//! token**. Trusted client-execution mutations require a second per-launch
+//! credential that renderer-facing clients are never given.
 //!
 //! The surface runs turns end to end: the chat CRUD routes, `POST
 //! /chats/{id}/messages` to start a turn (one per chat at a time), and
@@ -60,6 +61,24 @@ const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 pub fn app(state: AppState) -> Router {
     // `route_layer` applies the token check to matched API routes only, so an
     // unknown path still answers `404` (not `401`), and `/healthz` stays open.
+    let client_executor_api = Router::new()
+        .route(
+            "/chats/{id}/client-executions/{call_id}/claim",
+            post(routes::claim_client_execution),
+        )
+        .route(
+            "/chats/{id}/client-executions/{call_id}/heartbeat",
+            post(routes::heartbeat_client_execution),
+        )
+        .route(
+            "/chats/{id}/client-executions/{call_id}/resolve",
+            post(routes::resolve_client_execution),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_client_executor_token,
+        ));
+
     let api = Router::new()
         .route(
             "/settings",
@@ -132,22 +151,11 @@ pub fn app(state: AppState) -> Router {
             get(routes::list_pending_client_executions),
         )
         .route(
-            "/chats/{id}/client-executions/{call_id}/claim",
-            post(routes::claim_client_execution),
-        )
-        .route(
-            "/chats/{id}/client-executions/{call_id}/heartbeat",
-            post(routes::heartbeat_client_execution),
-        )
-        .route(
-            "/chats/{id}/client-executions/{call_id}/resolve",
-            post(routes::resolve_client_execution),
-        )
-        .route(
             "/chats/{id}/approvals/{call_id}",
             post(routes::post_approval),
         )
         .route("/chats/{id}/events", get(routes::chat_events))
+        .merge(client_executor_api)
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,
@@ -185,6 +193,7 @@ async fn healthz() -> &'static str {
 pub struct Server {
     local_addr: SocketAddr,
     token: Arc<str>,
+    client_executor_token: Arc<str>,
     store: Arc<dyn Store>,
     listener: TcpListener,
     router: Router,
@@ -247,6 +256,11 @@ impl Server {
         &self.token
     }
 
+    /// The second per-launch credential for trusted client-execution mutations.
+    pub fn client_executor_token(&self) -> &str {
+        &self.client_executor_token
+    }
+
     /// The authoritative durable store used by this server instance.
     ///
     /// Native embedders use this to resolve renderer-supplied entity IDs back
@@ -292,6 +306,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         agent_config,
     );
     let token = state.token.clone();
+    let client_executor_token = state.client_executor_token.clone();
     let document_worker = document_worker::DocumentWorker::new(
         state.store.clone(),
         state.blobs.clone(),
@@ -351,6 +366,7 @@ pub async fn bind(config: Config) -> Result<Server> {
     Ok(Server {
         local_addr,
         token,
+        client_executor_token,
         store: server_store,
         listener,
         router,
