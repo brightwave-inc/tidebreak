@@ -626,8 +626,8 @@ cancellation, reconnectable event stream, and fail-closed provider routing.
 
 The main next steps are:
 
-- introduce a durable agent-run hierarchy with one foreground coordinator,
-  depth-one sandboxed background agents, and bounded global/per-chat scheduling;
+- connect the durable agent-run hierarchy, depth-one sandbox scheduler, and
+  parent inbox to the shared execution loop;
 - unify client execution, approvals, folder consent, user questions, resource
   waits, and child-agent waits as durable continuations that release workers;
 - persist model/tool step boundaries and side-effect receipts so sandbox and

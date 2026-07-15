@@ -149,6 +149,15 @@ ambiguous retry. An expired running lease is cancelled immediately on request
 rather than reclaimed. Parent inbox delivery is intentionally the next
 transition, not a process-local notification.
 
+## Observing execution
+
+The authenticated local API exposes `GET /chats/{id}/agent-runs` for a
+chat-scoped snapshot of its foreground coordinator and any sandbox children.
+It is a read model, not a scheduler control surface: clients use it to render
+queued, running, waiting, failed, and completed work, while workers continue to
+advance runs solely through fenced store transitions. A missing chat returns
+`404`, rather than revealing whether an unrelated run identifier exists.
+
 ## Reliability contract
 
 The agent hierarchy preserves the runtime's existing rules:
@@ -181,8 +190,8 @@ The implementation is intentionally incremental:
 5. Generalize client execution into the shared continuation model.
 6. Persist shared model/tool step boundaries and side-effect receipts.
 7. Add waits that consume durable inbox receipts and wake a parent.
-7. Route sandbox folder access through the host broker.
-8. Add desktop surfaces for queued, running, waiting, failed, and completed
+8. Route sandbox folder access through the host broker.
+9. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work.
-9. Add richer context lifecycle, parallel-safe tool groups, and further
+10. Add richer context lifecycle, parallel-safe tool groups, and further
    orchestration only after these recovery boundaries are proven.

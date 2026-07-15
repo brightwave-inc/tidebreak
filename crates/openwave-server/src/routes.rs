@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, ApprovalDecision, CallId, Chat, ChatId, Project,
-    ProjectId, RequestTurnCancellationOutcome, SecretProvider, SequencedEvent, Store, TurnId,
-    TurnSteer, TurnSteerId,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, ApprovalDecision, CallId, Chat, ChatId,
+    Project, ProjectId, RequestTurnCancellationOutcome, SecretProvider, SequencedEvent, Store,
+    TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -386,6 +386,19 @@ pub async fn get_chat(
         .await?
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))
+}
+
+/// `GET /chats/{id}/agent-runs` — list foreground and sandbox execution state.
+pub async fn list_agent_runs(
+    State(state): State<AppState>,
+    Path(id): Path<ChatId>,
+) -> Result<Json<Vec<AgentRun>>, ServerError> {
+    state
+        .store
+        .get_chat(id)
+        .await?
+        .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
+    Ok(Json(state.store.list_agent_runs(id).await?))
 }
 
 /// Body of `POST /chats/{id}/messages`.

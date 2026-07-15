@@ -5198,6 +5198,28 @@ async fn create_then_get_and_list() {
     };
     assert_eq!(fetched, created);
 
+    let agent_runs: Vec<openwave_core::AgentRun> = {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/chats/{}/agent-runs", created.id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        json_body(response).await
+    };
+    assert_eq!(agent_runs.len(), 1);
+    assert_eq!(agent_runs[0].chat_id, created.id);
+    assert_eq!(
+        agent_runs[0].id,
+        openwave_core::AgentRunId::foreground_for_chat(created.id)
+    );
+
     let listed: Vec<Chat> = {
         let response = router
             .oneshot(
