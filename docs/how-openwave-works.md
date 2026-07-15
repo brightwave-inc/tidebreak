@@ -523,9 +523,12 @@ The Tauri host starts the same server in-process on an ephemeral loopback port,
 mints a fresh bearer token, and gives its React webview the address and token.
 The browser-facing API is not exposed on a public network interface.
 
-The current UI is a walking skeleton, not the complete product. It creates a new
-loose chat on each launch and supports provider setup, model selection, basic
-chat streaming, approval prompts, and native connected-folder pick/list/revoke.
+The current UI is a workspace-style conversation shell, not the complete
+product. It creates a new loose chat on each launch and supports provider setup,
+model selection, basic chat streaming, approval prompts, native connected-folder
+pick/list/revoke, and a concise foreground/background agent-status surface.
+That surface reads a redacted durable snapshot and is only an observer: worker
+leases, delegated inputs, and scheduler control remain server-private.
 OpenWave's operational scratch stays in private app storage; user-selected paths
 cross only the native host-to-broker control boundary, while the renderer sees
 opaque folder summaries. Projects and chats store only ordered opaque root IDs
@@ -622,7 +625,8 @@ When changing the runtime, these rules matter more than the exact module layout:
 The strongest parts today are the core seams, database constraints, durable
 document pipeline, generation-aware Lance publication, durable turn acceptance
 and ownership, atomic client-wait checkpoints, terminal turn commits,
-cancellation, reconnectable event stream, and fail-closed provider routing.
+cancellation, reconnectable event stream, durable foreground/sandbox agent-run
+leases and result delivery, and fail-closed provider routing.
 
 The main next steps are:
 
