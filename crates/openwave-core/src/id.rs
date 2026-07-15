@@ -169,6 +169,9 @@ id_type!(
 impl AgentRunId {
     /// Namespace for the one foreground coordinator derived for each chat.
     const FOREGROUND_NAMESPACE: Uuid = Uuid::from_u128(0x38fd_6a64_b02f_4e91_a60c_7173_9af0_5b21);
+    /// Namespace for a sandbox child derived from its exact model tool call.
+    const SANDBOX_SPAWN_NAMESPACE: Uuid =
+        Uuid::from_u128(0xb4b6_2a8f_6f85_4e0e_9e53_443a_4e69_a217);
 
     /// Derive the stable foreground coordinator identity for a chat.
     #[must_use]
@@ -176,6 +179,15 @@ impl AgentRunId {
         Self(Uuid::new_v5(
             &Self::FOREGROUND_NAMESPACE,
             chat_id.as_uuid().as_bytes(),
+        ))
+    }
+
+    /// Derive the stable child identity for one exact model tool call.
+    #[must_use]
+    pub fn sandbox_for_spawn_call(call_id: CallId) -> Self {
+        Self(Uuid::new_v5(
+            &Self::SANDBOX_SPAWN_NAMESPACE,
+            call_id.as_uuid().as_bytes(),
         ))
     }
 }

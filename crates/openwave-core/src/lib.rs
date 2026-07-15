@@ -14,6 +14,7 @@
 //! contract).
 
 pub mod agent;
+pub mod agent_tools;
 pub mod approval;
 #[cfg(feature = "blob-fs")]
 pub mod blob;
@@ -36,7 +37,13 @@ pub mod tool;
 #[cfg(feature = "tools")]
 pub mod tools;
 
-pub use agent::{Agent, AgentConfig, AgentTurnOutcome, ClaimedAgentEvent, ToolRegistry};
+pub use agent::{
+    Agent, AgentConfig, AgentTurnOutcome, ClaimedAgentEvent, SandboxAgentSpawnRequest, ToolRegistry,
+};
+pub use agent_tools::{
+    spawn_sandbox_agent_tool_spec, validate_spawn_sandbox_agent_arguments, SpawnSandboxAgentArgs,
+    MAX_SANDBOX_AGENT_TASK_CHARS, SPAWN_SANDBOX_AGENT_TOOL,
+};
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalRequest, AutoApproveGate, RefuseGate,
 };
