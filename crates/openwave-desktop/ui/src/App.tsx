@@ -37,6 +37,8 @@ type Msg =
   | { id: string; role: "error"; text: string };
 
 let msgSeq = 0;
+const MAX_RECENT_TERMINAL_SANDBOX_RUNS = 2;
+
 function nextId(): string {
   msgSeq += 1;
   return `m${msgSeq}`;
@@ -748,7 +750,7 @@ export default function App() {
                 if (e.key === "Enter") e.currentTarget.blur();
               }}
             />
-            <AgentRunStatusSurface
+            <AgentActivityPanel
               runs={agentRuns}
               loading={agentRunsLoading}
               error={agentRunsError}
@@ -876,7 +878,7 @@ function withoutConnectionState(status: string): string {
   return status.replace(/ · (?:live|reconnecting)$/, "");
 }
 
-function AgentRunStatusSurface({
+function AgentActivityPanel({
   runs,
   loading,
   error,
@@ -888,56 +890,91 @@ function AgentRunStatusSurface({
   onRetry: () => void;
 }) {
   if (loading) {
-    return <div className="agent-runs-state">Loading agent state…</div>;
+    return <div className="agent-activity-state">Loading activity…</div>;
   }
 
   if (error) {
     return (
-      <div className="agent-runs-state is-error" title={error}>
-        Agent state unavailable
-        <button type="button" className="agent-runs-retry" onClick={onRetry}>
+      <div className="agent-activity-state is-error" role="status">
+        Activity unavailable
+        <button type="button" className="agent-activity-retry" onClick={onRetry}>
           Retry
         </button>
       </div>
     );
   }
 
-  if (runs.length === 0) {
-    return <div className="agent-runs-state">No agent runs yet</div>;
-  }
-
   const foreground = runs.find((run) => run.execution === "foreground");
   const sandboxes = runs.filter((run) => run.execution === "sandbox");
+  if (!foreground && sandboxes.length === 0) return null;
+
+  const activeSandboxes = sandboxes.filter((run) =>
+    isActiveAgentRunStatus(run.status),
+  );
+  const terminalSandboxes = sandboxes
+    .filter((run) => !isActiveAgentRunStatus(run.status))
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  const recentTerminalSandboxes = terminalSandboxes.slice(
+    0,
+    MAX_RECENT_TERMINAL_SANDBOX_RUNS,
+  );
+  const hiddenTerminalCount = terminalSandboxes.length - recentTerminalSandboxes.length;
+  const active = runs.some((run) => isActiveAgentRunStatus(run.status));
   return (
-    <div className="agent-runs" aria-label="Agent execution state">
-      <span className="agent-runs-label">Agents</span>
-      {foreground ? (
-        <AgentRunPill run={foreground} label="Conversation" />
-      ) : (
-        <span className="agent-run-empty">Conversation unavailable</span>
+    <section
+      className="agent-activity"
+      aria-label="Agent activity"
+      aria-live={active ? "polite" : "off"}
+    >
+      <div className="agent-activity-heading">
+        <span>Activity</span>
+        <span className="agent-activity-summary">
+          {activeSandboxes.length > 0
+            ? `${activeSandboxes.length} background ${activeSandboxes.length === 1 ? "task" : "tasks"}`
+            : recentTerminalSandboxes.length > 0
+              ? "Recent background work"
+              : "No background work"}
+        </span>
+      </div>
+      <ul className="agent-activity-list">
+        {foreground && <AgentActivityItem run={foreground} label="Conversation" />}
+        {activeSandboxes.map((run, index) => (
+          <AgentActivityItem
+            key={run.id}
+            run={run}
+            label={`Background task ${index + 1}`}
+          />
+        ))}
+        {recentTerminalSandboxes.map((run, index) => (
+          <AgentActivityItem
+            key={run.id}
+            run={run}
+            label={`Recent background task ${index + 1}`}
+          />
+        ))}
+      </ul>
+      {hiddenTerminalCount > 0 && (
+        <p className="agent-activity-history">
+          {hiddenTerminalCount} earlier {hiddenTerminalCount === 1 ? "result" : "results"}
+        </p>
       )}
-      {sandboxes.length === 0 ? (
-        <span className="agent-run-empty">No background work</span>
-      ) : (
-        sandboxes.map((run, index) => (
-          <AgentRunPill key={run.id} run={run} label={`Background ${index + 1}`} />
-        ))
-      )}
-    </div>
+    </section>
   );
 }
 
-function AgentRunPill({ run, label }: { run: AgentRun; label: string }) {
+function AgentActivityItem({ run, label }: { run: AgentRun; label: string }) {
   const status = readableAgentRunStatus(run.status);
-  const detail = run.last_error_detail || run.last_error_code || undefined;
   return (
-    <span
-      className={`agent-run-pill is-${run.status}`}
-      title={detail ? `${label}: ${status} — ${detail}` : `${label}: ${status}`}
-    >
-      <span>{label}</span>
+    <li className={`agent-activity-item is-${run.status}`}>
+      <span className="agent-activity-indicator" aria-hidden="true" />
+      <span className="agent-activity-item-copy">
+        <span>{label}</span>
+        <span className="agent-activity-detail">
+          {agentRunStatusDescription(run.status)}
+        </span>
+      </span>
       <strong>{status}</strong>
-    </span>
+    </li>
   );
 }
 
@@ -949,6 +986,35 @@ function readableAgentRunStatus(status: AgentRun["status"]): string {
       return "stopping";
     default:
       return status;
+  }
+}
+
+function isActiveAgentRunStatus(status: AgentRun["status"]): boolean {
+  return ["active", "queued", "running", "cancelling", "waiting", "retry_wait"].includes(
+    status,
+  );
+}
+
+function agentRunStatusDescription(status: AgentRun["status"]): string {
+  switch (status) {
+    case "active":
+      return "Ready for this conversation";
+    case "queued":
+      return "Queued to start";
+    case "running":
+      return "Working in the background";
+    case "cancelling":
+      return "Stopping";
+    case "waiting":
+      return "Waiting to continue";
+    case "retry_wait":
+      return "Waiting to retry";
+    case "completed":
+      return "Finished";
+    case "failed":
+      return "Could not finish";
+    case "cancelled":
+      return "Stopped";
   }
 }
 
