@@ -78,8 +78,8 @@ database tools, and recursive fleets remain deferred.
 
 ## Web search
 
-Web search should be a provider-neutral crate rather than HTTP code embedded in
-the core loop:
+Web search now has a provider-neutral `openwave-web-search` crate rather than
+HTTP code embedded in the core loop:
 
 ```text
 WebSearchProvider
@@ -98,6 +98,13 @@ WebSearchTool
 ├── bounded output and citations
 └── optional durable web-document ingestion
 ```
+
+The first slice supplies the normalized bounded contract, fixed secret keys,
+and direct Exa/Tavily adapters through an injected HTTP seam. It does **not**
+register `WebSearchTool` or grant any worker network access. Constructing an
+adapter is inert; only an explicit `search` call can send a request. The next
+slice must make a host-owned provider-selection and outbound-domain policy
+available to the worker that is allowed to invoke it.
 
 The normalized contract should cover query text, optional date/domain filters,
 bounded result count, canonical URL, title, snippet or extracted text, rank or
