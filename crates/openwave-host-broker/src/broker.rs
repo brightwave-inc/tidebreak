@@ -30,10 +30,11 @@ use crate::{
     },
     protocol::{
         ControlEnvelope, ControlRequest, ControlResponseEnvelope, ControlResult, DirectoryEntry,
-        EntryKind, ErrorCode, ErrorResponse, HelloResult, OperationEnvelope, OperationRequest,
+        EntryKind, ErrorCode, ErrorResponse, HelloResult, LookupRegisterRootReceiptRequest,
+        LookupRegisterRootReceiptResult, OperationEnvelope, OperationRequest,
         OperationResponseEnvelope, OperationResult, PathRequest, ReadFileResult,
-        RegisterRootRequest, RegisterRootResult, Response, ResponseEnvelope, RevokeRootRequest,
-        RevokeRootResult, RootSummary, PROTOCOL_VERSION,
+        RegisterRootReceipt, RegisterRootRequest, RegisterRootResult, Response, ResponseEnvelope,
+        RevokeRootRequest, RevokeRootResult, RootSummary, PROTOCOL_VERSION,
     },
     Capability, ConsentMethod, ConsentRecord, ExecutionContext, Grant, GrantError, GrantId,
     GrantSubject, OperationId, RelativePath, RootAttachment, RootId, RootPolicy, RootPolicyError,
@@ -199,6 +200,15 @@ impl ControlAudit {
                 operation: AuditOperation::RegisterRoot,
                 operation_id: request.operation_id,
                 target: AuditTarget::selected_folder(&request.path),
+            }),
+            ControlRequest::LookupRegisterRootReceipt(request) => Some(Self {
+                actor: AuditActor::Control {
+                    subject: request.subject,
+                    conversation_id: Some(request.conversation_id),
+                },
+                operation: AuditOperation::LookupRegisterRootReceipt,
+                operation_id: request.operation_id,
+                target: AuditTarget::Subject,
             }),
             ControlRequest::RevokeRoot(request) => Some(Self {
                 actor: AuditActor::Control {
@@ -371,6 +381,9 @@ impl Controller {
             ControlRequest::RegisterRoot(request) => {
                 self.register_root(request).map(ControlResult::RegisterRoot)
             }
+            ControlRequest::LookupRegisterRootReceipt(request) => self
+                .lookup_register_root_receipt(request)
+                .map(ControlResult::LookupRegisterRootReceipt),
             ControlRequest::RevokeRoot(request) => {
                 self.revoke_root(request).map(ControlResult::RevokeRoot)
             }
@@ -455,6 +468,62 @@ impl Controller {
             return Err(error_response(error));
         }
         outcome
+    }
+
+    fn lookup_register_root_receipt(
+        &self,
+        request: LookupRegisterRootReceiptRequest,
+    ) -> Result<LookupRegisterRootReceiptResult, ErrorResponse> {
+        if request.conversation_id.is_nil()
+            || (request.subject.kind() == SubjectKind::Conversation
+                && request.subject.id() != request.conversation_id)
+        {
+            return Err(error_response(BrokerError::SubjectConversationMismatch));
+        }
+        let state = self.lock_state().map_err(error_response)?;
+        if let Some(record) = state.mutations.get(&request.operation_id) {
+            match record {
+                MutationRecord::Register {
+                    request: registered,
+                    ..
+                } if registered.subject == request.subject
+                    && registered.conversation_id == request.conversation_id => {}
+                MutationRecord::Register { .. } | MutationRecord::Revoke { .. } => {
+                    return Err(error_response(BrokerError::OperationIdConflict));
+                }
+            }
+        }
+        let receipt = match state.mutations.get(&request.operation_id) {
+            None => RegisterRootReceipt::Unknown,
+            Some(MutationRecord::Register {
+                outcome: MutationOutcome::Pending,
+                ..
+            }) => RegisterRootReceipt::Pending,
+            Some(MutationRecord::Register {
+                request: registered,
+                outcome: MutationOutcome::Complete(Ok(result)),
+            }) => {
+                let root = result.root.clone();
+                if registration_is_connected(&state, registered, &root) {
+                    RegisterRootReceipt::Completed { root }
+                } else {
+                    RegisterRootReceipt::Disconnected { root }
+                }
+            }
+            Some(MutationRecord::Register {
+                outcome: MutationOutcome::Complete(Err(error)),
+                ..
+            }) => RegisterRootReceipt::Failed {
+                error: error.clone(),
+            },
+            Some(MutationRecord::Revoke { .. }) => {
+                unreachable!("non-registration operation was rejected above")
+            }
+        };
+        Ok(LookupRegisterRootReceiptResult {
+            operation_id: request.operation_id,
+            receipt,
+        })
     }
 
     fn prepare_registration(
@@ -854,6 +923,27 @@ enum Claim<T> {
     Complete(Result<T, ErrorResponse>),
 }
 
+fn registration_is_connected(
+    state: &State,
+    request: &RegisterFingerprint,
+    root: &RootSummary,
+) -> bool {
+    state.roots.get(&root.root_id).is_some_and(|registered| {
+        registered.owner == request.subject && registered.display_name == root.display_name
+    }) && state.attachments.iter().any(|attachment| {
+        attachment.conversation_id() == request.conversation_id
+            && attachment.root_id() == root.root_id
+    }) && state.grants.iter().any(|grant| {
+        grant.subject() == request.subject
+            && grant.capability() == Capability::ListRoots
+            && matches!(grant.scope(), Scope::Subject)
+    }) && state.grants.iter().any(|grant| {
+        grant.subject() == request.subject
+            && grant.capability() == Capability::ReadFiles
+            && matches!(grant.scope(), Scope::Root { root_id } if *root_id == root.root_id)
+    })
+}
+
 fn claim_register(
     state: &mut State,
     operation_id: OperationId,
@@ -1239,6 +1329,27 @@ mod tests {
         result
     }
 
+    fn lookup_register_receipt(
+        controller: &Controller,
+        operation_id: OperationId,
+        subject: GrantSubject,
+        conversation_id: Uuid,
+    ) -> Result<LookupRegisterRootReceiptResult, ErrorResponse> {
+        let result = unwrap_response(controller.handle(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: ControlRequest::LookupRegisterRootReceipt(LookupRegisterRootReceiptRequest {
+                operation_id,
+                subject,
+                conversation_id,
+            }),
+        }))?;
+        let ControlResult::LookupRegisterRootReceipt(result) = result else {
+            panic!("unexpected control result")
+        };
+        Ok(result)
+    }
+
     fn operate(
         operator: &Operator,
         context: ExecutionContext,
@@ -1343,6 +1454,161 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn registration_receipt_lookup_never_starts_or_resumes_a_mutation() {
+        let (temp, broker, path) = setup();
+        let controller = broker.controller();
+        let conversation_id = Uuid::new_v4();
+        let subject = GrantSubject::conversation(conversation_id).unwrap();
+        let unknown_id = OperationId::new();
+        assert_eq!(
+            lookup_register_receipt(&controller, unknown_id, subject, conversation_id).unwrap(),
+            LookupRegisterRootReceiptResult {
+                operation_id: unknown_id,
+                receipt: RegisterRootReceipt::Unknown,
+            }
+        );
+
+        let operation_id = OperationId::new();
+        broker.shared.state.lock().unwrap().mutations.insert(
+            operation_id,
+            MutationRecord::Register {
+                request: RegisterFingerprint {
+                    subject,
+                    conversation_id,
+                    path: path.clone(),
+                    consent_method: ConsentMethod::FolderPicker,
+                },
+                outcome: MutationOutcome::Pending,
+            },
+        );
+        assert_eq!(
+            lookup_register_receipt(&controller, operation_id, subject, conversation_id).unwrap(),
+            LookupRegisterRootReceiptResult {
+                operation_id,
+                receipt: RegisterRootReceipt::Pending,
+            }
+        );
+        let other_conversation = Uuid::new_v4();
+        assert!(matches!(
+            lookup_register_receipt(
+                &controller,
+                operation_id,
+                GrantSubject::conversation(other_conversation).unwrap(),
+                other_conversation,
+            ),
+            Err(ErrorResponse {
+                code: ErrorCode::OperationIdConflict,
+                ..
+            })
+        ));
+        let state = broker.shared.state.lock().unwrap();
+        assert!(state.roots.is_empty());
+        assert!(!state.active_mutations.contains(&operation_id));
+        drop(state);
+
+        let completed = register(&controller, subject, conversation_id, path, operation_id);
+        let completed_root = completed.root.clone();
+        assert_eq!(
+            lookup_register_receipt(&controller, operation_id, subject, conversation_id).unwrap(),
+            LookupRegisterRootReceiptResult {
+                operation_id,
+                receipt: RegisterRootReceipt::Completed {
+                    root: completed_root.clone(),
+                },
+            }
+        );
+        let revoke = unwrap_response(controller.handle(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: ControlRequest::RevokeRoot(RevokeRootRequest {
+                operation_id: OperationId::new(),
+                subject,
+                root_id: completed_root.root_id,
+            }),
+        }))
+        .unwrap();
+        assert_eq!(
+            revoke,
+            ControlResult::RevokeRoot(RevokeRootResult { revoked: true })
+        );
+        assert_eq!(
+            lookup_register_receipt(&controller, operation_id, subject, conversation_id).unwrap(),
+            LookupRegisterRootReceiptResult {
+                operation_id,
+                receipt: RegisterRootReceipt::Disconnected {
+                    root: completed_root,
+                },
+            }
+        );
+
+        let failed_id = OperationId::new();
+        let failure = unwrap_response(controller.handle(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: ControlRequest::RegisterRoot(RegisterRootRequest {
+                operation_id: failed_id,
+                subject,
+                conversation_id,
+                path: temp.path().join("sensitive"),
+                consent_method: ConsentMethod::FolderPicker,
+            }),
+        }))
+        .unwrap_err();
+        assert_eq!(
+            lookup_register_receipt(&controller, failed_id, subject, conversation_id).unwrap(),
+            LookupRegisterRootReceiptResult {
+                operation_id: failed_id,
+                receipt: RegisterRootReceipt::Failed { error: failure },
+            }
+        );
+
+        let revoke_id = OperationId::new();
+        broker.shared.state.lock().unwrap().mutations.insert(
+            revoke_id,
+            MutationRecord::Revoke {
+                request: RevokeFingerprint {
+                    subject,
+                    root_id: RootId::new(),
+                },
+                outcome: MutationOutcome::Pending,
+            },
+        );
+        assert!(matches!(
+            lookup_register_receipt(&controller, revoke_id, subject, conversation_id),
+            Err(ErrorResponse {
+                code: ErrorCode::OperationIdConflict,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn registration_receipt_lookup_is_a_de_sensitized_audited_control_read() {
+        let (_temp, broker, _path, audit) = audited_setup();
+        let conversation_id = Uuid::new_v4();
+        let subject = GrantSubject::conversation(conversation_id).unwrap();
+        let operation_id = OperationId::new();
+        lookup_register_receipt(&broker.controller(), operation_id, subject, conversation_id)
+            .unwrap();
+
+        let events = audit.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].operation,
+            AuditOperation::LookupRegisterRootReceipt
+        );
+        assert_eq!(events[0].operation_id, Some(operation_id));
+        assert_eq!(
+            events[0].actor,
+            AuditActor::Control {
+                subject,
+                conversation_id: Some(conversation_id),
+            }
+        );
+        assert_eq!(events[0].target, AuditTarget::Subject);
     }
 
     #[test]
@@ -1986,6 +2252,15 @@ mod tests {
         drop(broker);
 
         let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+        assert_eq!(
+            lookup_register_receipt(&broker.controller(), operation_id, subject, conversation,)
+                .unwrap(),
+            LookupRegisterRootReceiptResult {
+                operation_id,
+                receipt: RegisterRootReceipt::Pending,
+            }
+        );
+        assert!(broker.shared.state.lock().unwrap().roots.is_empty());
         let completed = register(
             &broker.controller(),
             subject,
@@ -2042,9 +2317,25 @@ mod tests {
                 ..
             })
         ));
+        assert!(matches!(
+            lookup_register_receipt(&broker.controller(), operation_id, subject, conversation,),
+            Err(ErrorResponse {
+                code: ErrorCode::Internal,
+                retryable: false,
+                ..
+            })
+        ));
         drop(broker);
 
         let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+        assert_eq!(
+            lookup_register_receipt(&broker.controller(), operation_id, subject, conversation,)
+                .unwrap(),
+            LookupRegisterRootReceiptResult {
+                operation_id,
+                receipt: RegisterRootReceipt::Pending,
+            }
+        );
         let completed = register(
             &broker.controller(),
             subject,

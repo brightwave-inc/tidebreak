@@ -194,12 +194,12 @@ mod tests {
     #[test]
     fn request_union_rejects_unknown_top_level_fields() {
         let request = format!(
-            r#"{{"channel":"control","envelope":{{"protocol_version":1,"request_id":"{}","request":{{"control":"hello"}}}},"extra":true}}"#,
+            r#"{{"channel":"control","envelope":{{"protocol_version":2,"request_id":"{}","request":{{"control":"hello"}}}},"extra":true}}"#,
             RequestId::new()
         );
         assert!(serde_json::from_str::<SidecarRequest>(&request).is_err());
         let nested = format!(
-            r#"{{"channel":"control","envelope":{{"protocol_version":1,"request_id":"{}","request":{{"control":"hello","extra":true}}}}}}"#,
+            r#"{{"channel":"control","envelope":{{"protocol_version":2,"request_id":"{}","request":{{"control":"hello","extra":true}}}}}}"#,
             RequestId::new()
         );
         assert!(serde_json::from_str::<SidecarRequest>(&nested).is_err());

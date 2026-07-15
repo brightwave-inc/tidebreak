@@ -6,8 +6,8 @@ use std::{
 
 use openwave_host_broker::{
     ConsentMethod, ControlEnvelope, ControlRequest, ExecutionContext, GrantSubject,
-    OperationEnvelope, OperationId, OperationRequest, RegisterRootRequest, RequestId,
-    RevokeRootRequest, RootId, PROTOCOL_VERSION,
+    LookupRegisterRootReceiptRequest, OperationEnvelope, OperationId, OperationRequest,
+    RegisterRootRequest, RequestId, RevokeRootRequest, RootId, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use tempfile::TempDir;
@@ -64,6 +64,7 @@ fn stdio_sidecar_persists_authority_and_audit_across_restart() {
     let conversation_id = Uuid::new_v4();
     let subject = GrantSubject::conversation(conversation_id).unwrap();
 
+    let registration_id = OperationId::new();
     let root_id = {
         let mut child = spawn(&temp, &home);
         let mut input = child.stdin.take().unwrap();
@@ -76,7 +77,7 @@ fn stdio_sidecar_persists_authority_and_audit_across_restart() {
                 protocol_version: PROTOCOL_VERSION,
                 request_id: RequestId::new(),
                 request: ControlRequest::RegisterRoot(RegisterRootRequest {
-                    operation_id: OperationId::new(),
+                    operation_id: registration_id,
                     subject,
                     conversation_id,
                     path: root.clone(),
@@ -102,6 +103,29 @@ fn stdio_sidecar_persists_authority_and_audit_across_restart() {
     let mut child = spawn(&temp, &home);
     let mut input = child.stdin.take().unwrap();
     let mut output = BufReader::new(child.stdout.take().unwrap());
+    let receipt = exchange(
+        &mut input,
+        &mut output,
+        "control",
+        &ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new(),
+            request: ControlRequest::LookupRegisterRootReceipt(LookupRegisterRootReceiptRequest {
+                operation_id: registration_id,
+                subject,
+                conversation_id,
+            }),
+        },
+    );
+    assert_eq!(
+        receipt["envelope"]["response"]["payload"]["receipt"]["state"],
+        "completed"
+    );
+    assert_eq!(
+        receipt["envelope"]["response"]["payload"]["receipt"]["root"]["root_id"],
+        root_id
+    );
+    assert!(!receipt.to_string().contains(root.to_str().unwrap()));
     let response = exchange(
         &mut input,
         &mut output,
