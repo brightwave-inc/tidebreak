@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ApiClient,
+  type AgentRun,
   type Chat,
   type ModelInfo,
   type PendingFolderAccessRequest,
@@ -49,6 +50,9 @@ export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [messages, setMessages] = useState<Msg[]>([]);
+  const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
+  const [agentRunsLoading, setAgentRunsLoading] = useState(false);
+  const [agentRunsError, setAgentRunsError] = useState<string | null>(null);
   const [folderAccessRequests, setFolderAccessRequests] = useState<
     PendingFolderAccessRequest[]
   >([]);
@@ -71,6 +75,7 @@ export default function App() {
   const assistantBufRef = useRef("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const refreshFolderAccessRef = useRef<(() => void) | null>(null);
+  const refreshAgentRunsRef = useRef<(() => void) | null>(null);
   const resolvingFolderCallsRef = useRef<Set<string>>(new Set());
   const visibleFolderCallIdsRef = useRef<Set<string>>(new Set());
 
@@ -154,6 +159,61 @@ export default function App() {
     const refresh = async () => {
       const seq = ++requestSeq;
       try {
+        const runs = await client.listAgentRuns(chat.id);
+        if (!cancelled && seq === requestSeq) {
+          setAgentRuns(runs);
+          setAgentRunsError(null);
+        }
+      } catch (err) {
+        if (!cancelled && seq === requestSeq) {
+          setAgentRunsError(String(err));
+        }
+      } finally {
+        if (!cancelled && seq === requestSeq) {
+          setAgentRunsLoading(false);
+        }
+      }
+    };
+
+    setAgentRuns([]);
+    setAgentRunsError(null);
+    setAgentRunsLoading(true);
+    refreshAgentRunsRef.current = () => void refresh();
+    void refresh();
+    return () => {
+      cancelled = true;
+      requestSeq += 1;
+      if (refreshAgentRunsRef.current) {
+        refreshAgentRunsRef.current = null;
+      }
+    };
+  }, [client, chat?.id]);
+
+  const hasActiveSandboxRun = agentRuns.some(
+    (run) =>
+      run.execution === "sandbox" &&
+      ["queued", "running", "cancelling", "waiting", "retry_wait"].includes(
+        run.status,
+      ),
+  );
+
+  useEffect(() => {
+    if (!hasActiveSandboxRun) return;
+    const interval = window.setInterval(
+      () => refreshAgentRunsRef.current?.(),
+      5_000,
+    );
+    return () => window.clearInterval(interval);
+  }, [hasActiveSandboxRun]);
+
+  useEffect(() => {
+    if (!client || !chat) return;
+    let cancelled = false;
+    let requestSeq = 0;
+
+    const refresh = async () => {
+      const seq = ++requestSeq;
+      try {
         const requests = await client.listPendingFolderAccessRequests(chat.id);
         if (!cancelled && seq === requestSeq) {
           setFolderAccessRequests(requests);
@@ -201,6 +261,7 @@ export default function App() {
     const event = framed.event;
 
     if (event.type === "turn_started") {
+      refreshAgentRunsRef.current?.();
       assistantBufRef.current = "";
       setBusy(true);
       setMessages((prev) => [
@@ -239,6 +300,7 @@ export default function App() {
     }
 
     if (event.type === "tool_call_started") {
+      refreshAgentRunsRef.current?.();
       if (event.name === "request_folder_access") {
         refreshFolderAccessRef.current?.();
       }
@@ -276,11 +338,13 @@ export default function App() {
 
     if (event.type === "turn_completed") {
       setBusy(false);
+      refreshAgentRunsRef.current?.();
       return;
     }
 
     if (event.type === "turn_cancelled") {
       setBusy(false);
+      refreshAgentRunsRef.current?.();
       setMessages((prev) => [
         ...prev,
         { id: nextId(), role: "system", text: "turn cancelled" },
@@ -290,6 +354,7 @@ export default function App() {
 
     if (event.type === "turn_failed") {
       setBusy(false);
+      refreshAgentRunsRef.current?.();
       setMessages((prev) => [
         ...prev,
         {
@@ -320,6 +385,7 @@ export default function App() {
     setBusy(true);
     try {
       await client.postMessage(chat.id, turnId, content);
+      refreshAgentRunsRef.current?.();
     } catch (err) {
       setBusy(false);
       setMessages((prev) => [
@@ -340,6 +406,8 @@ export default function App() {
       assistantBufRef.current = "";
       lastSeqRef.current = 0;
       setMessages([]);
+      setAgentRuns([]);
+      setAgentRunsError(null);
       setFolderAccessRequests([]);
       setFolderAccessErrors({});
       setDraft("");
@@ -591,6 +659,12 @@ export default function App() {
                 if (e.key === "Enter") e.currentTarget.blur();
               }}
             />
+            <AgentRunStatusSurface
+              runs={agentRuns}
+              loading={agentRunsLoading}
+              error={agentRunsError}
+              onRetry={() => refreshAgentRunsRef.current?.()}
+            />
           </div>
 
           <div className="messages" ref={scrollRef}>
@@ -688,6 +762,82 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+function AgentRunStatusSurface({
+  runs,
+  loading,
+  error,
+  onRetry,
+}: {
+  runs: AgentRun[];
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  if (loading) {
+    return <div className="agent-runs-state">Loading agent state…</div>;
+  }
+
+  if (error) {
+    return (
+      <div className="agent-runs-state is-error" title={error}>
+        Agent state unavailable
+        <button type="button" className="agent-runs-retry" onClick={onRetry}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (runs.length === 0) {
+    return <div className="agent-runs-state">No agent runs yet</div>;
+  }
+
+  const foreground = runs.find((run) => run.execution === "foreground");
+  const sandboxes = runs.filter((run) => run.execution === "sandbox");
+  return (
+    <div className="agent-runs" aria-label="Agent execution state">
+      <span className="agent-runs-label">Agents</span>
+      {foreground ? (
+        <AgentRunPill run={foreground} label="Conversation" />
+      ) : (
+        <span className="agent-run-empty">Conversation unavailable</span>
+      )}
+      {sandboxes.length === 0 ? (
+        <span className="agent-run-empty">No background work</span>
+      ) : (
+        sandboxes.map((run, index) => (
+          <AgentRunPill key={run.id} run={run} label={`Background ${index + 1}`} />
+        ))
+      )}
+    </div>
+  );
+}
+
+function AgentRunPill({ run, label }: { run: AgentRun; label: string }) {
+  const status = readableAgentRunStatus(run.status);
+  const detail = run.last_error_detail || run.last_error_code || undefined;
+  return (
+    <span
+      className={`agent-run-pill is-${run.status}`}
+      title={detail ? `${label}: ${status} — ${detail}` : `${label}: ${status}`}
+    >
+      <span>{label}</span>
+      <strong>{status}</strong>
+    </span>
+  );
+}
+
+function readableAgentRunStatus(status: AgentRun["status"]): string {
+  switch (status) {
+    case "retry_wait":
+      return "retrying";
+    case "cancelling":
+      return "stopping";
+    default:
+      return status;
+  }
 }
 
 function FoldersPanel({ chat }: { chat: Chat }) {
