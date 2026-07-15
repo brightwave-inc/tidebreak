@@ -1167,6 +1167,37 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Claim one accepted sandbox call only when its immutable tool name is
+    /// exactly `name`. Executors use this filtered authority so one tool lane
+    /// can never terminalize another tool's durable work.
+    async fn claim_sandbox_tool_call_named(
+        &self,
+        _id: CallId,
+        _name: &str,
+        _lease_token: uuid::Uuid,
+        _lease_duration: chrono::Duration,
+    ) -> Result<ClaimSandboxToolCallOutcome> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Revalidate one exact live sandbox-tool executor lease against the
+    /// database clock and extend it up to its sandbox run deadline.
+    ///
+    /// This is the final cancellation/deadline fence before an executor may
+    /// begin an external operation. `None` means cancellation, expiry, a
+    /// terminal receipt, or a competing executor already won. `Some` returns
+    /// the remaining lease budget calculated from the same database-clock
+    /// transaction, so an executor need not compare host wall time to a stored
+    /// absolute expiry.
+    async fn heartbeat_sandbox_tool_call(
+        &self,
+        _id: CallId,
+        _lease_token: uuid::Uuid,
+        _lease_duration: chrono::Duration,
+    ) -> Result<Option<chrono::Duration>> {
+        agent_run_storage_unavailable()
+    }
+
     /// Atomically write one immutable terminal receipt under the exact live
     /// executor lease and make its sandbox run claimable for continuation.
     /// Exact ambiguous retries recover the same receipt.
@@ -1199,6 +1230,16 @@ pub trait Store: Send + Sync {
     /// executor recovery. Claiming remains the authority for ownership.
     async fn list_sandbox_tool_call_candidates(
         &self,
+        _limit: u64,
+    ) -> Result<Vec<crate::model::SandboxToolCall>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// List bounded oldest-first candidates for one exact immutable sandbox
+    /// tool name. The matching claim method remains the ownership authority.
+    async fn list_sandbox_tool_call_candidates_named(
+        &self,
+        _name: &str,
         _limit: u64,
     ) -> Result<Vec<crate::model::SandboxToolCall>> {
         agent_run_storage_unavailable()

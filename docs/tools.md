@@ -106,8 +106,13 @@ timeout at `GET`/`PUT /web-search`. That setting has no endpoint or credential
 reference, returns only whether the selected fixed key is present, and does not
 construct or call a provider. It does **not** register `WebSearchTool` or grant
 any worker network access. Constructing an adapter is inert; only an explicit
-`search` call can send a request. A later execution slice must still attach the
-host policy to a sandbox worker and define its outbound-domain policy.
+`search` call can send a request. A separate sandbox checkpoint executor now
+attaches the host policy only after claiming and revalidating an exact durable
+`web_search` checkpoint. Its strict argument contract rejects unknown fields,
+and unavailable/error cases resolve a bounded immutable failure receipt. The
+sandbox model loop still advertises no tools, so no model-generated request can
+reach this executor yet. A later slice must add model-loop checkpoint emission
+and an explicit outbound-domain policy before search is model-usable.
 
 The normalized contract should cover query text, optional date/domain filters,
 bounded result count, canonical URL, title, snippet or extracted text, rank or

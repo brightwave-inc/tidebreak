@@ -145,6 +145,29 @@ pub(in crate::db) async fn claim_sandbox_tool_call(
     lease_token: uuid::Uuid,
     lease_duration: Duration,
 ) -> Result<ClaimSandboxToolCallOutcome> {
+    claim_sandbox_tool_call_matching(store, id, None, lease_token, lease_duration).await
+}
+
+pub(in crate::db) async fn claim_sandbox_tool_call_named(
+    store: &DbStore,
+    id: CallId,
+    name: &str,
+    lease_token: uuid::Uuid,
+    lease_duration: Duration,
+) -> Result<ClaimSandboxToolCallOutcome> {
+    if !valid_tool_name(name) {
+        return Err(AgentError::Store("invalid sandbox tool name".into()));
+    }
+    claim_sandbox_tool_call_matching(store, id, Some(name), lease_token, lease_duration).await
+}
+
+async fn claim_sandbox_tool_call_matching(
+    store: &DbStore,
+    id: CallId,
+    expected_name: Option<&str>,
+    lease_token: uuid::Uuid,
+    lease_duration: Duration,
+) -> Result<ClaimSandboxToolCallOutcome> {
     if id.0.is_nil() || lease_token.is_nil() || lease_duration <= Duration::zero() {
         return Err(AgentError::Store(
             "invalid sandbox tool executor lease".into(),
@@ -164,6 +187,13 @@ pub(in crate::db) async fn claim_sandbox_tool_call(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ClaimSandboxToolCallOutcome::Unavailable);
     };
+    // Check the immutable dispatch key before handling an expired lease. A
+    // web-search worker must never terminalize a future tool type merely
+    // because it happened to observe that call in a generic recovery scan.
+    if expected_name.is_some_and(|name| existing.name != name) {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(ClaimSandboxToolCallOutcome::Unavailable);
+    }
     if existing.status == SandboxToolCallStatus::Claimed.as_str()
         && existing.executor_lease_token == Some(lease_token)
         && existing
@@ -213,6 +243,71 @@ pub(in crate::db) async fn claim_sandbox_tool_call(
     Ok(ClaimSandboxToolCallOutcome::Claimed(call_from_model(
         claimed,
     )?))
+}
+
+/// Extend an exact sandbox-tool executor lease after rechecking the waiting
+/// sandbox run and its database-clock deadline. This is deliberately separate
+/// from the model-worker lease: a parked run has released that lease, and only
+/// this executor capability can authorize its outbound continuation.
+pub(in crate::db) async fn heartbeat_sandbox_tool_call(
+    store: &DbStore,
+    id: CallId,
+    lease_token: uuid::Uuid,
+    lease_duration: Duration,
+) -> Result<Option<Duration>> {
+    if id.0.is_nil() || lease_token.is_nil() || lease_duration <= Duration::zero() {
+        return Err(AgentError::Store(
+            "invalid sandbox tool executor heartbeat".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    let requested_expires_at = now.checked_add_signed(lease_duration).ok_or_else(|| {
+        AgentError::Store("sandbox tool executor lease overflows database time".into())
+    })?;
+    let Some(call) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if call.status != SandboxToolCallStatus::Claimed.as_str()
+        || call.executor_lease_token != Some(lease_token)
+        || !call
+            .executor_lease_expires_at
+            .is_some_and(|expiry| expiry > now)
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(run) = find_by_id_on(&transaction, AgentRunId(call.agent_run_id)).await? else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let Some(deadline) = run.deadline_at.filter(|deadline| *deadline > now) else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if run.chat_id != call.chat_id || run.status != AgentRunStatus::Waiting.as_str() {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let expires_at = requested_expires_at.min(deadline);
+    if call
+        .executor_lease_expires_at
+        .is_some_and(|current| current >= expires_at)
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(call.executor_lease_expires_at.map(|expiry| expiry - now));
+    }
+    let mut active: entities::sandbox_tool_call::ActiveModel = call.into();
+    active.executor_lease_expires_at = Set(Some(expires_at));
+    active.update(&transaction).await.map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(expires_at - now))
 }
 
 pub(in crate::db) async fn resolve_sandbox_tool_call(
@@ -360,6 +455,45 @@ pub(in crate::db) async fn list_sandbox_tool_call_candidates(
     }
     let now = database_now(&store.conn).await?;
     entities::sandbox_tool_call::Entity::find()
+        .filter(
+            sea_orm::Condition::any()
+                .add(
+                    entities::sandbox_tool_call::Column::Status
+                        .eq(SandboxToolCallStatus::Accepted.as_str()),
+                )
+                .add(
+                    entities::sandbox_tool_call::Column::Status
+                        .eq(SandboxToolCallStatus::Claimed.as_str())
+                        .and(entities::sandbox_tool_call::Column::ExecutorLeaseExpiresAt.lte(now)),
+                ),
+        )
+        .order_by_asc(entities::sandbox_tool_call::Column::CreatedAt)
+        .order_by_asc(entities::sandbox_tool_call::Column::Id)
+        .limit(limit)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(call_from_model)
+        .collect()
+}
+
+pub(in crate::db) async fn list_sandbox_tool_call_candidates_named(
+    store: &DbStore,
+    name: &str,
+    limit: u64,
+) -> Result<Vec<SandboxToolCall>> {
+    if !valid_tool_name(name) {
+        return Err(AgentError::Store("invalid sandbox tool name".into()));
+    }
+    if limit == 0 || limit > 256 {
+        return Err(AgentError::Store(
+            "invalid sandbox tool candidate limit".into(),
+        ));
+    }
+    let now = database_now(&store.conn).await?;
+    entities::sandbox_tool_call::Entity::find()
+        .filter(entities::sandbox_tool_call::Column::Name.eq(name))
         .filter(
             sea_orm::Condition::any()
                 .add(
@@ -619,4 +753,8 @@ fn status_from_db(value: &str) -> Result<SandboxToolCallStatus> {
             "invalid sandbox tool status {value}"
         ))),
     }
+}
+
+fn valid_tool_name(value: &str) -> bool {
+    !value.is_empty() && value.len() <= ToolCallRecord::MAX_LABEL_LEN && !value.contains('\0')
 }
