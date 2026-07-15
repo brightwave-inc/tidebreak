@@ -472,6 +472,59 @@ pub mod agent_run_inbox {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod sandbox_tool_call {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "sandbox_tool_call")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub agent_run_id: Uuid,
+        pub chat_id: Uuid,
+        pub agent_run_depth: i16,
+        pub provider_id: String,
+        pub name: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub arguments: Json,
+        pub status: String,
+        pub park_lease_token: Uuid,
+        pub park_attempt_count: i32,
+        pub park_claim_count: i32,
+        pub executor_lease_token: Option<Uuid>,
+        pub executor_lease_expires_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+        pub resolved_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod sandbox_tool_call_receipt {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "sandbox_tool_call_receipt")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub call_id: Uuid,
+        pub executor_lease_token: Uuid,
+        pub status: String,
+        pub result: String,
+        pub error_code: Option<String>,
+        pub error_detail: Option<String>,
+        pub resolved_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod turn_agent_run_wait {
     use sea_orm::entity::prelude::*;
 

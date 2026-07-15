@@ -562,9 +562,15 @@ pub(in crate::db) async fn claim_agent_run(
             return Ok(None);
         };
 
-        let attempt_count = candidate.attempt_count.checked_add(1).ok_or_else(|| {
-            AgentError::Store(format!("agent run {} attempt count overflow", candidate.id))
-        })?;
+        let continuing_from_tool = candidate.status == AgentRunStatus::RetryWait.as_str()
+            && candidate.last_error_code.as_deref() == Some("tool_checkpoint_resolved");
+        let attempt_count = if continuing_from_tool {
+            candidate.attempt_count
+        } else {
+            candidate.attempt_count.checked_add(1).ok_or_else(|| {
+                AgentError::Store(format!("agent run {} attempt count overflow", candidate.id))
+            })?
+        };
         let claim_count = candidate.claim_count.checked_add(1).ok_or_else(|| {
             AgentError::Store(format!("agent run {} claim count overflow", candidate.id))
         })?;
@@ -764,6 +770,9 @@ pub(in crate::db) async fn request_agent_run_cancellation(
     } else {
         AgentRunStatus::Cancelling
     };
+    if status == AgentRunStatus::Waiting {
+        super::sandbox_tool::cancel_sandbox_tool_call_for_run_on(&transaction, id, now).await?;
+    }
     let mut update = entities::agent_run::Entity::update_many()
         .col_expr(
             entities::agent_run::Column::Status,
@@ -926,6 +935,9 @@ where
     } else {
         AgentRunStatus::Cancelling
     };
+    if status == AgentRunStatus::Waiting {
+        super::sandbox_tool::cancel_sandbox_tool_call_for_run_on(conn, child_run_id, now).await?;
+    }
     let mut update = entities::agent_run::Entity::update_many()
         .col_expr(
             entities::agent_run::Column::Status,
@@ -1943,7 +1955,7 @@ fn validate_inbox_claim_request(
     Ok(())
 }
 
-async fn database_now<C>(conn: &C) -> Result<chrono::DateTime<Utc>>
+pub(in crate::db) async fn database_now<C>(conn: &C) -> Result<chrono::DateTime<Utc>>
 where
     C: sea_orm::ConnectionTrait,
 {
@@ -1967,7 +1979,7 @@ where
     canonical_db_timestamp(now)
 }
 
-async fn acquire_agent_run_claim_lock<C>(conn: &C) -> Result<()>
+pub(in crate::db) async fn acquire_agent_run_claim_lock<C>(conn: &C) -> Result<()>
 where
     C: sea_orm::ConnectionTrait,
 {
@@ -2122,6 +2134,15 @@ async fn fail_candidate_on<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
+    if candidate.status == AgentRunStatus::Waiting.as_str() {
+        super::sandbox_tool::terminalize_sandbox_tool_call_for_run_on(
+            conn,
+            AgentRunId(candidate.id),
+            error_code,
+            now,
+        )
+        .await?;
+    }
     let cancelling = candidate.status == AgentRunStatus::Cancelling.as_str();
     let terminal_status = if cancelling {
         AgentRunStatus::Cancelled
@@ -2173,7 +2194,122 @@ where
             .filter(entities::agent_run::Column::LeaseExpiresAt.is_null())
     };
     let updated = update.exec(conn).await.map_err(store_err)?;
+    if updated.rows_affected == 1 && terminal_status == AgentRunStatus::Failed {
+        deliver_terminal_candidate_failure_on(conn, candidate, now, error_code, error_detail)
+            .await?;
+    }
     Ok(updated.rows_affected == 1)
+}
+
+async fn deliver_terminal_candidate_failure_on<C>(
+    conn: &C,
+    candidate: &entities::agent_run::Model,
+    now: chrono::DateTime<Utc>,
+    error_code: &str,
+    error_detail: &str,
+) -> Result<()>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    if entities::agent_run_result::Entity::find_by_id(candidate.id)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let Some(parent_id) = candidate.parent_id else {
+        return Err(AgentError::Store(
+            "terminal sandbox run is missing its parent".into(),
+        ));
+    };
+    let (lease_token, attempt_count, claim_count) = if let Some(lease_token) = candidate.lease_token
+    {
+        (lease_token, candidate.attempt_count, candidate.claim_count)
+    } else {
+        let call = entities::sandbox_tool_call::Entity::find()
+            .filter(entities::sandbox_tool_call::Column::AgentRunId.eq(candidate.id))
+            .order_by_desc(entities::sandbox_tool_call::Column::ParkClaimCount)
+            .order_by_desc(entities::sandbox_tool_call::Column::ParkAttemptCount)
+            .one(conn)
+            .await
+            .map_err(store_err)?;
+        if let Some(call) = call {
+            (
+                call.park_lease_token,
+                call.park_attempt_count,
+                call.park_claim_count,
+            )
+        } else if let Some(claim) = entities::agent_run_claim::Entity::find()
+            .filter(entities::agent_run_claim::Column::AgentRunId.eq(Some(candidate.id)))
+            .filter(
+                entities::agent_run_claim::Column::AttemptCount.eq(Some(candidate.attempt_count)),
+            )
+            .filter(entities::agent_run_claim::Column::ClaimCount.eq(Some(candidate.claim_count)))
+            .one(conn)
+            .await
+            .map_err(store_err)?
+        {
+            (
+                claim.token,
+                claim.attempt_count.expect("run claim has attempt"),
+                claim.claim_count.expect("run claim has count"),
+            )
+        } else {
+            // A queued child can expire before its first worker claim. Mint a
+            // scheduler-origin receipt segment solely to preserve the same
+            // immutable result/inbox contract for its parked parent.
+            let lease_token = uuid::Uuid::new_v4();
+            let attempt_count = candidate.attempt_count.max(1);
+            let claim_count = candidate.claim_count.max(attempt_count);
+            entities::agent_run_claim::ActiveModel {
+                token: Set(lease_token),
+                agent_run_id: Set(Some(candidate.id)),
+                attempt_count: Set(Some(attempt_count)),
+                claim_count: Set(Some(claim_count)),
+                claimed_at: Set(now),
+                lease_expires_at: Set(Some(now + chrono::Duration::seconds(1))),
+            }
+            .insert(conn)
+            .await
+            .map_err(store_err)?;
+            (lease_token, attempt_count, claim_count)
+        }
+    };
+    entities::agent_run_result::ActiveModel {
+        agent_run_id: Set(candidate.id),
+        lease_token: Set(lease_token),
+        attempt_count: Set(attempt_count),
+        claim_count: Set(claim_count),
+        text: Set(format!(
+            "Sandbox task failed ({error_code}): {error_detail}"
+        )),
+        submitted_at: Set(now),
+    }
+    .insert(conn)
+    .await
+    .map_err(store_err)?;
+    entities::agent_run_inbox::ActiveModel {
+        child_run_id: Set(candidate.id),
+        parent_run_id: Set(parent_id),
+        chat_id: Set(candidate.chat_id),
+        parent_depth: Set(0),
+        result_lease_token: Set(lease_token),
+        result_attempt_count: Set(attempt_count),
+        result_claim_count: Set(claim_count),
+        status: Set(AgentRunInboxStatus::Pending.as_str().into()),
+        claim_count: Set(0),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        consumed_lease_token: Set(None),
+        consumed_at: Set(None),
+        delivered_at: Set(now),
+    }
+    .insert(conn)
+    .await
+    .map_err(store_err)?;
+    Ok(())
 }
 
 pub(in crate::db) async fn list_agent_runs(
@@ -2241,7 +2377,7 @@ fn validate_request(
     }
 }
 
-fn agent_run_from_model(model: entities::agent_run::Model) -> Result<AgentRun> {
+pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> Result<AgentRun> {
     let execution = match model.execution.as_str() {
         "foreground" => AgentRunExecution::Foreground,
         "sandbox" => AgentRunExecution::Sandbox,
@@ -2596,7 +2732,10 @@ where
         && turn.lease_expires_at.is_none())
 }
 
-async fn find_by_id_on<C>(conn: &C, id: AgentRunId) -> Result<Option<entities::agent_run::Model>>
+pub(in crate::db) async fn find_by_id_on<C>(
+    conn: &C,
+    id: AgentRunId,
+) -> Result<Option<entities::agent_run::Model>>
 where
     C: sea_orm::ConnectionTrait,
 {

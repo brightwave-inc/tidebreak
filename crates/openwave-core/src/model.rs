@@ -1311,6 +1311,105 @@ impl AgentRunStatus {
     }
 }
 
+/// Immutable request for one tool operation checkpointed by a sandbox agent.
+///
+/// This is intentionally separate from foreground [`ToolCallRecord`]: a
+/// sandbox has no foreground turn id, and its checkpoint must be fenced by the
+/// sandbox worker lease that produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxToolCallRequest {
+    pub id: crate::id::CallId,
+    pub agent_run_id: crate::id::AgentRunId,
+    pub chat_id: ChatId,
+    pub provider_id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+impl SandboxToolCallRequest {
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        let labels_valid = [self.provider_id.as_str(), self.name.as_str()]
+            .into_iter()
+            .all(|value| {
+                !value.is_empty()
+                    && value.len() <= ToolCallRecord::MAX_LABEL_LEN
+                    && !value.contains('\0')
+            });
+        self.id.0 != Uuid::nil()
+            && self.agent_run_id.0 != Uuid::nil()
+            && self.chat_id.0 != Uuid::nil()
+            && labels_valid
+            && serde_json::to_vec(&self.arguments)
+                .is_ok_and(|arguments| arguments.len() <= ToolCallRecord::MAX_ARGUMENT_BYTES)
+    }
+}
+
+/// Durable lifecycle of sandbox-owned tool work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SandboxToolCallStatus {
+    Accepted,
+    Claimed,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl SandboxToolCallStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Claimed => "claimed",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// One persisted sandbox tool checkpoint and its current execution lease.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxToolCall {
+    pub id: crate::id::CallId,
+    pub agent_run_id: crate::id::AgentRunId,
+    pub chat_id: ChatId,
+    pub provider_id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+    pub status: SandboxToolCallStatus,
+    pub park_lease_token: Uuid,
+    pub park_attempt_count: i32,
+    pub park_claim_count: i32,
+    pub executor_lease_token: Option<Uuid>,
+    pub executor_lease_expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+impl SandboxToolCall {
+    pub const MAX_RESULT_BYTES: usize = ToolCallRecord::MAX_RESULT_BYTES;
+}
+
+/// Immutable terminal result receipt for sandbox tool work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxToolCallReceipt {
+    pub call_id: crate::id::CallId,
+    pub executor_lease_token: Uuid,
+    pub status: SandboxToolCallStatus,
+    pub result: String,
+    pub error_code: Option<String>,
+    pub error_detail: Option<String>,
+    pub resolved_at: DateTime<Utc>,
+}
+
 /// Durable execution state of one user turn.
 ///
 /// A turn is accepted once under its stable [`TurnId`], then claimed under an

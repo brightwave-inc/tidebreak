@@ -162,6 +162,39 @@ pub enum AcceptAgentRunOutcome {
     ParentUnavailable,
 }
 
+/// Result of atomically parking a sandbox run on immutable tool work.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParkSandboxToolCallOutcome {
+    Parked {
+        run: AgentRun,
+        call: crate::model::SandboxToolCall,
+    },
+    Existing {
+        run: AgentRun,
+        call: crate::model::SandboxToolCall,
+    },
+    IdentityConflict,
+    LeaseLost,
+}
+
+/// Result of claiming durable sandbox tool work.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaimSandboxToolCallOutcome {
+    Claimed(crate::model::SandboxToolCall),
+    Existing(crate::model::SandboxToolCall),
+    Unavailable,
+}
+
+/// Result of resolving sandbox tool work under its exact executor lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveSandboxToolCallOutcome {
+    Resolved,
+    Existing,
+    NotFound,
+    AlreadyTerminal,
+    LeaseLost,
+}
+
 /// Result of atomically accepting one sandbox child and checkpointing its
 /// owning foreground turn on that child's inbox delivery.
 #[derive(Debug, Clone, PartialEq)]
@@ -1107,6 +1140,67 @@ pub trait Store: Send + Sync {
         _lease_token: uuid::Uuid,
         _lease_duration: chrono::Duration,
     ) -> Result<bool> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Atomically accept canonical sandbox tool arguments, record the exact
+    /// originating sandbox lease, and release that lease into `waiting`.
+    /// Exact retries recover the checkpoint after the call resolves.
+    async fn park_agent_run_for_sandbox_tool_call(
+        &self,
+        _agent_run_id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _call: &crate::model::SandboxToolCallRequest,
+    ) -> Result<ParkSandboxToolCallOutcome> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Claim one accepted sandbox tool call under an exact expiring executor
+    /// lease. The executor token is a capability and is never included in
+    /// ordinary history reads.
+    async fn claim_sandbox_tool_call(
+        &self,
+        _id: CallId,
+        _lease_token: uuid::Uuid,
+        _lease_duration: chrono::Duration,
+    ) -> Result<ClaimSandboxToolCallOutcome> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Atomically write one immutable terminal receipt under the exact live
+    /// executor lease and make its sandbox run claimable for continuation.
+    /// Exact ambiguous retries recover the same receipt.
+    async fn resolve_sandbox_tool_call(
+        &self,
+        _id: CallId,
+        _lease_token: uuid::Uuid,
+        _resolution: &ToolCallResolution,
+    ) -> Result<ResolveSandboxToolCallOutcome> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Fetch a sandbox tool checkpoint by its stable model-visible identity.
+    async fn get_sandbox_tool_call(
+        &self,
+        _id: CallId,
+    ) -> Result<Option<crate::model::SandboxToolCall>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Fetch the immutable terminal receipt, if sandbox tool work resolved.
+    async fn get_sandbox_tool_call_receipt(
+        &self,
+        _id: CallId,
+    ) -> Result<Option<crate::model::SandboxToolCallReceipt>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// List bounded oldest-first accepted work and expired claims for durable
+    /// executor recovery. Claiming remains the authority for ownership.
+    async fn list_sandbox_tool_call_candidates(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<crate::model::SandboxToolCall>> {
         agent_run_storage_unavailable()
     }
 

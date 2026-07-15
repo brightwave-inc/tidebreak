@@ -32,7 +32,8 @@ use crate::model::{
     DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
     DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
-    Project, RootAttachmentChange, RootAttachmentChangeTerminal, SourceRegion, ToolCallRecord,
+    Project, RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall,
+    SandboxToolCallReceipt, SandboxToolCallRequest, SourceRegion, ToolCallRecord,
     ToolCallResolution, TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWaitStatus,
     TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
 };
@@ -40,14 +41,16 @@ use crate::provider::{StopReason, Usage};
 use crate::storage::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptToolCallOutcome,
     AcceptTurnOutcome, AcceptTurnSteerOutcome, BeginRootAttachmentChangeOutcome,
-    ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome, ClaimTurnRunOutcome,
-    CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
-    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
-    FailAgentRunOutcome, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
-    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
-    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkTurnForAgentRunInboxOutcome,
+    ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome, ClaimSandboxToolCallOutcome,
+    ClaimTurnRunOutcome, CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
+    ConsumeAgentRunInboxOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
+    EnsureDocumentParseJobOutcome, FailAgentRunOutcome, FinishAgentRunCancellationOutcome,
+    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
+    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledTurnOutcome,
+    JournaledTurnSteerOutcome, ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome,
     ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
-    RequestTurnCancellationOutcome, ResolveToolCallOutcome, Store, SubmitAgentRunResultOutcome,
+    RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, Store,
+    SubmitAgentRunResultOutcome,
 };
 
 mod ops;
@@ -1804,6 +1807,54 @@ impl Store for DbStore {
         lease_duration: chrono::Duration,
     ) -> Result<bool> {
         ops::agent_run::heartbeat_agent_run(self, id, lease_token, lease_duration).await
+    }
+
+    async fn park_agent_run_for_sandbox_tool_call(
+        &self,
+        agent_run_id: AgentRunId,
+        lease_token: uuid::Uuid,
+        call: &SandboxToolCallRequest,
+    ) -> Result<ParkSandboxToolCallOutcome> {
+        ops::sandbox_tool::park_agent_run_for_sandbox_tool_call(
+            self,
+            agent_run_id,
+            lease_token,
+            call,
+        )
+        .await
+    }
+
+    async fn claim_sandbox_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<ClaimSandboxToolCallOutcome> {
+        ops::sandbox_tool::claim_sandbox_tool_call(self, id, lease_token, lease_duration).await
+    }
+
+    async fn resolve_sandbox_tool_call(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        resolution: &ToolCallResolution,
+    ) -> Result<ResolveSandboxToolCallOutcome> {
+        ops::sandbox_tool::resolve_sandbox_tool_call(self, id, lease_token, resolution).await
+    }
+
+    async fn get_sandbox_tool_call(&self, id: CallId) -> Result<Option<SandboxToolCall>> {
+        ops::sandbox_tool::get_sandbox_tool_call(self, id).await
+    }
+
+    async fn get_sandbox_tool_call_receipt(
+        &self,
+        id: CallId,
+    ) -> Result<Option<SandboxToolCallReceipt>> {
+        ops::sandbox_tool::get_sandbox_tool_call_receipt(self, id).await
+    }
+
+    async fn list_sandbox_tool_call_candidates(&self, limit: u64) -> Result<Vec<SandboxToolCall>> {
+        ops::sandbox_tool::list_sandbox_tool_call_candidates(self, limit).await
     }
 
     async fn request_agent_run_cancellation(
