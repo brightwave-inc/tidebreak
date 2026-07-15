@@ -11,6 +11,8 @@ Project documentation, versioned alongside the code.
 - [Agent runs and sandboxed background work](agent-runs.md) — the shared
   foreground/background loop, depth-one agent hierarchy, durable waits, and
   bounded sandbox scheduling plan.
+- [Tool architecture and roadmap](tools.md) — the current tool surface,
+  foreground/sandbox split, provider boundaries, and web-search plan.
 
 More to come as the product surfaces land (running locally, API reference, and
 writing tools).
