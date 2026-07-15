@@ -9,9 +9,10 @@ use axum::http::{header, Request, StatusCode};
 use futures::stream::{self, BoxStream, StreamExt};
 // Tests use the in-memory store; production wires LanceDB in `bind`.
 use openwave_core::{
-    AgentErrorInfo, AgentEvent, ApprovalClass, BlobStore, Chat, ChatId, ChatRequest, Message,
-    ModelProvider, Project, ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent,
-    StopReason, Tool, ToolCtx, ToolOutput, ToolSpec, TurnId, TurnSteerId, Usage,
+    AgentErrorInfo, AgentEvent, ApprovalClass, BlobStore, CallId, Chat, ChatId, ChatRequest,
+    Message, ModelProvider, Project, ProjectId, ProviderEvent, ProviderId, SecretProvider,
+    SequencedEvent, StopReason, Tool, ToolCallExecution, ToolCallRecord, ToolCallStatus, ToolCtx,
+    ToolOutput, ToolSpec, TurnId, TurnSteerId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -966,12 +967,13 @@ impl Store for PauseTerminalStore {
     async fn heartbeat_client_tool_call(
         &self,
         id: openwave_core::CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         lease_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<openwave_core::HeartbeatClientToolCallOutcome> {
         self.inner
-            .heartbeat_client_tool_call(id, lease_token, now, lease_expires_at)
+            .heartbeat_client_tool_call(id, chat_id, lease_token, now, lease_expires_at)
             .await
     }
     async fn resolve_server_tool_call(
@@ -987,25 +989,34 @@ impl Store for PauseTerminalStore {
     async fn resolve_client_tool_call(
         &self,
         id: openwave_core::CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &openwave_core::ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<openwave_core::ResolveToolCallOutcome> {
         self.inner
-            .resolve_client_tool_call(id, lease_token, now, resolution, resolved_at)
+            .resolve_client_tool_call(id, chat_id, lease_token, now, resolution, resolved_at)
             .await
     }
     async fn resolve_expired_client_tool_call(
         &self,
         id: openwave_core::CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &openwave_core::ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<openwave_core::ResolveToolCallOutcome> {
         self.inner
-            .resolve_expired_client_tool_call(id, lease_token, now, resolution, resolved_at)
+            .resolve_expired_client_tool_call(
+                id,
+                chat_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+            )
             .await
     }
     async fn list_pending_client_tool_calls(
@@ -2389,6 +2400,325 @@ async fn post_json(
         )
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let other_chat = make_chat(&router, &bearer).await;
+    let proposed_call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "native_1".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({"suggested_name": "Documents"}),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+    };
+    let call = match store.accept_tool_call(&proposed_call).await.unwrap() {
+        openwave_core::AcceptToolCallOutcome::Accepted(call)
+        | openwave_core::AcceptToolCallOutcome::Existing(call) => call,
+        openwave_core::AcceptToolCallOutcome::IdentityConflict => {
+            panic!("fresh client tool call identity conflicted")
+        }
+    };
+
+    let pending = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/client-executions/pending", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.status(), StatusCode::OK);
+    let pending: Vec<ToolCallRecord> = json_body(pending).await;
+    assert_eq!(pending, vec![call.clone()]);
+
+    let executor_id = uuid::Uuid::new_v4();
+    let lease_token = uuid::Uuid::new_v4();
+    let claim_uri = format!("/chats/{}/client-executions/{}/claim", chat.id, call.id);
+    let claim_body = serde_json::json!({
+        "executor_id": executor_id,
+        "lease_token": lease_token,
+    });
+    let first = post_json(&router, &bearer, &claim_uri, claim_body.clone()).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: serde_json::Value = json_body(first).await;
+    assert_eq!(first["disposition"], "claimed");
+    assert_eq!(first["lease_token"], lease_token.to_string());
+    assert_eq!(first["call"]["arguments"], call.arguments);
+
+    // A lost response can be retried with the stable secret token even though
+    // the server calculates a fresh proposed expiry for the second request.
+    let retry = post_json(&router, &bearer, &claim_uri, claim_body).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    let retry: serde_json::Value = json_body(retry).await;
+    assert_eq!(retry["disposition"], "existing");
+    assert_eq!(retry["lease_token"], lease_token.to_string());
+
+    let stolen = post_json(
+        &router,
+        &bearer,
+        &claim_uri,
+        serde_json::json!({
+            "executor_id": executor_id,
+            "lease_token": uuid::Uuid::new_v4(),
+        }),
+    )
+    .await;
+    assert_eq!(stolen.status(), StatusCode::CONFLICT);
+
+    let pending = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/client-executions/pending", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let pending_bytes = to_bytes(pending.into_body(), usize::MAX).await.unwrap();
+    assert!(
+        !String::from_utf8_lossy(&pending_bytes).contains(&lease_token.to_string()),
+        "authoritative polling must never disclose the secret lease token"
+    );
+
+    let wrong_chat_heartbeat = post_json(
+        &router,
+        &bearer,
+        &format!(
+            "/chats/{}/client-executions/{}/heartbeat",
+            other_chat.id, call.id
+        ),
+        serde_json::json!({"lease_token": lease_token}),
+    )
+    .await;
+    assert_eq!(wrong_chat_heartbeat.status(), StatusCode::CONFLICT);
+
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let heartbeat = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/client-executions/{}/heartbeat", chat.id, call.id),
+        serde_json::json!({"lease_token": lease_token}),
+    )
+    .await;
+    assert_eq!(heartbeat.status(), StatusCode::OK);
+    let heartbeat: serde_json::Value = json_body(heartbeat).await;
+    assert_eq!(heartbeat["disposition"], "extended");
+
+    let resolve_uri = format!("/chats/{}/client-executions/{}/resolve", chat.id, call.id);
+    let resolution = serde_json::json!({
+        "lease_token": lease_token,
+        "resolution": {"status": "completed", "result": "folder connected"},
+    });
+    let wrong_chat_resolve = post_json(
+        &router,
+        &bearer,
+        &format!(
+            "/chats/{}/client-executions/{}/resolve",
+            other_chat.id, call.id
+        ),
+        resolution.clone(),
+    )
+    .await;
+    assert_eq!(wrong_chat_resolve.status(), StatusCode::CONFLICT);
+    let wrong_token = post_json(
+        &router,
+        &bearer,
+        &resolve_uri,
+        serde_json::json!({
+            "lease_token": uuid::Uuid::new_v4(),
+            "resolution": {"status": "completed", "result": "folder connected"},
+        }),
+    )
+    .await;
+    assert_eq!(wrong_token.status(), StatusCode::CONFLICT);
+
+    let resolved = post_json(&router, &bearer, &resolve_uri, resolution.clone()).await;
+    assert_eq!(resolved.status(), StatusCode::OK);
+    let resolved: serde_json::Value = json_body(resolved).await;
+    assert_eq!(resolved["disposition"], "resolved");
+
+    // Resolution time is server-owned metadata, not part of the stable command
+    // identity, so an ambiguous retry converges on token + terminal payload.
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let retry = post_json(&router, &bearer, &resolve_uri, resolution).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    let retry: serde_json::Value = json_body(retry).await;
+    assert_eq!(retry["disposition"], "existing");
+
+    let conflicting = post_json(
+        &router,
+        &bearer,
+        &resolve_uri,
+        serde_json::json!({
+            "lease_token": lease_token,
+            "resolution": {"status": "cancelled", "result": "not connected"},
+        }),
+    )
+    .await;
+    assert_eq!(conflicting.status(), StatusCode::CONFLICT);
+    assert!(store
+        .list_pending_client_tool_calls(chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn client_execution_api_reconciles_a_known_result_after_exact_lease_expiry() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "native_expired".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({}),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    let lease_token = uuid::Uuid::new_v4();
+    let claimed_at = chrono::Utc::now();
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                uuid::Uuid::new_v4(),
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::milliseconds(2),
+            )
+            .await
+            .unwrap(),
+        openwave_core::ClaimClientToolCallOutcome::Claimed(_)
+    ));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let resolved = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/client-executions/{}/resolve", chat.id, call.id),
+        serde_json::json!({
+            "lease_token": lease_token,
+            "resolution": {
+                "status": "cancelled",
+                "result": "folder picker was cancelled",
+            },
+        }),
+    )
+    .await;
+    assert_eq!(resolved.status(), StatusCode::OK);
+    let resolved: serde_json::Value = json_body(resolved).await;
+    assert_eq!(resolved["disposition"], "resolved");
+}
+
+#[tokio::test]
+async fn client_execution_api_validates_scope_identity_and_terminal_payloads() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let missing_chat = ChatId::new();
+    let missing = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{missing_chat}/client-executions/pending"))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "native_validation".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({}),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    let claim_uri = format!("/chats/{}/client-executions/{}/claim", chat.id, call.id);
+    let nil = post_json(
+        &router,
+        &bearer,
+        &claim_uri,
+        serde_json::json!({
+            "executor_id": uuid::Uuid::nil(),
+            "lease_token": uuid::Uuid::new_v4(),
+        }),
+    )
+    .await;
+    assert_eq!(nil.status(), StatusCode::BAD_REQUEST);
+
+    let lease_token = uuid::Uuid::new_v4();
+    let claimed = post_json(
+        &router,
+        &bearer,
+        &claim_uri,
+        serde_json::json!({
+            "executor_id": uuid::Uuid::new_v4(),
+            "lease_token": lease_token,
+        }),
+    )
+    .await;
+    assert_eq!(claimed.status(), StatusCode::OK);
+
+    let oversized = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/client-executions/{}/resolve", chat.id, call.id),
+        serde_json::json!({
+            "lease_token": lease_token,
+            "resolution": {
+                "status": "failed",
+                "result": "failure",
+                "error_code": "x".repeat(ToolCallRecord::MAX_ERROR_CODE_LEN + 1),
+            },
+        }),
+    )
+    .await;
+    assert_eq!(oversized.status(), StatusCode::BAD_REQUEST);
 }
 
 /// POST exact bytes to a raw document route.

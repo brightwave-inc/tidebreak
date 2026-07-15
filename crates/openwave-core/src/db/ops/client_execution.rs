@@ -106,8 +106,9 @@ pub(in crate::db) async fn claim_client_tool_call(
     }
     if existing.client_executor_id == Some(executor_id)
         && existing.client_lease_token == Some(lease_token)
-        && existing.client_lease_expires_at == Some(lease_expires_at)
-        && lease_expires_at > now
+        && existing
+            .client_lease_expires_at
+            .is_some_and(|expiry| expiry > now)
     {
         let claim = client_claim_from_model(existing)?;
         transaction.commit().await.map_err(store_err)?;
@@ -131,6 +132,7 @@ pub(in crate::db) async fn claim_client_tool_call(
 pub(in crate::db) async fn heartbeat_client_tool_call(
     store: &DbStore,
     id: CallId,
+    chat_id: ChatId,
     lease_token: uuid::Uuid,
     now: DateTime<Utc>,
     lease_expires_at: DateTime<Utc>,
@@ -149,7 +151,8 @@ pub(in crate::db) async fn heartbeat_client_tool_call(
         .map_err(store_err)?
         .expect("locked tool call exists");
     let current_expiry = existing.client_lease_expires_at;
-    if existing.execution != ToolCallExecution::Client.as_str()
+    if existing.chat_id != chat_id.0
+        || existing.execution != ToolCallExecution::Client.as_str()
         || existing.status != ToolCallStatus::Pending.as_str()
         || existing.client_lease_token != Some(lease_token)
         || current_expiry.is_none_or(|expiry| expiry <= now || lease_expires_at < expiry)
@@ -187,6 +190,7 @@ pub(in crate::db) async fn resolve_server_tool_call(
 pub(in crate::db) async fn resolve_client_tool_call(
     store: &DbStore,
     id: CallId,
+    chat_id: ChatId,
     lease_token: uuid::Uuid,
     now: DateTime<Utc>,
     resolution: &ToolCallResolution,
@@ -200,7 +204,11 @@ pub(in crate::db) async fn resolve_client_tool_call(
     resolve_tool_call(
         store,
         id,
-        ResolutionAuthority::LiveClient { lease_token, now },
+        ResolutionAuthority::LiveClient {
+            chat_id,
+            lease_token,
+            now,
+        },
         resolved_at,
         resolution,
     )
@@ -210,6 +218,7 @@ pub(in crate::db) async fn resolve_client_tool_call(
 pub(in crate::db) async fn resolve_expired_client_tool_call(
     store: &DbStore,
     id: CallId,
+    chat_id: ChatId,
     lease_token: uuid::Uuid,
     now: DateTime<Utc>,
     resolution: &ToolCallResolution,
@@ -223,7 +232,11 @@ pub(in crate::db) async fn resolve_expired_client_tool_call(
     resolve_tool_call(
         store,
         id,
-        ResolutionAuthority::ExpiredClient { lease_token, now },
+        ResolutionAuthority::ExpiredClient {
+            chat_id,
+            lease_token,
+            now,
+        },
         resolved_at,
         resolution,
     )
@@ -275,7 +288,7 @@ async fn resolve_tool_call(
     if existing.status != ToolCallStatus::Pending.as_str() {
         let outcome = if !terminal_authority_matches(&existing, authority) {
             ResolveToolCallOutcome::LeaseLost
-        } else if terminal_payload_matches(&existing, resolution, resolved_at) {
+        } else if terminal_payload_matches(&existing, resolution) {
             ResolveToolCallOutcome::Existing
         } else {
             ResolveToolCallOutcome::AlreadyTerminal
@@ -286,15 +299,25 @@ async fn resolve_tool_call(
 
     let owns = match authority {
         ResolutionAuthority::Server => existing.execution == ToolCallExecution::Server.as_str(),
-        ResolutionAuthority::LiveClient { lease_token, now } => {
-            existing.execution == ToolCallExecution::Client.as_str()
+        ResolutionAuthority::LiveClient {
+            chat_id,
+            lease_token,
+            now,
+        } => {
+            existing.chat_id == chat_id.0
+                && existing.execution == ToolCallExecution::Client.as_str()
                 && existing.client_lease_token == Some(lease_token)
                 && existing
                     .client_lease_expires_at
                     .is_some_and(|expiry| expiry > now)
         }
-        ResolutionAuthority::ExpiredClient { lease_token, now } => {
-            existing.execution == ToolCallExecution::Client.as_str()
+        ResolutionAuthority::ExpiredClient {
+            chat_id,
+            lease_token,
+            now,
+        } => {
+            existing.chat_id == chat_id.0
+                && existing.execution == ToolCallExecution::Client.as_str()
                 && existing.client_lease_token == Some(lease_token)
                 && existing
                     .client_lease_expires_at
@@ -323,10 +346,12 @@ async fn resolve_tool_call(
 enum ResolutionAuthority {
     Server,
     LiveClient {
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: DateTime<Utc>,
     },
     ExpiredClient {
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: DateTime<Utc>,
     },
@@ -336,11 +361,21 @@ impl ResolutionAuthority {
     fn canonicalized(self) -> Result<Self> {
         Ok(match self {
             Self::Server => Self::Server,
-            Self::LiveClient { lease_token, now } => Self::LiveClient {
+            Self::LiveClient {
+                chat_id,
+                lease_token,
+                now,
+            } => Self::LiveClient {
+                chat_id,
                 lease_token,
                 now: canonical_db_timestamp(now)?,
             },
-            Self::ExpiredClient { lease_token, now } => Self::ExpiredClient {
+            Self::ExpiredClient {
+                chat_id,
+                lease_token,
+                now,
+            } => Self::ExpiredClient {
+                chat_id,
                 lease_token,
                 now: canonical_db_timestamp(now)?,
             },
@@ -353,6 +388,13 @@ impl ResolutionAuthority {
             Self::LiveClient { lease_token, .. } | Self::ExpiredClient { lease_token, .. } => {
                 Some(lease_token)
             }
+        }
+    }
+
+    const fn chat_id(self) -> Option<ChatId> {
+        match self {
+            Self::Server => None,
+            Self::LiveClient { chat_id, .. } | Self::ExpiredClient { chat_id, .. } => Some(chat_id),
         }
     }
 }
@@ -451,6 +493,7 @@ fn terminal_authority_matches(
         }
         ResolutionAuthority::LiveClient { .. } | ResolutionAuthority::ExpiredClient { .. } => {
             model.execution == ToolCallExecution::Client.as_str()
+                && Some(ChatId(model.chat_id)) == authority.chat_id()
                 && model.client_lease_token == authority.lease_token()
         }
     }
@@ -459,14 +502,12 @@ fn terminal_authority_matches(
 fn terminal_payload_matches(
     model: &entities::tool_call::Model,
     resolution: &ToolCallResolution,
-    resolved_at: DateTime<Utc>,
 ) -> bool {
     let (error_code, error_detail) = resolution_error(resolution);
     model.status == resolution.status().as_str()
         && model.result.as_deref() == Some(resolution.result())
         && model.error_code == error_code
         && model.error_detail == error_detail
-        && model.resolved_at == Some(resolved_at)
 }
 
 pub(in crate::db) fn tool_call_from_model(

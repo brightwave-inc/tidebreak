@@ -35,7 +35,7 @@ impl MemStore {
     fn resolve_mem_tool_call(
         &self,
         id: CallId,
-        client_authority: Option<(uuid::Uuid, chrono::DateTime<chrono::Utc>, bool)>,
+        client_authority: Option<(ChatId, uuid::Uuid, chrono::DateTime<chrono::Utc>, bool)>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ResolveToolCallOutcome> {
@@ -62,8 +62,9 @@ impl MemStore {
         if call.status.is_terminal() {
             let authority_matches = match client_authority {
                 None => call.execution == ToolCallExecution::Server && stored_lease_token.is_none(),
-                Some((lease_token, _, _)) => {
-                    call.execution == ToolCallExecution::Client
+                Some((chat_id, lease_token, _, _)) => {
+                    call.chat_id == chat_id
+                        && call.execution == ToolCallExecution::Client
                         && stored_lease_token == Some(lease_token)
                 }
             };
@@ -73,8 +74,7 @@ impl MemStore {
             let exact = call.status == resolution.status()
                 && call.result.as_deref() == Some(resolution.result())
                 && call.error_code == error_code
-                && call.error_detail == error_detail
-                && call.resolved_at == Some(resolved_at);
+                && call.error_detail == error_detail;
             return Ok(if exact {
                 ResolveToolCallOutcome::Existing
             } else {
@@ -83,8 +83,9 @@ impl MemStore {
         }
         let owns = match client_authority {
             None => call.execution == ToolCallExecution::Server,
-            Some((lease_token, now, expired)) => {
-                call.execution == ToolCallExecution::Client
+            Some((chat_id, lease_token, now, expired)) => {
+                call.chat_id == chat_id
+                    && call.execution == ToolCallExecution::Client
                     && stored_lease_token == Some(lease_token)
                     && call.client_lease_expires_at.is_some_and(|expiry| {
                         if expired {
@@ -1251,8 +1252,9 @@ impl Store for MemStore {
             return Ok(ClaimClientToolCallOutcome::Unavailable);
         }
         if call.client_executor_id == Some(executor_id)
-            && call.client_lease_expires_at == Some(lease_expires_at)
-            && lease_expires_at > now
+            && call
+                .client_lease_expires_at
+                .is_some_and(|expiry| expiry > now)
         {
             let stored_lease_token = self
                 .tool_call_lease_tokens
@@ -1290,6 +1292,7 @@ impl Store for MemStore {
     async fn heartbeat_client_tool_call(
         &self,
         id: CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         lease_expires_at: chrono::DateTime<chrono::Utc>,
@@ -1301,7 +1304,8 @@ impl Store for MemStore {
         let Some(current_expiry) = call.client_lease_expires_at else {
             return Ok(HeartbeatClientToolCallOutcome::LeaseLost);
         };
-        if call.execution != ToolCallExecution::Client
+        if call.chat_id != chat_id
+            || call.execution != ToolCallExecution::Client
             || call.status != ToolCallStatus::Pending
             || self
                 .tool_call_lease_tokens
@@ -1332,22 +1336,34 @@ impl Store for MemStore {
     async fn resolve_client_tool_call(
         &self,
         id: CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ResolveToolCallOutcome> {
-        self.resolve_mem_tool_call(id, Some((lease_token, now, false)), resolution, resolved_at)
+        self.resolve_mem_tool_call(
+            id,
+            Some((chat_id, lease_token, now, false)),
+            resolution,
+            resolved_at,
+        )
     }
     async fn resolve_expired_client_tool_call(
         &self,
         id: CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ResolveToolCallOutcome> {
-        self.resolve_mem_tool_call(id, Some((lease_token, now, true)), resolution, resolved_at)
+        self.resolve_mem_tool_call(
+            id,
+            Some((chat_id, lease_token, now, true)),
+            resolution,
+            resolved_at,
+        )
     }
     async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
         let mut calls: Vec<_> = self

@@ -144,6 +144,11 @@ headless clients. It owns route orchestration and the durable document,
 retirement, and audit workers while core state transitions remain in
 `openwave-core`.
 
+Client-owned tool work is exposed through authenticated per-chat polling,
+claim, heartbeat, and resolution routes. General records show visible lease
+metadata but never the secret claim token; only the claim response returns that
+receipt.
+
 **Depends on:** `openwave-core`, `openwave-router`, `openwave-retrieval`.
 
 ## `openwave-cli` — headless daemon + CLI 🟡

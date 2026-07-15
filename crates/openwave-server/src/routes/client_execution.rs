@@ -1,0 +1,292 @@
+//! Durable HTTP control plane for work that executes in a trusted client.
+//!
+//! Polling is authoritative; event streams are only a latency hint. A client
+//! generates a fresh secret lease token before claiming, then retains it across
+//! ambiguous HTTP responses and presents it for every heartbeat or resolution.
+
+use axum::extract::State;
+use serde::{Deserialize, Serialize};
+
+use chrono::{Duration, Utc};
+use openwave_core::{
+    CallId, ChatId, ClaimClientToolCallOutcome, HeartbeatClientToolCallOutcome,
+    ResolveToolCallOutcome, ToolCallRecord, ToolCallResolution,
+};
+
+use crate::error::ServerError;
+use crate::extract::{Json, Path};
+use crate::state::AppState;
+
+const CLIENT_EXECUTION_LEASE: Duration = Duration::seconds(60);
+
+/// Caller-owned claim identity. The lease token is a secret capability and
+/// must be generated freshly for a new claim attempt.
+#[derive(Deserialize)]
+pub struct ClaimClientExecution {
+    pub executor_id: uuid::Uuid,
+    pub lease_token: uuid::Uuid,
+}
+
+/// Whether a claim was first installed or recovered after a lost response.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimDisposition {
+    Claimed,
+    Existing,
+}
+
+/// Canonical claimed work plus the secret receipt needed to operate it.
+#[derive(Serialize)]
+pub struct ClaimedClientExecution {
+    pub disposition: ClaimDisposition,
+    pub call: ToolCallRecord,
+    pub lease_token: uuid::Uuid,
+}
+
+/// Secret receipt for extending a live claim.
+#[derive(Deserialize)]
+pub struct HeartbeatClientExecution {
+    pub lease_token: uuid::Uuid,
+}
+
+/// Whether a heartbeat advanced the lease or proposed its current expiry.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeartbeatDisposition {
+    Extended,
+    Existing,
+}
+
+#[derive(Serialize)]
+pub struct ClientExecutionHeartbeat {
+    pub disposition: HeartbeatDisposition,
+}
+
+/// Terminal client outcome. The model-facing `result` is retained for every
+/// variant; failures additionally carry a stable machine code and bounded local
+/// diagnostic detail.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ClientExecutionResolution {
+    Completed {
+        result: String,
+    },
+    Failed {
+        result: String,
+        error_code: String,
+        #[serde(default)]
+        error_detail: Option<String>,
+    },
+    Cancelled {
+        result: String,
+    },
+}
+
+impl ClientExecutionResolution {
+    fn into_core(self) -> ToolCallResolution {
+        match self {
+            Self::Completed { result } => ToolCallResolution::Completed { result },
+            Self::Failed {
+                result,
+                error_code,
+                error_detail,
+            } => ToolCallResolution::Failed {
+                result,
+                error_code,
+                error_detail,
+            },
+            Self::Cancelled { result } => ToolCallResolution::Cancelled { result },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ResolveClientExecution {
+    pub lease_token: uuid::Uuid,
+    pub resolution: ClientExecutionResolution,
+}
+
+/// Whether this request committed the terminal state or recovered it.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionDisposition {
+    Resolved,
+    Existing,
+}
+
+#[derive(Serialize)]
+pub struct ResolvedClientExecution {
+    pub disposition: ResolutionDisposition,
+}
+
+/// `GET /chats/{id}/client-executions/pending` — authoritative pending work.
+///
+/// Includes visible executor and expiry metadata for recovery, but never the
+/// secret lease token. Unknown chats return `404` rather than an empty list.
+pub async fn list_pending_client_executions(
+    State(state): State<AppState>,
+    Path(id): Path<ChatId>,
+) -> Result<Json<Vec<ToolCallRecord>>, ServerError> {
+    ensure_chat(&state, id).await?;
+    Ok(Json(state.store.list_pending_client_tool_calls(id).await?))
+}
+
+/// `POST .../{call_id}/claim` — atomically acquire or recover one exact claim.
+pub async fn claim_client_execution(
+    State(state): State<AppState>,
+    Path((id, call_id)): Path<(ChatId, CallId)>,
+    Json(body): Json<ClaimClientExecution>,
+) -> Result<Json<ClaimedClientExecution>, ServerError> {
+    ensure_chat(&state, id).await?;
+    ensure_non_nil(body.executor_id, "executor_id")?;
+    ensure_non_nil(body.lease_token, "lease_token")?;
+    let now = Utc::now();
+    let outcome = state
+        .store
+        .claim_client_tool_call(
+            call_id,
+            id,
+            body.executor_id,
+            body.lease_token,
+            now,
+            now + CLIENT_EXECUTION_LEASE,
+        )
+        .await?;
+    let (disposition, claim) = match outcome {
+        ClaimClientToolCallOutcome::Claimed(claim) => (ClaimDisposition::Claimed, claim),
+        ClaimClientToolCallOutcome::Existing(claim) => (ClaimDisposition::Existing, claim),
+        ClaimClientToolCallOutcome::Unavailable => {
+            return Err(ServerError::conflict(format!(
+                "client execution {call_id} is not claimable for chat {id}"
+            )));
+        }
+    };
+    Ok(Json(ClaimedClientExecution {
+        disposition,
+        call: claim.call,
+        lease_token: claim.lease_token,
+    }))
+}
+
+/// `POST .../{call_id}/heartbeat` — renew the exact live lease for 60 seconds.
+/// Heartbeats are monotonic liveness updates rather than exact commands: a
+/// repeated request can extend the lease again from its new server receive time.
+pub async fn heartbeat_client_execution(
+    State(state): State<AppState>,
+    Path((id, call_id)): Path<(ChatId, CallId)>,
+    Json(body): Json<HeartbeatClientExecution>,
+) -> Result<Json<ClientExecutionHeartbeat>, ServerError> {
+    ensure_chat(&state, id).await?;
+    ensure_non_nil(body.lease_token, "lease_token")?;
+    let now = Utc::now();
+    let disposition = match state
+        .store
+        .heartbeat_client_tool_call(
+            call_id,
+            id,
+            body.lease_token,
+            now,
+            now + CLIENT_EXECUTION_LEASE,
+        )
+        .await?
+    {
+        HeartbeatClientToolCallOutcome::Extended => HeartbeatDisposition::Extended,
+        HeartbeatClientToolCallOutcome::Existing => HeartbeatDisposition::Existing,
+        HeartbeatClientToolCallOutcome::LeaseLost => {
+            return Err(ServerError::conflict(format!(
+                "client execution {call_id} lease is not live"
+            )));
+        }
+    };
+    Ok(Json(ClientExecutionHeartbeat { disposition }))
+}
+
+/// `POST .../{call_id}/resolve` — terminalize a known native outcome once.
+///
+/// The exact token can also reconcile a known outcome after lease expiry. Work
+/// is never transferred to another executor, and a different payload conflicts
+/// with the first committed result.
+pub async fn resolve_client_execution(
+    State(state): State<AppState>,
+    Path((id, call_id)): Path<(ChatId, CallId)>,
+    Json(body): Json<ResolveClientExecution>,
+) -> Result<Json<ResolvedClientExecution>, ServerError> {
+    ensure_chat(&state, id).await?;
+    ensure_non_nil(body.lease_token, "lease_token")?;
+    let resolution = body.resolution.into_core();
+    validate_resolution(&resolution)?;
+    let now = Utc::now();
+    let mut outcome = state
+        .store
+        .resolve_client_tool_call(call_id, id, body.lease_token, now, &resolution, now)
+        .await?;
+    if outcome == ResolveToolCallOutcome::LeaseLost {
+        outcome = state
+            .store
+            .resolve_expired_client_tool_call(call_id, id, body.lease_token, now, &resolution, now)
+            .await?;
+    }
+    let disposition = match outcome {
+        ResolveToolCallOutcome::Resolved => ResolutionDisposition::Resolved,
+        ResolveToolCallOutcome::Existing => ResolutionDisposition::Existing,
+        ResolveToolCallOutcome::AlreadyTerminal => {
+            return Err(ServerError::conflict(format!(
+                "client execution {call_id} already has a different terminal result"
+            )));
+        }
+        ResolveToolCallOutcome::LeaseLost => {
+            return Err(ServerError::conflict(format!(
+                "client execution {call_id} is not owned by this lease"
+            )));
+        }
+        ResolveToolCallOutcome::NotFound => {
+            return Err(ServerError::not_found(format!(
+                "client execution {call_id} not found"
+            )));
+        }
+    };
+    Ok(Json(ResolvedClientExecution { disposition }))
+}
+
+async fn ensure_chat(state: &AppState, id: ChatId) -> Result<(), ServerError> {
+    if state.store.get_chat(id).await?.is_none() {
+        return Err(ServerError::not_found(format!("chat {id} not found")));
+    }
+    Ok(())
+}
+
+fn ensure_non_nil(value: uuid::Uuid, field: &str) -> Result<(), ServerError> {
+    if value.is_nil() {
+        return Err(ServerError::bad_request(format!("{field} must not be nil")));
+    }
+    Ok(())
+}
+
+fn validate_resolution(resolution: &ToolCallResolution) -> Result<(), ServerError> {
+    let (error_code, error_detail) = match resolution {
+        ToolCallResolution::Failed {
+            error_code,
+            error_detail,
+            ..
+        } => (Some(error_code.as_str()), error_detail.as_deref()),
+        ToolCallResolution::Completed { .. } | ToolCallResolution::Cancelled { .. } => (None, None),
+    };
+    let invalid = resolution.result().len() > ToolCallRecord::MAX_RESULT_BYTES
+        || resolution.result().contains('\0')
+        || error_code.is_some_and(|code| {
+            code.is_empty()
+                || code.len() > ToolCallRecord::MAX_ERROR_CODE_LEN
+                || code.contains('\0')
+        })
+        || error_detail.is_some_and(|detail| {
+            detail.is_empty()
+                || detail.len() > ToolCallRecord::MAX_ERROR_DETAIL_LEN
+                || detail.contains('\0')
+        });
+    if invalid {
+        return Err(ServerError::bad_request(
+            "client execution resolution contains invalid or oversized fields",
+        ));
+    }
+    Ok(())
+}

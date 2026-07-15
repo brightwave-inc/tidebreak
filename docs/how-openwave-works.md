@@ -201,11 +201,23 @@ pending ----execute----->+----failure----> failed
 client execution adds: unclaimed ----claim/heartbeat----> leased
 ```
 
-This is the durable execution boundary. The agent still executes its current
-built-in tools inside the turn worker. Parking a turn while a native client acts,
-exposing the client-execution API, and running the desktop executor are the next
-layers; notifications will be wake-up hints, while the pending-work query
-remains authoritative.
+The local API exposes this durable boundary through authenticated per-chat
+pending, claim, heartbeat, and resolve routes. Lease times are server-owned. The
+client supplies the stable executor identity and fresh secret token, so retrying
+a claim after a lost HTTP response recovers the original claim without trusting
+the client clock. Resolution retries converge on the token and terminal payload;
+the first server timestamp remains metadata rather than request identity. The
+resolve route can also reconcile a known result after expiry under the exact
+token, but it never transfers ambiguous native work to a second executor.
+Heartbeats are simpler monotonic liveness updates: each accepted repeat renews
+the lease from the server's current receive time. Heartbeat and resolution
+enforce the immutable chat owner inside the same locked state transition rather
+than loading conversation history first.
+
+The agent still executes its current built-in tools inside the turn worker.
+Parking a turn atomically while a native client acts and running the desktop
+executor are the next layers. Notifications will be wake-up hints, while the
+pending-work query remains authoritative.
 
 ### 4. Events drive the live client
 
@@ -477,7 +489,7 @@ object storage, and multi-process ownership remain future integration work.
 | Agent loop | `crates/openwave-core/src/agent.rs` | Model/tool loop, context fitting, cancellation, steering |
 | Operational database | `crates/openwave-core/src/db/` | Schema plus transactional SQLite/Postgres state transitions |
 | Model providers | `crates/openwave-router/src/` | Anthropic/OpenAI adapters and model-to-provider routing |
-| Local API | `crates/openwave-server/src/lib.rs`, `routes.rs` | Authentication, API assembly, chat and turn routes |
+| Local API | `crates/openwave-server/src/lib.rs`, `routes.rs`, `routes/client_execution.rs` | Authentication, API assembly, chat, turn, and leased client-execution routes |
 | Turn execution | `crates/openwave-server/src/turn_worker.rs` | Claiming, heartbeats, event journaling, terminal resolution |
 | Documents | `crates/openwave-server/src/routes/document.rs`, `document_worker.rs` | Upload API and Parse/Index worker orchestration |
 | Retrieval | `crates/openwave-retrieval/src/` | Parsing, chunks, embeddings, Lance, ranking, citations |
@@ -526,8 +538,8 @@ The main next steps are:
 
 - replace raw chat/project workspace paths with broker-mediated, per-context
   connected roots while keeping OpenWave's private app data separate;
-- expose durable pending/claim/heartbeat/result client-execution APIs, park turns
-  atomically while a client acts, and run native folder requests in the desktop;
+- park turns atomically while a client acts, notify clients of durable pending
+  work, and run native folder requests in the desktop;
 - add resumable checkpoints and explicit idempotency policy around remaining
   server-side tool effects;
 - make approvals resumable rather than process-local;

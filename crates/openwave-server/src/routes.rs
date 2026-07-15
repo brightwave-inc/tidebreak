@@ -26,7 +26,9 @@ use crate::extract::{Json, Path, Query};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
 use crate::state::AppState;
 
+mod client_execution;
 mod document;
+pub use client_execution::*;
 pub use document::*;
 
 /// The store-settings key for the selected model.
