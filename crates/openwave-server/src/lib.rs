@@ -60,6 +60,7 @@ pub use error::ServerError;
 pub use state::AppState;
 
 const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
 
 /// Build the router: unauthenticated health check plus the token-guarded API.
 pub fn app(state: AppState) -> Router {
@@ -135,6 +136,16 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/web-search",
             get(routes::get_web_search_config).put(routes::put_web_search_config),
+        )
+        .route(
+            "/web-search/credentials",
+            get(routes::get_web_search_credentials),
+        )
+        .route(
+            "/web-search/credentials/{provider}",
+            axum::routing::put(routes::put_web_search_credential)
+                .delete(routes::delete_web_search_credential)
+                .layer(DefaultBodyLimit::max(MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES)),
         )
         .route("/providers", get(routes::list_providers))
         .route(
