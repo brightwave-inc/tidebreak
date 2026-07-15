@@ -116,16 +116,28 @@ safe summaries, not the broker's persisted absolute-path registry.
 Broker requests are divided into two typed channels:
 
 1. **Control requests** record trusted user actions: negotiate a protocol
-   version, register a folder returned by the native picker, inspect grants, or
-   revoke access. Only the desktop host or an equivalent explicit local CLI
-   action may send them.
-2. **Operation requests** come from agent execution: list connected roots, list
-   a directory, read a file, import bytes, write allowed output, or later run a
-   confined command. Every operation is denied unless a matching grant exists.
+   version, register a folder returned by the native picker, attach or detach an
+   existing root for one conversation, or revoke access. Only the desktop host
+   or an equivalent explicit local CLI action may send them.
+2. **Operation requests** come from agent execution. The current protocol can
+   list connected roots, list a directory, and read a file; bounded import,
+   writes, and confined commands are later capability slices. Every operation
+   is denied unless a matching grant exists.
 
 Code should expose different controller and operator interfaces so an agent
 executor cannot accidentally call the control channel. The broker still
 validates every request; the type split is defense in depth, not the only check.
+
+Attaching and detaching are exact conversation mutations. Detaching a root from
+one conversation leaves the root, its grant, and every other conversation's
+attachment intact. Revocation is deliberately broader: it forgets the root and
+removes all of its grants and attachments. Both mutation kinds bind a stable
+operation identity to their original request, so an exact retry is idempotent
+and identity reuse with different inputs is rejected. A read-only attachment
+receipt lets a recovering native client distinguish unknown, completed, and
+failed work without starting or replaying the mutation. Attachment changes are
+computed and published in one durable state replacement, so they do not expose
+a recoverable intermediate phase.
 
 The host-access context and the conversation's attached-root set are supplied by
 trusted conversation execution state, not by model-generated tool arguments.
@@ -298,8 +310,10 @@ This will land in independently reviewable pieces:
 8. **Pathless baseline complete:** project/chat `workspace_dir` is gone. The
    pre-v1 schema stores bounded ordered opaque root projections and revisions,
    while runtime-only legacy scratch is derived under private server data and
-   never returned by the product API. Native-only attachment mutation and
-   reconciliation APIs remain a separate slice.
+   never returned by the product API. The broker now supports exact,
+   idempotent per-conversation attach/detach plus read-only recovery receipts.
+   The durable product-side attachment operation and native reconciliation loop
+   remain separate slices.
 9. Route built-in file tools through the operation interface and remove direct
    ambient host-directory opening from `ToolCtx`.
 10. Port bounded imports, writes, approvals, and confined command execution as

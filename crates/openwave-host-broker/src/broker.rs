@@ -31,10 +31,13 @@ use crate::{
     protocol::{
         ControlEnvelope, ControlRequest, ControlResponseEnvelope, ControlResult, DirectoryEntry,
         EntryKind, ErrorCode, ErrorResponse, HelloResult, LookupRegisterRootReceiptRequest,
-        LookupRegisterRootReceiptResult, OperationEnvelope, OperationRequest,
+        LookupRegisterRootReceiptResult, LookupRootAttachmentReceiptRequest,
+        LookupRootAttachmentReceiptResult, OperationEnvelope, OperationRequest,
         OperationResponseEnvelope, OperationResult, PathRequest, ReadFileResult,
         RegisterRootReceipt, RegisterRootRequest, RegisterRootResult, Response, ResponseEnvelope,
-        RevokeRootRequest, RevokeRootResult, RootSummary, PROTOCOL_VERSION,
+        RevokeRootRequest, RevokeRootResult, RootAttachmentMutationKind,
+        RootAttachmentMutationReceipt, RootAttachmentMutationRequest, RootAttachmentMutationResult,
+        RootSummary, PROTOCOL_VERSION,
     },
     Capability, ConsentMethod, ConsentRecord, ExecutionContext, Grant, GrantError, GrantId,
     GrantSubject, OperationId, RelativePath, RootAttachment, RootId, RootPolicy, RootPolicyError,
@@ -61,6 +64,8 @@ pub enum BrokerError {
     OperationInProgress,
     #[error("the active conversation is not allowed to perform this host operation")]
     Denied,
+    #[error("connected root does not exist")]
+    UnknownRoot,
     #[error("conversation does not match the conversation-scoped grant subject")]
     SubjectConversationMismatch,
     #[error("folder-picker registration used an invalid consent method")]
@@ -142,6 +147,7 @@ struct RegisteredRoot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 enum MutationRecord {
     Register {
         request: RegisterFingerprint,
@@ -151,15 +157,21 @@ enum MutationRecord {
         request: RevokeFingerprint,
         outcome: MutationOutcome<RevokeRootResult>,
     },
+    Attachment {
+        request: AttachmentFingerprint,
+        outcome: MutationOutcome<RootAttachmentMutationResult>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 enum MutationOutcome<T> {
     Pending,
     Complete(Result<T, ErrorResponse>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RegisterFingerprint {
     subject: GrantSubject,
     conversation_id: Uuid,
@@ -168,9 +180,19 @@ struct RegisterFingerprint {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RevokeFingerprint {
     subject: GrantSubject,
     root_id: RootId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttachmentFingerprint {
+    subject: GrantSubject,
+    conversation_id: Uuid,
+    root_id: RootId,
+    mutation: RootAttachmentMutationKind,
 }
 
 struct PreparedRegistration {
@@ -209,6 +231,39 @@ impl ControlAudit {
                 operation: AuditOperation::LookupRegisterRootReceipt,
                 operation_id: request.operation_id,
                 target: AuditTarget::Subject,
+            }),
+            ControlRequest::AttachRoot(request) => Some(Self {
+                actor: AuditActor::Control {
+                    subject: request.subject,
+                    conversation_id: Some(request.conversation_id),
+                },
+                operation: AuditOperation::AttachRoot,
+                operation_id: request.operation_id,
+                target: AuditTarget::Root {
+                    root_id: request.root_id,
+                },
+            }),
+            ControlRequest::DetachRoot(request) => Some(Self {
+                actor: AuditActor::Control {
+                    subject: request.subject,
+                    conversation_id: Some(request.conversation_id),
+                },
+                operation: AuditOperation::DetachRoot,
+                operation_id: request.operation_id,
+                target: AuditTarget::Root {
+                    root_id: request.root_id,
+                },
+            }),
+            ControlRequest::LookupRootAttachmentReceipt(request) => Some(Self {
+                actor: AuditActor::Control {
+                    subject: request.subject,
+                    conversation_id: Some(request.conversation_id),
+                },
+                operation: AuditOperation::LookupRootAttachmentReceipt,
+                operation_id: request.operation_id,
+                target: AuditTarget::Root {
+                    root_id: request.root_id,
+                },
             }),
             ControlRequest::RevokeRoot(request) => Some(Self {
                 actor: AuditActor::Control {
@@ -384,6 +439,15 @@ impl Controller {
             ControlRequest::LookupRegisterRootReceipt(request) => self
                 .lookup_register_root_receipt(request)
                 .map(ControlResult::LookupRegisterRootReceipt),
+            ControlRequest::AttachRoot(request) => self
+                .mutate_root_attachment(request, RootAttachmentMutationKind::Attach)
+                .map(ControlResult::AttachRoot),
+            ControlRequest::DetachRoot(request) => self
+                .mutate_root_attachment(request, RootAttachmentMutationKind::Detach)
+                .map(ControlResult::DetachRoot),
+            ControlRequest::LookupRootAttachmentReceipt(request) => self
+                .lookup_root_attachment_receipt(request)
+                .map(ControlResult::LookupRootAttachmentReceipt),
             ControlRequest::RevokeRoot(request) => {
                 self.revoke_root(request).map(ControlResult::RevokeRoot)
             }
@@ -488,7 +552,9 @@ impl Controller {
                     ..
                 } if registered.subject == request.subject
                     && registered.conversation_id == request.conversation_id => {}
-                MutationRecord::Register { .. } | MutationRecord::Revoke { .. } => {
+                MutationRecord::Register { .. }
+                | MutationRecord::Revoke { .. }
+                | MutationRecord::Attachment { .. } => {
                     return Err(error_response(BrokerError::OperationIdConflict));
                 }
             }
@@ -516,7 +582,7 @@ impl Controller {
             }) => RegisterRootReceipt::Failed {
                 error: error.clone(),
             },
-            Some(MutationRecord::Revoke { .. }) => {
+            Some(MutationRecord::Revoke { .. } | MutationRecord::Attachment { .. }) => {
                 unreachable!("non-registration operation was rejected above")
             }
         };
@@ -569,6 +635,80 @@ impl Controller {
             },
             grants: [list_grant, read_grant],
             attachment: RootAttachment::new(request.conversation_id, root_id)?,
+        })
+    }
+
+    fn mutate_root_attachment(
+        &self,
+        request: RootAttachmentMutationRequest,
+        mutation: RootAttachmentMutationKind,
+    ) -> Result<RootAttachmentMutationResult, ErrorResponse> {
+        let fingerprint = AttachmentFingerprint {
+            subject: request.subject,
+            conversation_id: request.conversation_id,
+            root_id: request.root_id,
+            mutation,
+        };
+        let mut state = self.lock_state().map_err(error_response)?;
+        let mut next = state.clone();
+        match claim_attachment(&mut next, request.operation_id, fingerprint)
+            .map_err(error_response)?
+        {
+            Claim::Complete(result) => return result,
+            Claim::Start => {}
+        }
+
+        let result = apply_root_attachment(&mut next, fingerprint).map_err(error_response);
+        complete_attachment(&mut next, request.operation_id, fingerprint, result.clone())
+            .map_err(error_response)?;
+        self.commit_state(&mut state, next)
+            .map_err(error_response)?;
+        result
+    }
+
+    fn lookup_root_attachment_receipt(
+        &self,
+        request: LookupRootAttachmentReceiptRequest,
+    ) -> Result<LookupRootAttachmentReceiptResult, ErrorResponse> {
+        validate_subject_conversation(request.subject, request.conversation_id)
+            .map_err(error_response)?;
+        let expected = AttachmentFingerprint {
+            subject: request.subject,
+            conversation_id: request.conversation_id,
+            root_id: request.root_id,
+            mutation: request.mutation,
+        };
+        let state = self.lock_state().map_err(error_response)?;
+        let receipt = match state.mutations.get(&request.operation_id) {
+            None => RootAttachmentMutationReceipt::Unknown,
+            Some(MutationRecord::Attachment {
+                request: existing,
+                outcome: MutationOutcome::Pending,
+            }) if *existing == expected => {
+                return Err(error_response(BrokerError::OperationInProgress));
+            }
+            Some(MutationRecord::Attachment {
+                request: existing,
+                outcome: MutationOutcome::Complete(Ok(result)),
+            }) if *existing == expected => RootAttachmentMutationReceipt::Completed {
+                result: *result,
+                currently_attached: has_root_attachment(
+                    &state,
+                    request.conversation_id,
+                    request.root_id,
+                ),
+            },
+            Some(MutationRecord::Attachment {
+                request: existing,
+                outcome: MutationOutcome::Complete(Err(error)),
+            }) if *existing == expected => RootAttachmentMutationReceipt::Failed {
+                error: error.clone(),
+            },
+            Some(_) => return Err(error_response(BrokerError::OperationIdConflict)),
+        };
+        Ok(LookupRootAttachmentReceiptResult {
+            operation_id: request.operation_id,
+            receipt,
         })
     }
 
@@ -837,6 +977,11 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             true,
         ),
         BrokerError::Denied => (ErrorCode::Denied, "host operation was denied", false),
+        BrokerError::UnknownRoot => (
+            ErrorCode::InvalidRoot,
+            "connected root is unavailable",
+            false,
+        ),
         BrokerError::SubjectConversationMismatch
         | BrokerError::InvalidConsentMethod
         | BrokerError::InvalidGrant(_) => (
@@ -1050,6 +1195,123 @@ fn complete_revoke(
         }
         _ => Err(BrokerError::OperationIdConflict),
     }
+}
+
+fn claim_attachment(
+    state: &mut State,
+    operation_id: OperationId,
+    request: AttachmentFingerprint,
+) -> Result<Claim<RootAttachmentMutationResult>, BrokerError> {
+    match state.mutations.get(&operation_id) {
+        None => {
+            state.mutations.insert(
+                operation_id,
+                MutationRecord::Attachment {
+                    request,
+                    outcome: MutationOutcome::Pending,
+                },
+            );
+            state.active_mutations.insert(operation_id);
+            Ok(Claim::Start)
+        }
+        Some(MutationRecord::Attachment {
+            request: existing,
+            outcome: MutationOutcome::Complete(result),
+        }) if *existing == request => Ok(Claim::Complete(result.clone())),
+        Some(MutationRecord::Attachment {
+            request: existing,
+            outcome: MutationOutcome::Pending,
+        }) if *existing == request => {
+            if state.active_mutations.insert(operation_id) {
+                Ok(Claim::Start)
+            } else {
+                Err(BrokerError::OperationInProgress)
+            }
+        }
+        Some(_) => Err(BrokerError::OperationIdConflict),
+    }
+}
+
+fn complete_attachment(
+    state: &mut State,
+    operation_id: OperationId,
+    request: AttachmentFingerprint,
+    result: Result<RootAttachmentMutationResult, ErrorResponse>,
+) -> Result<(), BrokerError> {
+    match state.mutations.get_mut(&operation_id) {
+        Some(MutationRecord::Attachment {
+            request: existing,
+            outcome,
+        }) if *existing == request && matches!(outcome, MutationOutcome::Pending) => {
+            *outcome = MutationOutcome::Complete(result);
+            state.active_mutations.remove(&operation_id);
+            Ok(())
+        }
+        _ => Err(BrokerError::OperationIdConflict),
+    }
+}
+
+fn apply_root_attachment(
+    state: &mut State,
+    request: AttachmentFingerprint,
+) -> Result<RootAttachmentMutationResult, BrokerError> {
+    validate_subject_conversation(request.subject, request.conversation_id)?;
+    let changed = match request.mutation {
+        RootAttachmentMutationKind::Attach => {
+            let root = state
+                .roots
+                .get(&request.root_id)
+                .ok_or(BrokerError::UnknownRoot)?;
+            if root.owner != request.subject {
+                return Err(BrokerError::Denied);
+            }
+            if has_root_attachment(state, request.conversation_id, request.root_id) {
+                false
+            } else {
+                state.attachments.push(RootAttachment::new(
+                    request.conversation_id,
+                    request.root_id,
+                )?);
+                true
+            }
+        }
+        RootAttachmentMutationKind::Detach => {
+            if let Some(root) = state.roots.get(&request.root_id) {
+                if root.owner != request.subject {
+                    return Err(BrokerError::Denied);
+                }
+            }
+            let before = state.attachments.len();
+            state.attachments.retain(|attachment| {
+                attachment.conversation_id() != request.conversation_id
+                    || attachment.root_id() != request.root_id
+            });
+            state.attachments.len() != before
+        }
+    };
+    Ok(RootAttachmentMutationResult {
+        root_id: request.root_id,
+        mutation: request.mutation,
+        changed,
+    })
+}
+
+fn validate_subject_conversation(
+    subject: GrantSubject,
+    conversation_id: Uuid,
+) -> Result<(), BrokerError> {
+    if conversation_id.is_nil()
+        || (subject.kind() == SubjectKind::Conversation && subject.id() != conversation_id)
+    {
+        return Err(BrokerError::SubjectConversationMismatch);
+    }
+    Ok(())
+}
+
+fn has_root_attachment(state: &State, conversation_id: Uuid, root_id: RootId) -> bool {
+    state.attachments.iter().any(|attachment| {
+        attachment.conversation_id() == conversation_id && attachment.root_id() == root_id
+    })
 }
 
 fn list_roots(
@@ -1327,6 +1589,50 @@ mod tests {
             panic!("unexpected control result")
         };
         result
+    }
+
+    fn mutate_attachment(
+        controller: &Controller,
+        operation_id: OperationId,
+        subject: GrantSubject,
+        conversation_id: Uuid,
+        root_id: RootId,
+        mutation: RootAttachmentMutationKind,
+    ) -> Result<RootAttachmentMutationResult, ErrorResponse> {
+        let request = RootAttachmentMutationRequest {
+            operation_id,
+            subject,
+            conversation_id,
+            root_id,
+        };
+        let control = match mutation {
+            RootAttachmentMutationKind::Attach => ControlRequest::AttachRoot(request),
+            RootAttachmentMutationKind::Detach => ControlRequest::DetachRoot(request),
+        };
+        let result = unwrap_response(controller.handle(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: control,
+        }))?;
+        match result {
+            ControlResult::AttachRoot(result) | ControlResult::DetachRoot(result) => Ok(result),
+            _ => panic!("unexpected control result"),
+        }
+    }
+
+    fn lookup_attachment_receipt(
+        controller: &Controller,
+        request: LookupRootAttachmentReceiptRequest,
+    ) -> Result<RootAttachmentMutationReceipt, ErrorResponse> {
+        let result = unwrap_response(controller.handle(ControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: crate::RequestId::new(),
+            request: ControlRequest::LookupRootAttachmentReceipt(request),
+        }))?;
+        let ControlResult::LookupRootAttachmentReceipt(result) = result else {
+            panic!("unexpected control result")
+        };
+        Ok(result.receipt)
     }
 
     fn lookup_register_receipt(
@@ -1950,6 +2256,215 @@ mod tests {
     }
 
     #[test]
+    fn attach_and_detach_are_exact_conversation_mutations() {
+        let (_temp, broker, path) = setup();
+        let project_id = Uuid::new_v4();
+        let first_conversation = Uuid::new_v4();
+        let second_conversation = Uuid::new_v4();
+        let subject = GrantSubject::project(project_id).unwrap();
+        let registered = register(
+            &broker.controller(),
+            subject,
+            first_conversation,
+            path,
+            OperationId::new(),
+        );
+        let root_id = registered.root.root_id;
+
+        let attach_id = OperationId::new();
+        let attached = mutate_attachment(
+            &broker.controller(),
+            attach_id,
+            subject,
+            second_conversation,
+            root_id,
+            RootAttachmentMutationKind::Attach,
+        )
+        .unwrap();
+        assert!(attached.changed);
+        assert_eq!(
+            mutate_attachment(
+                &broker.controller(),
+                attach_id,
+                subject,
+                second_conversation,
+                root_id,
+                RootAttachmentMutationKind::Attach,
+            )
+            .unwrap(),
+            attached
+        );
+        assert!(matches!(
+            mutate_attachment(
+                &broker.controller(),
+                attach_id,
+                subject,
+                second_conversation,
+                root_id,
+                RootAttachmentMutationKind::Detach,
+            ),
+            Err(ErrorResponse {
+                code: ErrorCode::OperationIdConflict,
+                ..
+            })
+        ));
+
+        let second_context =
+            ExecutionContext::project_chat(second_conversation, project_id).unwrap();
+        assert!(matches!(
+            operate(&broker.operator(), second_context, OperationRequest::ListRoots).unwrap(),
+            OperationResult::ListRoots { roots } if roots == vec![registered.root.clone()]
+        ));
+
+        let detach_id = OperationId::new();
+        let detached = mutate_attachment(
+            &broker.controller(),
+            detach_id,
+            subject,
+            first_conversation,
+            root_id,
+            RootAttachmentMutationKind::Detach,
+        )
+        .unwrap();
+        assert!(detached.changed);
+        let first_context = ExecutionContext::project_chat(first_conversation, project_id).unwrap();
+        assert!(matches!(
+            operate(&broker.operator(), first_context, OperationRequest::ListRoots).unwrap(),
+            OperationResult::ListRoots { roots } if roots.is_empty()
+        ));
+        assert!(matches!(
+            operate(&broker.operator(), second_context, OperationRequest::ListRoots).unwrap(),
+            OperationResult::ListRoots { roots } if roots == vec![registered.root]
+        ));
+        assert!(
+            !mutate_attachment(
+                &broker.controller(),
+                OperationId::new(),
+                subject,
+                first_conversation,
+                root_id,
+                RootAttachmentMutationKind::Detach,
+            )
+            .unwrap()
+            .changed
+        );
+    }
+
+    #[test]
+    fn attachment_receipts_report_historical_result_and_current_state() {
+        let (_temp, broker, path) = setup();
+        let project_id = Uuid::new_v4();
+        let registered_conversation = Uuid::new_v4();
+        let attached_conversation = Uuid::new_v4();
+        let subject = GrantSubject::project(project_id).unwrap();
+        let root_id = register(
+            &broker.controller(),
+            subject,
+            registered_conversation,
+            path,
+            OperationId::new(),
+        )
+        .root
+        .root_id;
+        let attach_id = OperationId::new();
+        let attach = mutate_attachment(
+            &broker.controller(),
+            attach_id,
+            subject,
+            attached_conversation,
+            root_id,
+            RootAttachmentMutationKind::Attach,
+        )
+        .unwrap();
+        let lookup = LookupRootAttachmentReceiptRequest {
+            operation_id: attach_id,
+            subject,
+            conversation_id: attached_conversation,
+            root_id,
+            mutation: RootAttachmentMutationKind::Attach,
+        };
+        assert_eq!(
+            lookup_attachment_receipt(&broker.controller(), lookup).unwrap(),
+            RootAttachmentMutationReceipt::Completed {
+                result: attach,
+                currently_attached: true,
+            }
+        );
+
+        let detach_id = OperationId::new();
+        mutate_attachment(
+            &broker.controller(),
+            detach_id,
+            subject,
+            attached_conversation,
+            root_id,
+            RootAttachmentMutationKind::Detach,
+        )
+        .unwrap();
+        assert!(matches!(
+            lookup_attachment_receipt(&broker.controller(), lookup).unwrap(),
+            RootAttachmentMutationReceipt::Completed {
+                currently_attached: false,
+                ..
+            }
+        ));
+        let conflicting_lookup = LookupRootAttachmentReceiptRequest {
+            mutation: RootAttachmentMutationKind::Detach,
+            ..lookup
+        };
+        assert!(matches!(
+            lookup_attachment_receipt(&broker.controller(), conflicting_lookup),
+            Err(ErrorResponse {
+                code: ErrorCode::OperationIdConflict,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn failed_attachment_mutation_is_durable_and_cannot_widen_authority() {
+        let (_temp, broker, _path) = setup();
+        let conversation = Uuid::new_v4();
+        let subject = GrantSubject::conversation(conversation).unwrap();
+        let operation_id = OperationId::new();
+        let root_id = RootId::new();
+        let first = mutate_attachment(
+            &broker.controller(),
+            operation_id,
+            subject,
+            conversation,
+            root_id,
+            RootAttachmentMutationKind::Attach,
+        )
+        .unwrap_err();
+        let retry = mutate_attachment(
+            &broker.controller(),
+            operation_id,
+            subject,
+            conversation,
+            root_id,
+            RootAttachmentMutationKind::Attach,
+        )
+        .unwrap_err();
+        assert_eq!(first, retry);
+        assert_eq!(first.code, ErrorCode::InvalidRoot);
+        assert!(matches!(
+            lookup_attachment_receipt(
+                &broker.controller(),
+                LookupRootAttachmentReceiptRequest {
+                    operation_id,
+                    subject,
+                    conversation_id: conversation,
+                    root_id,
+                    mutation: RootAttachmentMutationKind::Attach,
+                },
+            )
+            .unwrap(),
+            RootAttachmentMutationReceipt::Failed { error } if error == first
+        ));
+    }
+
+    #[test]
     fn failed_control_mutation_still_binds_its_operation_identity() {
         let (_temp, broker, path) = setup();
         let conversation = Uuid::new_v4();
@@ -2189,6 +2704,104 @@ mod tests {
     }
 
     #[test]
+    fn conversation_attachments_and_receipts_survive_restart() {
+        let (temp, broker, path, state_dir) = durable_setup();
+        let project_id = Uuid::new_v4();
+        let first_conversation = Uuid::new_v4();
+        let second_conversation = Uuid::new_v4();
+        let subject = GrantSubject::project(project_id).unwrap();
+        let root_id = register(
+            &broker.controller(),
+            subject,
+            first_conversation,
+            path,
+            OperationId::new(),
+        )
+        .root
+        .root_id;
+        let attach_id = OperationId::new();
+        let attach = mutate_attachment(
+            &broker.controller(),
+            attach_id,
+            subject,
+            second_conversation,
+            root_id,
+            RootAttachmentMutationKind::Attach,
+        )
+        .unwrap();
+        let detach_id = OperationId::new();
+        let detach = mutate_attachment(
+            &broker.controller(),
+            detach_id,
+            subject,
+            first_conversation,
+            root_id,
+            RootAttachmentMutationKind::Detach,
+        )
+        .unwrap();
+        drop(broker);
+
+        let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+        assert_eq!(
+            mutate_attachment(
+                &broker.controller(),
+                attach_id,
+                subject,
+                second_conversation,
+                root_id,
+                RootAttachmentMutationKind::Attach,
+            )
+            .unwrap(),
+            attach
+        );
+        assert_eq!(
+            mutate_attachment(
+                &broker.controller(),
+                detach_id,
+                subject,
+                first_conversation,
+                root_id,
+                RootAttachmentMutationKind::Detach,
+            )
+            .unwrap(),
+            detach
+        );
+        let first_context = ExecutionContext::project_chat(first_conversation, project_id).unwrap();
+        let second_context =
+            ExecutionContext::project_chat(second_conversation, project_id).unwrap();
+        assert_eq!(
+            operate(
+                &broker.operator(),
+                first_context,
+                OperationRequest::ListRoots
+            )
+            .unwrap(),
+            OperationResult::ListRoots { roots: Vec::new() }
+        );
+        assert!(matches!(
+            operate(&broker.operator(), second_context, OperationRequest::ListRoots).unwrap(),
+            OperationResult::ListRoots { roots } if roots.len() == 1 && roots[0].root_id == root_id
+        ));
+        assert!(matches!(
+            lookup_attachment_receipt(
+                &broker.controller(),
+                LookupRootAttachmentReceiptRequest {
+                    operation_id: detach_id,
+                    subject,
+                    conversation_id: first_conversation,
+                    root_id,
+                    mutation: RootAttachmentMutationKind::Detach,
+                }
+            )
+            .unwrap(),
+            RootAttachmentMutationReceipt::Completed {
+                result,
+                currently_attached: false,
+            } if result == detach
+        ));
+    }
+
+    #[test]
     fn unavailable_audit_does_not_block_restart_or_read_access() {
         let (temp, broker, path, state_dir) = durable_setup();
         let conversation = Uuid::new_v4();
@@ -2347,6 +2960,145 @@ mod tests {
     }
 
     #[test]
+    fn attachment_publication_failures_recover_from_the_durable_boundary() {
+        let (temp, broker, path, state_dir) = durable_setup();
+        let project_id = Uuid::new_v4();
+        let registered_conversation = Uuid::new_v4();
+        let attached_conversation = Uuid::new_v4();
+        let subject = GrantSubject::project(project_id).unwrap();
+        let root_id = register(
+            &broker.controller(),
+            subject,
+            registered_conversation,
+            path,
+            OperationId::new(),
+        )
+        .root
+        .root_id;
+
+        let unpublished_id = OperationId::new();
+        broker
+            .shared
+            .state_file
+            .as_ref()
+            .unwrap()
+            .fail_after_saves(0);
+        assert!(matches!(
+            mutate_attachment(
+                &broker.controller(),
+                unpublished_id,
+                subject,
+                attached_conversation,
+                root_id,
+                RootAttachmentMutationKind::Attach,
+            ),
+            Err(ErrorResponse {
+                code: ErrorCode::HostIo,
+                ..
+            })
+        ));
+        drop(broker);
+
+        let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+        assert_eq!(
+            lookup_attachment_receipt(
+                &broker.controller(),
+                LookupRootAttachmentReceiptRequest {
+                    operation_id: unpublished_id,
+                    subject,
+                    conversation_id: attached_conversation,
+                    root_id,
+                    mutation: RootAttachmentMutationKind::Attach,
+                },
+            )
+            .unwrap(),
+            RootAttachmentMutationReceipt::Unknown
+        );
+        let context = ExecutionContext::project_chat(attached_conversation, project_id).unwrap();
+        assert!(matches!(
+            operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap(),
+            OperationResult::ListRoots { roots } if roots.is_empty()
+        ));
+
+        let published_id = OperationId::new();
+        broker
+            .shared
+            .state_file
+            .as_ref()
+            .unwrap()
+            .fail_once_after_publish();
+        assert!(matches!(
+            mutate_attachment(
+                &broker.controller(),
+                published_id,
+                subject,
+                attached_conversation,
+                root_id,
+                RootAttachmentMutationKind::Attach,
+            ),
+            Err(ErrorResponse {
+                code: ErrorCode::Internal,
+                retryable: false,
+                ..
+            })
+        ));
+        assert!(matches!(
+            lookup_attachment_receipt(
+                &broker.controller(),
+                LookupRootAttachmentReceiptRequest {
+                    operation_id: published_id,
+                    subject,
+                    conversation_id: attached_conversation,
+                    root_id,
+                    mutation: RootAttachmentMutationKind::Attach,
+                },
+            ),
+            Err(ErrorResponse {
+                code: ErrorCode::Internal,
+                retryable: false,
+                ..
+            })
+        ));
+        drop(broker);
+
+        let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+        let receipt = lookup_attachment_receipt(
+            &broker.controller(),
+            LookupRootAttachmentReceiptRequest {
+                operation_id: published_id,
+                subject,
+                conversation_id: attached_conversation,
+                root_id,
+                mutation: RootAttachmentMutationKind::Attach,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            receipt,
+            RootAttachmentMutationReceipt::Completed {
+                result: RootAttachmentMutationResult { changed: true, .. },
+                currently_attached: true,
+            }
+        ));
+        assert!(
+            mutate_attachment(
+                &broker.controller(),
+                published_id,
+                subject,
+                attached_conversation,
+                root_id,
+                RootAttachmentMutationKind::Attach,
+            )
+            .unwrap()
+            .changed
+        );
+        assert!(matches!(
+            operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap(),
+            OperationResult::ListRoots { roots } if roots.len() == 1
+        ));
+    }
+
+    #[test]
     fn one_process_exclusively_owns_a_durable_broker_directory() {
         let (temp, broker, _path, state_dir) = durable_setup();
         assert!(matches!(
@@ -2470,6 +3222,63 @@ mod tests {
         };
         result.root.root_id = RootId::new();
         assert!(state_file::validate_loaded_state(&inconsistent_register).is_err());
+    }
+
+    #[test]
+    fn persisted_attachments_must_be_unique_and_respect_conversation_ownership() {
+        let (_temp, broker, path, _state_dir) = durable_setup();
+        let conversation = Uuid::new_v4();
+        register(
+            &broker.controller(),
+            GrantSubject::conversation(conversation).unwrap(),
+            conversation,
+            path,
+            OperationId::new(),
+        );
+        let state = broker.shared.state.lock().unwrap().clone();
+
+        let mut duplicate = state.clone();
+        duplicate.attachments.push(duplicate.attachments[0]);
+        assert!(state_file::validate_loaded_state(&duplicate).is_err());
+
+        let mut wrong_conversation = state;
+        wrong_conversation.attachments[0] =
+            RootAttachment::new(Uuid::new_v4(), wrong_conversation.attachments[0].root_id())
+                .unwrap();
+        assert!(state_file::validate_loaded_state(&wrong_conversation).is_err());
+
+        let mut pending = broker.shared.state.lock().unwrap().clone();
+        let root_id = pending.attachments[0].root_id();
+        pending.mutations.insert(
+            OperationId::new(),
+            MutationRecord::Attachment {
+                request: AttachmentFingerprint {
+                    subject: GrantSubject::conversation(conversation).unwrap(),
+                    conversation_id: conversation,
+                    root_id,
+                    mutation: RootAttachmentMutationKind::Detach,
+                },
+                outcome: MutationOutcome::Pending,
+            },
+        );
+        assert!(state_file::validate_loaded_state(&pending).is_err());
+    }
+
+    #[test]
+    fn persisted_attachment_ledger_rejects_unknown_nested_fields() {
+        let conversation_id = Uuid::new_v4();
+        let record = MutationRecord::Attachment {
+            request: AttachmentFingerprint {
+                subject: GrantSubject::conversation(conversation_id).unwrap(),
+                conversation_id,
+                root_id: RootId::new(),
+                mutation: RootAttachmentMutationKind::Attach,
+            },
+            outcome: MutationOutcome::Pending,
+        };
+        let mut encoded = serde_json::to_value(record).unwrap();
+        encoded["Attachment"]["request"]["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<MutationRecord>(encoded).is_err());
     }
 
     #[test]
