@@ -1,6 +1,5 @@
 #![cfg(feature = "postgres")]
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
@@ -8,10 +7,11 @@ use openwave_core::{
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent,
     ApplyTurnSteerOutcome, CallId, Chat, ChatId, ClaimClientToolCallOutcome, ClientToolCallRequest,
     CompleteTurnRunOutcome, DbStore, FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome,
-    Message, MessageId, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
-    RequestTurnCancellationOutcome, ResolveToolCallOutcome, Role, StopReason, Store,
-    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress,
-    TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
+    HostRootId, Message, MessageId, ParkTurnForClientCallOutcome, Project, ProjectId,
+    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome, Role,
+    RootAttachmentOrigin, StopReason, Store, ToolCallExecution, ToolCallRecord, ToolCallResolution,
+    ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId,
+    TurnSteerStatus, Usage,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -22,9 +22,56 @@ fn sample_chat() -> Chat {
         project_id: None,
         title: None,
         model: None,
-        workspace_dir: PathBuf::from("/tmp/openwave-postgres-test"),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
         created_at: Utc::now(),
     }
+}
+
+#[tokio::test]
+async fn postgres_ordered_root_projection_roundtrips_and_snapshots_atomically() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let root_b = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let root_a = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let project = Project {
+        id: ProjectId::new(),
+        title: Some("postgres roots".into()),
+        attachment_revision: 1,
+        root_attachments: vec![root_b, root_a],
+        created_at: Utc::now(),
+    };
+    store.create_project(&project).await.unwrap();
+    assert_eq!(
+        store.get_project(project.id).await.unwrap(),
+        Some(project.clone())
+    );
+
+    let mut base = sample_chat();
+    base.project_id = Some(project.id);
+    let chat = store
+        .create_chat_with_project_defaults(&base)
+        .await
+        .unwrap();
+    assert_eq!(chat.attachment_revision, 1);
+    assert_eq!(
+        chat.root_attachments
+            .iter()
+            .map(|attachment| (attachment.root_id, attachment.origin))
+            .collect::<Vec<_>>(),
+        vec![
+            (root_b, RootAttachmentOrigin::ProjectDefault),
+            (root_a, RootAttachmentOrigin::ProjectDefault),
+        ]
+    );
+    assert_eq!(store.get_chat(chat.id).await.unwrap(), Some(chat));
 }
 
 #[tokio::test]

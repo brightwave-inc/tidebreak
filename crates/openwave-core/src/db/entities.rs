@@ -125,12 +125,21 @@ pub mod project {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
         pub title: Option<String>,
-        pub workspace_dir: String,
+        pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
+    pub enum Relation {
+        #[sea_orm(has_many = "super::project_root_attachment::Entity")]
+        RootAttachment,
+    }
+
+    impl Related<super::project_root_attachment::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::RootAttachment.def()
+        }
+    }
 
     impl ActiveModelBehavior for ActiveModel {}
 }
@@ -146,12 +155,90 @@ pub mod chat {
         pub project_id: Option<Uuid>,
         pub title: Option<String>,
         pub model: Option<String>,
-        pub workspace_dir: String,
+        pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
+    pub enum Relation {
+        #[sea_orm(has_many = "super::chat_root_attachment::Entity")]
+        RootAttachment,
+    }
+
+    impl Related<super::chat_root_attachment::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::RootAttachment.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod project_root_attachment {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "project_root_attachment")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub project_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub root_id: Uuid,
+        pub position: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::project::Entity",
+            from = "Column::ProjectId",
+            to = "super::project::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        Project,
+    }
+
+    impl Related<super::project::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Project.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod chat_root_attachment {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "chat_root_attachment")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub chat_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub root_id: Uuid,
+        pub position: i32,
+        pub origin: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::chat::Entity",
+            from = "Column::ChatId",
+            to = "super::chat::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        Chat,
+    }
+
+    impl Related<super::chat::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Chat.def()
+        }
+    }
 
     impl ActiveModelBehavior for ActiveModel {}
 }

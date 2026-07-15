@@ -1,16 +1,24 @@
 //! Supervised execution for durably claimed chat turns.
 
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt as StdDirBuilderExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, DirBuilder};
+#[cfg(unix)]
+use cap_std::fs::{DirBuilderExt as CapDirBuilderExt, PermissionsExt as CapPermissionsExt};
 use chrono::Utc;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use openwave_core::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentTurnOutcome, ClaimedAgentEvent,
     CompleteTurnRunOutcome, MessageId, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
-    Result, SequencedEvent, Store, ToolRegistry, TurnCheckpointProgress, TurnFailureRetry, TurnId,
-    TurnRun, TurnRunStatus,
+    Result, SequencedEvent, Store, ToolRegistry, ToolScratch, TurnCheckpointProgress,
+    TurnFailureRetry, TurnId, TurnRun, TurnRunStatus,
 };
 use tokio::sync::Notify;
 
@@ -63,6 +71,7 @@ pub(crate) struct TurnWorker {
     signals: Arc<TurnGuard>,
     wake: Arc<Notify>,
     agent_config: AgentConfig,
+    private_scratch_root: Option<PathBuf>,
     config: TurnWorkerConfig,
 }
 
@@ -209,6 +218,7 @@ impl TurnWorker {
         signals: Arc<TurnGuard>,
         wake: Arc<Notify>,
         agent_config: AgentConfig,
+        private_scratch_root: Option<PathBuf>,
         config: TurnWorkerConfig,
     ) -> Self {
         assert!(!config.lease.is_zero());
@@ -225,6 +235,7 @@ impl TurnWorker {
             signals,
             wake,
             agent_config,
+            private_scratch_root,
             config,
         }
     }
@@ -436,6 +447,18 @@ impl TurnWorker {
             let mut config = self.agent_config.clone();
             config.model = turn.model.clone();
             config.max_steps = remaining_steps;
+            config.tool_scratch = self.private_scratch_root.as_deref().and_then(|root| {
+                match private_chat_scratch(root, chat.id) {
+                    Ok(scratch) => Some(scratch),
+                    Err(error) => {
+                        eprintln!(
+                            "openwave: private scratch unavailable for chat {}: {}",
+                            chat.id, error
+                        );
+                        None
+                    }
+                }
+            });
             let provider = self.resolver.resolve().await;
             let steer = active.steer_inbox();
             let agent = Agent::new(provider, self.tools.clone(), self.store.clone(), config)
@@ -1440,6 +1463,63 @@ impl TurnWorker {
     }
 }
 
+/// Derive and create one chat's runtime-only scratch under the private server
+/// data directory. Product records and API responses never receive this path.
+fn private_chat_scratch(
+    root: &Path,
+    chat_id: openwave_core::ChatId,
+) -> std::io::Result<ToolScratch> {
+    let mut root_builder = fs::DirBuilder::new();
+    root_builder.recursive(true);
+    #[cfg(unix)]
+    root_builder.mode(0o700);
+    root_builder.create(root)?;
+    let root_meta = fs::symlink_metadata(root)?;
+    if !root_meta.is_dir() || root_meta.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "private scratch root is not a regular directory",
+        ));
+    }
+    #[cfg(unix)]
+    fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    let root_dir = Dir::open_ambient_dir(root, ambient_authority())?;
+    #[cfg(unix)]
+    {
+        let opened = root_dir.dir_metadata()?;
+        if std::os::unix::fs::MetadataExt::dev(&root_meta) != cap_std::fs::MetadataExt::dev(&opened)
+            || std::os::unix::fs::MetadataExt::ino(&root_meta)
+                != cap_std::fs::MetadataExt::ino(&opened)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "private scratch root changed while it was being pinned",
+            ));
+        }
+    }
+    let chat_name = chat_id.to_string();
+    match root_dir.symlink_metadata(&chat_name) {
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "private chat scratch is not a regular directory",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = DirBuilder::new();
+            #[cfg(unix)]
+            builder.mode(0o700);
+            root_dir.create_dir_with(&chat_name, &builder)?;
+        }
+        Err(error) => return Err(error),
+    }
+    #[cfg(unix)]
+    root_dir.set_permissions(&chat_name, cap_std::fs::Permissions::from_mode(0o700))?;
+    let chat_dir = root_dir.open_dir(&chat_name)?;
+    Ok(ToolScratch::from_dir(chat_dir))
+}
+
 fn checked_usage_sum(
     total: openwave_core::Usage,
     delta: openwave_core::Usage,
@@ -1473,6 +1553,97 @@ fn log_turn_result(result: std::result::Result<Result<TurnWorkerOutcome>, tokio:
 #[cfg(test)]
 mod committed_event_drain_tests {
     use super::*;
+
+    #[test]
+    fn private_scratch_is_isolated_per_chat() {
+        let root = tempfile::tempdir().unwrap();
+        let first_chat = openwave_core::ChatId::new();
+        let second_chat = openwave_core::ChatId::new();
+
+        let _first = private_chat_scratch(root.path(), first_chat).unwrap();
+        let _second = private_chat_scratch(root.path(), second_chat).unwrap();
+        let first = root.path().join(first_chat.to_string());
+        let second = root.path().join(second_chat.to_string());
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), second.parent());
+        assert!(first.is_dir());
+        assert!(second.is_dir());
+
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                fs::metadata(&first).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(&second).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_scratch_rejects_a_symlinked_chat_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let chat_id = openwave_core::ChatId::new();
+        symlink(outside.path(), root.path().join(chat_id.to_string())).unwrap();
+
+        let error = private_chat_scratch(root.path(), chat_id).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_scratch_rejects_a_symlinked_root() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = parent.path().join("scratch");
+        symlink(outside.path(), &root).unwrap();
+
+        let error = private_chat_scratch(&root, openwave_core::ChatId::new()).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_private_scratch_survives_path_replacement_without_escaping() {
+        use openwave_core::{Tool, ToolCtx, WriteFile};
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let chat_id = openwave_core::ChatId::new();
+        let original = root.path().join(chat_id.to_string());
+        let moved = root.path().join("pinned");
+        let scratch = private_chat_scratch(root.path(), chat_id).unwrap();
+        fs::rename(&original, &moved).unwrap();
+        symlink(outside.path(), &original).unwrap();
+        let ctx = ToolCtx::with_private_scratch(chat_id, None, scratch);
+
+        let output = WriteFile
+            .execute(
+                &ctx,
+                serde_json::json!({"path": "note.txt", "content": "pinned"}),
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert_eq!(
+            fs::read_to_string(moved.join("note.txt")).unwrap(),
+            "pinned"
+        );
+        assert!(!outside.path().join("note.txt").exists());
+    }
 
     #[tokio::test]
     async fn lease_loss_drain_discards_pending_and_publishes_committed_events() {

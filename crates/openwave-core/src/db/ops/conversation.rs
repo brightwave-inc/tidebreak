@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
@@ -9,10 +7,14 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, MessageId, ProjectId, TurnId};
-use crate::model::{Chat, Message, Role, ToolCallRecord, TurnRunStatus};
+use crate::id::{ChatId, HostRootId, MessageId, ProjectId, TurnId};
+use crate::model::{
+    validate_chat_root_projection, validate_chat_root_projection_against_project, Chat,
+    ChatRootAttachment, Message, Role, RootAttachmentOrigin, ToolCallRecord, TurnRunStatus,
+    MAX_ROOT_ATTACHMENTS,
+};
 
-use super::super::{entities, store_err, DbStore};
+use super::super::{entities, project_from_models, store_err, DbStore};
 use super::turn::canonical_db_timestamp;
 use super::{acquire_chat_write_lock, acquire_turn_write_lock};
 
@@ -90,17 +92,91 @@ where
 }
 
 pub(in crate::db) async fn create_chat(store: &DbStore, chat: &Chat) -> Result<()> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let project_roots = load_chat_project_roots(&transaction, chat.project_id).await?;
+    validate_chat_attachments(chat, &project_roots)?;
+    insert_chat_on(&transaction, chat).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(())
+}
+
+pub(in crate::db) async fn create_chat_with_project_defaults(
+    store: &DbStore,
+    base: &Chat,
+) -> Result<Chat> {
+    if base.attachment_revision != 0 || !base.root_attachments.is_empty() {
+        return Err(AgentError::Store(
+            "chat project defaults must be derived from an empty revision-zero projection".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let project_roots = load_chat_project_roots(&transaction, base.project_id).await?;
+    let mut chat = base.clone();
+    chat.root_attachments = project_roots
+        .into_iter()
+        .map(|root_id| ChatRootAttachment {
+            root_id,
+            origin: RootAttachmentOrigin::ProjectDefault,
+        })
+        .collect();
+    if !chat.root_attachments.is_empty() {
+        chat.attachment_revision = 1;
+    }
+    validate_chat_root_projection(&chat).map_err(|message| AgentError::Store(message.into()))?;
+    insert_chat_on(&transaction, &chat).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(chat)
+}
+
+async fn load_chat_project_roots<C>(
+    conn: &C,
+    project_id: Option<ProjectId>,
+) -> Result<Vec<HostRootId>>
+where
+    C: ConnectionTrait,
+{
+    let Some(project_id) = project_id else {
+        return Ok(Vec::new());
+    };
+    let mut rows = entities::project::Entity::find_by_id(project_id.0)
+        .find_with_related(entities::project_root_attachment::Entity)
+        .order_by_asc(entities::project_root_attachment::Column::Position)
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    let (model, roots) = rows
+        .pop()
+        .ok_or_else(|| AgentError::Store(format!("chat project {project_id} does not exist")))?;
+    Ok(project_from_models(model, roots)?.root_attachments)
+}
+
+async fn insert_chat_on<C>(conn: &C, chat: &Chat) -> Result<()>
+where
+    C: ConnectionTrait,
+{
     entities::chat::ActiveModel {
         id: Set(chat.id.0),
         project_id: Set(chat.project_id.map(|p| p.0)),
         title: Set(chat.title.clone()),
         model: Set(chat.model.clone()),
-        workspace_dir: Set(chat.workspace_dir.to_string_lossy().into_owned()),
+        attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
     }
-    .insert(&store.conn)
+    .insert(conn)
     .await
     .map_err(store_err)?;
+    for (position, attachment) in chat.root_attachments.iter().copied().enumerate() {
+        entities::chat_root_attachment::ActiveModel {
+            chat_id: Set(chat.id.0),
+            root_id: Set(*attachment.root_id.as_uuid()),
+            position: Set(i32::try_from(position)
+                .map_err(|_| AgentError::Store("chat root position exceeds i32".into()))?),
+            origin: Set(attachment_origin_to_db(attachment.origin).to_owned()),
+        }
+        .insert(conn)
+        .await
+        .map_err(store_err)?;
+    }
     Ok(())
 }
 
@@ -122,22 +198,34 @@ pub(in crate::db) async fn set_chat_model(
 }
 
 pub(in crate::db) async fn get_chat(store: &DbStore, id: ChatId) -> Result<Option<Chat>> {
-    Ok(entities::chat::Entity::find_by_id(id.0)
-        .one(&store.conn)
+    let mut rows = entities::chat::Entity::find_by_id(id.0)
+        .find_with_related(entities::chat_root_attachment::Entity)
+        .order_by_asc(entities::chat_root_attachment::Column::Position)
+        .all(&store.conn)
         .await
-        .map_err(store_err)?
-        .map(chat_from_model))
+        .map_err(store_err)?;
+    rows.pop()
+        .map(|(model, roots)| chat_from_models(model, roots))
+        .transpose()
 }
 
 pub(in crate::db) async fn list_chats(store: &DbStore) -> Result<Vec<Chat>> {
-    Ok(entities::chat::Entity::find()
-        .order_by_desc(entities::chat::Column::CreatedAt)
+    let mut chats = entities::chat::Entity::find()
+        .find_with_related(entities::chat_root_attachment::Entity)
+        .order_by_asc(entities::chat_root_attachment::Column::Position)
         .all(&store.conn)
         .await
         .map_err(store_err)?
         .into_iter()
-        .map(chat_from_model)
-        .collect())
+        .map(|(model, roots)| chat_from_models(model, roots))
+        .collect::<Result<Vec<_>>>()?;
+    chats.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.id.0.cmp(&left.id.0))
+    });
+    Ok(chats)
 }
 
 pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) -> Result<()> {
@@ -433,14 +521,66 @@ pub(in crate::db) async fn list_events(
         .collect()
 }
 
-fn chat_from_model(model: entities::chat::Model) -> Chat {
-    Chat {
+fn chat_from_models(
+    model: entities::chat::Model,
+    rows: Vec<entities::chat_root_attachment::Model>,
+) -> Result<Chat> {
+    if rows.len() > MAX_ROOT_ATTACHMENTS {
+        return Err(AgentError::Store(format!(
+            "chat {} exceeds the root attachment limit",
+            model.id
+        )));
+    }
+    let root_attachments = rows
+        .into_iter()
+        .enumerate()
+        .map(|(expected, row)| {
+            if usize::try_from(row.position).ok() != Some(expected) {
+                return Err(AgentError::Store(format!(
+                    "chat {} root positions are not contiguous",
+                    model.id
+                )));
+            }
+            Ok(ChatRootAttachment {
+                root_id: HostRootId::from_uuid(row.root_id).map_err(|error| {
+                    AgentError::Store(format!("chat {} has an invalid root id: {error}", model.id))
+                })?,
+                origin: attachment_origin_from_db(&row.origin)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let chat = Chat {
         id: ChatId(model.id),
         project_id: model.project_id.map(ProjectId),
         title: model.title,
         model: model.model,
-        workspace_dir: PathBuf::from(model.workspace_dir),
+        attachment_revision: model.attachment_revision,
+        root_attachments,
         created_at: model.created_at,
+    };
+    validate_chat_root_projection(&chat).map_err(|message| AgentError::Store(message.into()))?;
+    Ok(chat)
+}
+
+fn validate_chat_attachments(chat: &Chat, project_roots: &[HostRootId]) -> Result<()> {
+    validate_chat_root_projection_against_project(chat, project_roots)
+        .map_err(|message| AgentError::Store(message.into()))
+}
+
+fn attachment_origin_to_db(origin: RootAttachmentOrigin) -> &'static str {
+    match origin {
+        RootAttachmentOrigin::ProjectDefault => "project_default",
+        RootAttachmentOrigin::Conversation => "conversation",
+    }
+}
+
+fn attachment_origin_from_db(value: &str) -> Result<RootAttachmentOrigin> {
+    match value {
+        "project_default" => Ok(RootAttachmentOrigin::ProjectDefault),
+        "conversation" => Ok(RootAttachmentOrigin::Conversation),
+        other => Err(AgentError::Store(format!(
+            "unknown chat root attachment origin: {other}"
+        ))),
     }
 }
 

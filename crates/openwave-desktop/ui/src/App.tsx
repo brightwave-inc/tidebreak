@@ -102,10 +102,7 @@ export default function App() {
         if (cancelled) return;
         setModels(catalog.models);
         setProviders(providerList.providers);
-        const created = await client.createChat(
-          info.scratchDir,
-          catalog.models[0]?.id,
-        );
+        const created = await client.createChat(catalog.models[0]?.id);
         if (cancelled) return;
         setChat(created);
         setStatus(`chat ${created.id.slice(0, 8)}…`);
@@ -492,9 +489,6 @@ export default function App() {
                 if (e.key === "Enter") e.currentTarget.blur();
               }}
             />
-            <span title={chat.workspace_dir}>
-              private scratch · {shortPath(chat.workspace_dir)}
-            </span>
           </div>
 
           <div className="messages" ref={scrollRef}>
@@ -592,12 +586,6 @@ export default function App() {
       </div>
     </div>
   );
-}
-
-function shortPath(path: string): string {
-  const parts = path.split(/[/\\]/).filter(Boolean);
-  if (parts.length <= 2) return path;
-  return `…/${parts.slice(-2).join("/")}`;
 }
 
 function FoldersPanel({ chat }: { chat: Chat }) {

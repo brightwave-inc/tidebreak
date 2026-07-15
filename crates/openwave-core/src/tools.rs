@@ -1,7 +1,7 @@
 //! Built-in filesystem tools: `read_file`, `list_dir`, `write_file`.
 //!
 //! These are the M0 Workspace-class tools. Every path is resolved **relative to
-//! the chat's workspace directory** and may not escape it (no absolute paths,
+//! the chat's private scratch directory** and may not escape it (no absolute paths,
 //! no `..`). Filesystem operations are relative to a pinned directory
 //! capability, so symlinks and path replacement cannot escape it. Failures the
 //! model should see and react to (missing file, bad path)
@@ -32,7 +32,7 @@ const MAX_LIST_DIR_ENTRIES: usize = 4_096;
 fn workspace_relative(rel: &str) -> std::result::Result<PathBuf, String> {
     let path = Path::new(rel);
     if path.is_absolute() {
-        return Err(format!("path must be relative to the workspace: {rel}"));
+        return Err(format!("path must be relative to private scratch: {rel}"));
     }
     for component in path.components() {
         match component {
@@ -40,7 +40,7 @@ fn workspace_relative(rel: &str) -> std::result::Result<PathBuf, String> {
                 return Err(format!("path may not contain `..`: {rel}"));
             }
             Component::Prefix(_) | Component::RootDir => {
-                return Err(format!("path must be relative to the workspace: {rel}"));
+                return Err(format!("path must be relative to private scratch: {rel}"));
             }
             _ => {}
         }
@@ -180,11 +180,12 @@ impl Tool for ReadFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "read_file".into(),
-            description: "Read a UTF-8 text file, relative to the workspace directory.".into(),
+            description: "Read a UTF-8 text file, relative to the private scratch directory."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative file path." }
+                    "path": { "type": "string", "description": "Private-scratch-relative file path." }
                 },
                 "required": ["path"]
             }),
@@ -223,7 +224,7 @@ impl Tool for ReadFile {
     }
 }
 
-/// `list_dir` — list the entries of a workspace directory.
+/// `list_dir` — list the entries of a private scratch directory.
 pub struct ListDir;
 
 #[derive(Deserialize)]
@@ -237,11 +238,12 @@ impl Tool for ListDir {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "list_dir".into(),
-            description: "List the entries of a workspace directory (defaults to the root).".into(),
+            description: "List the entries of a private scratch directory (defaults to the root)."
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative directory (optional)." }
+                    "path": { "type": "string", "description": "Private-scratch-relative directory (optional)." }
                 }
             }),
         }
@@ -276,8 +278,8 @@ impl Tool for ListDir {
     }
 }
 
-/// `write_file` — write a UTF-8 text file into the workspace (creating parent
-/// directories). Workspace-class: auto-approved inside the workspace.
+/// `write_file` — write a UTF-8 text file into private scratch (creating parent
+/// directories). Workspace-class: auto-approved inside private scratch.
 pub struct WriteFile;
 
 #[derive(Deserialize)]
@@ -291,13 +293,13 @@ impl Tool for WriteFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "write_file".into(),
-            description: "Write a UTF-8 text file into the workspace, creating parent \
+            description: "Write a UTF-8 text file into private scratch, creating parent \
                           directories. Overwrites an existing file."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative file path." },
+                    "path": { "type": "string", "description": "Private-scratch-relative file path." },
                     "content": { "type": "string", "description": "File contents to write." }
                 },
                 "required": ["path", "content"]
@@ -349,7 +351,26 @@ mod tests {
     use crate::id::ChatId;
 
     fn ctx(dir: &std::path::Path) -> ToolCtx {
-        ToolCtx::try_new(ChatId::new(), None, dir.to_path_buf()).unwrap()
+        ToolCtx::try_new_legacy_workspace(ChatId::new(), None, dir.to_path_buf()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn every_file_tool_fails_closed_without_private_scratch() {
+        let ctx = ToolCtx::without_private_scratch(ChatId::new(), None);
+
+        let read = ReadFile
+            .execute(&ctx, json!({"path": "note.txt"}))
+            .await
+            .unwrap();
+        let list = ListDir.execute(&ctx, json!({})).await.unwrap();
+        let write = WriteFile
+            .execute(&ctx, json!({"path": "note.txt", "content": "nope"}))
+            .await
+            .unwrap();
+
+        assert!(read.is_error);
+        assert!(list.is_error);
+        assert!(write.is_error);
     }
 
     #[tokio::test]

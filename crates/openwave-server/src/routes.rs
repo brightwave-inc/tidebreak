@@ -4,8 +4,6 @@
 //! submodule; settings, providers, projects, chats, and event streaming remain
 //! here.
 
-use std::path::PathBuf;
-
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -249,9 +247,8 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
 
 /// Body of `POST /projects`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateProject {
-    /// Absolute path to the project's workspace/corpus root.
-    pub workspace_dir: PathBuf,
     /// Optional human-facing title.
     #[serde(default)]
     pub title: Option<String>,
@@ -262,16 +259,11 @@ pub async fn create_project(
     State(state): State<AppState>,
     Json(body): Json<CreateProject>,
 ) -> Result<impl IntoResponse, ServerError> {
-    if !body.workspace_dir.is_absolute() {
-        return Err(ServerError::bad_request(format!(
-            "workspace_dir must be an absolute path, got {:?}",
-            body.workspace_dir
-        )));
-    }
     let project = Project {
         id: ProjectId::new(),
         title: body.title,
-        workspace_dir: body.workspace_dir,
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
         created_at: Utc::now(),
     };
     state.store.create_project(&project).await?;
@@ -300,9 +292,8 @@ pub async fn get_project(
 
 /// Body of `POST /chats`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateChat {
-    /// Absolute path to the workspace directory the agent operates in.
-    pub workspace_dir: PathBuf,
     /// Optional human-facing title.
     #[serde(default)]
     pub title: Option<String>,
@@ -319,24 +310,15 @@ pub async fn create_chat(
     State(state): State<AppState>,
     Json(body): Json<CreateChat>,
 ) -> Result<impl IntoResponse, ServerError> {
-    // The workspace path must be absolute: a relative one is resolved against
-    // the server process's CWD only later (when a tool canonicalizes it), so the
-    // same chat would map to different directories across restarts or launch
-    // dirs. Reject it here rather than persist an ambiguous path.
-    if !body.workspace_dir.is_absolute() {
-        return Err(ServerError::bad_request(format!(
-            "workspace_dir must be an absolute path, got {:?}",
-            body.workspace_dir
-        )));
-    }
-    // Membership is validated here (the store has no DB-level foreign key): a
-    // chat can't reference a project that doesn't exist.
-    if let Some(project_id) = body.project_id {
-        if state.store.get_project(project_id).await?.is_none() {
-            return Err(ServerError::bad_request(format!(
-                "project {project_id} not found"
-            )));
+    // Return a product-facing 400 for an unknown project. The Store and schema
+    // independently enforce the same membership invariant inside insertion.
+    match body.project_id {
+        Some(project_id) => {
+            state.store.get_project(project_id).await?.ok_or_else(|| {
+                ServerError::bad_request(format!("project {project_id} not found"))
+            })?;
         }
+        None => {}
     }
     if body.model.as_deref().is_some_and(str::is_empty) {
         return Err(ServerError::bad_request("model must not be empty"));
@@ -346,10 +328,11 @@ pub async fn create_chat(
         project_id: body.project_id,
         title: body.title,
         model: body.model,
-        workspace_dir: body.workspace_dir,
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
         created_at: Utc::now(),
     };
-    state.store.create_chat(&chat).await?;
+    let chat = state.store.create_chat_with_project_defaults(&chat).await?;
     Ok((StatusCode::CREATED, Json(chat)))
 }
 
@@ -357,6 +340,7 @@ pub async fn create_chat(
 /// leaves the model unchanged, `null` clears it (fall back to the default), and a
 /// value sets it.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChatUpdate {
     #[serde(default, deserialize_with = "double_option")]
     pub model: Option<Option<String>>,

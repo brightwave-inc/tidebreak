@@ -45,7 +45,7 @@ use crate::storage::{
     AcceptToolCallOutcome, ApplyTurnSteerOutcome, JournaledTurnSteerOutcome,
     ResolveToolCallOutcome, Store,
 };
-use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
+use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
 
 /// A name-keyed registry of the tools available to the agent.
 #[derive(Default)]
@@ -184,6 +184,10 @@ pub struct AgentConfig {
     /// The model's context window in tokens. Used to compute the message budget
     /// for context reduction (default: 200 000).
     pub context_window: usize,
+    /// Exact runtime-only private scratch directory for legacy built-in file
+    /// tools. It is derived by the embedding server and never persisted in a
+    /// project or conversation.
+    pub tool_scratch: Option<ToolScratch>,
 }
 
 /// Default context window: 200k tokens (Claude Opus/Sonnet).
@@ -199,6 +203,7 @@ impl Default for AgentConfig {
             max_steps: 16,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_BYTES,
             context_window: DEFAULT_CONTEXT_WINDOW,
+            tool_scratch: None,
         }
     }
 }
@@ -1275,7 +1280,10 @@ impl Agent {
                 return ToolOutput::error("turn cancelled while awaiting approval");
             }
         }
-        let ctx = ToolCtx::new(chat.id, chat.project_id, chat.workspace_dir.clone());
+        let ctx = self.config.tool_scratch.as_ref().map_or_else(
+            || ToolCtx::without_private_scratch(chat.id, chat.project_id),
+            |scratch| ToolCtx::with_private_scratch(chat.id, chat.project_id, scratch.clone()),
+        );
         let mut output = match tool.execute(&ctx, parse_args(&call.args)).await {
             Ok(output) => output,
             Err(err) => ToolOutput::error(err.to_string()),
@@ -1531,6 +1539,12 @@ mod tests {
     use crate::provider::ProviderId;
     use crate::tools::ReadFile;
 
+    fn tool_scratch(path: &std::path::Path) -> ToolScratch {
+        ToolScratch::from_dir(
+            cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority()).unwrap(),
+        )
+    }
+
     fn emitted_events(emissions: Vec<ClaimedAgentEvent>) -> Vec<AgentEvent> {
         emissions
             .into_iter()
@@ -1675,7 +1689,6 @@ mod tests {
 
     #[tokio::test]
     async fn claimed_agent_returns_a_client_tool_checkpoint_without_executing_it() {
-        let workspace = tempfile::tempdir().unwrap();
         let db = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -1690,7 +1703,8 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -1805,7 +1819,6 @@ mod tests {
 
     #[tokio::test]
     async fn claimed_agent_retries_a_mixed_client_call_then_preserves_exhausted_usage() {
-        let workspace = tempfile::tempdir().unwrap();
         let db = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -1820,7 +1833,8 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -1899,7 +1913,8 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -1913,6 +1928,7 @@ mod tests {
             store.clone(),
             AgentConfig {
                 model: "fake".into(),
+                tool_scratch: Some(tool_scratch(workspace.path())),
                 ..Default::default()
             },
         );
@@ -1981,7 +1997,8 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -2012,6 +2029,7 @@ mod tests {
             store.clone(),
             AgentConfig {
                 model: "fake".into(),
+                tool_scratch: Some(tool_scratch(workspace.path())),
                 ..Default::default()
             },
         );
@@ -2357,7 +2375,6 @@ mod tests {
 
     #[tokio::test]
     async fn tool_context_inherits_the_chats_project_scope() {
-        let workspace = tempfile::tempdir().unwrap();
         let db = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -2370,7 +2387,8 @@ mod tests {
         let project = Project {
             id: ProjectId::new(),
             title: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_project(&project).await.unwrap();
@@ -2379,7 +2397,8 @@ mod tests {
             project_id: Some(project.id),
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -2422,7 +2441,8 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -2485,7 +2505,8 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -2558,7 +2579,8 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -2572,6 +2594,7 @@ mod tests {
             AgentConfig {
                 model: "fake".into(),
                 max_tool_result_bytes: 100,
+                tool_scratch: Some(tool_scratch(workspace.path())),
                 ..Default::default()
             },
         );
@@ -2658,7 +2681,6 @@ mod tests {
     async fn sensitive_tool_parks_until_approved() {
         use crate::approval::AutoApproveGate;
 
-        let workspace = tempfile::tempdir().unwrap();
         let db = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -2673,7 +2695,8 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -2774,7 +2797,8 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -3254,7 +3278,6 @@ mod tests {
 
     #[tokio::test]
     async fn sensitive_tool_is_refused_without_a_gate() {
-        let workspace = tempfile::tempdir().unwrap();
         let db = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -3269,7 +3292,8 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -3478,7 +3502,8 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
-            workspace_dir: workspace.path().to_path_buf(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -3492,6 +3517,7 @@ mod tests {
             store.clone(),
             AgentConfig {
                 model: "fake".into(),
+                tool_scratch: Some(tool_scratch(workspace.path())),
                 ..Default::default()
             },
         );

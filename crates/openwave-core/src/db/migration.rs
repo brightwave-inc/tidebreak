@@ -35,15 +35,60 @@ impl MigrationTrait for Init {
         manager
             .create_table(
                 Table::create()
+                    .table(Project::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(Project::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Project::Title).text())
+                    .col(
+                        ColumnDef::new(Project::AttachmentRevision)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Project::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .check(Expr::col(Project::AttachmentRevision).gte(0))
+                    .check(
+                        Expr::col(Project::AttachmentRevision)
+                            .lte(crate::model::MAX_ATTACHMENT_REVISION),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
                     .table(Chat::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Chat::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Chat::ProjectId).uuid())
                     .col(ColumnDef::new(Chat::Title).text())
-                    .col(ColumnDef::new(Chat::WorkspaceDir).text().not_null())
+                    .col(
+                        ColumnDef::new(Chat::AttachmentRevision)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .col(
                         ColumnDef::new(Chat::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
+                    )
+                    .check(Expr::col(Chat::AttachmentRevision).gte(0))
+                    .check(
+                        Expr::col(Chat::AttachmentRevision)
+                            .lte(crate::model::MAX_ATTACHMENT_REVISION),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_chat_project")
+                            .from(Chat::Table, Chat::ProjectId)
+                            .to(Project::Table, Project::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
                     )
                     .to_owned(),
             )
@@ -929,6 +974,9 @@ impl MigrationTrait for Init {
         manager
             .drop_table(Table::drop().table(Chat::Table).to_owned())
             .await?;
+        manager
+            .drop_table(Table::drop().table(Project::Table).to_owned())
+            .await?;
         Ok(())
     }
 }
@@ -1074,7 +1122,7 @@ impl MigrationTrait for AddEventJournal {
     }
 }
 
-/// Adds the `project` table and the optional `chat.project_id` link.
+/// Adds ordered host-root projection rows for projects and chats.
 struct AddProjects;
 
 impl MigrationName for AddProjects {
@@ -1089,28 +1137,109 @@ impl MigrationTrait for AddProjects {
         manager
             .create_table(
                 Table::create()
-                    .table(Project::Table)
+                    .table(ProjectRootAttachment::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Project::Id).uuid().not_null().primary_key())
-                    .col(ColumnDef::new(Project::Title).text())
-                    .col(ColumnDef::new(Project::WorkspaceDir).text().not_null())
                     .col(
-                        ColumnDef::new(Project::CreatedAt)
-                            .timestamp_with_time_zone()
+                        ColumnDef::new(ProjectRootAttachment::ProjectId)
+                            .uuid()
                             .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ProjectRootAttachment::RootId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ProjectRootAttachment::Position)
+                            .integer()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(ProjectRootAttachment::ProjectId)
+                            .col(ProjectRootAttachment::RootId),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_project_root_attachment_project")
+                            .from(
+                                ProjectRootAttachment::Table,
+                                ProjectRootAttachment::ProjectId,
+                            )
+                            .to(Project::Table, Project::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(Expr::col(ProjectRootAttachment::RootId).ne(uuid::Uuid::nil()))
+                    .check(Expr::col(ProjectRootAttachment::Position).gte(0))
+                    .check(
+                        Expr::col(ProjectRootAttachment::Position)
+                            .lt(crate::model::MAX_ROOT_ATTACHMENTS as i32),
                     )
                     .to_owned(),
             )
             .await?;
-
-        // A nullable link, no DB-level foreign key: SQLite can't add an FK to
-        // an existing table, so membership is validated at the API edge (the
-        // server checks the project exists before creating the chat).
         manager
-            .alter_table(
-                Table::alter()
-                    .table(Chat::Table)
-                    .add_column(ColumnDef::new(Chat::ProjectId).uuid())
+            .create_index(
+                Index::create()
+                    .name("idx_project_root_attachment_position")
+                    .table(ProjectRootAttachment::Table)
+                    .col(ProjectRootAttachment::ProjectId)
+                    .col(ProjectRootAttachment::Position)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(ChatRootAttachment::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(ChatRootAttachment::ChatId).uuid().not_null())
+                    .col(ColumnDef::new(ChatRootAttachment::RootId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(ChatRootAttachment::Position)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ChatRootAttachment::Origin)
+                            .string_len(24)
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(ChatRootAttachment::ChatId)
+                            .col(ChatRootAttachment::RootId),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_chat_root_attachment_chat")
+                            .from(ChatRootAttachment::Table, ChatRootAttachment::ChatId)
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(Expr::col(ChatRootAttachment::RootId).ne(uuid::Uuid::nil()))
+                    .check(Expr::col(ChatRootAttachment::Position).gte(0))
+                    .check(
+                        Expr::col(ChatRootAttachment::Position)
+                            .lt(crate::model::MAX_ROOT_ATTACHMENTS as i32),
+                    )
+                    .check(
+                        Expr::col(ChatRootAttachment::Origin)
+                            .is_in(["project_default", "conversation"]),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_chat_root_attachment_position")
+                    .table(ChatRootAttachment::Table)
+                    .col(ChatRootAttachment::ChatId)
+                    .col(ChatRootAttachment::Position)
+                    .unique()
                     .to_owned(),
             )
             .await?;
@@ -1119,15 +1248,10 @@ impl MigrationTrait for AddProjects {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .alter_table(
-                Table::alter()
-                    .table(Chat::Table)
-                    .drop_column(Chat::ProjectId)
-                    .to_owned(),
-            )
+            .drop_table(Table::drop().table(ChatRootAttachment::Table).to_owned())
             .await?;
         manager
-            .drop_table(Table::drop().table(Project::Table).to_owned())
+            .drop_table(Table::drop().table(ProjectRootAttachment::Table).to_owned())
             .await?;
         Ok(())
     }
@@ -2195,7 +2319,7 @@ enum Project {
     Table,
     Id,
     Title,
-    WorkspaceDir,
+    AttachmentRevision,
     CreatedAt,
 }
 
@@ -2283,8 +2407,25 @@ enum Chat {
     ProjectId,
     Title,
     Model,
-    WorkspaceDir,
+    AttachmentRevision,
     CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum ProjectRootAttachment {
+    Table,
+    ProjectId,
+    RootId,
+    Position,
+}
+
+#[derive(DeriveIden)]
+enum ChatRootAttachment {
+    Table,
+    ChatId,
+    RootId,
+    Position,
+    Origin,
 }
 
 #[derive(DeriveIden)]

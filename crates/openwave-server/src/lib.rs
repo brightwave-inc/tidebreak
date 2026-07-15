@@ -345,6 +345,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
         state.agent_config.clone(),
+        Some(state.config.data_dir.join("scratch")),
         turn_worker::TurnWorkerConfig::default(),
     );
     let server_store = state.store.clone();

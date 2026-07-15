@@ -56,8 +56,7 @@ cargo run -p openwave-cli -- serve
 
 # terminal 2
 cp ui/.env.example ui/.env.local
-# edit ui/.env.local: VITE_OPENWAVE_URL, VITE_OPENWAVE_TOKEN,
-# and an explicit absolute VITE_OPENWAVE_SCRATCH on the machine running serve
+# edit ui/.env.local: VITE_OPENWAVE_URL and VITE_OPENWAVE_TOKEN
 
 pnpm --dir ui install
 pnpm --dir ui dev

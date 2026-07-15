@@ -1204,7 +1204,8 @@ mod tests {
                 .create_project(&Project {
                     id: project_id,
                     title: None,
-                    workspace_dir: std::path::PathBuf::from(format!("/{project_id}")),
+                    attachment_revision: 0,
+                    root_attachments: Vec::new(),
                     created_at: Utc::now(),
                 })
                 .await
