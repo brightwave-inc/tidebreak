@@ -40,6 +40,15 @@ from and written to the OS keychain through
 over 8 KiB. They never alter selection or timeout policy. A missing key or
 disabled selection fails closed: there is no provider to invoke.
 
+## Desktop setup
+
+The desktop sidebar has a **Web search** panel for this same local API. It
+shows whether the saved configuration is disabled, ready, or missing the
+selected provider's key; lets the user choose Exa or Tavily (or disable search),
+set the bounded timeout, and save, replace, or remove a key. Existing keys are
+never displayed or read into the renderer. Saving a key and saving provider
+selection are deliberately separate actions, matching the API boundary above.
+
 ## Current boundary
 
 `openwave-server::web_search::resolve_provider` is the host-only construction
