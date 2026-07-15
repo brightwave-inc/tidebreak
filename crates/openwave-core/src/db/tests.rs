@@ -5545,13 +5545,11 @@ async fn resuming_turn_claims_a_new_lease_without_consuming_failure_budget() {
             .unwrap(),
         Some(CompleteTurnRunOutcome::Completed(_))
     ));
-    assert!(matches!(
-        store
-            .complete_turn_run(turn_id, first_token, 0, output.created_at, &output)
-            .await
-            .unwrap(),
-        None
-    ));
+    assert!(store
+        .complete_turn_run(turn_id, first_token, 0, output.created_at, &output)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
