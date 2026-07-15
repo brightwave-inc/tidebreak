@@ -72,6 +72,7 @@ pub(crate) struct TurnWorker {
     events: Arc<EventBus>,
     signals: Arc<TurnGuard>,
     wake: Arc<Notify>,
+    sandbox_agent_wake: Arc<Notify>,
     agent_config: AgentConfig,
     private_scratch_root: Option<PathBuf>,
     config: TurnWorkerConfig,
@@ -233,6 +234,7 @@ impl TurnWorker {
         events: Arc<EventBus>,
         signals: Arc<TurnGuard>,
         wake: Arc<Notify>,
+        sandbox_agent_wake: Arc<Notify>,
         agent_config: AgentConfig,
         private_scratch_root: Option<PathBuf>,
         config: TurnWorkerConfig,
@@ -250,6 +252,7 @@ impl TurnWorker {
             events,
             signals,
             wake,
+            sandbox_agent_wake,
             agent_config,
             private_scratch_root,
             config,
@@ -1175,6 +1178,12 @@ impl TurnWorker {
                                 ..
                             })) => {
                                 checkpoint_heartbeat.abort_and_wait().await;
+                                // The child and parent wait state are now one
+                                // durable transaction. This is intentionally
+                                // only a latency hint: the sandbox worker's
+                                // durable claim scan remains the correctness
+                                // source if the notification is lost.
+                                self.sandbox_agent_wake.notify_one();
                                 return Ok(TurnWorkerOutcome::WaitingForAgentRun(turn.id));
                             }
                             Ok(Some(AcceptSandboxAgentRunAndParkTurnOutcome::SteerPending(_)))

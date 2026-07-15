@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use openwave_core::{
-    AgentConfig, AgentError, AgentRun, AgentRunStatus, ChatMessage, ChatRequest,
+    AgentConfig, AgentError, AgentRun, AgentRunInboxEntry, AgentRunStatus, ChatMessage,
+    ChatRequest, ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
     FailAgentRunOutcome, ModelProvider, ProviderEvent, Result, Role, StopReason, Store,
     SubmitAgentRunResultOutcome,
 };
@@ -65,6 +66,7 @@ pub(crate) enum SandboxAgentRunWorkerOutcome {
     RetryScheduled(openwave_core::AgentRunId),
     Failed(openwave_core::AgentRunId),
     Cancelled(openwave_core::AgentRunId),
+    ParentResumed(openwave_core::AgentRunId),
     LeaseLost(openwave_core::AgentRunId),
 }
 
@@ -73,6 +75,7 @@ pub(crate) struct SandboxAgentRunWorker {
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
     wake: Arc<Notify>,
+    turn_wake: Arc<Notify>,
     agent_config: AgentConfig,
     /// Each run receives a directory under this private root. The initial
     /// no-tools executor does not open it; retaining the boundary now means a
@@ -87,6 +90,7 @@ impl SandboxAgentRunWorker {
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
         wake: Arc<Notify>,
+        turn_wake: Arc<Notify>,
         agent_config: AgentConfig,
         private_scratch_root: Option<PathBuf>,
         config: SandboxAgentRunWorkerConfig,
@@ -101,6 +105,7 @@ impl SandboxAgentRunWorker {
             store,
             resolver,
             wake,
+            turn_wake,
             agent_config,
             private_scratch_root,
             config,
@@ -148,6 +153,12 @@ impl SandboxAgentRunWorker {
     /// so focused integration tests can exercise the real durable transitions
     /// without starting permanent worker lanes.
     pub(crate) async fn run_once(&self) -> Result<SandboxAgentRunWorkerOutcome> {
+        for delivery in self.store.list_agent_run_inbox_candidates(16).await? {
+            match self.resume_parent(delivery).await? {
+                SandboxAgentRunWorkerOutcome::Idle => {}
+                outcome => return Ok(outcome),
+            }
+        }
         let lease_token = uuid::Uuid::new_v4();
         let lease = chrono_duration(self.config.lease)?;
         let Some(run) = self
@@ -164,6 +175,57 @@ impl SandboxAgentRunWorker {
         };
         self.wake.notify_one();
         self.process(run, lease_token).await
+    }
+
+    /// Advance one immutable child delivery to a durably resumable parent turn.
+    ///
+    /// The candidate scan is only recovery/latency plumbing. Exact inbox claim
+    /// and consume transitions own the fencing, so concurrent lanes and a
+    /// restart after child completion cannot double-resume the foreground turn.
+    async fn resume_parent(
+        &self,
+        delivery: AgentRunInboxEntry,
+    ) -> Result<SandboxAgentRunWorkerOutcome> {
+        let lease_token = uuid::Uuid::new_v4();
+        let lease = chrono_duration(self.config.lease)?;
+        let Some(claim) = self
+            .store
+            .claim_agent_run_inbox_entry(
+                delivery.parent_run_id,
+                delivery.child_run_id,
+                lease_token,
+                lease,
+            )
+            .await?
+        else {
+            return Ok(SandboxAgentRunWorkerOutcome::Idle);
+        };
+        let entry = match claim {
+            ClaimAgentRunInboxOutcome::Claimed(entry)
+            | ClaimAgentRunInboxOutcome::Existing(entry) => entry,
+        };
+        let Some(outcome) = self
+            .store
+            .consume_agent_run_inbox_entry_and_resume_turn(
+                entry.parent_run_id,
+                entry.child_run_id,
+                lease_token,
+            )
+            .await?
+        else {
+            return Ok(SandboxAgentRunWorkerOutcome::Idle);
+        };
+        match outcome {
+            ConsumeAgentRunInboxAndResumeTurnOutcome::Resumed { .. }
+            | ConsumeAgentRunInboxAndResumeTurnOutcome::Existing { .. } => {
+                // A committed `resuming` turn is authoritative. This only
+                // reduces the latency before the ordinary turn scan sees it.
+                self.turn_wake.notify_one();
+                Ok(SandboxAgentRunWorkerOutcome::ParentResumed(
+                    entry.child_run_id,
+                ))
+            }
+        }
     }
 
     async fn process(
@@ -439,8 +501,9 @@ mod tests {
     use async_trait::async_trait;
     use futures::stream::{self, BoxStream};
     use openwave_core::{
-        AcceptAgentRunOutcome, AgentRunExecution, CallId, Chat, ChatId, ChatRequest, DbStore,
-        ModelProvider, ProviderId, Role, Store,
+        AcceptAgentRunOutcome, AcceptTurnOutcome, AgentRunExecution, AgentRunInboxStatus, CallId,
+        Chat, ChatId, ChatRequest, DbStore, ModelProvider, ProviderId, Role, Store,
+        TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
     };
 
     use super::*;
@@ -545,6 +608,7 @@ mod tests {
             store.clone(),
             Arc::new(FixedResolver(provider.clone())),
             Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
             AgentConfig {
                 model: "sandbox-model".into(),
                 ..AgentConfig::default()
@@ -617,6 +681,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_inbox_scan_resumes_a_parked_parent_without_a_wake() {
+        let (worker, store, _provider, chat, _dir) = fixture().await;
+        let turn_id = TurnId::new();
+        assert!(matches!(
+            store
+                .accept_turn(turn_id, chat.id, "sandbox-model", "delegate")
+                .await
+                .unwrap(),
+            AcceptTurnOutcome::Accepted(_)
+        ));
+        let foreground_lease = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let foreground = store
+            .claim_turn_run(foreground_lease, now, now + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .turn
+            .unwrap();
+        let call = CallId::new();
+        let child_id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
+        assert!(matches!(
+            store
+                .accept_sandbox_agent_run_and_park_turn(
+                    child_id,
+                    foreground.id,
+                    call,
+                    "return the child result",
+                    foreground_lease,
+                    foreground.steer_revision,
+                    TurnCheckpointProgress {
+                        model_steps: 1,
+                        usage: Usage::default(),
+                    },
+                    chrono::Utc::now(),
+                )
+                .await
+                .unwrap(),
+            Some(openwave_core::AcceptSandboxAgentRunAndParkTurnOutcome::Parked { .. })
+        ));
+        let child_lease = uuid::Uuid::new_v4();
+        assert_eq!(
+            store
+                .claim_agent_run(child_lease, chrono::Duration::minutes(1), 4, 2)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            child_id
+        );
+        store
+            .submit_agent_run_result(child_id, child_lease, "child result")
+            .await
+            .unwrap()
+            .expect("exact child lease should complete");
+
+        // No notification is sent: a restarted worker's durable scan must
+        // still claim and consume this delivery.
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::ParentResumed(child_id)
+        );
+        let parent = openwave_core::AgentRunId::foreground_for_chat(chat.id);
+        assert_eq!(
+            store.list_agent_run_inbox(parent).await.unwrap()[0].status,
+            AgentRunInboxStatus::Consumed
+        );
+        assert_eq!(
+            store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+            TurnRunStatus::Resuming
+        );
+    }
+
+    #[tokio::test]
     async fn acknowledges_cancellation_under_its_exact_live_lease() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
@@ -651,6 +788,7 @@ mod tests {
             Arc::new(FixedResolver(Arc::new(BlockingProvider {
                 started: started.clone(),
             }))),
+            Arc::new(Notify::new()),
             Arc::new(Notify::new()),
             AgentConfig {
                 model: "sandbox-model".into(),
@@ -720,6 +858,7 @@ mod tests {
         let worker = SandboxAgentRunWorker::new(
             store.clone(),
             Arc::new(FixedResolver(Arc::new(FailingProvider))),
+            Arc::new(Notify::new()),
             Arc::new(Notify::new()),
             AgentConfig {
                 model: "m".into(),
@@ -801,6 +940,7 @@ mod tests {
                 provider: provider.clone(),
             }),
             Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
             AgentConfig {
                 model: "m".into(),
                 ..AgentConfig::default()
@@ -852,6 +992,7 @@ mod tests {
                 release: release.clone(),
                 provider: provider.clone(),
             }),
+            Arc::new(Notify::new()),
             Arc::new(Notify::new()),
             AgentConfig {
                 model: "m".into(),

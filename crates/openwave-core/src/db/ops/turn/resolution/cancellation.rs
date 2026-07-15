@@ -156,6 +156,18 @@ async fn request_turn_cancellation_inner(
                 "waiting turn {id} has a mismatched child receipt"
             )));
         }
+        if !super::super::super::agent_run::cancel_sandbox_child_for_parked_turn_on(
+            &transaction,
+            crate::AgentRunId(wait.parent_run_id),
+            crate::AgentRunId(wait.child_run_id),
+            ChatId(turn.chat_id),
+            now,
+        )
+        .await?
+        {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(None);
+        }
         let closed = entities::turn_agent_run_wait::Entity::update_many()
             .col_expr(
                 entities::turn_agent_run_wait::Column::Status,

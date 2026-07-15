@@ -398,6 +398,7 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
         state.events.clone(),
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
+        state.agent_run_wake.clone(),
         state.agent_config.clone(),
         Some(state.config.data_dir.join("scratch")),
         turn_worker::TurnWorkerConfig::default(),
@@ -406,6 +407,7 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
         state.store.clone(),
         state.resolver.clone(),
         state.agent_run_wake.clone(),
+        state.turn_job_wake.clone(),
         state.agent_config.clone(),
         Some(state.config.data_dir.join("scratch")),
         sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default(),
@@ -464,6 +466,10 @@ fn agent_deps(
         request_folder_access_tool_spec(),
         validate_request_folder_access_arguments,
     );
+    // The foreground worker parks atomically with child acceptance, and the
+    // bounded sandbox worker is started from the same state below. Sandboxed
+    // requests deliberately never receive this foreground-only definition.
+    tools.register_foreground_sandbox_spawn();
     let tools = Arc::new(tools);
     let model = std::env::var("OPENWAVE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let agent_config = AgentConfig {

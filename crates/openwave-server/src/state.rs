@@ -47,9 +47,8 @@ pub struct AppState {
     pub(crate) turn_job_wake: Arc<Notify>,
     /// Wakes the bounded sandbox-run worker after delegated work commits.
     ///
-    /// The foreground spawn contract is still intentionally disabled in the
-    /// production registry; this signal makes its later enablement immediate
-    /// rather than relying on the worker's idle poll.
+    /// This is only a latency hint; the worker always uses its durable claim
+    /// scan as the correctness source after a missed or coalesced wake-up.
     pub(crate) agent_run_wake: Arc<Notify>,
     /// Wakes the source-blob retirement worker after a reference drop commits.
     pub(crate) blob_retirement_wake: Arc<Notify>,

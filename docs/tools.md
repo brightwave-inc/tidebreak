@@ -7,7 +7,7 @@ identity.
 
 ## What exists today
 
-The current agent surface contains five tools:
+The current foreground agent surface contains six tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
@@ -16,6 +16,7 @@ The current agent surface contains five tools:
 | `write_file` | Atomically write private-scratch text | Server, workspace |
 | `search` | Search locally indexed project/chat documents | Server, read-only |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
+| `spawn_sandbox_agent` | Delegate one bounded task and wait for its durable result | Foreground-only durable continuation |
 
 The host broker already supports listing connected roots, listing directories,
 and reading files, but those operations are not yet advertised directly to the
@@ -56,22 +57,19 @@ The foreground coordinator needs tools for:
 - spawning, inspecting, messaging, waiting for, cancelling, and reviewing
   depth-one sandbox agents.
 
-`spawn_sandbox_agent` has a prepared bounded contract and durable foreground
-checkpoint path, but is intentionally disabled in the production registry
-until a sandbox executor exists. Enabling it earlier would park a foreground
-chat with no worker able to complete the child.
+`spawn_sandbox_agent` is enabled only for a claimed foreground turn. It
+atomically admits a depth-one child and parks that turn; the child result is
+persisted as a system transcript message before the parent can resume. Sandbox
+agents never receive this tool.
 
-A background sandbox starts with a deliberately smaller surface:
+A background sandbox currently has **no tool surface and no shared
+conversation, filesystem, network, or host-folder access**. It receives one
+bounded task and its final text becomes the fenced result receipt. Sandboxes
+do not receive `spawn_sandbox_agent` and cannot create further agents.
 
-- confined command execution;
-- web search and image viewing;
-- project-document search/read;
-- `ask` and non-blocking `notify` communication with its parent;
-- a small durable task list;
-- explicit `submit_result` completion.
-
-Sandboxes do not receive `spawn_agent`. Ordinary assistant text does not
-complete a background run; `submit_result` is its successful terminal action.
+Future sandbox-safe capabilities (for example web search or broker-mediated
+folder reads) must be added one at a time behind the same durable continuation
+and consent boundaries.
 
 Later additions may include a scratchpad, pinned context, plan/execution modes,
 deliverable export, clipboard operations, generated images, and connected apps.

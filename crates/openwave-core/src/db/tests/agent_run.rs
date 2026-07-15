@@ -3,8 +3,8 @@ use crate::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptTurnOutcome, AgentRun,
     AgentRunExecution, AgentRunId, AgentRunInboxStatus, AgentRunStatus, CallId, ChatId,
     ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
-    ConsumeAgentRunInboxOutcome, DbStore, FinishAgentRunCancellationOutcome,
-    ParkTurnForAgentRunInboxOutcome, RequestAgentRunCancellationOutcome, Store,
+    ConsumeAgentRunInboxOutcome, DbStore, FinishAgentRunCancellationOutcome, MessageId,
+    ParkTurnForAgentRunInboxOutcome, RequestAgentRunCancellationOutcome, Role, Store,
     SubmitAgentRunResultOutcome, TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
 };
 use chrono::{Duration, Utc};
@@ -1142,6 +1142,14 @@ async fn child_inbox_consumption_atomically_wakes_a_parked_foreground_turn() {
     assert_eq!(resumed.1.claim_count, running.claim_count);
     assert_eq!(resumed.1.model_steps, progress.model_steps);
     assert_eq!(resumed.1.usage, progress.usage);
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert!(messages.iter().any(|message| {
+        message.id == MessageId::sandbox_result_for_child(child_id)
+            && message.turn_id == running.id
+            && message.role == Role::System
+            && message.content
+                == "Sandbox agent completed. Its exact final result follows:\nresearch complete"
+    }));
     assert!(matches!(
         store
             .consume_agent_run_inbox_entry_and_resume_turn(parent_id, child_id, continuation_lease)
@@ -1169,6 +1177,223 @@ async fn child_inbox_consumption_atomically_wakes_a_parked_foreground_turn() {
     assert_eq!(resumed_claim.claim_count, running.claim_count + 1);
     assert_eq!(resumed_claim.model_steps, progress.model_steps);
     assert_eq!(resumed_claim.usage, progress.usage);
+}
+
+#[tokio::test]
+async fn parked_parent_cancellation_retires_a_delivered_child_without_an_orphan_wake() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    let child_id = AgentRunId::new();
+    let parent_id = AgentRunId::foreground_for_chat(chat.id);
+    store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(parent_id),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("finish before the parent is cancelled"),
+        )
+        .await
+        .unwrap();
+    let parked = park_foreground_turn_on_child(&store, chat.id, child_id).await;
+    let child_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(child_lease, Duration::minutes(1), 4, 2)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        child_id
+    );
+    store
+        .submit_agent_run_result(child_id, child_lease, "terminal child result")
+        .await
+        .unwrap()
+        .expect("child result should be delivered before cancellation");
+
+    assert!(matches!(
+        store.request_turn_cancellation(parked.id, Utc::now()).await.unwrap(),
+        Some(crate::RequestTurnCancellationOutcome::Cancelled(turn))
+            if turn.status == TurnRunStatus::Cancelled
+    ));
+    let inbox = store.list_agent_run_inbox(parent_id).await.unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].status, AgentRunInboxStatus::Cancelled);
+    assert!(store
+        .list_agent_run_inbox_candidates(16)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .list_agent_runs(chat.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|run| run.id == child_id)
+            .unwrap()
+            .status,
+        AgentRunStatus::Completed,
+        "an already-terminal child remains auditable, but its delivery is fenced"
+    );
+}
+
+#[tokio::test]
+async fn parked_parent_cancellation_cascades_to_an_unclaimed_sandbox_child() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    let child_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("this work should be fenced before it starts"),
+        )
+        .await
+        .unwrap();
+    let parked = park_foreground_turn_on_child(&store, chat.id, child_id).await;
+    assert!(matches!(
+        store
+            .request_turn_cancellation(parked.id, Utc::now())
+            .await
+            .unwrap(),
+        Some(crate::RequestTurnCancellationOutcome::Cancelled(_))
+    ));
+    let child = store
+        .list_agent_runs(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|run| run.id == child_id)
+        .unwrap();
+    assert_eq!(child.status, AgentRunStatus::Cancelled);
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 4, 2)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn failed_child_result_is_persisted_in_the_resumed_parent_transcript() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let child_id = AgentRunId::new();
+    let parent_id = AgentRunId::foreground_for_chat(chat.id);
+    store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(parent_id),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("this task will fail"),
+        )
+        .await
+        .unwrap();
+    crate::db::entities::agent_run::Entity::update_many()
+        .col_expr(
+            crate::db::entities::agent_run::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(1),
+        )
+        .filter(crate::db::entities::agent_run::Column::Id.eq(child_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let parked = park_foreground_turn_on_child(&store, chat.id, child_id).await;
+    let child_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(child_lease, Duration::minutes(1), 4, 2)
+        .await
+        .unwrap()
+        .expect("child should claim");
+    assert!(matches!(
+        store
+            .fail_agent_run(
+                child_id,
+                child_lease,
+                "sandbox_execution_failed",
+                "provider failed",
+                Duration::seconds(1),
+            )
+            .await
+            .unwrap(),
+        Some(crate::FailAgentRunOutcome::Failed(_))
+    ));
+    let continuation_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run_inbox_entry(
+            parent_id,
+            child_id,
+            continuation_lease,
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .expect("failed result should claim for the parked parent");
+    store
+        .consume_agent_run_inbox_entry_and_resume_turn(parent_id, child_id, continuation_lease)
+        .await
+        .unwrap()
+        .expect("failed result should resume the parked parent");
+    assert!(store.list_messages(chat.id).await.unwrap().iter().any(|message| {
+        message.id == MessageId::sandbox_result_for_child(child_id)
+            && message.turn_id == parked.id
+            && message.role == Role::System
+            && message.content
+                == "Sandbox agent failed. Its exact final result follows:\nSandbox task failed (sandbox_execution_failed): provider failed"
+    }));
+}
+
+#[tokio::test]
+async fn live_parent_inbox_candidates_skip_sixteen_obsolete_deliveries() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    for index in 0..16 {
+        submit_sandbox_result(
+            &store,
+            chat.id,
+            &format!("obsolete task {index}"),
+            &format!("obsolete result {index}"),
+        )
+        .await;
+    }
+    let (live_child, _) = submit_sandbox_result(
+        &store,
+        chat.id,
+        "the live delegated task",
+        "the live result",
+    )
+    .await;
+    let parked = park_foreground_turn_on_child(&store, chat.id, live_child).await;
+    assert_eq!(parked.status, TurnRunStatus::WaitingForAgentRun);
+
+    let candidates = store.list_agent_run_inbox_candidates(16).await.unwrap();
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|entry| entry.child_run_id)
+            .collect::<Vec<_>>(),
+        vec![live_child],
+        "obsolete entries must not starve the bounded recovery scan"
+    );
 }
 
 #[tokio::test]

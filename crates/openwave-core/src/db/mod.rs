@@ -1849,6 +1849,10 @@ impl Store for DbStore {
         ops::agent_run::list_agent_run_inbox(self, parent_run_id).await
     }
 
+    async fn list_agent_run_inbox_candidates(&self, limit: u64) -> Result<Vec<AgentRunInboxEntry>> {
+        ops::agent_run::list_agent_run_inbox_candidates(self, limit).await
+    }
+
     async fn claim_agent_run_inbox_entry(
         &self,
         parent_run_id: AgentRunId,

@@ -683,6 +683,10 @@ pub async fn post_cancel(
     }
     state.active_turns.cancel(id, body.turn_id);
     state.turn_job_wake.notify_one();
+    // A parked-parent cancellation can fence a queued or running sandbox
+    // child. Wake its worker promptly; durable claims remain the source of
+    // truth if this notification is lost.
+    state.agent_run_wake.notify_one();
     Ok(StatusCode::ACCEPTED)
 }
 
