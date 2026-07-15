@@ -161,6 +161,10 @@ id_type!(
     /// Identifies a persistent conversation.
     ChatId
 );
+id_type!(
+    /// Identifies one durable foreground or sandboxed background agent run.
+    AgentRunId
+);
 
 /// Stable product and broker idempotency identity for one root-attachment change.
 ///

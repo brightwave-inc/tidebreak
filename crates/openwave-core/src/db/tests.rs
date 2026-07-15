@@ -7,6 +7,7 @@ use crate::model::{
 use crate::storage::ApplyTurnSteerOutcome;
 use chrono::{DateTime, Utc};
 
+mod agent_run;
 mod root_attachment;
 mod turn_steer;
 

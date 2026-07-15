@@ -326,6 +326,34 @@ pub mod message {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod agent_run {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "agent_run")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub chat_id: Uuid,
+        pub parent_id: Option<Uuid>,
+        pub parent_depth: Option<i16>,
+        pub spawn_call_id: Option<Uuid>,
+        pub execution: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub depth: i16,
+        pub status: String,
+        pub input: Option<String>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod turn_run {
     use sea_orm::entity::prelude::*;
 

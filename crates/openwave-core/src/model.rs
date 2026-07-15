@@ -1079,6 +1079,106 @@ pub(crate) fn validate_chat_root_projection_against_project(
     Ok(())
 }
 
+/// One durable foreground or sandboxed background execution context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRun {
+    /// Stable idempotency identity.
+    pub id: crate::id::AgentRunId,
+    /// Conversation that owns this run and its events.
+    pub chat_id: ChatId,
+    /// Foreground coordinator that owns this run. Always absent at depth zero.
+    pub parent_id: Option<crate::id::AgentRunId>,
+    /// Exact tool-call identity that requested a sandbox child.
+    pub spawn_call_id: Option<crate::id::CallId>,
+    /// Where and how the run executes.
+    pub execution: AgentRunExecution,
+    /// Explicit bounded hierarchy depth. OpenWave v1 permits only zero or one.
+    pub depth: u8,
+    /// Durable lifecycle state.
+    pub status: AgentRunStatus,
+    /// Exact delegated task for a sandbox run. Foreground runs have no task.
+    pub input: Option<String>,
+    /// When the run was durably accepted.
+    pub created_at: DateTime<Utc>,
+    /// When its durable state last changed.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl AgentRun {
+    /// Recursive agent spawning is deliberately excluded from the initial model.
+    pub const MAX_DEPTH: u8 = 1;
+    /// Maximum persisted delegated task length.
+    pub const MAX_INPUT_LEN: usize = 65_536;
+}
+
+/// Execution boundary for an [`AgentRun`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AgentRunExecution {
+    /// Conversation coordinator advanced by foreground turn work.
+    Foreground,
+    /// Isolated background work advanced by the sandbox scheduler.
+    Sandbox,
+}
+
+impl AgentRunExecution {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Foreground => "foreground",
+            Self::Sandbox => "sandbox",
+        }
+    }
+}
+
+/// Durable lifecycle of an [`AgentRun`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AgentRunStatus {
+    /// Foreground coordinator is available to own chat turns.
+    Active,
+    /// Sandboxed work was accepted and awaits a bounded scheduler slot.
+    Queued,
+    /// One exact scheduler lease currently owns the run.
+    Running,
+    /// The run checkpointed and released its worker for a durable dependency.
+    Waiting,
+    /// Replay-safe work awaits another scheduler claim.
+    RetryWait,
+    /// The run submitted its final result successfully.
+    Completed,
+    /// The run failed permanently or cannot be replayed safely.
+    Failed,
+    /// The run was cancelled and has quiesced.
+    Cancelled,
+}
+
+impl AgentRunStatus {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::RetryWait => "retry_wait",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Whether no worker may advance this run without a new explicit command.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
 /// Durable execution state of one user turn.
 ///
 /// A turn is accepted once under its stable [`TurnId`], then claimed under an

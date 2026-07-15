@@ -21,23 +21,24 @@ use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
 use crate::id::MessageId;
 use crate::id::{
-    CallId, ChatId, DocumentId, DocumentJobId, HostRootId, ProjectId, RootAttachmentChangeId,
-    TurnId, TurnSteerId,
+    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, HostRootId, ProjectId,
+    RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
-    validate_project_root_projection, BeginRootAttachmentChange, BlobRetirement,
-    BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
-    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
-    DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
-    DocumentUpsert, Message, Project, RootAttachmentChange, RootAttachmentChangeTerminal,
-    SourceRegion, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress, TurnClientWaitStatus,
-    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
+    validate_project_root_projection, AgentRun, AgentRunExecution, AgentRunStatus,
+    BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration,
+    DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
+    DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSourceBlob,
+    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project,
+    RootAttachmentChange, RootAttachmentChangeTerminal, SourceRegion, ToolCallRecord,
+    ToolCallResolution, TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun,
+    TurnRunStatus, TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
-    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
+    AcceptAgentRunOutcome, AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
     BeginRootAttachmentChangeOutcome, ClaimClientToolCallOutcome, ClaimTurnRunOutcome,
     CompleteTurnRunOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
     EnsureDocumentParseJobOutcome, FinishRootAttachmentChangeOutcome,
@@ -1720,6 +1721,35 @@ impl Store for DbStore {
         limit: u64,
     ) -> Result<Vec<RootAttachmentChange>> {
         ops::root_attachment::list_pending_root_attachment_changes(self, executor_id, limit).await
+    }
+
+    async fn accept_agent_run(
+        &self,
+        id: AgentRunId,
+        chat_id: ChatId,
+        parent_id: Option<AgentRunId>,
+        spawn_call_id: Option<CallId>,
+        execution: AgentRunExecution,
+        input: Option<&str>,
+    ) -> Result<AcceptAgentRunOutcome> {
+        ops::agent_run::accept_agent_run(
+            self,
+            id,
+            chat_id,
+            parent_id,
+            spawn_call_id,
+            execution,
+            input,
+        )
+        .await
+    }
+
+    async fn get_agent_run(&self, id: AgentRunId) -> Result<Option<AgentRun>> {
+        ops::agent_run::get_agent_run(self, id).await
+    }
+
+    async fn list_agent_runs(&self, chat_id: ChatId) -> Result<Vec<AgentRun>> {
+        ops::agent_run::list_agent_runs(self, chat_id).await
     }
 
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {

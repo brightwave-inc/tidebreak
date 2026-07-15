@@ -21,16 +21,17 @@ use serde_json::Value;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{
-    CallId, ChatId, DocumentId, DocumentJobId, ProjectId, RootAttachmentChangeId, TurnId,
-    TurnSteerId,
+    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, ProjectId, RootAttachmentChangeId,
+    TurnId, TurnSteerId,
 };
 use crate::model::{
-    BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
-    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceUpsert,
-    DocumentSummaryRecord, DocumentUpsert, Message, Project, RootAttachmentChange,
-    RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress,
-    TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
+    AgentRun, AgentRunExecution, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
+    Chat, ClientToolCallRequest, DocumentGeneration, DocumentJob, DocumentJobKind,
+    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentRecord, DocumentScope,
+    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project,
+    RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
+    TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun,
+    TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
 
@@ -144,6 +145,21 @@ pub enum AcceptTurnOutcome {
     IdentityConflict,
     /// Another nonterminal turn already owns the chat's single live slot.
     ChatBusy(TurnRun),
+}
+
+/// Result of atomically accepting one durable foreground or sandboxed agent run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptAgentRunOutcome {
+    /// This call committed a new run.
+    Accepted(AgentRun),
+    /// The exact id and immutable request were already committed.
+    Existing(AgentRun),
+    /// The id was already committed for different immutable request data.
+    IdentityConflict,
+    /// A chat may have only one foreground coordinator.
+    ForegroundExists(AgentRun),
+    /// The requested sandbox parent is missing, cross-chat, or not foreground.
+    ParentUnavailable,
 }
 
 /// Result of atomically accepting one exact steering instruction.
@@ -369,6 +385,12 @@ fn document_storage_unavailable<T>() -> Result<T> {
 fn turn_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "durable turn storage is not implemented by this Store".into(),
+    ))
+}
+
+fn agent_run_storage_unavailable<T>() -> Result<T> {
+    Err(AgentError::Store(
+        "durable agent-run storage is not implemented by this Store".into(),
     ))
 }
 
@@ -869,6 +891,37 @@ pub trait Store: Send + Sync {
         _limit: u64,
     ) -> Result<Vec<RootAttachmentChange>> {
         root_attachment_storage_unavailable()
+    }
+
+    /// Atomically accept one foreground coordinator or sandboxed child run.
+    ///
+    /// `id` is the run's stable idempotency identity. Foreground runs require no
+    /// parent, spawn call, or input and become active immediately. Sandboxed
+    /// runs require a unique `spawn_call_id`, non-empty task, and active
+    /// depth-zero foreground parent in the same chat; they are accepted as
+    /// queued depth-one work. An exact spawn-call retry recovers the original
+    /// run even if the caller supplies a fresh run id. Recursive children are
+    /// rejected by construction.
+    async fn accept_agent_run(
+        &self,
+        _id: AgentRunId,
+        _chat_id: ChatId,
+        _parent_id: Option<AgentRunId>,
+        _spawn_call_id: Option<CallId>,
+        _execution: AgentRunExecution,
+        _input: Option<&str>,
+    ) -> Result<AcceptAgentRunOutcome> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Fetch one agent run by its exact idempotency identity.
+    async fn get_agent_run(&self, _id: AgentRunId) -> Result<Option<AgentRun>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// List a chat's runs in deterministic creation order.
+    async fn list_agent_runs(&self, _chat_id: ChatId) -> Result<Vec<AgentRun>> {
+        agent_run_storage_unavailable()
     }
 
     /// Fetch one durable turn by its exact idempotency identity.
