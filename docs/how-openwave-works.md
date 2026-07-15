@@ -525,8 +525,12 @@ The browser-facing API is not exposed on a public network interface.
 
 The current UI is a workspace-style conversation shell, not the complete
 product. It creates a new loose chat on each launch and supports provider setup,
-model selection, basic chat streaming, approval prompts, native connected-folder
-pick/list/revoke, and a concise foreground/background agent-status surface.
+model selection, basic chat streaming, a foreground-turn stop control, approval
+prompts, native connected-folder pick/list/revoke, and a concise
+foreground/background agent-status surface. The stop control sends cancellation
+for the exact active turn, prevents duplicate requests, and stays in a pending
+state until an authoritative terminal event arrives; it never treats a request
+as a locally completed cancellation.
 That surface reads a redacted durable snapshot and is only an observer: worker
 leases, delegated inputs, and scheduler control remain server-private.
 OpenWave's operational scratch stays in private app storage; user-selected paths
@@ -537,8 +541,8 @@ still use a server-derived per-chat private scratch directory and are not yet
 routed through connected roots; that scratch path is neither persisted nor
 returned to the renderer. The
 UI does not yet provide a chat picker, history reconstruction, projects,
-document ingestion, document search, cancel, or steer controls, even though much
-of that backend API already exists.
+document ingestion, document search, or steer controls, even though much of
+that backend API already exists.
 
 Because that chat is projectless, its `search` tool can see only the unscoped
 document corpus. Project-scoped documents are not reachable through the current

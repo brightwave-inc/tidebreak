@@ -64,6 +64,11 @@ export default function App() {
   >({});
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
+  const [cancelPendingTurnId, setCancelPendingTurnId] = useState<string | null>(
+    null,
+  );
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [creatingChat, setCreatingChat] = useState(false);
   const [settingsPanel, setSettingsPanel] = useState<
     "providers" | "folders" | null
@@ -78,6 +83,7 @@ export default function App() {
   const refreshAgentRunsRef = useRef<(() => void) | null>(null);
   const resolvingFolderCallsRef = useRef<Set<string>>(new Set());
   const visibleFolderCallIdsRef = useRef<Set<string>>(new Set());
+  const cancelRequestTurnRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -127,24 +133,62 @@ export default function App() {
     socketRef.current?.close();
     lastSeqRef.current = 0;
     const generation = ++socketGenerationRef.current;
-    const socket = client.openEvents(chat.id, 0, (event) => {
-      if (socketGenerationRef.current !== generation) return;
-      handleEvent(event);
-    });
-    socket.onopen = () => {
-      if (socketGenerationRef.current === generation) {
-        setStatus((s) => `${s} · live`);
+    let disposed = false;
+    let reconnectTimer: number | null = null;
+    let reconnectDelayMs = 250;
+
+    const scheduleReconnect = () => {
+      if (
+        disposed ||
+        socketGenerationRef.current !== generation ||
+        reconnectTimer !== null
+      ) {
+        return;
       }
+      setStatus((s) => `${withoutConnectionState(s)} · reconnecting`);
+      const delay = reconnectDelayMs;
+      reconnectDelayMs = Math.min(reconnectDelayMs * 2, 5_000);
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, delay);
     };
-    socket.onerror = () => {
-      if (socketGenerationRef.current === generation) {
-        setStatus("websocket error");
+
+    const connect = () => {
+      if (disposed || socketGenerationRef.current !== generation) return;
+      let socket: WebSocket;
+      try {
+        socket = client.openEvents(chat.id, lastSeqRef.current, (event) => {
+          if (socketGenerationRef.current !== generation) return;
+          handleEvent(event);
+        });
+      } catch {
+        scheduleReconnect();
+        return;
       }
+      socketRef.current = socket;
+      socket.onopen = () => {
+        if (disposed || socketGenerationRef.current !== generation) return;
+        reconnectDelayMs = 250;
+        setStatus((s) => `${withoutConnectionState(s)} · live`);
+      };
+      socket.onerror = () => {
+        if (!disposed && socketGenerationRef.current === generation) {
+          setStatus((s) => `${withoutConnectionState(s)} · reconnecting`);
+        }
+      };
+      socket.onclose = () => {
+        if (socketRef.current === socket) socketRef.current = null;
+        scheduleReconnect();
+      };
     };
-    socketRef.current = socket;
+
+    connect();
     return () => {
-      socket.close();
-      if (socketRef.current === socket) socketRef.current = null;
+      disposed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      socketRef.current?.close();
+      socketRef.current = null;
       if (socketGenerationRef.current === generation) {
         socketGenerationRef.current += 1;
       }
@@ -264,6 +308,10 @@ export default function App() {
       refreshAgentRunsRef.current?.();
       assistantBufRef.current = "";
       setBusy(true);
+      setActiveTurnId(event.turn_id);
+      setCancelPendingTurnId(null);
+      setCancelError(null);
+      cancelRequestTurnRef.current = null;
       setMessages((prev) => [
         ...prev,
         { id: nextId(), role: "assistant", text: "" },
@@ -337,13 +385,13 @@ export default function App() {
     }
 
     if (event.type === "turn_completed") {
-      setBusy(false);
+      resolveActiveTurn();
       refreshAgentRunsRef.current?.();
       return;
     }
 
     if (event.type === "turn_cancelled") {
-      setBusy(false);
+      resolveActiveTurn();
       refreshAgentRunsRef.current?.();
       setMessages((prev) => [
         ...prev,
@@ -353,7 +401,7 @@ export default function App() {
     }
 
     if (event.type === "turn_failed") {
-      setBusy(false);
+      resolveActiveTurn();
       refreshAgentRunsRef.current?.();
       setMessages((prev) => [
         ...prev,
@@ -364,6 +412,14 @@ export default function App() {
         },
       ]);
     }
+  }
+
+  function resolveActiveTurn() {
+    setBusy(false);
+    setActiveTurnId(null);
+    setCancelPendingTurnId(null);
+    setCancelError(null);
+    cancelRequestTurnRef.current = null;
   }
 
   async function refreshCatalog() {
@@ -383,15 +439,44 @@ export default function App() {
     setDraft("");
     setMessages((prev) => [...prev, { id: nextId(), role: "user", text: content }]);
     setBusy(true);
+    setActiveTurnId(turnId);
+    setCancelPendingTurnId(null);
+    setCancelError(null);
     try {
       await client.postMessage(chat.id, turnId, content);
       refreshAgentRunsRef.current?.();
     } catch (err) {
-      setBusy(false);
+      resolveActiveTurn();
       setMessages((prev) => [
         ...prev,
         { id: nextId(), role: "error", text: String(err) },
       ]);
+    }
+  }
+
+  async function onCancelActiveTurn() {
+    const turnId = activeTurnId;
+    if (
+      !client ||
+      !chat ||
+      !busy ||
+      !turnId ||
+      cancelRequestTurnRef.current === turnId
+    ) {
+      return;
+    }
+
+    cancelRequestTurnRef.current = turnId;
+    setCancelPendingTurnId(turnId);
+    setCancelError(null);
+    try {
+      await client.cancel(chat.id, turnId);
+    } catch (err) {
+      if (cancelRequestTurnRef.current === turnId) {
+        cancelRequestTurnRef.current = null;
+        setCancelPendingTurnId(null);
+        setCancelError(String(err));
+      }
     }
   }
 
@@ -411,6 +496,10 @@ export default function App() {
       setFolderAccessRequests([]);
       setFolderAccessErrors({});
       setDraft("");
+      setActiveTurnId(null);
+      setCancelPendingTurnId(null);
+      setCancelError(null);
+      cancelRequestTurnRef.current = null;
       setChat(created);
       setStatus(`chat ${created.id.slice(0, 8)}…`);
     } catch (err) {
@@ -741,6 +830,25 @@ export default function App() {
                 }
               }}
             />
+            {busy && activeTurnId && (
+              <div className="composer-turn-control" aria-live="polite">
+                <button
+                  type="button"
+                  className="btn btn-stop"
+                  disabled={cancelPendingTurnId === activeTurnId}
+                  onClick={() => void onCancelActiveTurn()}
+                >
+                  {cancelPendingTurnId === activeTurnId
+                    ? "Stopping…"
+                    : "Stop"}
+                </button>
+                {cancelError && (
+                  <span className="composer-turn-error" role="status">
+                    Couldn’t stop turn: {cancelError}
+                  </span>
+                )}
+              </div>
+            )}
             <button
               type="submit"
               className="btn btn-primary"
@@ -762,6 +870,10 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+function withoutConnectionState(status: string): string {
+  return status.replace(/ · (?:live|reconnecting)$/, "");
 }
 
 function AgentRunStatusSurface({
