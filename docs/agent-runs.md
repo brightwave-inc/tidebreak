@@ -46,7 +46,7 @@ differ:
 | --- | --- |
 | Responds directly in the chat | Works on one delegated task |
 | Final assistant text completes a turn | An explicit result submission completes the run |
-| Uses conversation-facing tools | Uses sandbox, project, and workspace tools |
+| Uses conversation-facing tools | Starts with no tools or shared conversation context |
 | Usually short-lived work | May park and resume over a longer period |
 | Streams answer content | Publishes bounded progress and a final result |
 
@@ -107,14 +107,11 @@ notification may reduce latency, but it is never the source of truth.
 
 ## Sandbox and host-access boundary
 
-A background agent receives private scratch space. Access to a project or host
-folder is capability-based and mediated by the host broker described in
-[Host access and connected folders](host-access.md). The model sees opaque root
-identities and root-relative paths, never unrestricted absolute host paths.
-
-An agent may request additional access, but only the trusted native host can
-show the picker and register the user's selection. The sandbox parks while that
-request is unresolved and resumes from its durable checkpoint afterward.
+A background agent has private runtime scratch, but the initial executor has no
+tools and cannot access that scratch, projects, host folders, the network, or
+the parent conversation. Broker-mediated folder access is a future capability;
+when introduced it must use the consent and durable-receipt protocol described
+in [Host access and connected folders](host-access.md), never absolute paths.
 
 The sandbox boundary should remain useful outside the desktop product. A local
 process sandbox is the first execution adapter; self-hosted and managed profiles
@@ -158,14 +155,17 @@ the exact lease segment that submitted it. The receipt, `completed` state, and
 one parent inbox entry commit together, so an ambiguous worker retry can recover
 its original result but cannot overwrite or double-deliver it. Each inbox entry
 then advances through its own fenced continuation state machine:
-`pending -> claimed -> consumed`. A parent continuation claims one exact child
+`pending -> claimed -> consumed` (or `cancelled` when its parked parent is
+cancelled). A parent continuation claims one exact child
 result only after the matching foreground checkpoint has committed, with a
 database-clock lease, and only that live lease can consume it. A result that
 arrives first remains pending; it is never leased merely because a process saw
 it before the parent reached its durable boundary.
 An expired claim can be reclaimed; a consumed entry retains the exact consuming
 lease as an immutable receipt, so an ambiguous consume retry recovers the same
-boundary without processing the child result twice. A foreground worker can
+boundary without processing the child result twice. Consumption also persists
+the exact terminal child text as a deterministic system transcript message, so
+the resumed model request sees it after a restart. A foreground worker can
 checkpoint its exact turn against a known child, releasing its turn lease and
 preserving model progress. Consumption then closes that checkpoint and moves
 the turn to `resuming` in the same transaction. `resuming` is the durable wake
@@ -176,8 +176,11 @@ immediately; a running worker first enters `cancelling` and must acknowledge its
 exact live lease. That acknowledgement writes its own immutable receipt, so only
 the worker that actually committed terminal cancellation can recover an
 ambiguous retry. An expired running lease is cancelled immediately on request
-rather than reclaimed. Parent inbox delivery is intentionally the next
-transition, not a process-local notification.
+rather than reclaimed. Cancelling a parked parent fences its owned sandbox
+child in the same durable transition: queued work is cancelled, running work
+is asked to acknowledge cancellation, and a delivered inbox receipt is retired.
+Parent inbox delivery is intentionally the next transition, not a process-local
+notification.
 
 ## Observing execution
 

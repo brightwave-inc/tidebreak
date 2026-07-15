@@ -630,8 +630,8 @@ leases and result delivery, and fail-closed provider routing.
 
 The main next steps are:
 
-- connect the durable agent-run hierarchy, depth-one sandbox scheduler, and
-  parent inbox to the shared execution loop;
+- extend the connected durable agent-run hierarchy with carefully scoped
+  sandbox-safe capabilities and UI status surfaces;
 - unify client execution, approvals, folder consent, user questions, resource
   waits, and child-agent waits as durable continuations that release workers;
 - persist model/tool step boundaries and side-effect receipts so sandbox and

@@ -11,11 +11,12 @@ use futures::stream::{self, BoxStream, StreamExt};
 use openwave_core::{
     AgentErrorInfo, AgentEvent, AgentRunInboxStatus, AgentRunStatus, ApprovalClass,
     BeginRootAttachmentChange, BlobStore, CallId, Chat, ChatId, ChatRequest, ChatRootAttachment,
-    ClientToolCallRequest, HostRootId, Message, ModelProvider, ParkTurnForClientCallOutcome,
-    Project, ProjectId, ProviderEvent, ProviderId, RootAttachmentChangeAction,
-    RootAttachmentChangeId, RootAttachmentOrigin, SecretProvider, SequencedEvent, StopReason, Tool,
-    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput,
-    ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
+    ClientToolCallRequest, ContentBlock, HostRootId, Message, ModelProvider,
+    ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent, ProviderId, Role,
+    RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentOrigin, SecretProvider,
+    SequencedEvent, StopReason, Tool, ToolCallExecution, ToolCallRecord, ToolCallResolution,
+    ToolCallStatus, ToolCtx, ToolOutput, ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus,
+    TurnSteerId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -6385,6 +6386,18 @@ async fn foreground_sandbox_spawn_parks_executes_delivers_and_resumes() {
     assert!(
         requests[1].tools.is_empty(),
         "sandbox receives no tool surface"
+    );
+    assert!(
+        requests[2].messages.iter().any(|message| {
+            message.role == Role::System
+                && message.content
+                    == vec![ContentBlock::Text {
+                        text:
+                            "Sandbox agent completed. Its exact final result follows:\nchild result"
+                                .into(),
+                    }]
+        }),
+        "the resumed foreground request must receive the durable child result"
     );
     assert!(requests[2]
         .tools

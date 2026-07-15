@@ -267,6 +267,22 @@ id_type!(
     /// Identifies a persisted message within a chat.
     MessageId
 );
+
+impl MessageId {
+    /// Namespace for the transcript message carrying one exact sandbox child
+    /// result into its foreground parent.
+    const SANDBOX_RESULT_NAMESPACE: Uuid =
+        Uuid::from_u128(0xa6e4_7b83_9c19_470f_9b2d_b8d4_0f4d_55ac);
+
+    /// Derive the one idempotent transcript identity for a sandbox child.
+    #[must_use]
+    pub fn sandbox_result_for_child(child_id: AgentRunId) -> Self {
+        Self(Uuid::new_v5(
+            &Self::SANDBOX_RESULT_NAMESPACE,
+            child_id.as_uuid().as_bytes(),
+        ))
+    }
+}
 id_type!(
     /// Identifies one turn: a single user input through to the final answer.
     TurnId

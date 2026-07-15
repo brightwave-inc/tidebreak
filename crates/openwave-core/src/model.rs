@@ -1213,6 +1213,8 @@ pub enum AgentRunInboxStatus {
     Claimed,
     /// One exact continuation lease durably consumed this child result.
     Consumed,
+    /// The parent turn was cancelled before this delivery could resume it.
+    Cancelled,
 }
 
 impl AgentRunInboxStatus {
@@ -1223,6 +1225,7 @@ impl AgentRunInboxStatus {
             Self::Pending => "pending",
             Self::Claimed => "claimed",
             Self::Consumed => "consumed",
+            Self::Cancelled => "cancelled",
         }
     }
 
@@ -1231,6 +1234,7 @@ impl AgentRunInboxStatus {
             "pending" => Some(Self::Pending),
             "claimed" => Some(Self::Claimed),
             "consumed" => Some(Self::Consumed),
+            "cancelled" => Some(Self::Cancelled),
             _ => None,
         }
     }

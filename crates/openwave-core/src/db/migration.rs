@@ -600,7 +600,12 @@ async fn create_agent_run_inbox_table(manager: &SchemaManager<'_>) -> Result<(),
                     Expr::col(AgentRunInbox::ResultClaimCount)
                         .gte(Expr::col(AgentRunInbox::ResultAttemptCount)),
                 )
-                .check(Expr::col(AgentRunInbox::Status).is_in(["pending", "claimed", "consumed"]))
+                .check(Expr::col(AgentRunInbox::Status).is_in([
+                    "pending",
+                    "claimed",
+                    "consumed",
+                    "cancelled",
+                ]))
                 .check(Expr::col(AgentRunInbox::ClaimCount).gte(0))
                 .check(
                     Expr::col(AgentRunInbox::Status)
@@ -623,7 +628,13 @@ async fn create_agent_run_inbox_table(manager: &SchemaManager<'_>) -> Result<(),
                             .and(Expr::col(AgentRunInbox::LeaseToken).is_null())
                             .and(Expr::col(AgentRunInbox::LeaseExpiresAt).is_null())
                             .and(Expr::col(AgentRunInbox::ConsumedLeaseToken).is_not_null())
-                            .and(Expr::col(AgentRunInbox::ConsumedAt).is_not_null())),
+                            .and(Expr::col(AgentRunInbox::ConsumedAt).is_not_null()))
+                        .or(Expr::col(AgentRunInbox::Status)
+                            .eq("cancelled")
+                            .and(Expr::col(AgentRunInbox::LeaseToken).is_null())
+                            .and(Expr::col(AgentRunInbox::LeaseExpiresAt).is_null())
+                            .and(Expr::col(AgentRunInbox::ConsumedLeaseToken).is_null())
+                            .and(Expr::col(AgentRunInbox::ConsumedAt).is_null())),
                 )
                 .to_owned(),
         )

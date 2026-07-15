@@ -5,10 +5,10 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{AgentRunId, CallId, ChatId, TurnId};
+use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::model::{
     AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunResult,
-    AgentRunStatus,
+    AgentRunStatus, TurnRun,
 };
 use crate::storage::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, ClaimAgentRunInboxOutcome,
@@ -20,6 +20,9 @@ use crate::storage::{
 use super::super::{entities, store_err, DbStore};
 use super::{
     acquire_chat_write_lock, acquire_turn_write_lock,
+    conversation::{
+        next_message_seq_on, reserve_message_identity_on, MESSAGE_IDENTITY_OWNER_MESSAGE,
+    },
     turn::{
         canonical_db_timestamp, park_turn_for_agent_run_inbox_on,
         validate_agent_run_inbox_park_request,
@@ -821,6 +824,146 @@ pub(in crate::db) async fn request_agent_run_cancellation(
     }))
 }
 
+/// Fence-cascade a cancelled foreground checkpoint to its owned sandbox child.
+///
+/// This runs under the parent turn's chat/turn transaction.  It deliberately
+/// uses the child row's exact lifecycle fields as a CAS rather than taking the
+/// global sandbox scheduler lock: a concurrent claim either loses its queued
+/// predicate or becomes `cancelling`, and can never produce a second result.
+pub(in crate::db) async fn cancel_sandbox_child_for_parked_turn_on<C>(
+    conn: &C,
+    parent_run_id: AgentRunId,
+    child_run_id: AgentRunId,
+    chat_id: ChatId,
+    now: chrono::DateTime<Utc>,
+) -> Result<bool>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let Some(child) = find_by_id_on(conn, child_run_id).await? else {
+        return Err(AgentError::Store(format!(
+            "waiting turn references missing sandbox child {child_run_id}"
+        )));
+    };
+    if child.chat_id != chat_id.0
+        || child.parent_id != Some(parent_run_id.0)
+        || child.execution != AgentRunExecution::Sandbox.as_str()
+        || child.depth != 1
+    {
+        return Err(AgentError::Store(format!(
+            "waiting turn child {child_run_id} is not owned by its foreground parent"
+        )));
+    }
+    let status = agent_run_status_from_db(&child.status)?;
+    match status {
+        AgentRunStatus::Cancelled | AgentRunStatus::Cancelling => return Ok(true),
+        AgentRunStatus::Completed | AgentRunStatus::Failed => {
+            let retired = entities::agent_run_inbox::Entity::update_many()
+                .col_expr(
+                    entities::agent_run_inbox::Column::Status,
+                    sea_orm::sea_query::Expr::value(AgentRunInboxStatus::Cancelled.as_str()),
+                )
+                .col_expr(
+                    entities::agent_run_inbox::Column::LeaseToken,
+                    sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+                )
+                .col_expr(
+                    entities::agent_run_inbox::Column::LeaseExpiresAt,
+                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+                )
+                .filter(entities::agent_run_inbox::Column::ChildRunId.eq(child_run_id.0))
+                .filter(entities::agent_run_inbox::Column::ParentRunId.eq(parent_run_id.0))
+                .filter(
+                    Condition::any()
+                        .add(
+                            entities::agent_run_inbox::Column::Status
+                                .eq(AgentRunInboxStatus::Pending.as_str()),
+                        )
+                        .add(
+                            entities::agent_run_inbox::Column::Status
+                                .eq(AgentRunInboxStatus::Claimed.as_str()),
+                        ),
+                )
+                .exec(conn)
+                .await
+                .map_err(store_err)?;
+            if retired.rows_affected == 1 {
+                return Ok(true);
+            }
+            let inbox = find_agent_run_inbox_on(conn, parent_run_id, child_run_id).await?;
+            return match inbox
+                .as_ref()
+                .and_then(|entry| AgentRunInboxStatus::parse(&entry.status))
+            {
+                Some(AgentRunInboxStatus::Cancelled) => Ok(true),
+                Some(AgentRunInboxStatus::Consumed) => Err(AgentError::Store(format!(
+                    "waiting turn has already-consumed child delivery {child_run_id}"
+                ))),
+                Some(_) => Ok(false),
+                None => Err(AgentError::Store(format!(
+                    "terminal sandbox child {child_run_id} is missing its inbox delivery"
+                ))),
+            };
+        }
+        AgentRunStatus::Active => {
+            return Err(AgentError::Store(format!(
+                "waiting turn child {child_run_id} unexpectedly has foreground status"
+            )));
+        }
+        AgentRunStatus::Queued
+        | AgentRunStatus::Waiting
+        | AgentRunStatus::RetryWait
+        | AgentRunStatus::Running => {}
+    }
+    if child.updated_at > now {
+        return Ok(false);
+    }
+    let immediate = status != AgentRunStatus::Running
+        || !child.lease_expires_at.is_some_and(|expiry| expiry > now)
+        || !child.deadline_at.is_some_and(|deadline| deadline > now);
+    let next = if immediate {
+        AgentRunStatus::Cancelled
+    } else {
+        AgentRunStatus::Cancelling
+    };
+    let mut update = entities::agent_run::Entity::update_many()
+        .col_expr(
+            entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(next.as_str()),
+        )
+        .col_expr(
+            entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::agent_run::Column::Id.eq(child_run_id.0))
+        .filter(entities::agent_run::Column::Status.eq(status.as_str()))
+        .filter(entities::agent_run::Column::AttemptCount.eq(child.attempt_count))
+        .filter(entities::agent_run::Column::ClaimCount.eq(child.claim_count))
+        .filter(entities::agent_run::Column::UpdatedAt.eq(child.updated_at))
+        .filter(entities::agent_run::Column::UpdatedAt.lte(now));
+    if immediate {
+        update = update
+            .col_expr(
+                entities::agent_run::Column::LeaseToken,
+                sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+            )
+            .col_expr(
+                entities::agent_run::Column::LeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .col_expr(
+                entities::agent_run::Column::FinishedAt,
+                sea_orm::sea_query::Expr::value(Some(now)),
+            );
+    } else {
+        update = update
+            .filter(entities::agent_run::Column::LeaseToken.eq(child.lease_token))
+            .filter(entities::agent_run::Column::LeaseExpiresAt.eq(child.lease_expires_at))
+            .filter(entities::agent_run::Column::LeaseExpiresAt.gt(now));
+    }
+    Ok(update.exec(conn).await.map_err(store_err)?.rows_affected == 1)
+}
+
 pub(in crate::db) async fn finish_agent_run_cancellation(
     store: &DbStore,
     id: AgentRunId,
@@ -1297,6 +1440,145 @@ pub(in crate::db) async fn list_agent_run_inbox_candidates(
         return Ok(Vec::new());
     }
     let now = database_now(&store.conn).await?;
+    // Do not let an old result for a completed or cancelled parent consume the
+    // bounded recovery scan.  The worker still rechecks this relationship when
+    // claiming, but filtering it here gives a live parked turn a fair chance to
+    // run even if historical inbox receipts remain in the database.
+    let waiting_checkpoint = sea_orm::sea_query::Query::select()
+        .expr(sea_orm::sea_query::Expr::value(1))
+        .from(entities::turn_agent_run_wait::Entity)
+        .inner_join(
+            entities::turn_run::Entity,
+            sea_orm::sea_query::Expr::col((
+                entities::turn_agent_run_wait::Entity,
+                entities::turn_agent_run_wait::Column::TurnId,
+            ))
+            .equals((entities::turn_run::Entity, entities::turn_run::Column::Id)),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_agent_run_wait::Entity,
+                entities::turn_agent_run_wait::Column::Status,
+            ))
+            .eq(crate::model::TurnAgentRunWaitStatus::Waiting.as_str()),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_agent_run_wait::Entity,
+                entities::turn_agent_run_wait::Column::ClosedAt,
+            ))
+            .is_null(),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_run::Entity,
+                entities::turn_run::Column::Status,
+            ))
+            .eq(crate::model::TurnRunStatus::WaitingForAgentRun.as_str()),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_agent_run_wait::Entity,
+                entities::turn_agent_run_wait::Column::ChildRunId,
+            ))
+            .equals((
+                entities::agent_run_inbox::Entity,
+                entities::agent_run_inbox::Column::ChildRunId,
+            )),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_agent_run_wait::Entity,
+                entities::turn_agent_run_wait::Column::ParentRunId,
+            ))
+            .equals((
+                entities::agent_run_inbox::Entity,
+                entities::agent_run_inbox::Column::ParentRunId,
+            )),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_agent_run_wait::Entity,
+                entities::turn_agent_run_wait::Column::ChatId,
+            ))
+            .equals((
+                entities::agent_run_inbox::Entity,
+                entities::agent_run_inbox::Column::ChatId,
+            )),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_run::Entity,
+                entities::turn_run::Column::ChatId,
+            ))
+            .equals((
+                entities::turn_agent_run_wait::Entity,
+                entities::turn_agent_run_wait::Column::ChatId,
+            )),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_run::Entity,
+                entities::turn_run::Column::AgentRunId,
+            ))
+            .equals((
+                entities::turn_agent_run_wait::Entity,
+                entities::turn_agent_run_wait::Column::ParentRunId,
+            )),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_run::Entity,
+                entities::turn_run::Column::AttemptCount,
+            ))
+            .equals((
+                entities::turn_agent_run_wait::Entity,
+                entities::turn_agent_run_wait::Column::AttemptCount,
+            )),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_run::Entity,
+                entities::turn_run::Column::ClaimCount,
+            ))
+            .equals((
+                entities::turn_agent_run_wait::Entity,
+                entities::turn_agent_run_wait::Column::ClaimCount,
+            )),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_run::Entity,
+                entities::turn_run::Column::LeaseToken,
+            ))
+            .is_null(),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::turn_run::Entity,
+                entities::turn_run::Column::LeaseExpiresAt,
+            ))
+            .is_null(),
+        )
+        .to_owned();
+    let active_parents = sea_orm::sea_query::Query::select()
+        .column((entities::agent_run::Entity, entities::agent_run::Column::Id))
+        .from(entities::agent_run::Entity)
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::agent_run::Entity,
+                entities::agent_run::Column::Status,
+            ))
+            .eq(AgentRunStatus::Active.as_str()),
+        )
+        .and_where(
+            sea_orm::sea_query::Expr::col((
+                entities::agent_run::Entity,
+                entities::agent_run::Column::Execution,
+            ))
+            .eq(AgentRunExecution::Foreground.as_str()),
+        )
+        .to_owned();
     let entries = entities::agent_run_inbox::Entity::find()
         .filter(
             Condition::any()
@@ -1313,6 +1595,8 @@ pub(in crate::db) async fn list_agent_run_inbox_candidates(
                         .add(entities::agent_run_inbox::Column::LeaseExpiresAt.lte(now)),
                 ),
         )
+        .filter(sea_orm::sea_query::Expr::exists(waiting_checkpoint))
+        .filter(entities::agent_run_inbox::Column::ParentRunId.in_subquery(active_parents))
         .order_by_asc(entities::agent_run_inbox::Column::DeliveredAt)
         .order_by_asc(entities::agent_run_inbox::Column::ChildRunId)
         .limit(limit)
@@ -1472,7 +1756,9 @@ pub(in crate::db) async fn claim_agent_run_inbox_entry(
             transaction.commit().await.map_err(store_err)?;
             Ok(Some(ClaimAgentRunInboxOutcome::Claimed(claimed)))
         }
-        AgentRunInboxStatus::Claimed | AgentRunInboxStatus::Consumed => {
+        AgentRunInboxStatus::Claimed
+        | AgentRunInboxStatus::Consumed
+        | AgentRunInboxStatus::Cancelled => {
             transaction.commit().await.map_err(store_err)?;
             Ok(None)
         }
@@ -1546,6 +1832,9 @@ pub(in crate::db) async fn consume_agent_run_inbox_entry_and_resume_turn(
         } else {
             None
         };
+        if let Some(turn) = turn.as_ref() {
+            ensure_sandbox_result_message_on(&transaction, &entry, turn, now, false).await?;
+        }
         transaction.commit().await.map_err(store_err)?;
         return Ok(
             turn.map(|turn| ConsumeAgentRunInboxAndResumeTurnOutcome::Existing {
@@ -1574,6 +1863,7 @@ pub(in crate::db) async fn consume_agent_run_inbox_entry_and_resume_turn(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
+    ensure_sandbox_result_message_on(&transaction, &entry, &turn, now, true).await?;
     let updated = entities::agent_run_inbox::Entity::update_many()
         .col_expr(
             entities::agent_run_inbox::Column::Status,
@@ -2059,6 +2349,12 @@ fn agent_run_inbox_from_models(
                     .is_some_and(|token| !token.is_nil())
                 && model.consumed_at.is_some()
         }
+        AgentRunInboxStatus::Cancelled => {
+            model.lease_token.is_none()
+                && model.lease_expires_at.is_none()
+                && model.consumed_lease_token.is_none()
+                && model.consumed_at.is_none()
+        }
     };
     if model.parent_depth != 0
         || model.result_lease_token.is_nil()
@@ -2154,6 +2450,105 @@ where
             && parent.execution == AgentRunExecution::Foreground.as_str()
             && parent.status == AgentRunStatus::Active.as_str()
     }))
+}
+
+/// Persist the exact terminal child result into the foreground transcript at
+/// the same durable boundary that consumes its inbox receipt.  A deterministic
+/// message id makes an ambiguous commit retry safe without relying on worker
+/// memory: the next foreground provider request rebuilds this message from the
+/// ordinary transcript after any restart.
+async fn ensure_sandbox_result_message_on<C>(
+    conn: &C,
+    entry: &AgentRunInboxEntry,
+    turn: &TurnRun,
+    now: chrono::DateTime<Utc>,
+    insert_if_missing: bool,
+) -> Result<()>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let child = find_by_id_on(conn, entry.child_run_id)
+        .await?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "agent-run inbox child {} disappeared before transcript delivery",
+                entry.child_run_id
+            ))
+        })?;
+    if child.chat_id != entry.chat_id.0
+        || child.parent_id != Some(entry.parent_run_id.0)
+        || child.execution != AgentRunExecution::Sandbox.as_str()
+        || child.depth != 1
+    {
+        return Err(AgentError::Store(format!(
+            "agent-run inbox child {} does not match its durable parent delivery",
+            entry.child_run_id
+        )));
+    }
+    let disposition = match agent_run_status_from_db(&child.status)? {
+        AgentRunStatus::Completed => "completed",
+        AgentRunStatus::Failed => "failed",
+        status => {
+            return Err(AgentError::Store(format!(
+                "agent-run inbox child {} is not terminal ({})",
+                entry.child_run_id,
+                status.as_str()
+            )));
+        }
+    };
+    let message_id = MessageId::sandbox_result_for_child(entry.child_run_id);
+    let content = format!(
+        "Sandbox agent {disposition}. Its exact final result follows:\n{}",
+        entry.result.text
+    );
+    let existing = entities::message::Entity::find_by_id(message_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    if let Some(existing) = existing {
+        if existing.chat_id == entry.chat_id.0
+            && existing.turn_id == turn.id.0
+            && existing.role == "system"
+            && existing.content == content
+        {
+            return Ok(());
+        }
+        return Err(AgentError::Store(format!(
+            "sandbox result message identity {message_id} is already bound to different content"
+        )));
+    }
+    if !insert_if_missing {
+        return Err(AgentError::Store(format!(
+            "consumed agent-run inbox entry for child {} is missing its transcript result",
+            entry.child_run_id
+        )));
+    }
+    if !reserve_message_identity_on(
+        conn,
+        message_id,
+        entry.chat_id,
+        turn.id,
+        MESSAGE_IDENTITY_OWNER_MESSAGE,
+    )
+    .await?
+    {
+        return Err(AgentError::Store(format!(
+            "sandbox result message identity {message_id} was reserved without a message"
+        )));
+    }
+    entities::message::ActiveModel {
+        id: Set(message_id.0),
+        chat_id: Set(entry.chat_id.0),
+        turn_id: Set(turn.id.0),
+        seq: Set(next_message_seq_on(conn, entry.chat_id).await?),
+        role: Set("system".to_owned()),
+        content: Set(content),
+        created_at: Set(now),
+    }
+    .insert(conn)
+    .await
+    .map_err(store_err)?;
+    Ok(())
 }
 
 /// Confirm the parent has durably yielded the foreground turn that this exact
