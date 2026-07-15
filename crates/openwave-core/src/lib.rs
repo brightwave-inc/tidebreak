@@ -54,19 +54,20 @@ pub use db::DbStore;
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{
-    CallId, ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, StepId, TurnId, TurnSteerId,
+    CallId, ChatId, DocumentId, DocumentJobId, HostRootId, HostRootIdError, MessageId, ProjectId,
+    StepId, TurnId, TurnSteerId,
 };
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
 pub use model::{
     validate_source_regions, BlobRetirement, BlobRetirementStatus, ByteSpan, Chat,
-    ClientToolCallRequest, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus,
-    DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus, DocumentRecord,
-    DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
-    Message, Project, Role, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
-    ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnClientWait,
-    TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer,
-    TurnSteerStatus,
+    ChatRootAttachment, ClientToolCallRequest, DocumentGeneration, DocumentJob, DocumentJobKind,
+    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
+    DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
+    DocumentUpsert, Message, Project, Role, RootAttachmentOrigin, SourceLocation, SourceRegion,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress,
+    TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun,
+    TurnRunStatus, TurnSteer, TurnSteerStatus, MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
@@ -82,6 +83,6 @@ pub use storage::{
     JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
     RequestTurnCancellationOutcome, ResolveToolCallOutcome, SecretProvider, Store,
 };
-pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
+pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
 #[cfg(feature = "tools")]
 pub use tools::{ListDir, ReadFile, WriteFile};

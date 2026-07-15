@@ -1,12 +1,11 @@
 //! The persisted conversation model.
 //!
 //! Mirrors the conversation tables of `Store` schema v1. A
-//! [`Chat`] is a durable conversation that owns a workspace directory; a
+//! [`Chat`] is a durable conversation with an ordered, pathless host-root
+//! projection; a
 //! [`TurnRun`] is one durably scheduled agent turn, and a [`Message`] is one
 //! user input or assistant answer within it. Steps remain runtime concepts of
 //! the agent loop.
-
-use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -94,9 +93,44 @@ pub fn validate_source_regions(
     Ok(())
 }
 
-use crate::id::{CallId, ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, TurnId};
+use crate::id::{
+    CallId, ChatId, DocumentId, DocumentJobId, HostRootId, MessageId, ProjectId, TurnId,
+};
 
-/// An optional grouping of chats that share a workspace and (later) a document
+/// Maximum number of host roots projected onto one project or conversation.
+///
+/// The host broker separately bounds and authorizes its live registry. This
+/// product-side limit keeps API responses, turn snapshots, and future CAS
+/// replacements predictably small.
+pub const MAX_ROOT_ATTACHMENTS: usize = 32;
+
+/// Largest attachment revision represented exactly by every supported client.
+///
+/// JSON numbers become JavaScript `number` values in the desktop renderer, so
+/// revisions stay within the integer-safe range instead of silently losing CAS
+/// precision at the product boundary.
+pub const MAX_ATTACHMENT_REVISION: i64 = 9_007_199_254_740_991;
+
+/// Why a root appears in one conversation's exact ordered projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootAttachmentOrigin {
+    /// Snapshotted from project defaults when the conversation was created.
+    ProjectDefault,
+    /// Added specifically to this conversation by trusted native control.
+    Conversation,
+}
+
+/// One pathless root in a conversation's exact ordered projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatRootAttachment {
+    /// Opaque broker root identity. This value grants no authority by itself.
+    pub root_id: HostRootId,
+    /// Product-level provenance for ordering and future management UI.
+    pub origin: RootAttachmentOrigin,
+}
+
+/// An optional grouping of chats that share project context and a document
 /// corpus. A chat may belong to a project or stand alone — unlike some designs
 /// that make a project mandatory, OpenWave keeps loose, projectless chats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,8 +139,11 @@ pub struct Project {
     pub id: ProjectId,
     /// Human-facing title.
     pub title: Option<String>,
-    /// Absolute path to the project's workspace/corpus root.
-    pub workspace_dir: PathBuf,
+    /// CAS revision of the ordered root projection.
+    pub attachment_revision: i64,
+    /// Ordered opaque root defaults for conversations created in this project.
+    /// These ids are product state, never host authorization.
+    pub root_attachments: Vec<HostRootId>,
     /// When the project was created.
     pub created_at: DateTime<Utc>,
 }
@@ -594,7 +631,7 @@ pub enum Role {
     Tool,
 }
 
-/// A persistent conversation. Owns a workspace directory the agent operates in.
+/// A persistent conversation with an exact, ordered host-root projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chat {
     /// Stable identifier.
@@ -605,10 +642,99 @@ pub struct Chat {
     pub title: Option<String>,
     /// The model this chat runs against, or `None` to use the configured default.
     pub model: Option<String>,
-    /// Absolute path to this chat's workspace directory.
-    pub workspace_dir: PathBuf,
+    /// CAS revision of this conversation's exact root projection.
+    pub attachment_revision: i64,
+    /// Ordered opaque roots available for future broker-backed operations.
+    /// Live broker authorization remains mandatory and may revoke access at any
+    /// time, regardless of this projection.
+    pub root_attachments: Vec<ChatRootAttachment>,
     /// When the chat was created.
     pub created_at: DateTime<Utc>,
+}
+
+pub(crate) fn validate_project_root_projection(project: &Project) -> Result<(), &'static str> {
+    if !(0..=MAX_ATTACHMENT_REVISION).contains(&project.attachment_revision) {
+        return Err("project attachment revision is outside the supported range");
+    }
+    if project.root_attachments.len() > MAX_ROOT_ATTACHMENTS {
+        return Err("project root attachment count exceeds the supported limit");
+    }
+    if !project.root_attachments.is_empty() && project.attachment_revision == 0 {
+        return Err("a nonempty project root projection must have a positive revision");
+    }
+    let unique = project
+        .root_attachments
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    if unique.len() != project.root_attachments.len() {
+        return Err("project root attachments must be unique");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_chat_root_projection(chat: &Chat) -> Result<(), &'static str> {
+    if !(0..=MAX_ATTACHMENT_REVISION).contains(&chat.attachment_revision) {
+        return Err("chat attachment revision is outside the supported range");
+    }
+    if chat.root_attachments.len() > MAX_ROOT_ATTACHMENTS {
+        return Err("chat root attachment count exceeds the supported limit");
+    }
+    if !chat.root_attachments.is_empty() && chat.attachment_revision == 0 {
+        return Err("a nonempty chat root projection must have a positive revision");
+    }
+    let unique = chat
+        .root_attachments
+        .iter()
+        .map(|attachment| attachment.root_id)
+        .collect::<std::collections::HashSet<_>>();
+    if unique.len() != chat.root_attachments.len() {
+        return Err("chat root attachments must be unique");
+    }
+    if chat.project_id.is_none()
+        && chat
+            .root_attachments
+            .iter()
+            .any(|attachment| attachment.origin == RootAttachmentOrigin::ProjectDefault)
+    {
+        return Err("a standalone chat cannot contain project-default roots");
+    }
+    let mut conversation_root_seen = false;
+    for attachment in &chat.root_attachments {
+        match attachment.origin {
+            RootAttachmentOrigin::ProjectDefault if conversation_root_seen => {
+                return Err("project-default roots must precede conversation roots");
+            }
+            RootAttachmentOrigin::Conversation => conversation_root_seen = true,
+            RootAttachmentOrigin::ProjectDefault => {}
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_chat_root_projection_against_project(
+    chat: &Chat,
+    project_roots: &[HostRootId],
+) -> Result<(), &'static str> {
+    validate_chat_root_projection(chat)?;
+    if chat.project_id.is_none() && !project_roots.is_empty() {
+        return Err("a standalone chat cannot snapshot project roots");
+    }
+    if chat.root_attachments.len() < project_roots.len() {
+        return Err("chat is missing project root defaults");
+    }
+    for (expected, actual) in project_roots.iter().zip(&chat.root_attachments) {
+        if actual.root_id != *expected || actual.origin != RootAttachmentOrigin::ProjectDefault {
+            return Err("chat project root snapshot does not match current project defaults");
+        }
+    }
+    if chat.root_attachments[project_roots.len()..]
+        .iter()
+        .any(|attachment| attachment.origin != RootAttachmentOrigin::Conversation)
+    {
+        return Err("chat-specific roots must follow project defaults");
+    }
+    Ok(())
 }
 
 /// Durable execution state of one user turn.

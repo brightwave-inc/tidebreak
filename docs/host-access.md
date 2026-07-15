@@ -37,9 +37,14 @@ In practical terms:
   such as Documents or Downloads. The request can explain why and suggest where
   to open the picker, but only the folder the user actually selects is granted.
 
-The current `workspace_dir` fields on projects and chats do not express this
-model. They are temporary pre-alpha implementation details and will be replaced
-rather than preserved as a compatibility layer.
+Projects and chats now persist only ordered opaque root IDs plus an attachment
+revision. Project defaults are snapshotted into a new chat's exact attachment
+set; later project changes cannot silently widen that chat. These product rows
+are not grants: they contain no path, capability, consent, or display name, and
+host access still requires the broker's live attachment and authorization. The
+current native picker still updates broker state only; synchronizing those
+connections into this product projection is the next native CAS/reconciliation
+slice, before any tool treats the projection as usable context.
 
 ## The four layers
 
@@ -290,9 +295,11 @@ This will land in independently reviewable pieces:
    dispatch must begin inside a short post-heartbeat deadline. Recovery runs in
    the background with bounded backoff; it may query the broker receipt and
    publish a known result, but it never starts or replays registration.
-8. Replace project/chat `workspace_dir` with persisted host-access context
-   identity and connected-root APIs. This can update the pre-v1 baseline schema
-   directly.
+8. **Pathless baseline complete:** project/chat `workspace_dir` is gone. The
+   pre-v1 schema stores bounded ordered opaque root projections and revisions,
+   while runtime-only legacy scratch is derived under private server data and
+   never returned by the product API. Native-only attachment mutation and
+   reconciliation APIs remain a separate slice.
 9. Route built-in file tools through the operation interface and remove direct
    ambient host-directory opening from `ToolCtx`.
 10. Port bounded imports, writes, approvals, and confined command execution as

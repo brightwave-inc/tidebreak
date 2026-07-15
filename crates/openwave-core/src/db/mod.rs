@@ -6,8 +6,6 @@
 //! so nothing is stringly-encoded by hand. Enabled by the `sqlite` feature (which
 //! compiles in the SQLite driver).
 
-use std::path::PathBuf;
-
 use async_trait::async_trait;
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
@@ -22,16 +20,19 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
 use crate::id::MessageId;
-use crate::id::{CallId, ChatId, DocumentId, DocumentJobId, ProjectId, TurnId, TurnSteerId};
+use crate::id::{
+    CallId, ChatId, DocumentId, DocumentJobId, HostRootId, ProjectId, TurnId, TurnSteerId,
+};
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
-    BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
-    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
-    DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
-    DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, ToolCallResolution,
-    TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus,
-    TurnSteerStatus,
+    validate_project_root_projection, BlobRetirement, BlobRetirementStatus, Chat,
+    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
+    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
+    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
+    Project, SourceRegion, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress,
+    TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus,
+    MAX_ROOT_ATTACHMENTS,
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
@@ -99,35 +100,61 @@ impl DbStore {
 #[async_trait]
 impl Store for DbStore {
     async fn create_project(&self, project: &Project) -> Result<()> {
+        validate_project_attachments(project)?;
+        let transaction = self.conn.begin().await.map_err(store_err)?;
         entities::project::ActiveModel {
             id: Set(project.id.0),
             title: Set(project.title.clone()),
-            workspace_dir: Set(project.workspace_dir.to_string_lossy().into_owned()),
+            attachment_revision: Set(project.attachment_revision),
             created_at: Set(project.created_at),
         }
-        .insert(&self.conn)
+        .insert(&transaction)
         .await
         .map_err(store_err)?;
+        for (position, root_id) in project.root_attachments.iter().copied().enumerate() {
+            entities::project_root_attachment::ActiveModel {
+                project_id: Set(project.id.0),
+                root_id: Set(*root_id.as_uuid()),
+                position: Set(i32::try_from(position)
+                    .map_err(|_| AgentError::Store("project root position exceeds i32".into()))?),
+            }
+            .insert(&transaction)
+            .await
+            .map_err(store_err)?;
+        }
+        transaction.commit().await.map_err(store_err)?;
         Ok(())
     }
 
     async fn get_project(&self, id: ProjectId) -> Result<Option<Project>> {
-        Ok(entities::project::Entity::find_by_id(id.0)
-            .one(&self.conn)
+        let mut rows = entities::project::Entity::find_by_id(id.0)
+            .find_with_related(entities::project_root_attachment::Entity)
+            .order_by_asc(entities::project_root_attachment::Column::Position)
+            .all(&self.conn)
             .await
-            .map_err(store_err)?
-            .map(project_from_model))
+            .map_err(store_err)?;
+        rows.pop()
+            .map(|(model, roots)| project_from_models(model, roots))
+            .transpose()
     }
 
     async fn list_projects(&self) -> Result<Vec<Project>> {
-        Ok(entities::project::Entity::find()
-            .order_by_desc(entities::project::Column::CreatedAt)
+        let mut projects = entities::project::Entity::find()
+            .find_with_related(entities::project_root_attachment::Entity)
+            .order_by_asc(entities::project_root_attachment::Column::Position)
             .all(&self.conn)
             .await
             .map_err(store_err)?
             .into_iter()
-            .map(project_from_model)
-            .collect())
+            .map(|(model, roots)| project_from_models(model, roots))
+            .collect::<Result<Vec<_>>>()?;
+        projects.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.id.0.cmp(&left.id.0))
+        });
+        Ok(projects)
     }
 
     async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
@@ -1638,6 +1665,10 @@ impl Store for DbStore {
         ops::conversation::create_chat(self, chat).await
     }
 
+    async fn create_chat_with_project_defaults(&self, chat: &Chat) -> Result<Chat> {
+        ops::conversation::create_chat_with_project_defaults(self, chat).await
+    }
+
     async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
         ops::conversation::set_chat_model(self, id, model).await
     }
@@ -2705,13 +2736,50 @@ where
     Ok(())
 }
 
-fn project_from_model(model: entities::project::Model) -> Project {
-    Project {
+pub(in crate::db) fn project_from_models(
+    model: entities::project::Model,
+    roots: Vec<entities::project_root_attachment::Model>,
+) -> Result<Project> {
+    let root_attachments = hydrate_project_root_attachments(ProjectId(model.id), roots)?;
+    let project = Project {
         id: ProjectId(model.id),
         title: model.title,
-        workspace_dir: PathBuf::from(model.workspace_dir),
+        attachment_revision: model.attachment_revision,
+        root_attachments,
         created_at: model.created_at,
+    };
+    validate_project_attachments(&project)?;
+    Ok(project)
+}
+
+fn hydrate_project_root_attachments(
+    project_id: ProjectId,
+    rows: Vec<entities::project_root_attachment::Model>,
+) -> Result<Vec<HostRootId>> {
+    if rows.len() > MAX_ROOT_ATTACHMENTS {
+        return Err(AgentError::Store(format!(
+            "project {project_id} exceeds the root attachment limit"
+        )));
     }
+    rows.into_iter()
+        .enumerate()
+        .map(|(expected, row)| {
+            if usize::try_from(row.position).ok() != Some(expected) {
+                return Err(AgentError::Store(format!(
+                    "project {project_id} root positions are not contiguous"
+                )));
+            }
+            HostRootId::from_uuid(row.root_id).map_err(|error| {
+                AgentError::Store(format!(
+                    "project {project_id} has an invalid root id: {error}"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn validate_project_attachments(project: &Project) -> Result<()> {
+    validate_project_root_projection(project).map_err(|message| AgentError::Store(message.into()))
 }
 
 fn validate_document_source_regions(text: &str, regions: &[SourceRegion]) -> Result<()> {

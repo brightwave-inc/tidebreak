@@ -3,7 +3,6 @@
 interface ImportMetaEnv {
   readonly VITE_OPENWAVE_URL?: string;
   readonly VITE_OPENWAVE_TOKEN?: string;
-  readonly VITE_OPENWAVE_SCRATCH?: string;
 }
 
 interface ImportMeta {

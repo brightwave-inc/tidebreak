@@ -10,10 +10,11 @@ use futures::stream::{self, BoxStream, StreamExt};
 // Tests use the in-memory store; production wires LanceDB in `bind`.
 use openwave_core::{
     AgentErrorInfo, AgentEvent, ApprovalClass, BlobStore, CallId, Chat, ChatId, ChatRequest,
-    ClientToolCallRequest, Message, ModelProvider, ParkTurnForClientCallOutcome, Project,
-    ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent, StopReason, Tool,
-    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput,
-    ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
+    ChatRootAttachment, ClientToolCallRequest, HostRootId, Message, ModelProvider,
+    ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent, ProviderId,
+    RootAttachmentOrigin, SecretProvider, SequencedEvent, StopReason, Tool, ToolCallExecution,
+    ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput, ToolSpec,
+    TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -636,6 +637,9 @@ impl Store for PauseTerminalStore {
     }
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
         self.inner.create_chat(chat).await
+    }
+    async fn create_chat_with_project_defaults(&self, chat: &Chat) -> Result<Chat> {
+        self.inner.create_chat_with_project_defaults(chat).await
     }
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
         self.inner.get_chat(id).await
@@ -1280,6 +1284,7 @@ fn spawn_turn_worker_with_config(state: &AppState, config: turn_worker::TurnWork
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
         state.agent_config.clone(),
+        None,
         config,
     );
     tokio::spawn(worker.run());
@@ -1343,9 +1348,7 @@ async fn make_chat(router: &Router, bearer: &str) -> Chat {
                 .uri("/chats")
                 .header(header::AUTHORIZATION, bearer)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({"workspace_dir": "/tmp/ws"}).to_string(),
-                ))
+                .body(Body::from(serde_json::json!({}).to_string()))
                 .unwrap(),
         )
         .await
@@ -5137,9 +5140,7 @@ async fn create_then_get_and_list() {
                     .uri("/chats")
                     .header(header::AUTHORIZATION, &bearer)
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"workspace_dir": "/tmp/ws", "title": "hi"}).to_string(),
-                    ))
+                    .body(Body::from(serde_json::json!({"title": "hi"}).to_string()))
                     .unwrap(),
             )
             .await
@@ -5148,6 +5149,12 @@ async fn create_then_get_and_list() {
         json_body(response).await
     };
     assert_eq!(created.title.as_deref(), Some("hi"));
+    assert_eq!(created.attachment_revision, 0);
+    assert!(created.root_attachments.is_empty());
+    assert!(serde_json::to_value(&created)
+        .unwrap()
+        .get("workspace_dir")
+        .is_none());
 
     let fetched: Chat = {
         let response = router
@@ -5193,9 +5200,7 @@ async fn make_project(router: &Router, bearer: &str) -> Project {
                 .uri("/projects")
                 .header(header::AUTHORIZATION, bearer)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({"workspace_dir": "/tmp/proj", "title": "p"}).to_string(),
-                ))
+                .body(Body::from(serde_json::json!({"title": "p"}).to_string()))
                 .unwrap(),
         )
         .await
@@ -5210,6 +5215,12 @@ async fn project_create_get_and_list() {
     let bearer = format!("Bearer {token}");
     let created = make_project(&router, &bearer).await;
     assert_eq!(created.title.as_deref(), Some("p"));
+    assert_eq!(created.attachment_revision, 0);
+    assert!(created.root_attachments.is_empty());
+    assert!(serde_json::to_value(&created)
+        .unwrap()
+        .get("workspace_dir")
+        .is_none());
 
     let fetched: Project = {
         let response = router
@@ -5259,8 +5270,7 @@ async fn chat_can_be_filed_under_a_project() {
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"workspace_dir": "/tmp/ws", "project_id": project.id})
-                        .to_string(),
+                    serde_json::json!({"project_id": project.id}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -5269,6 +5279,53 @@ async fn chat_can_be_filed_under_a_project() {
     assert_eq!(response.status(), StatusCode::CREATED);
     let chat: Chat = json_body(response).await;
     assert_eq!(chat.project_id, Some(project.id));
+}
+
+#[tokio::test]
+async fn project_chat_snapshots_ordered_opaque_root_defaults() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let root_b = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let root_a = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let project = Project {
+        id: ProjectId::new(),
+        title: Some("pathless".into()),
+        attachment_revision: 3,
+        root_attachments: vec![root_b, root_a],
+        created_at: chrono::Utc::now(),
+    };
+    store.create_project(&project).await.unwrap();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"project_id": project.id}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let chat: Chat = json_body(response).await;
+    assert_eq!(chat.attachment_revision, 1);
+    assert_eq!(
+        chat.root_attachments,
+        vec![
+            ChatRootAttachment {
+                root_id: root_b,
+                origin: RootAttachmentOrigin::ProjectDefault,
+            },
+            ChatRootAttachment {
+                root_id: root_a,
+                origin: RootAttachmentOrigin::ProjectDefault,
+            },
+        ]
+    );
 }
 
 #[tokio::test]
@@ -5282,8 +5339,7 @@ async fn chat_referencing_an_unknown_project_is_rejected() {
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"workspace_dir": "/tmp/ws", "project_id": ProjectId::new()})
-                        .to_string(),
+                    serde_json::json!({"project_id": ProjectId::new()}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -5325,8 +5381,7 @@ async fn chat_created_with_a_model() {
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"workspace_dir": "/tmp/ws", "model": "claude-x"})
-                        .to_string(),
+                    serde_json::json!({"model": "claude-x"}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -5347,9 +5402,7 @@ async fn chat_created_with_empty_model_is_rejected() {
                 .uri("/chats")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({"workspace_dir": "/tmp/ws", "model": ""}).to_string(),
-                ))
+                .body(Body::from(serde_json::json!({"model": ""}).to_string()))
                 .unwrap(),
         )
         .await
@@ -5417,6 +5470,24 @@ async fn patch_chat_rejects_empty_model_and_unknown_chat() {
 
     let empty = patch_chat(&router, &bearer, chat.id, serde_json::json!({"model": ""})).await;
     assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+    let legacy_path = patch_chat(
+        &router,
+        &bearer,
+        chat.id,
+        serde_json::json!({"workspace_dir": "/tmp/legacy"}),
+    )
+    .await;
+    assert_eq!(legacy_path.status(), StatusCode::BAD_REQUEST);
+
+    let forged_roots = patch_chat(
+        &router,
+        &bearer,
+        chat.id,
+        serde_json::json!({"root_attachments": []}),
+    )
+    .await;
+    assert_eq!(forged_roots.status(), StatusCode::BAD_REQUEST);
 
     let missing = patch_chat(
         &router,
@@ -6047,7 +6118,7 @@ async fn configured_model_is_used_for_the_turn() {
 }
 
 #[tokio::test]
-async fn relative_workspace_dir_is_rejected() {
+async fn workspace_dir_is_not_an_accepted_product_field() {
     let (router, token, _store, _dir) = test_app().await;
     let response = router
         .oneshot(
@@ -6057,7 +6128,7 @@ async fn relative_workspace_dir_is_rejected() {
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"workspace_dir": "relative/dir"}).to_string(),
+                    serde_json::json!({"workspace_dir": "/tmp/legacy"}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -6121,7 +6192,8 @@ async fn worker_drains_a_turn_queued_before_startup() {
         project_id: None,
         title: None,
         model: None,
-        workspace_dir: std::path::PathBuf::from("/tmp/ws"),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
         created_at: chrono::Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -6521,6 +6593,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
         state.agent_config.clone(),
+        None,
         turn_worker::TurnWorkerConfig {
             lease: Duration::from_millis(600),
             heartbeat: Duration::from_millis(200),
@@ -6614,6 +6687,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
         state.agent_config.clone(),
+        None,
         turn_worker::TurnWorkerConfig {
             lease: Duration::from_millis(250),
             heartbeat: Duration::from_millis(50),
@@ -7369,7 +7443,7 @@ async fn malformed_requests_get_json_errors_not_plaintext() {
                 .method("POST")
                 .uri("/chats")
                 .header(header::AUTHORIZATION, &bearer)
-                .body(Body::from(r#"{"workspace_dir":"/tmp/ws"}"#))
+                .body(Body::from(r#"{}"#))
                 .unwrap(),
         )
         .await
@@ -7493,7 +7567,7 @@ async fn make_chat_http(client: &reqwest::Client, addr: SocketAddr, token: &str)
     client
         .post(format!("http://{addr}/chats"))
         .bearer_auth(token)
-        .json(&serde_json::json!({"workspace_dir": "/tmp/ws"}))
+        .json(&serde_json::json!({}))
         .send()
         .await
         .unwrap()

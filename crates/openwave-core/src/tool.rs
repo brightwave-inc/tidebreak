@@ -21,6 +21,36 @@ use serde_json::Value;
 use crate::error::Result;
 use crate::id::{ChatId, ProjectId};
 
+/// A pinned runtime-only directory capability for legacy private-scratch tools.
+///
+/// It carries no host path and grants access only to the already-open directory
+/// handle supplied by the embedding runtime.
+#[derive(Clone)]
+pub struct ToolScratch {
+    #[cfg(feature = "tools")]
+    workspace: Arc<Dir>,
+}
+
+impl std::fmt::Debug for ToolScratch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolScratch")
+            .field("available", &cfg!(feature = "tools"))
+            .finish_non_exhaustive()
+    }
+}
+
+impl ToolScratch {
+    /// Wrap an already-open exact directory capability.
+    #[cfg(feature = "tools")]
+    #[must_use]
+    pub fn from_dir(workspace: Dir) -> Self {
+        Self {
+            workspace: Arc::new(workspace),
+        }
+    }
+}
+
 /// The approval policy class a tool declares for itself.
 ///
 /// Policy maps class → auto-approve / ask / deny. In v1: `ReadOnly` and
@@ -105,9 +135,6 @@ pub struct ToolCtx {
     pub chat_id: ChatId,
     /// Project corpus inherited from the chat, or `None` for a loose chat.
     pub project_id: Option<ProjectId>,
-    /// Absolute path to the chat's workspace directory. Workspace-class
-    /// tools stay within it without prompting.
-    pub workspace_dir: PathBuf,
     #[cfg(feature = "tools")]
     workspace: WorkspaceAccess,
 }
@@ -125,30 +152,33 @@ impl std::fmt::Debug for ToolCtx {
             .debug_struct("ToolCtx")
             .field("chat_id", &self.chat_id)
             .field("project_id", &self.project_id)
-            .field("workspace_dir", &self.workspace_dir)
+            .field("private_scratch_available", &self.scratch_available())
             .finish_non_exhaustive()
     }
 }
 
 impl ToolCtx {
-    /// Build an execution context and pin the workspace to an open directory
-    /// capability. A missing workspace remains a model-facing tool error rather
-    /// than preventing unrelated tools from running.
-    pub fn new(chat_id: ChatId, project_id: Option<ProjectId>, workspace_dir: PathBuf) -> Self {
-        match Self::try_new(chat_id, project_id, workspace_dir.clone()) {
+    /// Build a legacy CLI/MCP context by opening an explicit workspace path.
+    ///
+    /// Product turns must use a pinned [`ToolScratch`] supplied by their runtime.
+    pub fn new_legacy_workspace(
+        chat_id: ChatId,
+        project_id: Option<ProjectId>,
+        workspace_dir: PathBuf,
+    ) -> Self {
+        match Self::try_new_legacy_workspace(chat_id, project_id, workspace_dir) {
             Ok(ctx) => ctx,
             Err(_error) => Self {
                 chat_id,
                 project_id,
-                workspace_dir,
                 #[cfg(feature = "tools")]
                 workspace: WorkspaceAccess::Unavailable(_error.to_string().into()),
             },
         }
     }
 
-    /// Build an execution context, failing if its workspace cannot be pinned.
-    pub fn try_new(
+    /// Build a legacy CLI/MCP context, failing if its path cannot be pinned.
+    pub fn try_new_legacy_workspace(
         chat_id: ChatId,
         project_id: Option<ProjectId>,
         workspace_dir: PathBuf,
@@ -158,10 +188,49 @@ impl ToolCtx {
         Ok(Self {
             chat_id,
             project_id,
-            workspace_dir,
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Open(Arc::new(workspace)),
         })
+    }
+
+    /// Build a product execution context from an exact pinned scratch handle.
+    #[must_use]
+    pub fn with_private_scratch(
+        chat_id: ChatId,
+        project_id: Option<ProjectId>,
+        scratch: ToolScratch,
+    ) -> Self {
+        Self {
+            chat_id,
+            project_id,
+            #[cfg(feature = "tools")]
+            workspace: WorkspaceAccess::Open(scratch.workspace),
+        }
+    }
+
+    /// Build a context with no direct filesystem scratch available.
+    ///
+    /// Non-filesystem tools remain usable; a legacy filesystem tool fails
+    /// closed instead of resolving an absent path against the process CWD.
+    #[must_use]
+    pub fn without_private_scratch(chat_id: ChatId, project_id: Option<ProjectId>) -> Self {
+        Self {
+            chat_id,
+            project_id,
+            #[cfg(feature = "tools")]
+            workspace: WorkspaceAccess::Unavailable("private scratch is unavailable".into()),
+        }
+    }
+
+    fn scratch_available(&self) -> bool {
+        #[cfg(feature = "tools")]
+        {
+            matches!(&self.workspace, WorkspaceAccess::Open(_))
+        }
+        #[cfg(not(feature = "tools"))]
+        {
+            false
+        }
     }
 
     #[cfg(feature = "tools")]
@@ -169,7 +238,7 @@ impl ToolCtx {
         match &self.workspace {
             WorkspaceAccess::Open(workspace) => Ok(Arc::clone(workspace)),
             WorkspaceAccess::Unavailable(error) => {
-                Err(format!("workspace directory unavailable: {error}"))
+                Err(format!("private scratch unavailable: {error}"))
             }
         }
     }

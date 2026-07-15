@@ -5887,6 +5887,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "axum",
+ "cap-std",
  "chrono",
  "futures",
  "openwave-core",

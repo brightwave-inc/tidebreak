@@ -155,7 +155,8 @@ tool-call records. It then loops for a bounded number of model steps:
 The built-in server registry currently contains:
 
 - `read_file` and `list_dir`, which are read-only;
-- `write_file`, which is workspace-confined and runs without a prompt;
+- `write_file`, which is confined to private per-chat scratch and runs without a
+  prompt;
 - `search`, which queries the indexed corpus and requires approval only when its
   embedder, store, or reranker can send data outside the machine;
 - `request_folder_access`, a client-owned consent proposal with a bounded
@@ -163,12 +164,13 @@ The built-in server registry currently contains:
   picker hint for Documents or Downloads. It has no server executor and grants
   nothing.
 
-Today these file tools still operate inside one directly opened workspace
-directory stored on the chat. That temporary tool path is not the intended
-product boundary. The desktop can now connect, list, and revoke multiple folders
+Today these file tools still operate inside a server-derived, pinned per-chat
+scratch capability. Its path is neither persisted on the chat nor returned by
+the product API. The desktop can connect, list, and revoke multiple folders
 through a native picker and capability-gated host-broker sidecar; it exposes only
-opaque root IDs and display names to the renderer. The next tool-routing slice
-will resolve file operations through those roots instead of the legacy workspace.
+opaque root IDs and display names to the renderer. The next native CAS slice will
+synchronize broker connections into the product's pathless root projection, and
+the following tool-routing slice will resolve operations through those roots.
 See [Host access and connected folders](host-access.md). The agent loop can now
 produce a durable client-wait checkpoint for the registered folder-request
 contract. The desktop discovers those pending requests from durable state and
@@ -389,7 +391,7 @@ result rather than applying the instruction twice.
 
 ## What happens when a document is added
 
-A project does not automatically crawl its workspace. Documents enter the
+A project does not automatically crawl its connected roots. Documents enter the
 system through an explicit HTTP upload. A source URI is identity and provenance;
 OpenWave does not fetch that URI itself.
 
@@ -525,8 +527,11 @@ loose chat on each launch and supports provider setup, model selection, basic
 chat streaming, approval prompts, and native connected-folder pick/list/revoke.
 OpenWave's operational scratch stays in private app storage; user-selected paths
 cross only the native host-to-broker control boundary, while the renderer sees
-opaque folder summaries. Built-in agent file tools still use the temporary
-private scratch path and are not yet routed through those connected roots. The
+opaque folder summaries. Projects and chats store only ordered opaque root IDs
+and attachment revisions—never host paths or grants. Built-in agent file tools
+still use a server-derived per-chat private scratch directory and are not yet
+routed through connected roots; that scratch path is neither persisted nor
+returned to the renderer. The
 UI does not yet provide a chat picker, history reconstruction, projects,
 document ingestion, document search, cancel, or steer controls, even though much
 of that backend API already exists.
@@ -620,10 +625,10 @@ cancellation, reconnectable event stream, and fail-closed provider routing.
 
 The main next steps are:
 
-- replace raw chat/project workspace paths with broker-mediated, per-context
-  connected roots while keeping OpenWave's private app data separate;
-- notify the desktop of durable pending folder requests and execute them through
-  the picker and broker;
+- synchronize native picker connections into the pathless project/conversation
+  root projection with exact CAS and broker reconciliation;
+- route built-in file tools through explicit broker roots while keeping private
+  per-chat scratch separate;
 - add resumable checkpoints and explicit idempotency policy around remaining
   server-side tool effects;
 - make approvals resumable rather than process-local;

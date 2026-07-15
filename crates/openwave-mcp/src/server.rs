@@ -317,7 +317,7 @@ mod tests {
     }
 
     fn server_with(tools: ToolRegistry) -> McpServer {
-        let ctx = ToolCtx::new(ChatId::new(), None, PathBuf::from("/tmp/ws"));
+        let ctx = ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("/tmp/ws"));
         McpServer::new(Arc::new(tools), ctx)
     }
 

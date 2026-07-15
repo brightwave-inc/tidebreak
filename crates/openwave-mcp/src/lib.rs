@@ -20,7 +20,7 @@
 //!
 //! # fn demo() -> std::io::Result<()> {
 //! let tools = Arc::new(ToolRegistry::new());
-//! let ctx = ToolCtx::try_new(ChatId::new(), None, ".".into())?;
+//! let ctx = ToolCtx::try_new_legacy_workspace(ChatId::new(), None, ".".into())?;
 //! let server = McpServer::new(tools, ctx);
 //! // then: `openwave_mcp::serve_stdio(server).await` inside an async runtime.
 //! # let _ = server;

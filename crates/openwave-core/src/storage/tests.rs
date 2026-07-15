@@ -6,7 +6,9 @@ use futures::executor::block_on;
 
 use super::*;
 use crate::model::{
-    DocumentJobKind, DocumentJobStatus, DocumentProcessingStatus, ToolCallExecution, ToolCallStatus,
+    validate_chat_root_projection, validate_chat_root_projection_against_project,
+    validate_project_root_projection, ChatRootAttachment, DocumentJobKind, DocumentJobStatus,
+    DocumentProcessingStatus, RootAttachmentOrigin, ToolCallExecution, ToolCallStatus,
 };
 
 /// Minimal in-memory `Store` — proves the trait is object-safe and usable
@@ -150,10 +152,13 @@ fn reset_mem_document_job(
 #[async_trait]
 impl Store for MemStore {
     async fn create_project(&self, project: &Project) -> Result<()> {
-        self.projects
-            .lock()
-            .unwrap()
-            .insert(project.id, project.clone());
+        validate_project_root_projection(project)
+            .map_err(|message| AgentError::Store(message.into()))?;
+        let mut projects = self.projects.lock().unwrap();
+        if projects.contains_key(&project.id) {
+            return Err(AgentError::Store("project already exists".into()));
+        }
+        projects.insert(project.id, project.clone());
         Ok(())
     }
     async fn get_project(&self, id: ProjectId) -> Result<Option<Project>> {
@@ -1192,8 +1197,58 @@ impl Store for MemStore {
         Ok(true)
     }
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
-        self.chats.lock().unwrap().insert(chat.id, chat.clone());
+        validate_chat_root_projection(chat).map_err(|message| AgentError::Store(message.into()))?;
+        let projects = self.projects.lock().unwrap();
+        let project_roots = match chat.project_id {
+            Some(project_id) => projects
+                .get(&project_id)
+                .ok_or_else(|| AgentError::Store("chat project does not exist".into()))?
+                .root_attachments
+                .as_slice(),
+            None => &[],
+        };
+        validate_chat_root_projection_against_project(chat, project_roots)
+            .map_err(|message| AgentError::Store(message.into()))?;
+        let mut chats = self.chats.lock().unwrap();
+        if chats.contains_key(&chat.id) {
+            return Err(AgentError::Store("chat already exists".into()));
+        }
+        chats.insert(chat.id, chat.clone());
         Ok(())
+    }
+    async fn create_chat_with_project_defaults(&self, base: &Chat) -> Result<Chat> {
+        if base.attachment_revision != 0 || !base.root_attachments.is_empty() {
+            return Err(AgentError::Store(
+                "chat project defaults must start from an empty revision-zero projection".into(),
+            ));
+        }
+        let projects = self.projects.lock().unwrap();
+        let mut chat = base.clone();
+        if let Some(project_id) = chat.project_id {
+            let project = projects
+                .get(&project_id)
+                .ok_or_else(|| AgentError::Store("chat project does not exist".into()))?;
+            chat.root_attachments = project
+                .root_attachments
+                .iter()
+                .copied()
+                .map(|root_id| ChatRootAttachment {
+                    root_id,
+                    origin: RootAttachmentOrigin::ProjectDefault,
+                })
+                .collect();
+            if !chat.root_attachments.is_empty() {
+                chat.attachment_revision = 1;
+            }
+        }
+        validate_chat_root_projection(&chat)
+            .map_err(|message| AgentError::Store(message.into()))?;
+        let mut chats = self.chats.lock().unwrap();
+        if chats.contains_key(&chat.id) {
+            return Err(AgentError::Store("chat already exists".into()));
+        }
+        chats.insert(chat.id, chat.clone());
+        Ok(chat)
     }
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
         Ok(self.chats.lock().unwrap().get(&id).cloned())
@@ -1524,7 +1579,8 @@ fn store_is_object_safe_and_roundtrips() {
         project_id: None,
         title: None,
         model: None,
-        workspace_dir: "/tmp/ws".into(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
         created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
     };
     block_on(store.create_chat(&chat)).unwrap();
@@ -1631,12 +1687,14 @@ fn mem_store_rejects_moving_a_live_document_between_corpora() {
     let project_a = Project {
         id: ProjectId::new(),
         title: None,
-        workspace_dir: "/tmp/a".into(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
         created_at: chrono::Utc::now(),
     };
     let project_b = Project {
         id: ProjectId::new(),
-        workspace_dir: "/tmp/b".into(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
         ..project_a.clone()
     };
     block_on(store.create_project(&project_a)).unwrap();

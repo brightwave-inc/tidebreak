@@ -26,9 +26,6 @@ pub struct ServerInfo {
     pub base_url: String,
     /// Per-launch bearer token.
     pub token: String,
-    /// App-private scratch path used by legacy direct file tools until they are
-    /// routed through the host broker.
-    pub scratch_dir: String,
 }
 
 struct AppState {
@@ -69,20 +66,6 @@ fn home_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("resolve home dir: {e}"))
 }
 
-/// Private scratch for the current desktop profile. This is operational app
-/// data, not a connected user folder and never appears in a native picker.
-fn private_scratch(data_dir: &std::path::Path) -> Result<PathBuf, String> {
-    let scratch = data_dir.join("scratch");
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("create private scratch: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("restrict private scratch: {e}"))?;
-    }
-    Ok(scratch)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (info_tx, info_rx) = watch::channel(None);
@@ -113,12 +96,11 @@ pub fn run() {
             let handle = app.handle().clone();
             let data = data_dir(&handle)?;
             let home = home_dir(&handle)?;
-            let scratch = private_scratch(&data)?;
             let host_access = host_access::HostAccess::new(handle.clone(), data.clone(), home)?;
             app.manage(host_access);
 
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = boot_server(handle, info_tx, data, scratch).await {
+                if let Err(error) = boot_server(handle, info_tx, data).await {
                     eprintln!("openwave-desktop: {error}");
                 }
             });
@@ -138,7 +120,6 @@ async fn boot_server(
     app: tauri::AppHandle,
     info_tx: watch::Sender<Option<ServerInfo>>,
     data_dir: PathBuf,
-    scratch_dir: PathBuf,
 ) -> Result<(), String> {
     let server = openwave_server::bind(Config::desktop(data_dir))
         .await
@@ -150,11 +131,7 @@ async fn boot_server(
     let executor_token = server.client_executor_token().to_string();
     app.state::<host_access::HostAccess>()
         .initialize_control_plane(base_url.clone(), token.clone(), executor_token)?;
-    let info = ServerInfo {
-        base_url,
-        token,
-        scratch_dir: scratch_dir.display().to_string(),
-    };
+    let info = ServerInfo { base_url, token };
     let _ = info_tx.send(Some(info));
     let recovery_app = app.clone();
     tauri::async_runtime::spawn(async move {

@@ -77,7 +77,7 @@ mod tests {
     use openwave_core::{ChatId, ToolCtx, ToolRegistry};
 
     fn empty_server() -> McpServer {
-        let ctx = ToolCtx::new(ChatId::new(), None, PathBuf::from("/tmp/ws"));
+        let ctx = ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("/tmp/ws"));
         McpServer::new(Arc::new(ToolRegistry::new()), ctx)
     }
 

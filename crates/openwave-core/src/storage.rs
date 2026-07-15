@@ -744,12 +744,17 @@ pub trait Store: Send + Sync {
 
     /// Persist a new chat.
     ///
-    /// A chat's `project_id`, when set, is not checked against an existing
-    /// project here — there is no database foreign key on the link (SQLite can't
-    /// add one to an existing table). Callers that accept a `project_id` from
-    /// outside must verify the project exists first (the server does so at its
-    /// API edge) to avoid persisting a dangling reference.
+    /// The ordered projection must be valid. When `project_id` is set, the
+    /// project must exist and the leading `project_default` roots must exactly
+    /// snapshot its current ordered defaults. The insertion is atomic.
     async fn create_chat(&self, chat: &Chat) -> Result<()>;
+
+    /// Persist a new chat while atomically deriving its project-default roots.
+    ///
+    /// `chat` must carry revision zero and an empty projection. Implementations
+    /// resolve the current project inside the same atomic operation that inserts
+    /// the chat, returning the exact persisted snapshot.
+    async fn create_chat_with_project_defaults(&self, chat: &Chat) -> Result<Chat>;
 
     /// Fetch a chat by id, or `None` if it doesn't exist.
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>>;

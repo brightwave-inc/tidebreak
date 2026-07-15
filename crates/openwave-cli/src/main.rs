@@ -73,12 +73,14 @@ async fn serve() -> Result<()> {
 
 /// Serve the built-in read-only filesystem tools over MCP stdio.
 async fn serve_mcp(workspace: PathBuf) -> Result<()> {
-    let ctx = ToolCtx::try_new(ChatId::new(), None, workspace.clone()).map_err(|error| {
-        AgentError::config(format!(
-            "could not open MCP workspace {}: {error}",
-            workspace.display()
-        ))
-    })?;
+    let ctx = ToolCtx::try_new_legacy_workspace(ChatId::new(), None, workspace.clone()).map_err(
+        |error| {
+            AgentError::config(format!(
+                "could not open MCP workspace {}: {error}",
+                workspace.display()
+            ))
+        },
+    )?;
 
     let tools = Arc::new(
         ToolRegistry::new()

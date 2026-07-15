@@ -6,6 +6,7 @@
 //! `Store` they are indistinguishable from a plain UUID.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use uuid::Uuid;
 
 /// Declares a UUID-backed identifier newtype with the common impls.
@@ -62,6 +63,67 @@ id_type!(
     /// Identifies a project: an optional grouping a chat may belong to.
     ProjectId
 );
+
+/// Opaque identifier for a folder registered with a host broker.
+///
+/// This is product projection data, not authority: possession of an id never
+/// grants access to the corresponding host path. The broker independently
+/// validates live attachments, consent, capabilities, and revocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct HostRootId(Uuid);
+
+impl HostRootId {
+    /// Build a root id from its non-nil wire UUID.
+    pub fn from_uuid(uuid: Uuid) -> Result<Self, HostRootIdError> {
+        if uuid.is_nil() {
+            Err(HostRootIdError::Nil)
+        } else {
+            Ok(Self(uuid))
+        }
+    }
+
+    /// Borrow the underlying UUID.
+    #[must_use]
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for HostRootId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let uuid = Uuid::deserialize(deserializer)?;
+        Self::from_uuid(uuid).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for HostRootId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for HostRootId {
+    type Err = HostRootIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::from_uuid(Uuid::parse_str(value)?)
+    }
+}
+
+/// Invalid opaque host-root identity.
+#[derive(Debug, Error)]
+pub enum HostRootIdError {
+    /// The value is not a UUID.
+    #[error("invalid host root id: {0}")]
+    InvalidUuid(#[from] uuid::Error),
+    /// Nil is reserved and never identifies a broker root.
+    #[error("host root id must not be nil")]
+    Nil,
+}
 id_type!(
     /// Identifies an authoritative source document.
     ///
@@ -96,7 +158,7 @@ impl DocumentId {
     }
 }
 id_type!(
-    /// Identifies a persistent conversation (owns a workspace directory).
+    /// Identifies a persistent conversation.
     ChatId
 );
 id_type!(
@@ -140,6 +202,18 @@ mod tests {
         // Transparent: serializes as the bare quoted UUID, no wrapper.
         assert_eq!(json, format!("\"{id}\""));
         assert_eq!(serde_json::from_str::<ChatId>(&json).unwrap(), id);
+    }
+
+    #[test]
+    fn host_root_ids_reject_nil_and_roundtrip() {
+        let uuid = Uuid::new_v4();
+        let id = HostRootId::from_uuid(uuid).unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(serde_json::from_str::<HostRootId>(&json).unwrap(), id);
+        assert!(HostRootId::from_uuid(Uuid::nil()).is_err());
+        assert!(
+            serde_json::from_str::<HostRootId>("\"00000000-0000-0000-0000-000000000000\"").is_err()
+        );
     }
 
     #[test]
