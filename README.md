@@ -72,7 +72,8 @@ client remain in development.
 
 Pre-alpha, built in the open. The current stack includes projects and chats,
 local file tools, multi-provider model routing, a turn engine with live journaled
-WebSocket events, a baseline desktop UI, and durable asynchronous document
+WebSocket events, a workspace-style desktop conversation shell, a bounded
+foreground/sandbox agent-run foundation, and durable asynchronous document
 ingestion/retrieval with grounded citations — all behind `openwave serve`.
 Connectors, richer document parsers, indexed-search MCP wiring, and the MCP client
 remain in development. Expect rapid change and rough edges — and see
