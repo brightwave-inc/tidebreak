@@ -1349,6 +1349,26 @@ impl Store for MemStore {
             resolved_at,
         )
     }
+    async fn resolve_client_tool_call_and_append_event(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        Ok(JournaledClientToolCallOutcome {
+            outcome: self.resolve_mem_tool_call(
+                id,
+                Some((chat_id, lease_token, now, false)),
+                resolution,
+                resolved_at,
+            )?,
+            turn: None,
+            terminal_event: None,
+        })
+    }
     async fn resolve_expired_client_tool_call(
         &self,
         id: CallId,
@@ -1364,6 +1384,26 @@ impl Store for MemStore {
             resolution,
             resolved_at,
         )
+    }
+    async fn resolve_expired_client_tool_call_and_append_event(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<JournaledClientToolCallOutcome> {
+        Ok(JournaledClientToolCallOutcome {
+            outcome: self.resolve_mem_tool_call(
+                id,
+                Some((chat_id, lease_token, now, true)),
+                resolution,
+                resolved_at,
+            )?,
+            turn: None,
+            terminal_event: None,
+        })
     }
     async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
         let mut calls: Vec<_> = self

@@ -250,6 +250,30 @@ pub mod turn_claim_lock {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod turn_client_wait {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "turn_client_wait")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub call_id: Uuid,
+        pub turn_id: Uuid,
+        pub chat_id: Uuid,
+        pub park_lease_token: Uuid,
+        pub attempt_count: i32,
+        pub claim_count: i32,
+        pub status: String,
+        pub parked_at: DateTimeUtc,
+        pub closed_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod message_identity {
     use sea_orm::entity::prelude::*;
 

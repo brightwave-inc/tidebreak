@@ -214,12 +214,21 @@ the lease from the server's current receive time. Heartbeat and resolution
 enforce the immutable chat owner inside the same locked state transition rather
 than loading conversation history first.
 
-The agent still executes its current built-in tools inside the turn worker. The
-turn model now distinguishes failure attempts from worker lease segments and
-reserves an explicit resumable claim state for native client work. The atomic
-wait receipt, park/resolve transitions, and desktop executor are the next layers.
-Notifications will be wake-up hints, while the pending-work query remains
-authoritative.
+The store can now hand a turn across that process boundary without keeping its
+worker alive. In one transaction it records the immutable client call, records a
+wait receipt tied to the exact worker claim, moves the turn to
+`waiting_for_client`, and releases the worker lease. If the database commit is
+ambiguous, the worker can repeat the exact request and recover that receipt; a
+different request cannot reuse the identity.
+
+Resolving the client call closes the receipt and moves the turn to `resuming` in
+the same transaction. A turn worker then takes a fresh lease segment without
+spending another failure attempt. This is the durable equivalent of pausing a
+function, doing native work elsewhere, and continuing from a known checkpoint.
+The remaining integration work is to have the agent emit this checkpoint for
+folder-access tools and to run those pending calls from the desktop. Notifications
+will be wake-up hints; the pending-work query remains authoritative after a
+restart or missed notification.
 
 ### 4. Events drive the live client
 
@@ -250,10 +259,24 @@ queued ----claim----> running ----success----> completed
   |                     +----failure---------> failed
   |                     |
   |                     +----cancel request--> cancelling --> cancelled
+  |                     |
+  |                     +----park native call----> waiting_for_client
+  |                                                   |       |
+  |                                            resolve|       |cancel unclaimed
+  |                                                   v       v
+  |                                               resuming  cancelled
+  |                                                   |
+  |                                         fresh claim segment
+  |                                                   |
+  |                                                   +-----> running
   |
   +----cancel-----------------------------------------------> cancelled
 
-resuming ----same attempt, fresh claim----> running
+waiting_for_client ----cancel claimed call----> cancelling_client
+                                                    |
+                                         exact client resolution
+                                                    |
+                                                    +-----> cancelled
 ```
 
 retry_wait exists for safely replayable failures. `attempt_count` tracks that
@@ -273,8 +296,13 @@ but they have different durability today.
 Cancellation is a durable state transition. A queued turn can become cancelled
 immediately. A running turn first becomes `cancelling`; its exact worker receives
 a local cancellation signal, stops cooperatively, and acknowledges `cancelled`.
-The chat remains occupied until that handoff is resolved, so a new turn cannot
-race the old one.
+An unclaimed client call can also be cancelled immediately: the call, wait
+receipt, turn, and terminal event change together. If the native client already
+claimed the call, the turn becomes `cancelling_client` until that exact client
+lease reports a terminal result. This avoids pretending an in-flight folder
+picker or broker mutation never happened. In every case the chat remains
+occupied until the owner has quiesced or the store has atomically fenced the
+work, so a new turn cannot race the old one.
 
 ### Approvals
 
@@ -539,15 +567,15 @@ When changing the runtime, these rules matter more than the exact module layout:
 
 The strongest parts today are the core seams, database constraints, durable
 document pipeline, generation-aware Lance publication, durable turn acceptance
-and ownership, terminal turn commits, cancellation, reconnectable event stream,
-and fail-closed provider routing.
+and ownership, atomic client-wait checkpoints, terminal turn commits,
+cancellation, reconnectable event stream, and fail-closed provider routing.
 
 The main next steps are:
 
 - replace raw chat/project workspace paths with broker-mediated, per-context
   connected roots while keeping OpenWave's private app data separate;
-- park turns atomically while a client acts, notify clients of durable pending
-  work, and run native folder requests in the desktop;
+- teach the agent to emit client-wait checkpoints, notify clients of durable
+  pending work, and run native folder requests in the desktop;
 - add resumable checkpoints and explicit idempotency policy around remaining
   server-side tool effects;
 - make approvals resumable rather than process-local;

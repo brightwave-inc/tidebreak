@@ -30,15 +30,16 @@ use crate::model::{
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
     DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
     DocumentUpsert, Message, Project, SourceRegion, ToolCallRecord, ToolCallResolution,
-    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus,
+    TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus,
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, ClaimClientToolCallOutcome,
     ClaimTurnRunOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
     EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
-    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome, Store,
+    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledTurnOutcome,
+    JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
+    RequestTurnCancellationOutcome, ResolveToolCallOutcome, Store,
 };
 
 mod ops;
@@ -1839,6 +1840,25 @@ impl Store for DbStore {
             .await
     }
 
+    async fn park_turn_for_client_tool_call(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
+        now: chrono::DateTime<Utc>,
+        call: &crate::model::ClientToolCallRequest,
+    ) -> Result<Option<ParkTurnForClientCallOutcome>> {
+        ops::turn::park_turn_for_client_tool_call(
+            self,
+            turn_id,
+            lease_token,
+            expected_steer_revision,
+            now,
+            call,
+        )
+        .await
+    }
+
     async fn append_message(&self, message: &Message) -> Result<()> {
         ops::conversation::append_message(self, message).await
     }
@@ -1900,7 +1920,7 @@ impl Store for DbStore {
         ops::client_execution::resolve_server_tool_call(self, id, resolution, resolved_at).await
     }
 
-    async fn resolve_client_tool_call(
+    async fn resolve_client_tool_call_and_append_event(
         &self,
         id: CallId,
         chat_id: ChatId,
@@ -1908,8 +1928,8 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<Utc>,
-    ) -> Result<ResolveToolCallOutcome> {
-        ops::client_execution::resolve_client_tool_call(
+    ) -> Result<JournaledClientToolCallOutcome> {
+        ops::client_execution::resolve_client_tool_call_and_append_event(
             self,
             id,
             chat_id,
@@ -1921,7 +1941,7 @@ impl Store for DbStore {
         .await
     }
 
-    async fn resolve_expired_client_tool_call(
+    async fn resolve_expired_client_tool_call_and_append_event(
         &self,
         id: CallId,
         chat_id: ChatId,
@@ -1929,8 +1949,8 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<Utc>,
-    ) -> Result<ResolveToolCallOutcome> {
-        ops::client_execution::resolve_expired_client_tool_call(
+    ) -> Result<JournaledClientToolCallOutcome> {
+        ops::client_execution::resolve_expired_client_tool_call_and_append_event(
             self,
             id,
             chat_id,

@@ -710,7 +710,7 @@ async fn journal_chat_id(
         .map(|turn| ChatId(turn.chat_id)))
 }
 
-async fn append_terminal_event_on<C>(
+pub(super) async fn append_terminal_event_on<C>(
     conn: &C,
     id: TurnId,
     chat_id: ChatId,

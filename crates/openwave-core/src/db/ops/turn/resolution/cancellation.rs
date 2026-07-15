@@ -28,8 +28,11 @@ async fn request_turn_cancellation_inner(
     terminal_event: Option<&AgentEvent>,
 ) -> Result<Option<JournaledTurnOutcome<RequestTurnCancellationOutcome>>> {
     let now = canonical_db_timestamp(now)?;
-    let journal_chat_id = journal_chat_id(store, id, terminal_event.is_some()).await?;
-    if terminal_event.is_some() && journal_chat_id.is_none() {
+    // Client claiming/resolution also takes this chat lock before its call and
+    // turn locks. Take it even for the non-journaling Store API so cancellation
+    // cannot invert that order while inspecting a parked client call.
+    let journal_chat_id = journal_chat_id(store, id, true).await?;
+    if journal_chat_id.is_none() {
         return Ok(None);
     }
     let transaction = store.conn.begin().await.map_err(store_err)?;
@@ -54,7 +57,7 @@ async fn request_turn_cancellation_inner(
     };
     let status = turn_run_status_from_db(&turn.status)?;
     match status {
-        TurnRunStatus::Cancelling | TurnRunStatus::Cancelled => {
+        TurnRunStatus::Cancelling | TurnRunStatus::CancellingClient | TurnRunStatus::Cancelled => {
             let sequenced_event = if status == TurnRunStatus::Cancelled {
                 existing_cancellation_event_on(&transaction, id, terminal_event.is_some()).await?
             } else {
@@ -77,6 +80,7 @@ async fn request_turn_cancellation_inner(
         }
         TurnRunStatus::Queued
         | TurnRunStatus::Running
+        | TurnRunStatus::WaitingForClient
         | TurnRunStatus::Resuming
         | TurnRunStatus::RetryWait => {}
     }
@@ -85,11 +89,109 @@ async fn request_turn_cancellation_inner(
         return Ok(None);
     }
 
-    let next_status = if status == TurnRunStatus::Running {
-        TurnRunStatus::Cancelling
-    } else {
-        TurnRunStatus::Cancelled
+    let mut cancel_unclaimed_call = None;
+    if status == TurnRunStatus::WaitingForClient {
+        let wait = entities::turn_client_wait::Entity::find()
+            .filter(entities::turn_client_wait::Column::TurnId.eq(id.0))
+            .filter(
+                entities::turn_client_wait::Column::Status
+                    .eq(crate::model::TurnClientWaitStatus::Waiting.as_str()),
+            )
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .ok_or_else(|| {
+                AgentError::Store(format!("waiting turn {id} is missing its client receipt"))
+            })?;
+        if wait.chat_id != turn.chat_id
+            || wait.attempt_count != turn.attempt_count
+            || wait.claim_count != turn.claim_count
+        {
+            return Err(AgentError::Store(format!(
+                "waiting turn {id} has a mismatched client receipt"
+            )));
+        }
+        let call_id = crate::CallId(wait.call_id);
+        if !super::super::super::acquire_tool_call_write_lock(&transaction, call_id).await? {
+            return Err(AgentError::Store(format!(
+                "waiting turn {id} references missing client call {call_id}"
+            )));
+        }
+        let call = entities::tool_call::Entity::find_by_id(wait.call_id)
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .expect("locked waiting client call exists");
+        if call.chat_id != turn.chat_id
+            || call.turn_id != turn.id
+            || call.execution != crate::model::ToolCallExecution::Client.as_str()
+            || call.status != crate::model::ToolCallStatus::Pending.as_str()
+        {
+            return Err(AgentError::Store(format!(
+                "waiting turn {id} has an invalid client call"
+            )));
+        }
+        if call.client_executor_id.is_none() {
+            cancel_unclaimed_call = Some((wait, call));
+        }
+    }
+
+    let next_status = match status {
+        TurnRunStatus::Running => TurnRunStatus::Cancelling,
+        TurnRunStatus::WaitingForClient if cancel_unclaimed_call.is_none() => {
+            TurnRunStatus::CancellingClient
+        }
+        _ => TurnRunStatus::Cancelled,
     };
+    if let Some((wait, call)) = cancel_unclaimed_call {
+        let cancelled_call = entities::tool_call::Entity::update_many()
+            .col_expr(
+                entities::tool_call::Column::Status,
+                sea_orm::sea_query::Expr::value(crate::model::ToolCallStatus::Cancelled.as_str()),
+            )
+            .col_expr(
+                entities::tool_call::Column::Result,
+                sea_orm::sea_query::Expr::value(Some(
+                    "cancelled before client execution".to_owned(),
+                )),
+            )
+            .col_expr(
+                entities::tool_call::Column::ResolvedAt,
+                sea_orm::sea_query::Expr::value(Some(now)),
+            )
+            .filter(entities::tool_call::Column::Id.eq(call.id))
+            .filter(
+                entities::tool_call::Column::Status
+                    .eq(crate::model::ToolCallStatus::Pending.as_str()),
+            )
+            .filter(entities::tool_call::Column::ClientExecutorId.is_null())
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+        let closed_wait = entities::turn_client_wait::Entity::update_many()
+            .col_expr(
+                entities::turn_client_wait::Column::Status,
+                sea_orm::sea_query::Expr::value(
+                    crate::model::TurnClientWaitStatus::Cancelled.as_str(),
+                ),
+            )
+            .col_expr(
+                entities::turn_client_wait::Column::ClosedAt,
+                sea_orm::sea_query::Expr::value(Some(now)),
+            )
+            .filter(entities::turn_client_wait::Column::CallId.eq(wait.call_id))
+            .filter(
+                entities::turn_client_wait::Column::Status
+                    .eq(crate::model::TurnClientWaitStatus::Waiting.as_str()),
+            )
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+        if cancelled_call.rows_affected != 1 || closed_wait.rows_affected != 1 {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(None);
+        }
+    }
     let update = entities::turn_run::Entity::update_many()
         .col_expr(
             entities::turn_run::Column::Status,
@@ -148,7 +250,10 @@ async fn request_turn_cancellation_inner(
         None
     };
     transaction.commit().await.map_err(store_err)?;
-    let outcome = if next_status == TurnRunStatus::Cancelling {
+    let outcome = if matches!(
+        next_status,
+        TurnRunStatus::Cancelling | TurnRunStatus::CancellingClient
+    ) {
         RequestTurnCancellationOutcome::Requested(updated)
     } else {
         RequestTurnCancellationOutcome::Cancelled(updated)

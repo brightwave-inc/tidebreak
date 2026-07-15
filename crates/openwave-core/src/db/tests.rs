@@ -3,6 +3,7 @@ use crate::model::{
     ByteSpan, DocumentParseOutput, DocumentSourceBlob, DocumentSourceUpsert, SourceLocation,
     ToolCallExecution, ToolCallResolution, ToolCallStatus,
 };
+use crate::storage::ApplyTurnSteerOutcome;
 use chrono::{DateTime, Utc};
 
 mod turn_steer;
@@ -5550,6 +5551,581 @@ async fn resuming_turn_claims_a_new_lease_without_consuming_failure_budget() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn client_wait_parks_resolves_and_recovers_exactly() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let _accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "connect a folder")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = Utc::now();
+    let turn_lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(
+            turn_lease,
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    let request = crate::model::ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id,
+        provider_id: "native".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({"suggested_name": "Documents"}),
+    };
+    let stale_steer_id = TurnSteerId::new();
+    assert!(matches!(
+        store
+            .accept_turn_steer(
+                stale_steer_id,
+                turn_id,
+                chat.id,
+                "apply before native checkpoint",
+                false,
+            )
+            .await
+            .unwrap(),
+        AcceptTurnSteerOutcome::Accepted(_)
+    ));
+    let first_steer_at = Utc::now();
+    assert!(matches!(
+        store
+            .apply_turn_steer(turn_id, turn_lease, stale_steer_id, 1, None, first_steer_at,)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        ApplyTurnSteerOutcome::Applied(_)
+    ));
+    let checkpoint_at = Utc::now();
+    assert!(matches!(
+        store
+            .park_turn_for_client_tool_call(turn_id, turn_lease, 0, checkpoint_at, &request)
+            .await
+            .unwrap()
+            .unwrap(),
+        ParkTurnForClientCallOutcome::OutputSuperseded(turn)
+            if turn.steer_revision == 1
+    ));
+
+    let pending_steer_id = TurnSteerId::new();
+    assert!(matches!(
+        store
+            .accept_turn_steer(
+                pending_steer_id,
+                turn_id,
+                chat.id,
+                "pending before native checkpoint",
+                false,
+            )
+            .await
+            .unwrap(),
+        AcceptTurnSteerOutcome::Accepted(_)
+    ));
+    let pending_checkpoint_at = Utc::now();
+    assert!(matches!(
+        store
+            .park_turn_for_client_tool_call(
+                turn_id,
+                turn_lease,
+                1,
+                pending_checkpoint_at,
+                &request,
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        ParkTurnForClientCallOutcome::SteerPending(turn)
+            if turn.steer_revision == 1
+    ));
+    let second_steer_at = Utc::now();
+    assert!(matches!(
+        store
+            .apply_turn_steer(
+                turn_id,
+                turn_lease,
+                pending_steer_id,
+                2,
+                None,
+                second_steer_at,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        ApplyTurnSteerOutcome::Applied(_)
+    ));
+
+    let parked_at = Utc::now();
+    assert_eq!(
+        store
+            .park_turn_for_client_tool_call(turn_id, uuid::Uuid::new_v4(), 2, parked_at, &request,)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+    let (parked_turn, parked_call, parked_wait) = match store
+        .park_turn_for_client_tool_call(turn_id, turn_lease, 2, parked_at, &request)
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        ParkTurnForClientCallOutcome::Parked { turn, call, wait } => (turn, call, wait),
+        outcome => panic!("unexpected park outcome: {outcome:?}"),
+    };
+    assert_eq!(parked_turn.status, TurnRunStatus::WaitingForClient);
+    assert_eq!(parked_turn.lease_token, None);
+    assert_eq!(parked_call.status, ToolCallStatus::Pending);
+    assert_eq!(
+        parked_wait.status,
+        crate::model::TurnClientWaitStatus::Waiting
+    );
+    assert_eq!((parked_wait.attempt_count, parked_wait.claim_count), (1, 1));
+    assert!(matches!(
+        store
+            .accept_turn(TurnId::new(), chat.id, "gpt-5", "must stay occupied")
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::ChatBusy(turn) if turn.id == turn_id
+    ));
+
+    let executor_id = uuid::Uuid::new_v4();
+    let client_lease = uuid::Uuid::new_v4();
+    let client_claimed_at = parked_at + chrono::Duration::seconds(1);
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                request.id,
+                chat.id,
+                executor_id,
+                client_lease,
+                client_claimed_at,
+                client_claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Claimed(_)
+    ));
+    let resolved_at = client_claimed_at + chrono::Duration::seconds(1);
+    let resolution = ToolCallResolution::Completed {
+        result: "root-1".into(),
+    };
+    let journaled = store
+        .resolve_client_tool_call_and_append_event(
+            request.id,
+            chat.id,
+            client_lease,
+            resolved_at,
+            &resolution,
+            resolved_at,
+        )
+        .await
+        .unwrap();
+    assert_eq!(journaled.outcome, ResolveToolCallOutcome::Resolved);
+    assert_eq!(journaled.terminal_event, None);
+    assert_eq!(
+        journaled.turn.as_ref().map(|turn| turn.status),
+        Some(TurnRunStatus::Resuming)
+    );
+    let resumable = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    assert_eq!(resumable.status, TurnRunStatus::Resuming);
+    assert_eq!((resumable.attempt_count, resumable.claim_count), (1, 1));
+    let wait = entities::turn_client_wait::Entity::find_by_id(request.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        wait.status,
+        crate::model::TurnClientWaitStatus::Resumed.as_str()
+    );
+    assert_eq!(wait.closed_at, Some(resumable.updated_at));
+
+    assert!(matches!(
+        store
+            .park_turn_for_client_tool_call(turn_id, turn_lease, 2, Utc::now(), &request)
+            .await
+            .unwrap()
+            .unwrap(),
+        ParkTurnForClientCallOutcome::Existing { turn, wait, .. }
+            if turn.status == TurnRunStatus::Resuming
+                && wait.status == crate::model::TurnClientWaitStatus::Resumed
+    ));
+    let resumed = store
+        .claim_turn_run(
+            uuid::Uuid::new_v4(),
+            resolved_at,
+            resolved_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    assert_eq!((resumed.attempt_count, resumed.claim_count), (1, 2));
+}
+
+async fn park_test_client_wait(
+    store: &DbStore,
+    chat_id: ChatId,
+) -> (TurnId, crate::model::ClientToolCallRequest, DateTime<Utc>) {
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat_id, "gpt-5", "native action")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let turn_lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(
+            turn_lease,
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    let request = crate::model::ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id,
+        turn_id,
+        provider_id: "native".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({}),
+    };
+    let parked_at = claimed_at + chrono::Duration::seconds(1);
+    assert!(matches!(
+        store
+            .park_turn_for_client_tool_call(turn_id, turn_lease, 0, parked_at, &request)
+            .await
+            .unwrap()
+            .unwrap(),
+        ParkTurnForClientCallOutcome::Parked { .. }
+    ));
+    (turn_id, request, parked_at)
+}
+
+#[tokio::test]
+async fn client_wait_schema_rejects_invalid_scope_claim_and_lifecycle() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request, parked_at) = park_test_client_wait(&store, chat.id).await;
+    let wait = entities::turn_client_wait::Entity::find_by_id(request.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let second_call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id,
+        provider_id: "native-second".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({}),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: parked_at + chrono::Duration::microseconds(1),
+        resolved_at: None,
+    };
+    assert!(matches!(
+        store.accept_tool_call(&second_call).await.unwrap(),
+        AcceptToolCallOutcome::Accepted(_)
+    ));
+
+    let valid_second = entities::turn_client_wait::ActiveModel {
+        call_id: Set(second_call.id.0),
+        turn_id: Set(turn_id.0),
+        chat_id: Set(chat.id.0),
+        park_lease_token: Set(wait.park_lease_token),
+        attempt_count: Set(wait.attempt_count),
+        claim_count: Set(wait.claim_count),
+        status: Set(crate::model::TurnClientWaitStatus::Waiting.as_str().into()),
+        parked_at: Set(second_call.created_at),
+        closed_at: Set(None),
+    };
+    assert!(valid_second.clone().insert(&store.conn).await.is_err());
+
+    let mut wrong_claim = valid_second.clone();
+    wrong_claim.claim_count = Set(wait.claim_count + 1);
+    wrong_claim.status = Set(crate::model::TurnClientWaitStatus::Cancelled
+        .as_str()
+        .into());
+    wrong_claim.closed_at = Set(Some(second_call.created_at));
+    assert!(wrong_claim.insert(&store.conn).await.is_err());
+
+    let mut wrong_scope = valid_second.clone();
+    wrong_scope.chat_id = Set(ChatId::new().0);
+    wrong_scope.status = Set(crate::model::TurnClientWaitStatus::Cancelled
+        .as_str()
+        .into());
+    wrong_scope.closed_at = Set(Some(second_call.created_at));
+    assert!(wrong_scope.insert(&store.conn).await.is_err());
+
+    let mut missing_close = valid_second.clone();
+    missing_close.status = Set(crate::model::TurnClientWaitStatus::Resumed.as_str().into());
+    assert!(missing_close.insert(&store.conn).await.is_err());
+
+    let mut close_before_park = valid_second;
+    close_before_park.status = Set(crate::model::TurnClientWaitStatus::Cancelled
+        .as_str()
+        .into());
+    close_before_park.closed_at = Set(Some(
+        second_call.created_at - chrono::Duration::microseconds(1),
+    ));
+    assert!(close_before_park.insert(&store.conn).await.is_err());
+}
+
+#[tokio::test]
+async fn client_wait_cancellation_fences_unclaimed_and_claimed_native_work() {
+    let (_dir, store) = temp_store().await;
+
+    let unclaimed_chat = sample_chat();
+    store.create_chat(&unclaimed_chat).await.unwrap();
+    let (unclaimed_turn, unclaimed_call, unclaimed_parked_at) =
+        park_test_client_wait(&store, unclaimed_chat.id).await;
+    let cancelled_at = unclaimed_parked_at + chrono::Duration::seconds(1);
+    let cancelled = store
+        .request_turn_cancellation_and_append_event(unclaimed_turn, cancelled_at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        cancelled.outcome,
+        RequestTurnCancellationOutcome::Cancelled(ref turn)
+            if turn.status == TurnRunStatus::Cancelled
+    ));
+    assert!(cancelled.terminal_event.is_some());
+    assert_eq!(
+        store.list_tool_calls(unclaimed_chat.id).await.unwrap()[0].status,
+        ToolCallStatus::Cancelled
+    );
+    let unclaimed_wait = entities::turn_client_wait::Entity::find_by_id(unclaimed_call.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        unclaimed_wait.status,
+        crate::model::TurnClientWaitStatus::Cancelled.as_str()
+    );
+
+    let claimed_chat = Chat {
+        id: ChatId::new(),
+        ..sample_chat()
+    };
+    store.create_chat(&claimed_chat).await.unwrap();
+    let (claimed_turn, claimed_call, claimed_parked_at) =
+        park_test_client_wait(&store, claimed_chat.id).await;
+    let client_claimed_at = claimed_parked_at + chrono::Duration::seconds(1);
+    let client_lease = uuid::Uuid::new_v4();
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                claimed_call.id,
+                claimed_chat.id,
+                uuid::Uuid::new_v4(),
+                client_lease,
+                client_claimed_at,
+                client_claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Claimed(_)
+    ));
+    let requested_at = client_claimed_at + chrono::Duration::seconds(1);
+    let requested = store
+        .request_turn_cancellation_and_append_event(claimed_turn, requested_at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        requested.outcome,
+        RequestTurnCancellationOutcome::Requested(ref turn)
+            if turn.status == TurnRunStatus::CancellingClient
+    ));
+    assert_eq!(requested.terminal_event, None);
+    assert!(matches!(
+        store
+            .accept_turn(
+                TurnId::new(),
+                claimed_chat.id,
+                "gpt-5",
+                "must remain occupied",
+            )
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::ChatBusy(turn) if turn.id == claimed_turn
+    ));
+
+    let resolved_at = client_claimed_at + chrono::Duration::minutes(1);
+    let resolution = ToolCallResolution::Cancelled {
+        result: "cancelled by user".into(),
+    };
+    let live = store
+        .resolve_client_tool_call_and_append_event(
+            claimed_call.id,
+            claimed_chat.id,
+            client_lease,
+            resolved_at,
+            &resolution,
+            resolved_at,
+        )
+        .await
+        .unwrap();
+    assert_eq!(live.outcome, ResolveToolCallOutcome::LeaseLost);
+    assert_eq!(live.turn, None);
+    assert_eq!(live.terminal_event, None);
+    let journaled = store
+        .resolve_expired_client_tool_call_and_append_event(
+            claimed_call.id,
+            claimed_chat.id,
+            client_lease,
+            resolved_at,
+            &resolution,
+            resolved_at,
+        )
+        .await
+        .unwrap();
+    assert_eq!(journaled.outcome, ResolveToolCallOutcome::Resolved);
+    assert_eq!(
+        journaled.turn.as_ref().map(|turn| turn.status),
+        Some(TurnRunStatus::Cancelled)
+    );
+    let terminal_event = journaled.terminal_event.clone().unwrap();
+    assert_eq!(
+        store
+            .get_turn_run(claimed_turn)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TurnRunStatus::Cancelled
+    );
+    let claimed_wait = entities::turn_client_wait::Entity::find_by_id(claimed_call.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claimed_wait.status,
+        crate::model::TurnClientWaitStatus::Cancelled.as_str()
+    );
+    let events = store.list_events(claimed_chat.id, 0).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0].event, AgentEvent::TurnCancelled { .. }));
+    let recovered = store
+        .resolve_expired_client_tool_call_and_append_event(
+            claimed_call.id,
+            claimed_chat.id,
+            client_lease,
+            resolved_at,
+            &resolution,
+            resolved_at,
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered.outcome, ResolveToolCallOutcome::Existing);
+    assert_eq!(recovered.terminal_event, Some(terminal_event));
+}
+
+#[tokio::test]
+async fn concurrent_client_resolution_and_cancellation_do_not_invert_locks() {
+    let (_dir, store) = temp_store().await;
+    let store = std::sync::Arc::new(store);
+
+    for _ in 0..8 {
+        let chat = sample_chat();
+        store.create_chat(&chat).await.unwrap();
+        let (turn_id, call, parked_at) = park_test_client_wait(&store, chat.id).await;
+        let client_token = uuid::Uuid::new_v4();
+        let claimed_at = parked_at + chrono::Duration::seconds(1);
+        assert!(matches!(
+            store
+                .claim_client_tool_call(
+                    call.id,
+                    chat.id,
+                    uuid::Uuid::new_v4(),
+                    client_token,
+                    claimed_at,
+                    claimed_at + chrono::Duration::minutes(1),
+                )
+                .await
+                .unwrap(),
+            ClaimClientToolCallOutcome::Claimed(_)
+        ));
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let cancel_store = store.clone();
+        let cancel_barrier = barrier.clone();
+        let cancel_at = claimed_at + chrono::Duration::seconds(1);
+        let cancellation = tokio::spawn(async move {
+            cancel_barrier.wait().await;
+            cancel_store
+                .request_turn_cancellation(turn_id, cancel_at)
+                .await
+        });
+        let resolve_store = store.clone();
+        let resolution = tokio::spawn(async move {
+            barrier.wait().await;
+            resolve_store
+                .resolve_client_tool_call(
+                    call.id,
+                    chat.id,
+                    client_token,
+                    cancel_at,
+                    &ToolCallResolution::Completed {
+                        result: "connected".into(),
+                    },
+                    cancel_at,
+                )
+                .await
+        });
+        let (cancellation, resolution) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(cancellation, resolution)
+            })
+            .await
+            .expect("client resolution and cancellation must not deadlock");
+        assert!(matches!(
+            cancellation.unwrap().unwrap().unwrap(),
+            RequestTurnCancellationOutcome::Requested(_)
+                | RequestTurnCancellationOutcome::Cancelled(_)
+        ));
+        assert_eq!(
+            resolution.unwrap().unwrap(),
+            ResolveToolCallOutcome::Resolved
+        );
+        assert_eq!(
+            store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+            TurnRunStatus::Cancelled
+        );
+    }
 }
 
 #[tokio::test]

@@ -6,12 +6,12 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use openwave_core::{
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent,
-    ApplyTurnSteerOutcome, CallId, Chat, ChatId, ClaimClientToolCallOutcome,
+    ApplyTurnSteerOutcome, CallId, Chat, ChatId, ClaimClientToolCallOutcome, ClientToolCallRequest,
     CompleteTurnRunOutcome, DbStore, FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome,
-    Message, MessageId, RecordTurnFailureOutcome, RequestTurnCancellationOutcome,
-    ResolveToolCallOutcome, Role, StopReason, Store, ToolCallExecution, ToolCallRecord,
-    ToolCallResolution, ToolCallStatus, TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId,
-    TurnSteerStatus, Usage,
+    Message, MessageId, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
+    RequestTurnCancellationOutcome, ResolveToolCallOutcome, Role, StopReason, Store,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnFailureRetry,
+    TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -990,6 +990,126 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         .unwrap();
     store
         .request_turn_cancellation(registry_message_turn.id, Utc::now())
+        .await
+        .unwrap();
+
+    let client_wait_chat = sample_chat();
+    store.create_chat(&client_wait_chat).await.unwrap();
+    let client_wait_turn = match store
+        .accept_turn(
+            TurnId::new(),
+            client_wait_chat.id,
+            "gpt-5",
+            "postgres native action",
+        )
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected client-wait turn acceptance: {outcome:?}"),
+    };
+    let client_wait_claimed_at = client_wait_turn.available_at + Duration::seconds(1);
+    let client_wait_turn_token = uuid::Uuid::new_v4();
+    let client_wait_claim = store
+        .claim_turn_run(
+            client_wait_turn_token,
+            client_wait_claimed_at,
+            client_wait_claimed_at + Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    assert_eq!(client_wait_claim.id, client_wait_turn.id);
+    let client_request = ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id: client_wait_chat.id,
+        turn_id: client_wait_turn.id,
+        provider_id: "native".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({"reason": "postgres state test"}),
+    };
+    let client_wait_parked_at = client_wait_claimed_at + Duration::seconds(1);
+    assert!(matches!(
+        store
+            .park_turn_for_client_tool_call(
+                client_wait_turn.id,
+                client_wait_turn_token,
+                0,
+                client_wait_parked_at,
+                &client_request,
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        ParkTurnForClientCallOutcome::Parked { turn, .. }
+            if turn.status == TurnRunStatus::WaitingForClient
+    ));
+    let client_token = uuid::Uuid::new_v4();
+    let client_claimed_at = client_wait_parked_at + Duration::seconds(1);
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                client_request.id,
+                client_wait_chat.id,
+                uuid::Uuid::new_v4(),
+                client_token,
+                client_claimed_at,
+                client_claimed_at + Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Claimed(_)
+    ));
+    let client_resolved_at = client_claimed_at + Duration::seconds(1);
+    assert_eq!(
+        store
+            .resolve_client_tool_call(
+                client_request.id,
+                client_wait_chat.id,
+                client_token,
+                client_resolved_at,
+                &ToolCallResolution::Completed {
+                    result: "root-postgres".into(),
+                },
+                client_resolved_at,
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Resolved
+    );
+    assert_eq!(
+        store
+            .get_turn_run(client_wait_turn.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TurnRunStatus::Resuming
+    );
+    let resumed_token = uuid::Uuid::new_v4();
+    let resumed = store
+        .claim_turn_run(
+            resumed_token,
+            client_resolved_at,
+            client_resolved_at + Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    assert_eq!(resumed.id, client_wait_turn.id);
+    assert_eq!((resumed.attempt_count, resumed.claim_count), (1, 2));
+    store
+        .request_turn_cancellation(resumed.id, client_resolved_at + Duration::seconds(1))
+        .await
+        .unwrap();
+    store
+        .finish_turn_cancellation(
+            resumed.id,
+            resumed_token,
+            client_resolved_at + Duration::seconds(2),
+        )
         .await
         .unwrap();
 
