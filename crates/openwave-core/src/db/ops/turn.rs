@@ -8,6 +8,7 @@ use crate::error::{AgentError, AgentErrorInfo, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, MessageId, TurnId};
 use crate::model::{TurnRun, TurnRunStatus};
+use crate::provider::Usage;
 use crate::storage::{AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome};
 
 use super::super::{entities, store_err, DbStore};
@@ -162,6 +163,11 @@ pub(in crate::db) async fn accept_turn(
         attempt_count: Set(0),
         max_attempts: Set(TurnRun::DEFAULT_MAX_ATTEMPTS),
         claim_count: Set(0),
+        model_steps: Set(0),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
         available_at: Set(now),
         lease_token: Set(None),
         lease_expires_at: Set(None),
@@ -362,7 +368,7 @@ pub(in crate::db) async fn claim_turn_run(
             }
             steer::reject_pending_turn_steers_on(&transaction, TurnId(candidate.id), now).await?;
             let event = AgentEvent::TurnCancelled {
-                usage: crate::provider::Usage::default(),
+                usage: usage_from_turn_model(&candidate)?,
             };
             let sequenced_event = append_claim_scan_terminal_event_on(
                 &transaction,
@@ -831,6 +837,7 @@ where
 }
 
 fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
+    let usage = usage_from_turn_model(&model)?;
     Ok(TurnRun {
         id: TurnId(model.id),
         chat_id: ChatId(model.chat_id),
@@ -841,6 +848,8 @@ fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
         attempt_count: model.attempt_count,
         max_attempts: model.max_attempts,
         claim_count: model.claim_count,
+        model_steps: model.model_steps,
+        usage,
         available_at: model.available_at,
         lease_token: model.lease_token,
         lease_expires_at: model.lease_expires_at,
@@ -852,6 +861,26 @@ fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
         last_steer_applied_at: model.last_steer_applied_at,
         created_at: model.created_at,
         updated_at: model.updated_at,
+    })
+}
+
+pub(in crate::db) fn usage_from_turn_model(model: &entities::turn_run::Model) -> Result<Usage> {
+    fn token_count(value: i64, field: &str) -> Result<u32> {
+        u32::try_from(value).map_err(|_| {
+            AgentError::Store(format!(
+                "turn {field} token count is outside the supported range"
+            ))
+        })
+    }
+
+    Ok(Usage {
+        input_tokens: token_count(model.input_tokens, "input")?,
+        output_tokens: token_count(model.output_tokens, "output")?,
+        cache_read_input_tokens: token_count(model.cache_read_input_tokens, "cache-read input")?,
+        cache_creation_input_tokens: token_count(
+            model.cache_creation_input_tokens,
+            "cache-creation input",
+        )?,
     })
 }
 

@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 use std::num::NonZeroU32;
 use uuid::Uuid;
 
+use crate::provider::Usage;
+
 /// A half-open UTF-8 byte range `[start, end)` in canonical document text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ByteSpan {
@@ -641,6 +643,12 @@ pub struct TurnRun {
     /// Worker lease segments already issued, including resumptions within one
     /// failure attempt.
     pub claim_count: i32,
+    /// Model calls committed through the latest durable client checkpoint.
+    /// Workers use this baseline when a later lease segment resumes.
+    pub model_steps: i32,
+    /// Provider usage committed through the latest durable client checkpoint.
+    /// The terminal event carries the final total after the last live segment.
+    pub usage: Usage,
     /// Earliest time queued, retry-wait, or resuming work may be claimed.
     pub available_at: DateTime<Utc>,
     /// Exact claim identity required for heartbeat and resolution writes.
@@ -752,6 +760,15 @@ pub struct ClientToolCallRequest {
     pub arguments: serde_json::Value,
 }
 
+/// Progress atomically committed with one client-execution checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnCheckpointProgress {
+    /// Model calls consumed since the preceding durable checkpoint.
+    pub model_steps: i32,
+    /// Provider usage incurred since the preceding durable checkpoint.
+    pub usage: Usage,
+}
+
 /// Immutable receipt for one turn parked on a client tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnClientWait {
@@ -767,6 +784,8 @@ pub struct TurnClientWait {
     pub attempt_count: i32,
     /// Exact lease-segment ordinal containing the checkpoint.
     pub claim_count: i32,
+    /// Exact progress delta committed by this checkpoint.
+    pub progress: TurnCheckpointProgress,
     /// Durable wait lifecycle.
     pub status: TurnClientWaitStatus,
     /// Store-owned time when parking committed.

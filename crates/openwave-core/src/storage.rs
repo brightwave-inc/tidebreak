@@ -25,8 +25,8 @@ use crate::model::{
     BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest, DocumentGeneration,
     DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
     DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
-    Message, Project, ToolCallRecord, ToolCallResolution, TurnClientWait, TurnFailureReceipt,
-    TurnFailureRetry, TurnRun, TurnSteer,
+    Message, Project, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress, TurnClientWait,
+    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
 
@@ -1023,13 +1023,16 @@ pub trait Store: Send + Sync {
     /// originating worker claim, and release the turn lease.
     ///
     /// Exact retries recover through the immutable wait receipt even after the
-    /// client call resolves or the turn advances. A pending steer fences the
-    /// checkpoint so the worker can apply that instruction first.
+    /// client call resolves or the turn advances. The exact progress delta is
+    /// part of that retry identity and is folded into turn-wide checkpoint
+    /// accounting at most once. A pending steer fences the checkpoint so the
+    /// worker can apply that instruction first.
     async fn park_turn_for_client_tool_call(
         &self,
         _turn_id: TurnId,
         _lease_token: uuid::Uuid,
         _expected_steer_revision: i64,
+        _progress: TurnCheckpointProgress,
         _now: chrono::DateTime<chrono::Utc>,
         _call: &ClientToolCallRequest,
     ) -> Result<Option<ParkTurnForClientCallOutcome>> {

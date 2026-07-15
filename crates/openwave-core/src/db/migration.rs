@@ -384,6 +384,36 @@ impl MigrationTrait for Init {
                             .default(0),
                     )
                     .col(
+                        ColumnDef::new(TurnRun::ModelSteps)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(TurnRun::InputTokens)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(TurnRun::OutputTokens)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(TurnRun::CacheReadInputTokens)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(TurnRun::CacheCreationInputTokens)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
                         ColumnDef::new(TurnRun::AvailableAt)
                             .timestamp_with_time_zone()
                             .not_null(),
@@ -506,6 +536,22 @@ impl MigrationTrait for Init {
                     )
                     .check(Expr::col(TurnRun::SteerRevision).gte(0))
                     .check(coherent_steer_generation)
+                    .check(
+                        Expr::col(TurnRun::ModelSteps)
+                            .gte(0)
+                            .and(Expr::col(TurnRun::ModelSteps).lte(i64::from(i32::MAX)))
+                            .and(Expr::col(TurnRun::InputTokens).gte(0))
+                            .and(Expr::col(TurnRun::InputTokens).lte(i64::from(u32::MAX)))
+                            .and(Expr::col(TurnRun::OutputTokens).gte(0))
+                            .and(Expr::col(TurnRun::OutputTokens).lte(i64::from(u32::MAX)))
+                            .and(Expr::col(TurnRun::CacheReadInputTokens).gte(0))
+                            .and(Expr::col(TurnRun::CacheReadInputTokens).lte(i64::from(u32::MAX)))
+                            .and(Expr::col(TurnRun::CacheCreationInputTokens).gte(0))
+                            .and(
+                                Expr::col(TurnRun::CacheCreationInputTokens)
+                                    .lte(i64::from(u32::MAX)),
+                            ),
+                    )
                     .check(
                         Expr::col(TurnRun::LastSteerAppliedAt)
                             .is_null()
@@ -1313,6 +1359,31 @@ impl MigrationTrait for AddToolCalls {
                             .integer()
                             .not_null(),
                     )
+                    .col(
+                        ColumnDef::new(TurnClientWait::ModelSteps)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnClientWait::InputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnClientWait::OutputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnClientWait::CacheReadInputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnClientWait::CacheCreationInputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(TurnClientWait::Status).text().not_null())
                     .col(
                         ColumnDef::new(TurnClientWait::ParkedAt)
@@ -1366,6 +1437,25 @@ impl MigrationTrait for AddToolCalls {
                             .is_null()
                             .or(Expr::col(TurnClientWait::ClosedAt)
                                 .gte(Expr::col(TurnClientWait::ParkedAt))),
+                    )
+                    .check(
+                        Expr::col(TurnClientWait::ModelSteps)
+                            .gt(0)
+                            .and(Expr::col(TurnClientWait::ModelSteps).lte(i64::from(i32::MAX)))
+                            .and(Expr::col(TurnClientWait::InputTokens).gte(0))
+                            .and(Expr::col(TurnClientWait::InputTokens).lte(i64::from(u32::MAX)))
+                            .and(Expr::col(TurnClientWait::OutputTokens).gte(0))
+                            .and(Expr::col(TurnClientWait::OutputTokens).lte(i64::from(u32::MAX)))
+                            .and(Expr::col(TurnClientWait::CacheReadInputTokens).gte(0))
+                            .and(
+                                Expr::col(TurnClientWait::CacheReadInputTokens)
+                                    .lte(i64::from(u32::MAX)),
+                            )
+                            .and(Expr::col(TurnClientWait::CacheCreationInputTokens).gte(0))
+                            .and(
+                                Expr::col(TurnClientWait::CacheCreationInputTokens)
+                                    .lte(i64::from(u32::MAX)),
+                            ),
                     )
                     .to_owned(),
             )
@@ -2197,6 +2287,11 @@ enum TurnRun {
     AttemptCount,
     MaxAttempts,
     ClaimCount,
+    ModelSteps,
+    InputTokens,
+    OutputTokens,
+    CacheReadInputTokens,
+    CacheCreationInputTokens,
     AvailableAt,
     LeaseToken,
     LeaseExpiresAt,
@@ -2285,6 +2380,11 @@ enum TurnClientWait {
     ParkLeaseToken,
     AttemptCount,
     ClaimCount,
+    ModelSteps,
+    InputTokens,
+    OutputTokens,
+    CacheReadInputTokens,
+    CacheCreationInputTokens,
     Status,
     ParkedAt,
     ClosedAt,

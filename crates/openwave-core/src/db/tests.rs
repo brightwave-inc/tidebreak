@@ -26,6 +26,18 @@ fn sample_chat() -> Chat {
     }
 }
 
+fn test_checkpoint_progress() -> crate::model::TurnCheckpointProgress {
+    crate::model::TurnCheckpointProgress {
+        model_steps: 1,
+        usage: crate::provider::Usage {
+            input_tokens: 13,
+            output_tokens: 8,
+            cache_read_input_tokens: 5,
+            cache_creation_input_tokens: 3,
+        },
+    }
+}
+
 fn sample_project() -> Project {
     Project {
         id: ProjectId::new(),
@@ -4613,6 +4625,11 @@ async fn make_queued_turn(
         attempt_count: Set(0),
         max_attempts: Set(crate::model::TurnRun::DEFAULT_MAX_ATTEMPTS),
         claim_count: Set(0),
+        model_steps: Set(0),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
         available_at: Set(now),
         lease_token: Set(None),
         lease_expires_at: Set(None),
@@ -4643,6 +4660,8 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     assert_eq!(stored.chat_id, chat.id);
     assert_eq!(stored.model, "claude-sonnet-4-5");
     assert_eq!(stored.status, TurnRunStatus::Queued);
+    assert_eq!(stored.model_steps, 0);
+    assert_eq!(stored.usage, crate::provider::Usage::default());
     assert_eq!(store.list_turn_runs(chat.id).await.unwrap(), vec![stored]);
 
     // The database, not a process-local map, owns the one-live-turn invariant.
@@ -4705,6 +4724,13 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
 
     let invalid_chat = sample_chat();
     store.create_chat(&invalid_chat).await.unwrap();
+
+    let mut negative_accounting = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
+    negative_accounting.input_tokens = Set(-1);
+    assert!(negative_accounting.insert(&store.conn).await.is_err());
+    let mut oversized_accounting = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
+    oversized_accounting.input_tokens = Set(i64::from(u32::MAX) + 1);
+    assert!(oversized_accounting.insert(&store.conn).await.is_err());
 
     let mut running_without_lease = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     running_without_lease.status = Set(TurnRunStatus::Running.as_str().into());
@@ -5587,6 +5613,29 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
         name: "connect_folder".into(),
         arguments: serde_json::json!({"suggested_name": "Documents"}),
     };
+    let progress = crate::model::TurnCheckpointProgress {
+        model_steps: 3,
+        usage: crate::provider::Usage {
+            input_tokens: 11,
+            output_tokens: 7,
+            cache_read_input_tokens: 5,
+            cache_creation_input_tokens: 2,
+        },
+    };
+    assert!(store
+        .park_turn_for_client_tool_call(
+            turn_id,
+            turn_lease,
+            0,
+            crate::model::TurnCheckpointProgress {
+                model_steps: 0,
+                usage: crate::provider::Usage::default(),
+            },
+            Utc::now(),
+            &request,
+        )
+        .await
+        .is_err());
     let stale_steer_id = TurnSteerId::new();
     assert!(matches!(
         store
@@ -5614,7 +5663,14 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     let checkpoint_at = Utc::now();
     assert!(matches!(
         store
-            .park_turn_for_client_tool_call(turn_id, turn_lease, 0, checkpoint_at, &request)
+            .park_turn_for_client_tool_call(
+                turn_id,
+                turn_lease,
+                0,
+                progress,
+                checkpoint_at,
+                &request,
+            )
             .await
             .unwrap()
             .unwrap(),
@@ -5643,6 +5699,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
                 turn_id,
                 turn_lease,
                 1,
+                progress,
                 pending_checkpoint_at,
                 &request,
             )
@@ -5673,14 +5730,21 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     let parked_at = Utc::now();
     assert_eq!(
         store
-            .park_turn_for_client_tool_call(turn_id, uuid::Uuid::new_v4(), 2, parked_at, &request,)
+            .park_turn_for_client_tool_call(
+                turn_id,
+                uuid::Uuid::new_v4(),
+                2,
+                progress,
+                parked_at,
+                &request,
+            )
             .await
             .unwrap(),
         None
     );
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     let (parked_turn, parked_call, parked_wait) = match store
-        .park_turn_for_client_tool_call(turn_id, turn_lease, 2, parked_at, &request)
+        .park_turn_for_client_tool_call(turn_id, turn_lease, 2, progress, parked_at, &request)
         .await
         .unwrap()
         .unwrap()
@@ -5690,12 +5754,34 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     };
     assert_eq!(parked_turn.status, TurnRunStatus::WaitingForClient);
     assert_eq!(parked_turn.lease_token, None);
+    assert_eq!(parked_turn.model_steps, progress.model_steps);
+    assert_eq!(parked_turn.usage, progress.usage);
     assert_eq!(parked_call.status, ToolCallStatus::Pending);
     assert_eq!(
         parked_wait.status,
         crate::model::TurnClientWaitStatus::Waiting
     );
     assert_eq!((parked_wait.attempt_count, parked_wait.claim_count), (1, 1));
+    assert_eq!(parked_wait.progress, progress);
+    let conflicting_progress = crate::model::TurnCheckpointProgress {
+        model_steps: progress.model_steps + 1,
+        ..progress
+    };
+    assert!(matches!(
+        store
+            .park_turn_for_client_tool_call(
+                turn_id,
+                turn_lease,
+                2,
+                conflicting_progress,
+                parked_at,
+                &request,
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        ParkTurnForClientCallOutcome::IdentityConflict
+    ));
     assert!(matches!(
         store
             .accept_turn(TurnId::new(), chat.id, "gpt-5", "must stay occupied")
@@ -5745,11 +5831,31 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     let resumable = store.get_turn_run(turn_id).await.unwrap().unwrap();
     assert_eq!(resumable.status, TurnRunStatus::Resuming);
     assert_eq!((resumable.attempt_count, resumable.claim_count), (1, 1));
+    assert_eq!(resumable.model_steps, progress.model_steps);
+    assert_eq!(resumable.usage, progress.usage);
     let wait = entities::turn_client_wait::Entity::find_by_id(request.id.0)
         .one(&store.conn)
         .await
         .unwrap()
         .unwrap();
+    assert!(entities::turn_client_wait::Entity::update_many()
+        .col_expr(
+            entities::turn_client_wait::Column::ModelSteps,
+            sea_orm::sea_query::Expr::value(0),
+        )
+        .filter(entities::turn_client_wait::Column::CallId.eq(request.id.0))
+        .exec(&store.conn)
+        .await
+        .is_err());
+    assert!(entities::turn_client_wait::Entity::update_many()
+        .col_expr(
+            entities::turn_client_wait::Column::InputTokens,
+            sea_orm::sea_query::Expr::value(i64::from(u32::MAX) + 1),
+        )
+        .filter(entities::turn_client_wait::Column::CallId.eq(request.id.0))
+        .exec(&store.conn)
+        .await
+        .is_err());
     assert_eq!(
         wait.status,
         crate::model::TurnClientWaitStatus::Resumed.as_str()
@@ -5758,7 +5864,14 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
 
     assert!(matches!(
         store
-            .park_turn_for_client_tool_call(turn_id, turn_lease, 2, Utc::now(), &request)
+            .park_turn_for_client_tool_call(
+                turn_id,
+                turn_lease,
+                2,
+                progress,
+                Utc::now(),
+                &request,
+            )
             .await
             .unwrap()
             .unwrap(),
@@ -5766,9 +5879,10 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
             if turn.status == TurnRunStatus::Resuming
                 && wait.status == crate::model::TurnClientWaitStatus::Resumed
     ));
+    let resumed_lease = uuid::Uuid::new_v4();
     let resumed = store
         .claim_turn_run(
-            uuid::Uuid::new_v4(),
+            resumed_lease,
             resolved_at,
             resolved_at + chrono::Duration::minutes(1),
         )
@@ -5777,6 +5891,189 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
         .turn
         .unwrap();
     assert_eq!((resumed.attempt_count, resumed.claim_count), (1, 2));
+    assert_eq!(resumed.model_steps, progress.model_steps);
+    assert_eq!(resumed.usage, progress.usage);
+    let regressing_output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "must not commit".into(),
+        created_at: resolved_at + chrono::Duration::microseconds(1),
+    };
+    assert_eq!(
+        store
+            .complete_turn_run_and_append_event(
+                turn_id,
+                turn_lease,
+                2,
+                regressing_output.created_at,
+                &regressing_output,
+                crate::provider::Usage::default(),
+                crate::provider::StopReason::EndTurn,
+            )
+            .await
+            .unwrap(),
+        None,
+        "a stale claim remains lease-lost even when its proposed usage is lower"
+    );
+    assert!(store
+        .complete_turn_run_and_append_event(
+            turn_id,
+            resumed_lease,
+            2,
+            regressing_output.created_at,
+            &regressing_output,
+            crate::provider::Usage::default(),
+            crate::provider::StopReason::EndTurn,
+        )
+        .await
+        .is_err());
+    assert!(store
+        .list_messages(chat.id)
+        .await
+        .unwrap()
+        .iter()
+        .all(|message| message.id != regressing_output.id));
+
+    let second_progress = crate::model::TurnCheckpointProgress {
+        model_steps: 2,
+        usage: crate::provider::Usage {
+            input_tokens: 17,
+            output_tokens: 9,
+            cache_read_input_tokens: 4,
+            cache_creation_input_tokens: 1,
+        },
+    };
+    let expected_total_usage = crate::provider::Usage {
+        input_tokens: progress.usage.input_tokens + second_progress.usage.input_tokens,
+        output_tokens: progress.usage.output_tokens + second_progress.usage.output_tokens,
+        cache_read_input_tokens: progress.usage.cache_read_input_tokens
+            + second_progress.usage.cache_read_input_tokens,
+        cache_creation_input_tokens: progress.usage.cache_creation_input_tokens
+            + second_progress.usage.cache_creation_input_tokens,
+    };
+    let second_request = crate::model::ClientToolCallRequest {
+        id: CallId::new(),
+        provider_id: "native-second".into(),
+        name: "open_file".into(),
+        arguments: serde_json::json!({"root_id": "root-1"}),
+        ..request.clone()
+    };
+    let second_parked_at = resolved_at + chrono::Duration::seconds(1);
+    let second_parked = store
+        .park_turn_for_client_tool_call(
+            turn_id,
+            resumed_lease,
+            2,
+            second_progress,
+            second_parked_at,
+            &second_request,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        second_parked,
+        ParkTurnForClientCallOutcome::Parked { ref turn, ref wait, .. }
+            if turn.model_steps == progress.model_steps + second_progress.model_steps
+                && turn.usage == expected_total_usage
+                && wait.progress == second_progress
+    ));
+    assert!(matches!(
+        store
+            .park_turn_for_client_tool_call(
+                turn_id,
+                resumed_lease,
+                2,
+                second_progress,
+                Utc::now(),
+                &second_request,
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        ParkTurnForClientCallOutcome::Existing { turn, wait, .. }
+            if turn.model_steps == progress.model_steps + second_progress.model_steps
+                && turn.usage == expected_total_usage
+                && wait.progress == second_progress
+    ));
+    let twice_parked = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    assert_eq!(
+        twice_parked.model_steps,
+        progress.model_steps + second_progress.model_steps
+    );
+    assert_eq!(twice_parked.usage, expected_total_usage);
+}
+
+#[tokio::test]
+async fn client_wait_accounting_overflow_rolls_back_the_checkpoint() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "overflow")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let lease_token = uuid::Uuid::new_v4();
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    store
+        .claim_turn_run(
+            lease_token,
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::InputTokens,
+            sea_orm::sea_query::Expr::value(i64::from(u32::MAX)),
+        )
+        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    let request = crate::model::ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id,
+        provider_id: "native".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({}),
+    };
+    assert!(store
+        .park_turn_for_client_tool_call(
+            turn_id,
+            lease_token,
+            0,
+            crate::model::TurnCheckpointProgress {
+                model_steps: 1,
+                usage: crate::provider::Usage {
+                    input_tokens: 1,
+                    ..crate::provider::Usage::default()
+                },
+            },
+            claimed_at + chrono::Duration::seconds(1),
+            &request,
+        )
+        .await
+        .is_err());
+    assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+    assert!(entities::turn_client_wait::Entity::find_by_id(request.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .is_none());
+    let still_running = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    assert_eq!(still_running.status, TurnRunStatus::Running);
+    assert_eq!(still_running.lease_token, Some(lease_token));
+    assert_eq!(still_running.usage.input_tokens, u32::MAX);
 }
 
 async fn park_test_client_wait(
@@ -5815,7 +6112,14 @@ async fn park_test_client_wait(
     let parked_at = claimed_at + chrono::Duration::seconds(1);
     assert!(matches!(
         store
-            .park_turn_for_client_tool_call(turn_id, turn_lease, 0, parked_at, &request)
+            .park_turn_for_client_tool_call(
+                turn_id,
+                turn_lease,
+                0,
+                test_checkpoint_progress(),
+                parked_at,
+                &request,
+            )
             .await
             .unwrap()
             .unwrap(),
@@ -5865,6 +6169,11 @@ async fn client_wait_schema_rejects_invalid_scope_claim_and_lifecycle() {
         park_lease_token: Set(wait.park_lease_token),
         attempt_count: Set(wait.attempt_count),
         claim_count: Set(wait.claim_count),
+        model_steps: Set(1),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
         status: Set(crate::model::TurnClientWaitStatus::Waiting.as_str().into()),
         parked_at: Set(second_call.created_at),
         closed_at: Set(None),
@@ -5919,8 +6228,15 @@ async fn client_wait_cancellation_fences_unclaimed_and_claimed_native_work() {
         cancelled.outcome,
         RequestTurnCancellationOutcome::Cancelled(ref turn)
             if turn.status == TurnRunStatus::Cancelled
+                && turn.usage == test_checkpoint_progress().usage
     ));
-    assert!(cancelled.terminal_event.is_some());
+    assert!(matches!(
+        cancelled.terminal_event,
+        Some(SequencedEvent {
+            event: AgentEvent::TurnCancelled { usage },
+            ..
+        }) if usage == test_checkpoint_progress().usage
+    ));
     assert_eq!(
         store.list_tool_calls(unclaimed_chat.id).await.unwrap()[0].status,
         ToolCallStatus::Cancelled
@@ -6018,6 +6334,10 @@ async fn client_wait_cancellation_fences_unclaimed_and_claimed_native_work() {
         Some(TurnRunStatus::Cancelled)
     );
     let terminal_event = journaled.terminal_event.clone().unwrap();
+    assert!(matches!(
+        terminal_event.event,
+        AgentEvent::TurnCancelled { usage } if usage == test_checkpoint_progress().usage
+    ));
     assert_eq!(
         store
             .get_turn_run(claimed_turn)

@@ -6,8 +6,8 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::model::{
-    ClientToolCallRequest, ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnClientWait,
-    TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
+    ClientToolCallRequest, ToolCallExecution, ToolCallRecord, ToolCallStatus,
+    TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
 };
 use crate::storage::ParkTurnForClientCallOutcome;
 use crate::{AgentEvent, ChatId, SequencedEvent, TurnId, TurnRun};
@@ -26,10 +26,11 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
     turn_id: crate::TurnId,
     lease_token: uuid::Uuid,
     expected_steer_revision: i64,
+    progress: TurnCheckpointProgress,
     now: chrono::DateTime<Utc>,
     call: &ClientToolCallRequest,
 ) -> Result<Option<ParkTurnForClientCallOutcome>> {
-    validate_request(turn_id, lease_token, call)?;
+    validate_request(turn_id, lease_token, progress, call)?;
     let now = canonical_db_timestamp(now)?;
     let Some(scope) = entities::turn_run::Entity::find_by_id(turn_id.0)
         .one(&store.conn)
@@ -71,6 +72,7 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         let exact = wait.turn_id == turn_id.0
             && wait.chat_id == call.chat_id.0
             && wait.park_lease_token == lease_token
+            && progress_from_wait_model(&wait)? == progress
             && exact_call_request(&existing_call, call);
         let outcome = if exact {
             ParkTurnForClientCallOutcome::Existing {
@@ -127,6 +129,7 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         transaction.commit().await.map_err(store_err)?;
         return Ok(Some(ParkTurnForClientCallOutcome::IdentityConflict));
     }
+    let totals = checked_checkpoint_totals(&turn, progress)?;
 
     let inserted = entities::tool_call::Entity::insert(entities::tool_call::ActiveModel {
         id: Set(call.id.0),
@@ -166,6 +169,11 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         park_lease_token: Set(lease_token),
         attempt_count: Set(turn.attempt_count),
         claim_count: Set(turn.claim_count),
+        model_steps: Set(progress.model_steps),
+        input_tokens: Set(i64::from(progress.usage.input_tokens)),
+        output_tokens: Set(i64::from(progress.usage.output_tokens)),
+        cache_read_input_tokens: Set(i64::from(progress.usage.cache_read_input_tokens)),
+        cache_creation_input_tokens: Set(i64::from(progress.usage.cache_creation_input_tokens)),
         status: Set(TurnClientWaitStatus::Waiting.as_str().into()),
         parked_at: Set(now),
         closed_at: Set(None),
@@ -185,6 +193,26 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         .col_expr(
             entities::turn_run::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::turn_run::Column::ModelSteps,
+            sea_orm::sea_query::Expr::value(totals.model_steps),
+        )
+        .col_expr(
+            entities::turn_run::Column::InputTokens,
+            sea_orm::sea_query::Expr::value(totals.input_tokens),
+        )
+        .col_expr(
+            entities::turn_run::Column::OutputTokens,
+            sea_orm::sea_query::Expr::value(totals.output_tokens),
+        )
+        .col_expr(
+            entities::turn_run::Column::CacheReadInputTokens,
+            sea_orm::sea_query::Expr::value(totals.cache_read_input_tokens),
+        )
+        .col_expr(
+            entities::turn_run::Column::CacheCreationInputTokens,
+            sea_orm::sea_query::Expr::value(totals.cache_creation_input_tokens),
         )
         .col_expr(
             entities::turn_run::Column::UpdatedAt,
@@ -229,6 +257,7 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
 fn validate_request(
     turn_id: crate::TurnId,
     lease_token: uuid::Uuid,
+    progress: TurnCheckpointProgress,
     call: &ClientToolCallRequest,
 ) -> Result<()> {
     let labels_valid = [call.provider_id.as_str(), call.name.as_str()]
@@ -246,6 +275,7 @@ fn validate_request(
         || call.id.0.is_nil()
         || call.chat_id.0.is_nil()
         || call.turn_id != turn_id
+        || progress.model_steps <= 0
         || !labels_valid
         || args_len > ToolCallRecord::MAX_ARGUMENT_BYTES
     {
@@ -287,10 +317,106 @@ pub(super) fn wait_from_model(model: entities::turn_client_wait::Model) -> Resul
         park_lease_token: model.park_lease_token,
         attempt_count: model.attempt_count,
         claim_count: model.claim_count,
+        progress: progress_from_wait_model(&model)?,
         status,
         parked_at: model.parked_at,
         closed_at: model.closed_at,
     })
+}
+
+fn progress_from_wait_model(
+    model: &entities::turn_client_wait::Model,
+) -> Result<TurnCheckpointProgress> {
+    if model.model_steps <= 0 {
+        return Err(AgentError::Store(format!(
+            "client wait {} has invalid model-step progress",
+            crate::CallId(model.call_id)
+        )));
+    }
+    Ok(TurnCheckpointProgress {
+        model_steps: model.model_steps,
+        usage: crate::provider::Usage {
+            input_tokens: checkpoint_tokens_from_db(
+                model.call_id,
+                "input_tokens",
+                model.input_tokens,
+            )?,
+            output_tokens: checkpoint_tokens_from_db(
+                model.call_id,
+                "output_tokens",
+                model.output_tokens,
+            )?,
+            cache_read_input_tokens: checkpoint_tokens_from_db(
+                model.call_id,
+                "cache_read_input_tokens",
+                model.cache_read_input_tokens,
+            )?,
+            cache_creation_input_tokens: checkpoint_tokens_from_db(
+                model.call_id,
+                "cache_creation_input_tokens",
+                model.cache_creation_input_tokens,
+            )?,
+        },
+    })
+}
+
+fn checkpoint_tokens_from_db(call_id: uuid::Uuid, field: &str, value: i64) -> Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        AgentError::Store(format!(
+            "client wait {} has invalid {field}",
+            crate::CallId(call_id)
+        ))
+    })
+}
+
+struct CheckpointTotals {
+    model_steps: i32,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_input_tokens: i64,
+    cache_creation_input_tokens: i64,
+}
+
+fn checked_checkpoint_totals(
+    turn: &entities::turn_run::Model,
+    progress: TurnCheckpointProgress,
+) -> Result<CheckpointTotals> {
+    let model_steps = turn
+        .model_steps
+        .checked_add(progress.model_steps)
+        .filter(|total| *total >= 0)
+        .ok_or_else(|| AgentError::Store("turn model-step accounting overflowed".into()))?;
+    Ok(CheckpointTotals {
+        model_steps,
+        input_tokens: checked_token_total(
+            "input_tokens",
+            turn.input_tokens,
+            progress.usage.input_tokens,
+        )?,
+        output_tokens: checked_token_total(
+            "output_tokens",
+            turn.output_tokens,
+            progress.usage.output_tokens,
+        )?,
+        cache_read_input_tokens: checked_token_total(
+            "cache_read_input_tokens",
+            turn.cache_read_input_tokens,
+            progress.usage.cache_read_input_tokens,
+        )?,
+        cache_creation_input_tokens: checked_token_total(
+            "cache_creation_input_tokens",
+            turn.cache_creation_input_tokens,
+            progress.usage.cache_creation_input_tokens,
+        )?,
+    })
+}
+
+fn checked_token_total(field: &str, current: i64, delta: u32) -> Result<i64> {
+    let total = current
+        .checked_add(i64::from(delta))
+        .filter(|total| u32::try_from(*total).is_ok())
+        .ok_or_else(|| AgentError::Store(format!("turn {field} accounting overflowed")))?;
+    Ok(total)
 }
 
 pub(in crate::db) async fn advance_turn_after_client_resolution_on<C>(
@@ -414,7 +540,7 @@ where
     let terminal_event = if cancelling {
         super::steer::reject_pending_turn_steers_on(conn, turn_id, resolved_at).await?;
         let event = AgentEvent::TurnCancelled {
-            usage: crate::provider::Usage::default(),
+            usage: super::usage_from_turn_model(&turn)?,
         };
         super::resolution::append_terminal_event_on(
             conn,

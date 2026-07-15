@@ -5,7 +5,7 @@ pub(in crate::db) async fn request_turn_cancellation(
     id: TurnId,
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<RequestTurnCancellationOutcome>> {
-    Ok(request_turn_cancellation_inner(store, id, now, None)
+    Ok(request_turn_cancellation_inner(store, id, now, false)
         .await?
         .map(|resolution| resolution.outcome))
 }
@@ -15,17 +15,14 @@ pub(in crate::db) async fn request_turn_cancellation_and_append_event(
     id: TurnId,
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<JournaledTurnOutcome<RequestTurnCancellationOutcome>>> {
-    let event = AgentEvent::TurnCancelled {
-        usage: Usage::default(),
-    };
-    request_turn_cancellation_inner(store, id, now, Some(&event)).await
+    request_turn_cancellation_inner(store, id, now, true).await
 }
 
 async fn request_turn_cancellation_inner(
     store: &DbStore,
     id: TurnId,
     now: chrono::DateTime<Utc>,
-    terminal_event: Option<&AgentEvent>,
+    journal_terminal_event: bool,
 ) -> Result<Option<JournaledTurnOutcome<RequestTurnCancellationOutcome>>> {
     let now = canonical_db_timestamp(now)?;
     // Client claiming/resolution also takes this chat lock before its call and
@@ -59,7 +56,7 @@ async fn request_turn_cancellation_inner(
     match status {
         TurnRunStatus::Cancelling | TurnRunStatus::CancellingClient | TurnRunStatus::Cancelled => {
             let sequenced_event = if status == TurnRunStatus::Cancelled {
-                existing_cancellation_event_on(&transaction, id, terminal_event.is_some()).await?
+                existing_cancellation_event_on(&transaction, id, journal_terminal_event).await?
             } else {
                 None
             };
@@ -244,7 +241,14 @@ async fn request_turn_cancellation_inner(
         .ok_or_else(|| AgentError::Store(format!("cancelled turn {id} disappeared")))
         .and_then(turn_run_from_model)?;
     let sequenced_event = if next_status == TurnRunStatus::Cancelled {
-        append_terminal_event_on(&transaction, id, ChatId(turn.chat_id), None, terminal_event)
+        let event = if journal_terminal_event {
+            Some(AgentEvent::TurnCancelled {
+                usage: super::super::usage_from_turn_model(&turn)?,
+            })
+        } else {
+            None
+        };
+        append_terminal_event_on(&transaction, id, ChatId(turn.chat_id), None, event.as_ref())
             .await?
     } else {
         None
@@ -353,6 +357,9 @@ async fn finish_turn_cancellation_inner(
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
+    }
+    if let Some(AgentEvent::TurnCancelled { usage }) = terminal_event {
+        validate_terminal_usage(*usage, super::super::usage_from_turn_model(&turn)?)?;
     }
 
     let cancelled = entities::turn_run::Entity::update_many()

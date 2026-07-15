@@ -126,13 +126,20 @@ pub struct Usage {
     pub cache_creation_input_tokens: u32,
 }
 
-impl std::ops::AddAssign for Usage {
-    /// Accumulate token counts (e.g. across the model calls of a multi-step turn).
-    fn add_assign(&mut self, rhs: Self) {
-        self.input_tokens += rhs.input_tokens;
-        self.output_tokens += rhs.output_tokens;
-        self.cache_read_input_tokens += rhs.cache_read_input_tokens;
-        self.cache_creation_input_tokens += rhs.cache_creation_input_tokens;
+impl Usage {
+    /// Accumulate token counts without wrapping any component.
+    #[must_use]
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        Some(Self {
+            input_tokens: self.input_tokens.checked_add(rhs.input_tokens)?,
+            output_tokens: self.output_tokens.checked_add(rhs.output_tokens)?,
+            cache_read_input_tokens: self
+                .cache_read_input_tokens
+                .checked_add(rhs.cache_read_input_tokens)?,
+            cache_creation_input_tokens: self
+                .cache_creation_input_tokens
+                .checked_add(rhs.cache_creation_input_tokens)?,
+        })
     }
 }
 
@@ -294,6 +301,18 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Usage>(&serde_json::to_string(&full).unwrap()).unwrap(),
             full
+        );
+        assert_eq!(full.checked_add(Usage::default()), Some(full));
+        assert_eq!(
+            Usage {
+                input_tokens: u32::MAX,
+                ..Usage::default()
+            }
+            .checked_add(Usage {
+                input_tokens: 1,
+                ..Usage::default()
+            }),
+            None
         );
     }
 
