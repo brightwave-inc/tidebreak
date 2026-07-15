@@ -2,13 +2,34 @@ use super::{sample_chat, temp_store};
 use crate::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptTurnOutcome, AgentRun,
     AgentRunExecution, AgentRunId, AgentRunInboxStatus, AgentRunStatus, CallId, ChatId,
-    ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
-    ConsumeAgentRunInboxOutcome, DbStore, FinishAgentRunCancellationOutcome, MessageId,
-    ParkTurnForAgentRunInboxOutcome, RequestAgentRunCancellationOutcome, Role, Store,
-    SubmitAgentRunResultOutcome, TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
+    ClaimAgentRunInboxOutcome, ClaimSandboxToolCallOutcome,
+    ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome, DbStore,
+    FinishAgentRunCancellationOutcome, MessageId, ParkSandboxToolCallOutcome,
+    ParkTurnForAgentRunInboxOutcome, RequestAgentRunCancellationOutcome,
+    ResolveSandboxToolCallOutcome, Role, SandboxToolCallRequest, Store,
+    SubmitAgentRunResultOutcome, ToolCallResolution, TurnCheckpointProgress, TurnId, TurnRunStatus,
+    Usage,
 };
 use chrono::{Duration, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+async fn accepted_sandbox_for_tool_test(store: &DbStore, chat_id: ChatId) -> AgentRun {
+    match store
+        .accept_agent_run(
+            AgentRunId::new(),
+            chat_id,
+            Some(AgentRunId::foreground_for_chat(chat_id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("Use the durable sandbox tool checkpoint"),
+        )
+        .await
+        .unwrap()
+    {
+        AcceptAgentRunOutcome::Accepted(run) => run,
+        outcome => panic!("unexpected sandbox acceptance: {outcome:?}"),
+    }
+}
 
 async fn force_expired_agent_lease(store: &DbStore, id: AgentRunId) {
     let past = Utc::now() - Duration::minutes(5);
@@ -1778,6 +1799,14 @@ async fn sandbox_claim_terminalizes_expired_deadlines() {
     let failed = store.get_agent_run(child_id).await.unwrap().unwrap();
     assert_eq!(failed.status, AgentRunStatus::Failed);
     assert_eq!(failed.last_error_code.as_deref(), Some("deadline_exceeded"));
+    assert_eq!(
+        store
+            .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1890,4 +1919,318 @@ async fn concurrent_sandbox_claimers_respect_both_limits() {
         .collect::<Vec<_>>();
     assert_eq!(claimed.len(), 2);
     assert_ne!(claimed[0].chat_id, claimed[1].chat_id);
+}
+
+#[tokio::test]
+async fn sandbox_tool_checkpoint_is_lease_fenced_and_receipt_idempotent() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let sandbox = accepted_sandbox_for_tool_test(&store, chat.id).await;
+    let worker_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(worker_lease, Duration::minutes(5), 1, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        sandbox.id
+    );
+    let request = SandboxToolCallRequest {
+        id: CallId::new(),
+        agent_run_id: sandbox.id,
+        chat_id: chat.id,
+        provider_id: "provider-call-1".into(),
+        name: "web_search".into(),
+        arguments: serde_json::json!({"query": "durable receipts"}),
+    };
+    assert!(matches!(
+        store
+            .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+            .await
+            .unwrap(),
+        ParkSandboxToolCallOutcome::Parked { .. }
+    ));
+    assert!(matches!(
+        store
+            .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+            .await
+            .unwrap(),
+        ParkSandboxToolCallOutcome::Existing { .. }
+    ));
+    let executor_lease = uuid::Uuid::new_v4();
+    assert!(matches!(
+        store
+            .claim_sandbox_tool_call(request.id, executor_lease, Duration::minutes(2))
+            .await
+            .unwrap(),
+        ClaimSandboxToolCallOutcome::Claimed(_)
+    ));
+    assert!(matches!(
+        store
+            .claim_sandbox_tool_call(request.id, executor_lease, Duration::minutes(2))
+            .await
+            .unwrap(),
+        ClaimSandboxToolCallOutcome::Existing(_)
+    ));
+    let resolution = ToolCallResolution::Completed {
+        result: "search results".into(),
+    };
+    assert_eq!(
+        store
+            .resolve_sandbox_tool_call(request.id, executor_lease, &resolution)
+            .await
+            .unwrap(),
+        ResolveSandboxToolCallOutcome::Resolved
+    );
+    assert_eq!(
+        store
+            .resolve_sandbox_tool_call(request.id, executor_lease, &resolution)
+            .await
+            .unwrap(),
+        ResolveSandboxToolCallOutcome::Existing
+    );
+    assert_eq!(
+        store
+            .resolve_sandbox_tool_call(
+                request.id,
+                executor_lease,
+                &ToolCallResolution::Cancelled {
+                    result: "different".into(),
+                },
+            )
+            .await
+            .unwrap(),
+        ResolveSandboxToolCallOutcome::AlreadyTerminal
+    );
+    assert_eq!(
+        store
+            .get_agent_run(sandbox.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AgentRunStatus::RetryWait
+    );
+    let resumed = store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(2), 1, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.id, sandbox.id);
+    assert_eq!(resumed.attempt_count, 1, "tool continuation is not a retry");
+    assert_eq!(resumed.claim_count, 2);
+    assert_eq!(
+        store
+            .get_sandbox_tool_call_receipt(request.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .result,
+        "search results"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_waiting_sandbox_fences_claimed_tool_work() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let sandbox = accepted_sandbox_for_tool_test(&store, chat.id).await;
+    let worker_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(worker_lease, Duration::minutes(5), 1, 1)
+        .await
+        .unwrap();
+    let request = SandboxToolCallRequest {
+        id: CallId::new(),
+        agent_run_id: sandbox.id,
+        chat_id: chat.id,
+        provider_id: "provider-call-2".into(),
+        name: "web_search".into(),
+        arguments: serde_json::json!({"query": "cancel"}),
+    };
+    store
+        .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+        .await
+        .unwrap();
+    let executor_lease = uuid::Uuid::new_v4();
+    store
+        .claim_sandbox_tool_call(request.id, executor_lease, Duration::minutes(2))
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .request_agent_run_cancellation(sandbox.id)
+            .await
+            .unwrap(),
+        Some(RequestAgentRunCancellationOutcome::Cancelled(_))
+    ));
+    assert_eq!(
+        store
+            .resolve_sandbox_tool_call(
+                request.id,
+                executor_lease,
+                &ToolCallResolution::Completed {
+                    result: "late result".into(),
+                },
+            )
+            .await
+            .unwrap(),
+        ResolveSandboxToolCallOutcome::AlreadyTerminal
+    );
+    assert_eq!(
+        store
+            .get_sandbox_tool_call_receipt(request.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            .as_str(),
+        "cancelled"
+    );
+}
+
+#[tokio::test]
+async fn expired_sandbox_tool_claim_is_recoverable_and_fences_stale_executor() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let sandbox = accepted_sandbox_for_tool_test(&store, chat.id).await;
+    let worker_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(worker_lease, Duration::minutes(5), 1, 1)
+        .await
+        .unwrap();
+    let request = SandboxToolCallRequest {
+        id: CallId::new(),
+        agent_run_id: sandbox.id,
+        chat_id: chat.id,
+        provider_id: "provider-call-3".into(),
+        name: "web_search".into(),
+        arguments: serde_json::json!({"query": "expiry"}),
+    };
+    store
+        .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+        .await
+        .unwrap();
+    let stale_executor = uuid::Uuid::new_v4();
+    store
+        .claim_sandbox_tool_call(request.id, stale_executor, Duration::minutes(2))
+        .await
+        .unwrap();
+    crate::db::entities::sandbox_tool_call::Entity::update_many()
+        .col_expr(
+            crate::db::entities::sandbox_tool_call::Column::ExecutorLeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Some(Utc::now() - Duration::minutes(1))),
+        )
+        .filter(crate::db::entities::sandbox_tool_call::Column::Id.eq(request.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .list_sandbox_tool_call_candidates(8)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(matches!(
+        store
+            .claim_sandbox_tool_call(request.id, uuid::Uuid::new_v4(), Duration::minutes(2))
+            .await
+            .unwrap(),
+        ClaimSandboxToolCallOutcome::Unavailable
+    ));
+    assert_eq!(
+        store
+            .resolve_sandbox_tool_call(
+                request.id,
+                stale_executor,
+                &ToolCallResolution::Completed {
+                    result: "late result".into(),
+                },
+            )
+            .await
+            .unwrap(),
+        ResolveSandboxToolCallOutcome::AlreadyTerminal
+    );
+    let receipt = store
+        .get_sandbox_tool_call_receipt(request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receipt.error_code.as_deref(),
+        Some("executor_lease_expired")
+    );
+    assert_eq!(
+        store
+            .get_agent_run(sandbox.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AgentRunStatus::RetryWait
+    );
+}
+
+#[tokio::test]
+async fn waiting_sandbox_deadline_fences_tool_and_delivers_parent_failure() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let sandbox = accepted_sandbox_for_tool_test(&store, chat.id).await;
+    let worker_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(worker_lease, Duration::minutes(5), 1, 1)
+        .await
+        .unwrap();
+    let request = SandboxToolCallRequest {
+        id: CallId::new(),
+        agent_run_id: sandbox.id,
+        chat_id: chat.id,
+        provider_id: "provider-call-4".into(),
+        name: "web_search".into(),
+        arguments: serde_json::json!({"query": "deadline"}),
+    };
+    store
+        .park_agent_run_for_sandbox_tool_call(sandbox.id, worker_lease, &request)
+        .await
+        .unwrap();
+    force_expired_agent_deadline(&store, sandbox.id).await;
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store
+            .get_agent_run(sandbox.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AgentRunStatus::Failed
+    );
+    assert_eq!(
+        store
+            .get_sandbox_tool_call_receipt(request.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .error_code
+            .as_deref(),
+        Some("deadline_exceeded")
+    );
+    assert_eq!(
+        store
+            .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }

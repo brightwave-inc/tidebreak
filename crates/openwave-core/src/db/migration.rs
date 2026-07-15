@@ -5,6 +5,7 @@ use super::{
     DocumentProcessingStatus, TurnAgentRunWaitStatus, TurnClientWaitStatus, TurnRunStatus,
     TurnSteerStatus,
 };
+use crate::model::SandboxToolCallStatus;
 
 pub struct Migrator;
 
@@ -18,6 +19,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddChatModel),
             Box::new(AddToolCalls),
             Box::new(AddDocuments),
+            Box::new(AddSandboxToolCalls),
         ]
     }
 }
@@ -210,12 +212,6 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
         ])
         .and(Expr::col(AgentRun::LastErrorCode).is_null())
         .and(Expr::col(AgentRun::LastErrorDetail).is_null());
-    let queued_pristine = Expr::col(AgentRun::Status)
-        .ne(AgentRunStatus::Queued.as_str())
-        .or(Expr::col(AgentRun::AttemptCount)
-            .eq(0)
-            .and(Expr::col(AgentRun::ClaimCount).eq(0))
-            .and(Expr::col(AgentRun::StartedAt).is_null()));
 
     manager
         .create_table(
@@ -312,7 +308,6 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
                 .check(active_lease.or(no_lease))
                 .check(terminal_finished.or(nonterminal_unfinished))
                 .check(failure_has_error.or(success_has_no_error))
-                .check(queued_pristine)
                 .check(
                     Expr::col(AgentRun::LastErrorDetail)
                         .is_null()
@@ -639,6 +634,197 @@ async fn create_agent_run_inbox_table(manager: &SchemaManager<'_>) -> Result<(),
                 .to_owned(),
         )
         .await
+}
+
+async fn create_sandbox_tool_call_tables(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .create_table(
+            Table::create()
+                .table(SandboxToolCall::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(SandboxToolCall::Id)
+                        .uuid()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(SandboxToolCall::AgentRunId)
+                        .uuid()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(SandboxToolCall::ChatId).uuid().not_null())
+                .col(
+                    ColumnDef::new(SandboxToolCall::AgentRunDepth)
+                        .small_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(SandboxToolCall::ProviderId)
+                        .text()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(SandboxToolCall::Name).text().not_null())
+                .col(
+                    ColumnDef::new(SandboxToolCall::Arguments)
+                        .json_binary()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(SandboxToolCall::Status).text().not_null())
+                .col(
+                    ColumnDef::new(SandboxToolCall::ParkLeaseToken)
+                        .uuid()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(SandboxToolCall::ParkAttemptCount)
+                        .integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(SandboxToolCall::ParkClaimCount)
+                        .integer()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(SandboxToolCall::ExecutorLeaseToken).uuid())
+                .col(
+                    ColumnDef::new(SandboxToolCall::ExecutorLeaseExpiresAt)
+                        .timestamp_with_time_zone(),
+                )
+                .col(
+                    ColumnDef::new(SandboxToolCall::CreatedAt)
+                        .timestamp_with_time_zone()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(SandboxToolCall::ResolvedAt).timestamp_with_time_zone())
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_sandbox_tool_call_run")
+                        .from_tbl(SandboxToolCall::Table)
+                        .from_col(SandboxToolCall::AgentRunId)
+                        .from_col(SandboxToolCall::ChatId)
+                        .from_col(SandboxToolCall::AgentRunDepth)
+                        .to_tbl(AgentRun::Table)
+                        .to_col(AgentRun::Id)
+                        .to_col(AgentRun::ChatId)
+                        .to_col(AgentRun::Depth)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_sandbox_tool_call_park_claim")
+                        .from_tbl(SandboxToolCall::Table)
+                        .from_col(SandboxToolCall::ParkLeaseToken)
+                        .from_col(SandboxToolCall::AgentRunId)
+                        .from_col(SandboxToolCall::ParkAttemptCount)
+                        .from_col(SandboxToolCall::ParkClaimCount)
+                        .to_tbl(AgentRunClaim::Table)
+                        .to_col(AgentRunClaim::Token)
+                        .to_col(AgentRunClaim::AgentRunId)
+                        .to_col(AgentRunClaim::AttemptCount)
+                        .to_col(AgentRunClaim::ClaimCount)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .check(Expr::col(SandboxToolCall::AgentRunDepth).eq(1))
+                .check(Expr::col(SandboxToolCall::ParkAttemptCount).gte(1))
+                .check(
+                    Expr::col(SandboxToolCall::ParkClaimCount)
+                        .gte(Expr::col(SandboxToolCall::ParkAttemptCount)),
+                )
+                .check(Expr::col(SandboxToolCall::Status).is_in([
+                    SandboxToolCallStatus::Accepted.as_str(),
+                    SandboxToolCallStatus::Claimed.as_str(),
+                    SandboxToolCallStatus::Completed.as_str(),
+                    SandboxToolCallStatus::Failed.as_str(),
+                    SandboxToolCallStatus::Cancelled.as_str(),
+                ]))
+                .check(
+                    Expr::col(SandboxToolCall::ResolvedAt)
+                        .is_null()
+                        .or(Expr::col(SandboxToolCall::ResolvedAt)
+                            .gte(Expr::col(SandboxToolCall::CreatedAt))),
+                )
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_sandbox_tool_call_run")
+                .table(SandboxToolCall::Table)
+                .col(SandboxToolCall::AgentRunId)
+                .col(SandboxToolCall::CreatedAt)
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_sandbox_tool_call_recovery")
+                .table(SandboxToolCall::Table)
+                .col(SandboxToolCall::Status)
+                .col(SandboxToolCall::ExecutorLeaseExpiresAt)
+                .col(SandboxToolCall::CreatedAt)
+                .col(SandboxToolCall::Id)
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_table(
+            Table::create()
+                .table(SandboxToolCallReceipt::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(SandboxToolCallReceipt::CallId)
+                        .uuid()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(SandboxToolCallReceipt::ExecutorLeaseToken)
+                        .uuid()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(SandboxToolCallReceipt::Status)
+                        .text()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(SandboxToolCallReceipt::Result)
+                        .text()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(SandboxToolCallReceipt::ErrorCode).text())
+                .col(ColumnDef::new(SandboxToolCallReceipt::ErrorDetail).text())
+                .col(
+                    ColumnDef::new(SandboxToolCallReceipt::ResolvedAt)
+                        .timestamp_with_time_zone()
+                        .not_null(),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_sandbox_tool_receipt_call")
+                        .from(
+                            SandboxToolCallReceipt::Table,
+                            SandboxToolCallReceipt::CallId,
+                        )
+                        .to(SandboxToolCall::Table, SandboxToolCall::Id)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .check(
+                    Expr::col(SandboxToolCallReceipt::Status)
+                        .eq(SandboxToolCallStatus::Failed.as_str())
+                        .and(Expr::col(SandboxToolCallReceipt::ErrorCode).is_not_null())
+                        .or(Expr::col(SandboxToolCallReceipt::Status)
+                            .is_not_in([SandboxToolCallStatus::Failed.as_str()])
+                            .and(Expr::col(SandboxToolCallReceipt::ErrorCode).is_null())
+                            .and(Expr::col(SandboxToolCallReceipt::ErrorDetail).is_null())),
+                )
+                .to_owned(),
+        )
+        .await?;
+    Ok(())
 }
 
 async fn create_agent_run_cancellation_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
@@ -3492,6 +3678,35 @@ impl MigrationTrait for AddDocuments {
     }
 }
 
+struct AddSandboxToolCalls;
+
+impl MigrationName for AddSandboxToolCalls {
+    fn name(&self) -> &str {
+        "m20260715_000007_add_sandbox_tool_calls"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddSandboxToolCalls {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        create_sandbox_tool_call_tables(manager).await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(SandboxToolCallReceipt::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(Table::drop().table(SandboxToolCall::Table).to_owned())
+            .await?;
+        Ok(())
+    }
+}
+
 #[derive(DeriveIden)]
 enum Project {
     Table,
@@ -3692,6 +3907,38 @@ enum TurnAgentRunWait {
     Status,
     ParkedAt,
     ClosedAt,
+}
+
+#[derive(DeriveIden)]
+enum SandboxToolCall {
+    Table,
+    Id,
+    AgentRunId,
+    ChatId,
+    AgentRunDepth,
+    ProviderId,
+    Name,
+    Arguments,
+    Status,
+    ParkLeaseToken,
+    ParkAttemptCount,
+    ParkClaimCount,
+    ExecutorLeaseToken,
+    ExecutorLeaseExpiresAt,
+    CreatedAt,
+    ResolvedAt,
+}
+
+#[derive(DeriveIden)]
+enum SandboxToolCallReceipt {
+    Table,
+    CallId,
+    ExecutorLeaseToken,
+    Status,
+    Result,
+    ErrorCode,
+    ErrorDetail,
+    ResolvedAt,
 }
 
 #[derive(DeriveIden)]
