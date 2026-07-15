@@ -29,6 +29,12 @@ pub const MIN_TIMEOUT_MS: u64 = 1_000;
 /// durable worker state rather than an unbounded HTTP call.
 pub const MAX_TIMEOUT_MS: u64 = 60_000;
 
+/// The fixed providers this host can hold a credential for. Keeping this
+/// allow-list here means a local API route can never turn an arbitrary path
+/// segment into a keychain key.
+const CREDENTIAL_PROVIDERS: [WebSearchProviderKind; 2] =
+    [WebSearchProviderKind::Exa, WebSearchProviderKind::Tavily];
+
 /// Non-secret host configuration. `provider: None` is the safe default: no
 /// credential lookup and no possible outbound request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +78,20 @@ pub struct WebSearchConfigInfo {
     pub provider: Option<WebSearchProviderKind>,
     pub timeout_ms: u64,
     pub has_credential: bool,
+}
+
+/// Credential readiness for one fixed web-search provider. This public shape
+/// deliberately carries no secret material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WebSearchCredentialReadiness {
+    pub provider: WebSearchProviderKind,
+    pub has_credential: bool,
+}
+
+/// Credential readiness for every provider OpenWave supports locally.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WebSearchCredentialsInfo {
+    pub credentials: Vec<WebSearchCredentialReadiness>,
 }
 
 /// Partial update accepted by `PUT /web-search`. An omitted `provider` leaves
@@ -131,6 +151,59 @@ pub async fn config_info(
         provider: config.provider,
         timeout_ms: config.timeout_ms,
         has_credential,
+    })
+}
+
+/// Return readiness for every fixed provider without reading or returning any
+/// key material. Storage errors are projected to one generic server error so
+/// keychain implementation details cannot cross the local API boundary.
+pub async fn credentials_info(
+    secrets: &dyn SecretProvider,
+) -> std::result::Result<WebSearchCredentialsInfo, ServerError> {
+    let mut credentials = Vec::with_capacity(CREDENTIAL_PROVIDERS.len());
+    for provider in CREDENTIAL_PROVIDERS {
+        let has_credential = WebSearchCredentials::load(secrets, provider)
+            .await
+            .map_err(|_| ServerError::internal("web search credential storage is unavailable"))?
+            .is_some();
+        credentials.push(WebSearchCredentialReadiness {
+            provider,
+            has_credential,
+        });
+    }
+    Ok(WebSearchCredentialsInfo { credentials })
+}
+
+/// Store a non-empty, already validated credential under the provider's fixed
+/// key. The provider kind is an enum rather than caller-controlled storage
+/// input, so this cannot address other application secrets.
+pub async fn write_credential(
+    secrets: &dyn SecretProvider,
+    provider: WebSearchProviderKind,
+    api_key: &str,
+) -> std::result::Result<WebSearchCredentialReadiness, ServerError> {
+    secrets
+        .set_secret(provider.credential_key(), api_key)
+        .await
+        .map_err(|_| ServerError::internal("web search credential storage is unavailable"))?;
+    Ok(WebSearchCredentialReadiness {
+        provider,
+        has_credential: true,
+    })
+}
+
+/// Delete only the selected provider's fixed credential key.
+pub async fn delete_credential(
+    secrets: &dyn SecretProvider,
+    provider: WebSearchProviderKind,
+) -> std::result::Result<WebSearchCredentialReadiness, ServerError> {
+    secrets
+        .delete_secret(provider.credential_key())
+        .await
+        .map_err(|_| ServerError::internal("web search credential storage is unavailable"))?;
+    Ok(WebSearchCredentialReadiness {
+        provider,
+        has_credential: false,
     })
 }
 

@@ -13,6 +13,9 @@ The loopback API exposes a bearer-protected host policy at `/web-search`.
 | --- | --- |
 | `GET /web-search` | Read the selected provider, timeout, and whether its fixed key is available. |
 | `PUT /web-search` | Select `exa`, `tavily`, or `null` to disable; optionally set the timeout. |
+| `GET /web-search/credentials` | Read readiness for the fixed Exa and Tavily key slots. |
+| `PUT /web-search/credentials/{provider}` | Store a key for `exa` or `tavily`; returns readiness only. |
+| `DELETE /web-search/credentials/{provider}` | Delete that fixed provider key; returns readiness only. |
 
 Example:
 
@@ -28,11 +31,14 @@ proxy URL, arbitrary secret reference, or API-key field in this API. The Exa
 and Tavily adapters own their fixed HTTPS endpoints, disable redirects, and
 bound request input and retained response output.
 
-The response never contains a credential. It reports only `has_credential` for
-the currently selected provider. Keys are read from the OS keychain through
+No response contains a credential. `/web-search` reports only
+`has_credential` for the currently selected provider, while
+`/web-search/credentials` reports readiness for both fixed slots. Keys are read
+from and written to the OS keychain through
 `SecretProvider` under the fixed names `web_search.exa.api_key` and
-`web_search.tavily.api_key`. A missing key or disabled selection fails closed:
-there is no provider to invoke.
+`web_search.tavily.api_key`. Credential writes reject empty values and values
+over 8 KiB. They never alter selection or timeout policy. A missing key or
+disabled selection fails closed: there is no provider to invoke.
 
 ## Current boundary
 

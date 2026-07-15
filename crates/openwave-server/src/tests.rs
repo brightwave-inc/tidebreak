@@ -1355,6 +1355,41 @@ async fn test_app() -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
     test_app_with(Arc::new(FakeProvider)).await
 }
 
+/// A normal authenticated local API plus a handle to its test-only secret
+/// store, for asserting web-search credential routes never touch other keys.
+async fn test_app_with_web_search_secrets() -> (Router, Arc<str>, Arc<MemSecrets>, tempfile::TempDir)
+{
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let secrets = Arc::new(MemSecrets::default());
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        secrets.clone(),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    (app(state), token, secrets, dir)
+}
+
 #[tokio::test]
 async fn app_state_roots_blob_storage_under_the_data_directory() {
     let dir = tempfile::tempdir().unwrap();
@@ -5862,6 +5897,149 @@ async fn put_empty_api_key_is_rejected() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let info: AgentErrorInfo = json_body(response).await;
     assert_eq!(info.kind, "bad_request");
+}
+
+#[tokio::test]
+async fn web_search_credential_routes_are_authenticated_and_never_return_keys() {
+    let (router, token, secrets, _dir) = test_app_with_web_search_secrets().await;
+    let bearer = format!("Bearer {token}");
+
+    let unauthenticated = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/web-search/credentials")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let initial = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/web-search/credentials")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(initial.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<serde_json::Value>(initial).await,
+        serde_json::json!({
+            "credentials": [
+                {"provider": "exa", "has_credential": false},
+                {"provider": "tavily", "has_credential": false}
+            ]
+        })
+    );
+
+    let key = "exa-secret-that-must-not-cross-the-api-boundary";
+    let put = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/web-search/credentials/exa")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({"api_key": key}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let put_body = to_bytes(put.into_body(), usize::MAX).await.unwrap();
+    assert!(!std::str::from_utf8(&put_body).unwrap().contains(key));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&put_body).unwrap(),
+        serde_json::json!({"provider": "exa", "has_credential": true})
+    );
+    assert_eq!(
+        secrets
+            .get_secret("web_search.exa.api_key")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(key)
+    );
+    assert_eq!(
+        secrets
+            .get_secret("web_search.tavily.api_key")
+            .await
+            .unwrap(),
+        None
+    );
+
+    let deleted = router
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/web-search/credentials/exa")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<serde_json::Value>(deleted).await,
+        serde_json::json!({"provider": "exa", "has_credential": false})
+    );
+    assert_eq!(
+        secrets.get_secret("web_search.exa.api_key").await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn web_search_credential_write_validates_fixed_provider_and_key_bounds() {
+    let (router, token, secrets, _dir) = test_app_with_web_search_secrets().await;
+    let bearer = format!("Bearer {token}");
+
+    for body in [
+        serde_json::json!({"api_key": ""}),
+        serde_json::json!({"api_key": " \n\t "}),
+        serde_json::json!({"api_key": "x".repeat(8 * 1024 + 1)}),
+        serde_json::json!({"api_key": "valid", "unexpected": true}),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/web-search/credentials/exa")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let unknown = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/web-search/credentials/arbitrary-secret-name")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"api_key": "valid"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    assert!(secrets.0.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

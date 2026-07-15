@@ -23,7 +23,10 @@ use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
 use crate::state::AppState;
-use crate::web_search::{self, WebSearchConfigInfo, WebSearchConfigUpdate};
+use crate::web_search::{
+    self, WebSearchConfigInfo, WebSearchConfigUpdate, WebSearchCredentialReadiness,
+    WebSearchCredentialsInfo,
+};
 
 mod client_execution;
 mod document;
@@ -126,6 +129,83 @@ pub async fn put_web_search_config(
     Ok(Json(
         web_search::update_config(&*state.store, &*state.secrets, body).await?,
     ))
+}
+
+/// Maximum API-key size accepted by the local credential endpoint. This is
+/// far beyond ordinary provider keys while keeping accidental pasted blobs out
+/// of the OS keychain.
+const MAX_WEB_SEARCH_CREDENTIAL_BYTES: usize = 8 * 1024;
+
+/// Body of `PUT /web-search/credentials/{provider}`. The custom `Debug`
+/// implementation redacts the only sensitive field.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchCredentialUpdate {
+    pub api_key: String,
+}
+
+impl std::fmt::Debug for WebSearchCredentialUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebSearchCredentialUpdate")
+            .field("api_key", &"***")
+            .finish()
+    }
+}
+
+/// `GET /web-search/credentials` — readiness for the fixed Exa and Tavily
+/// credential slots. This route never returns the stored keys.
+pub async fn get_web_search_credentials(
+    State(state): State<AppState>,
+) -> Result<Json<WebSearchCredentialsInfo>, ServerError> {
+    Ok(Json(web_search::credentials_info(&*state.secrets).await?))
+}
+
+/// `PUT /web-search/credentials/{provider}` — store a key in one fixed
+/// provider slot. It does not change provider selection or timeout policy.
+pub async fn put_web_search_credential(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Json(body): Json<WebSearchCredentialUpdate>,
+) -> Result<Json<WebSearchCredentialReadiness>, ServerError> {
+    let provider = parse_web_search_provider(&provider)?;
+    if body.api_key.as_bytes().len() > MAX_WEB_SEARCH_CREDENTIAL_BYTES {
+        return Err(ServerError::bad_request(format!(
+            "web search api_key must be at most {MAX_WEB_SEARCH_CREDENTIAL_BYTES} bytes"
+        )));
+    }
+    let api_key = body.api_key.trim();
+    if api_key.is_empty() {
+        return Err(ServerError::bad_request(
+            "web search api_key must not be empty",
+        ));
+    }
+    Ok(Json(
+        web_search::write_credential(&*state.secrets, provider, api_key).await?,
+    ))
+}
+
+/// `DELETE /web-search/credentials/{provider}` — remove only that fixed
+/// provider key. It does not change provider selection or timeout policy.
+pub async fn delete_web_search_credential(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+) -> Result<Json<WebSearchCredentialReadiness>, ServerError> {
+    let provider = parse_web_search_provider(&provider)?;
+    Ok(Json(
+        web_search::delete_credential(&*state.secrets, provider).await?,
+    ))
+}
+
+fn parse_web_search_provider(
+    value: &str,
+) -> std::result::Result<openwave_web_search::WebSearchProviderKind, ServerError> {
+    match value {
+        "exa" => Ok(openwave_web_search::WebSearchProviderKind::Exa),
+        "tavily" => Ok(openwave_web_search::WebSearchProviderKind::Tavily),
+        _ => Err(ServerError::not_found(format!(
+            "unknown web search provider kind: {value}"
+        ))),
+    }
 }
 
 /// The configured model, if any.
