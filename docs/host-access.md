@@ -270,8 +270,9 @@ This will land in independently reviewable pieces:
    generic tool-execution foundation is now present: canonical requests are
    immutable, client work is durably discoverable, and per-claim fencing tokens
    guard heartbeat, terminal resolution, and explicit expired-claim recovery.
-   The API, atomic turn parking, folder request tool, and desktop executor remain
-   to be layered on it.
+   Authenticated per-chat pending/claim/heartbeat/resolve routes now expose that
+   state machine without leaking tokens through polling. Atomic turn parking,
+   the folder request tool, and the desktop executor remain to be layered on it.
 8. Replace project/chat `workspace_dir` with persisted host-access context
    identity and connected-root APIs. This can update the pre-v1 baseline schema
    directly.

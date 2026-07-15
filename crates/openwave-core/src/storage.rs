@@ -990,6 +990,8 @@ pub trait Store: Send + Sync {
     async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome>;
 
     /// Claim the first lease with a caller-generated secret fencing token.
+    /// A retry with the same executor and token recovers the original live
+    /// claim even when the caller proposes a newly calculated expiry.
     async fn claim_client_tool_call(
         &self,
         id: CallId,
@@ -1004,6 +1006,7 @@ pub trait Store: Send + Sync {
     async fn heartbeat_client_tool_call(
         &self,
         id: CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         lease_expires_at: chrono::DateTime<chrono::Utc>,
@@ -1018,9 +1021,13 @@ pub trait Store: Send + Sync {
     ) -> Result<ResolveToolCallOutcome>;
 
     /// Resolve a pending client call under its exact unexpired executor lease.
+    /// Once committed, the token and terminal payload are the stable retry
+    /// identity; `resolved_at` records the first commit and is not compared on
+    /// an ambiguous retry.
     async fn resolve_client_tool_call(
         &self,
         id: CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -1034,6 +1041,7 @@ pub trait Store: Send + Sync {
     async fn resolve_expired_client_tool_call(
         &self,
         id: CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,

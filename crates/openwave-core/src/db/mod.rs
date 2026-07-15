@@ -1875,6 +1875,7 @@ impl Store for DbStore {
     async fn heartbeat_client_tool_call(
         &self,
         id: CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         lease_expires_at: chrono::DateTime<Utc>,
@@ -1882,6 +1883,7 @@ impl Store for DbStore {
         ops::client_execution::heartbeat_client_tool_call(
             self,
             id,
+            chat_id,
             lease_token,
             now,
             lease_expires_at,
@@ -1901,6 +1903,7 @@ impl Store for DbStore {
     async fn resolve_client_tool_call(
         &self,
         id: CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         resolution: &ToolCallResolution,
@@ -1909,6 +1912,7 @@ impl Store for DbStore {
         ops::client_execution::resolve_client_tool_call(
             self,
             id,
+            chat_id,
             lease_token,
             now,
             resolution,
@@ -1920,6 +1924,7 @@ impl Store for DbStore {
     async fn resolve_expired_client_tool_call(
         &self,
         id: CallId,
+        chat_id: ChatId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         resolution: &ToolCallResolution,
@@ -1928,6 +1933,7 @@ impl Store for DbStore {
         ops::client_execution::resolve_expired_client_tool_call(
             self,
             id,
+            chat_id,
             lease_token,
             now,
             resolution,

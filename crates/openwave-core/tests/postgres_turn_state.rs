@@ -118,8 +118,8 @@ async fn postgres_client_execution_claim_has_one_winner() {
                 chat.id,
                 winner,
                 lease_token,
-                claim_at,
-                lease_expires_at,
+                claim_at + Duration::microseconds(1),
+                lease_expires_at + Duration::microseconds(1),
             )
             .await
             .unwrap(),
@@ -130,6 +130,7 @@ async fn postgres_client_execution_claim_has_one_winner() {
         store
             .heartbeat_client_tool_call(
                 call.id,
+                chat.id,
                 lease_token,
                 claim_at + Duration::seconds(1),
                 extended_expiry,
@@ -142,6 +143,7 @@ async fn postgres_client_execution_claim_has_one_winner() {
         store
             .heartbeat_client_tool_call(
                 call.id,
+                chat.id,
                 lease_token,
                 claim_at + Duration::seconds(1),
                 extended_expiry,
@@ -156,14 +158,28 @@ async fn postgres_client_execution_claim_has_one_winner() {
     };
     assert_eq!(
         store
-            .resolve_client_tool_call(call.id, lease_token, resolved_at, &resolution, resolved_at,)
+            .resolve_client_tool_call(
+                call.id,
+                chat.id,
+                lease_token,
+                resolved_at + Duration::microseconds(1),
+                &resolution,
+                resolved_at + Duration::microseconds(1),
+            )
             .await
             .unwrap(),
         ResolveToolCallOutcome::Resolved
     );
     assert_eq!(
         store
-            .resolve_client_tool_call(call.id, lease_token, resolved_at, &resolution, resolved_at,)
+            .resolve_client_tool_call(
+                call.id,
+                chat.id,
+                lease_token,
+                resolved_at,
+                &resolution,
+                resolved_at,
+            )
             .await
             .unwrap(),
         ResolveToolCallOutcome::Existing

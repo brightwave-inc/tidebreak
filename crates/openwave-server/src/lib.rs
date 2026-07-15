@@ -127,6 +127,22 @@ pub fn app(state: AppState) -> Router {
         .route("/chats/{id}/cancel", post(routes::post_cancel))
         .route("/chats/{id}/steer", post(routes::post_steer))
         .route(
+            "/chats/{id}/client-executions/pending",
+            get(routes::list_pending_client_executions),
+        )
+        .route(
+            "/chats/{id}/client-executions/{call_id}/claim",
+            post(routes::claim_client_execution),
+        )
+        .route(
+            "/chats/{id}/client-executions/{call_id}/heartbeat",
+            post(routes::heartbeat_client_execution),
+        )
+        .route(
+            "/chats/{id}/client-executions/{call_id}/resolve",
+            post(routes::resolve_client_execution),
+        )
+        .route(
             "/chats/{id}/approvals/{call_id}",
             post(routes::post_approval),
         )

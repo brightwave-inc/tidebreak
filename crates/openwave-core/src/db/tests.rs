@@ -8016,8 +8016,8 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
                 chat.id,
                 executor,
                 lease_token,
-                claimed_at,
-                first_expiry,
+                claimed_at + chrono::Duration::milliseconds(1),
+                first_expiry + chrono::Duration::milliseconds(1),
             )
             .await
             .unwrap(),
@@ -8057,6 +8057,20 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
         store
             .heartbeat_client_tool_call(
                 call.id,
+                ChatId::new(),
+                lease_token,
+                claimed_at + chrono::Duration::seconds(1),
+                extended_expiry,
+            )
+            .await
+            .unwrap(),
+        HeartbeatClientToolCallOutcome::LeaseLost
+    );
+    assert_eq!(
+        store
+            .heartbeat_client_tool_call(
+                call.id,
+                chat.id,
                 lease_token,
                 claimed_at + chrono::Duration::seconds(1),
                 extended_expiry,
@@ -8069,6 +8083,7 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
         store
             .heartbeat_client_tool_call(
                 call.id,
+                chat.id,
                 lease_token,
                 claimed_at + chrono::Duration::seconds(1),
                 extended_expiry,
@@ -8087,6 +8102,21 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
         store
             .resolve_client_tool_call(
                 call.id,
+                ChatId::new(),
+                lease_token,
+                resolved_at,
+                &resolution,
+                resolved_at,
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::LeaseLost
+    );
+    assert_eq!(
+        store
+            .resolve_client_tool_call(
+                call.id,
+                chat.id,
                 uuid::Uuid::new_v4(),
                 resolved_at,
                 &resolution,
@@ -8098,14 +8128,28 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
     );
     assert_eq!(
         store
-            .resolve_client_tool_call(call.id, lease_token, resolved_at, &resolution, resolved_at)
+            .resolve_client_tool_call(
+                call.id,
+                chat.id,
+                lease_token,
+                resolved_at + chrono::Duration::milliseconds(1),
+                &resolution,
+                resolved_at + chrono::Duration::milliseconds(1),
+            )
             .await
             .unwrap(),
         ResolveToolCallOutcome::Resolved
     );
     assert_eq!(
         store
-            .resolve_client_tool_call(call.id, lease_token, resolved_at, &resolution, resolved_at)
+            .resolve_client_tool_call(
+                call.id,
+                chat.id,
+                lease_token,
+                resolved_at,
+                &resolution,
+                resolved_at,
+            )
             .await
             .unwrap(),
         ResolveToolCallOutcome::Existing
@@ -8114,6 +8158,21 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
         store
             .resolve_client_tool_call(
                 call.id,
+                ChatId::new(),
+                lease_token,
+                resolved_at,
+                &resolution,
+                resolved_at,
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::LeaseLost
+    );
+    assert_eq!(
+        store
+            .resolve_client_tool_call(
+                call.id,
+                chat.id,
                 uuid::Uuid::new_v4(),
                 resolved_at,
                 &resolution,
@@ -8208,6 +8267,7 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
         store
             .resolve_client_tool_call(
                 call.id,
+                chat.id,
                 lease_token,
                 after_expiry,
                 &ToolCallResolution::Cancelled {
@@ -8226,6 +8286,7 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
         store
             .resolve_expired_client_tool_call(
                 call.id,
+                chat.id,
                 lease_token,
                 after_expiry,
                 &recovered,
@@ -8239,6 +8300,7 @@ async fn expired_client_lease_is_not_transferred_implicitly() {
         store
             .resolve_expired_client_tool_call(
                 call.id,
+                chat.id,
                 lease_token,
                 after_expiry,
                 &recovered,
