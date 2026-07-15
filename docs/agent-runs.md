@@ -157,6 +157,8 @@ It is a read model, not a scheduler control surface: clients use it to render
 queued, running, waiting, failed, and completed work, while workers continue to
 advance runs solely through fenced store transitions. A missing chat returns
 `404`, rather than revealing whether an unrelated run identifier exists.
+The response is deliberately renderer-safe: worker lease tokens, delegated
+input, and scheduler bookkeeping never cross this API boundary.
 
 ## Reliability contract
 

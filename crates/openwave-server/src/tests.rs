@@ -5198,7 +5198,7 @@ async fn create_then_get_and_list() {
     };
     assert_eq!(fetched, created);
 
-    let agent_runs: Vec<openwave_core::AgentRun> = {
+    let agent_runs: Vec<serde_json::Value> = {
         let response = router
             .clone()
             .oneshot(
@@ -5214,11 +5214,17 @@ async fn create_then_get_and_list() {
         json_body(response).await
     };
     assert_eq!(agent_runs.len(), 1);
-    assert_eq!(agent_runs[0].chat_id, created.id);
     assert_eq!(
-        agent_runs[0].id,
-        openwave_core::AgentRunId::foreground_for_chat(created.id)
+        agent_runs[0].get("id"),
+        Some(&serde_json::Value::String(
+            openwave_core::AgentRunId::foreground_for_chat(created.id).to_string()
+        ))
     );
+    let snapshot = agent_runs[0].as_object().unwrap();
+    assert!(snapshot.get("lease_token").is_none());
+    assert!(snapshot.get("lease_expires_at").is_none());
+    assert!(snapshot.get("input").is_none());
+    assert!(snapshot.get("chat_id").is_none());
 
     let listed: Vec<Chat> = {
         let response = router

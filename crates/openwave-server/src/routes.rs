@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, ApprovalDecision, CallId, Chat, ChatId,
-    Project, ProjectId, RequestTurnCancellationOutcome, SecretProvider, SequencedEvent, Store,
-    TurnId, TurnSteer, TurnSteerId,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
+    ApprovalDecision, CallId, Chat, ChatId, Project, ProjectId, RequestTurnCancellationOutcome,
+    SecretProvider, SequencedEvent, Store, TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -388,17 +388,60 @@ pub async fn get_chat(
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))
 }
 
-/// `GET /chats/{id}/agent-runs` — list foreground and sandbox execution state.
+/// Renderer-safe state for one agent run.
+///
+/// Worker lease tokens, delegated inputs, scheduling budgets, and other
+/// executor-facing fields intentionally remain inside the server/store boundary.
+#[derive(Debug, Serialize)]
+pub struct AgentRunSnapshot {
+    pub id: openwave_core::AgentRunId,
+    pub parent_id: Option<openwave_core::AgentRunId>,
+    pub execution: AgentRunExecution,
+    pub status: AgentRunStatus,
+    pub started_at: Option<chrono::DateTime<Utc>>,
+    pub finished_at: Option<chrono::DateTime<Utc>>,
+    pub last_error_code: Option<String>,
+    pub last_error_detail: Option<String>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+impl From<AgentRun> for AgentRunSnapshot {
+    fn from(run: AgentRun) -> Self {
+        Self {
+            id: run.id,
+            parent_id: run.parent_id,
+            execution: run.execution,
+            status: run.status,
+            started_at: run.started_at,
+            finished_at: run.finished_at,
+            last_error_code: run.last_error_code,
+            last_error_detail: run.last_error_detail,
+            created_at: run.created_at,
+            updated_at: run.updated_at,
+        }
+    }
+}
+
+/// `GET /chats/{id}/agent-runs` — list renderer-safe execution state.
 pub async fn list_agent_runs(
     State(state): State<AppState>,
     Path(id): Path<ChatId>,
-) -> Result<Json<Vec<AgentRun>>, ServerError> {
+) -> Result<Json<Vec<AgentRunSnapshot>>, ServerError> {
     state
         .store
         .get_chat(id)
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
-    Ok(Json(state.store.list_agent_runs(id).await?))
+    Ok(Json(
+        state
+            .store
+            .list_agent_runs(id)
+            .await?
+            .into_iter()
+            .map(AgentRunSnapshot::from)
+            .collect(),
+    ))
 }
 
 /// Body of `POST /chats/{id}/messages`.
