@@ -484,6 +484,7 @@ pub mod turn_agent_run_wait {
         pub turn_id: Uuid,
         pub chat_id: Uuid,
         pub park_lease_token: Uuid,
+        pub atomic_admission: bool,
         pub attempt_count: i32,
         pub claim_count: i32,
         pub model_steps: i32,

@@ -1,11 +1,11 @@
 use super::{sample_chat, temp_store};
 use crate::{
-    AcceptAgentRunOutcome, AcceptTurnOutcome, AgentRun, AgentRunExecution, AgentRunId,
-    AgentRunInboxStatus, AgentRunStatus, CallId, ChatId, ClaimAgentRunInboxOutcome,
-    ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome, DbStore,
-    FinishAgentRunCancellationOutcome, ParkTurnForAgentRunInboxOutcome,
-    RequestAgentRunCancellationOutcome, Store, SubmitAgentRunResultOutcome, TurnCheckpointProgress,
-    TurnId, TurnRunStatus, Usage,
+    AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptTurnOutcome, AgentRun,
+    AgentRunExecution, AgentRunId, AgentRunInboxStatus, AgentRunStatus, CallId, ChatId,
+    ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
+    ConsumeAgentRunInboxOutcome, DbStore, FinishAgentRunCancellationOutcome,
+    ParkTurnForAgentRunInboxOutcome, RequestAgentRunCancellationOutcome, Store,
+    SubmitAgentRunResultOutcome, TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
 };
 use chrono::{Duration, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -133,6 +133,275 @@ async fn park_foreground_turn_on_child(
         ParkTurnForAgentRunInboxOutcome::Parked { turn, .. } => turn,
         outcome => panic!("unexpected child checkpoint outcome: {outcome:?}"),
     }
+}
+
+#[tokio::test]
+async fn sandbox_spawn_and_foreground_checkpoint_commit_as_one_exact_transition() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let queued = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "delegate this atomically")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected turn acceptance: {outcome:?}"),
+    };
+    let lease_token = uuid::Uuid::new_v4();
+    let now = Utc::now();
+    let running = store
+        .claim_turn_run(lease_token, now, now + Duration::minutes(5))
+        .await
+        .unwrap()
+        .turn
+        .expect("foreground turn should claim");
+    assert_eq!(running.id, queued.id);
+    let child_run_id = AgentRunId::new();
+    let spawn_call_id = CallId::new();
+    let progress = TurnCheckpointProgress {
+        model_steps: 1,
+        usage: Usage {
+            input_tokens: 11,
+            output_tokens: 7,
+            cache_read_input_tokens: 3,
+            cache_creation_input_tokens: 2,
+        },
+    };
+    let parked = match store
+        .accept_sandbox_agent_run_and_park_turn(
+            child_run_id,
+            running.id,
+            spawn_call_id,
+            "research the question",
+            lease_token,
+            running.steer_revision,
+            progress,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .expect("live foreground turn should checkpoint")
+    {
+        AcceptSandboxAgentRunAndParkTurnOutcome::Parked { child, turn, wait } => {
+            (child, turn, wait)
+        }
+        outcome => panic!("unexpected combined spawn outcome: {outcome:?}"),
+    };
+    assert_eq!(parked.0.id, child_run_id);
+    assert_eq!(
+        parked.0.parent_id,
+        Some(AgentRunId::foreground_for_chat(chat.id))
+    );
+    assert_eq!(parked.0.status, AgentRunStatus::Queued);
+    assert_eq!(parked.1.status, TurnRunStatus::WaitingForAgentRun);
+    assert_eq!(parked.1.lease_token, None);
+    assert_eq!(parked.2.turn_id, running.id);
+    assert_eq!(
+        parked.2.parent_run_id,
+        AgentRunId::foreground_for_chat(chat.id)
+    );
+    assert_eq!(parked.2.progress, progress);
+
+    assert!(matches!(
+        store
+            .accept_sandbox_agent_run_and_park_turn(
+                child_run_id,
+                running.id,
+                spawn_call_id,
+                "research the question",
+                lease_token,
+                running.steer_revision,
+                progress,
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        Some(AcceptSandboxAgentRunAndParkTurnOutcome::Existing { child, turn, wait })
+            if child == parked.0 && turn == parked.1 && wait == parked.2
+    ));
+    assert!(matches!(
+        store
+            .accept_sandbox_agent_run_and_park_turn(
+                AgentRunId::new(),
+                running.id,
+                spawn_call_id,
+                "research the question",
+                lease_token,
+                running.steer_revision,
+                progress,
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        Some(AcceptSandboxAgentRunAndParkTurnOutcome::Existing { child, turn, wait })
+            if child == parked.0 && turn == parked.1 && wait == parked.2
+    ));
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn sandbox_spawn_checkpoint_rolls_back_when_foreground_lease_or_steer_is_stale() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let queued = match store
+        .accept_turn(
+            TurnId::new(),
+            chat.id,
+            "gpt-5",
+            "do not enqueue a stale child",
+        )
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected turn acceptance: {outcome:?}"),
+    };
+    let lease_token = uuid::Uuid::new_v4();
+    let now = Utc::now();
+    let running = store
+        .claim_turn_run(lease_token, now, now + Duration::minutes(5))
+        .await
+        .unwrap()
+        .turn
+        .expect("foreground turn should claim");
+    assert_eq!(running.id, queued.id);
+    let progress = TurnCheckpointProgress {
+        model_steps: 1,
+        usage: Usage::default(),
+    };
+    let stale_child_id = AgentRunId::new();
+    assert!(store
+        .accept_sandbox_agent_run_and_park_turn(
+            stale_child_id,
+            running.id,
+            CallId::new(),
+            "this child must roll back",
+            uuid::Uuid::new_v4(),
+            running.steer_revision,
+            progress,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store.get_agent_run(stale_child_id).await.unwrap().is_none());
+
+    let superseded_child_id = AgentRunId::new();
+    assert!(matches!(
+        store
+            .accept_sandbox_agent_run_and_park_turn(
+                superseded_child_id,
+                running.id,
+                CallId::new(),
+                "this child must not survive a stale model output",
+                lease_token,
+                running.steer_revision + 1,
+                progress,
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        Some(AcceptSandboxAgentRunAndParkTurnOutcome::OutputSuperseded(turn))
+            if turn == running
+    ));
+    assert!(store
+        .get_agent_run(superseded_child_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store.get_turn_run(running.id).await.unwrap(),
+        Some(running),
+        "a rolled-back spawn must preserve the exact live foreground claim"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_spawn_checkpoint_never_retrofits_a_separately_accepted_child() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let queued = match store
+        .accept_turn(
+            TurnId::new(),
+            chat.id,
+            "gpt-5",
+            "keep admission and waits coupled",
+        )
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected turn acceptance: {outcome:?}"),
+    };
+    let lease_token = uuid::Uuid::new_v4();
+    let now = Utc::now();
+    let running = store
+        .claim_turn_run(lease_token, now, now + Duration::minutes(5))
+        .await
+        .unwrap()
+        .turn
+        .expect("foreground turn should claim");
+    assert_eq!(running.id, queued.id);
+    let child_run_id = AgentRunId::new();
+    let spawn_call_id = CallId::new();
+    store
+        .accept_agent_run(
+            child_run_id,
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(spawn_call_id),
+            AgentRunExecution::Sandbox,
+            Some("accepted by an older boundary"),
+        )
+        .await
+        .unwrap();
+    let progress = TurnCheckpointProgress {
+        model_steps: 1,
+        usage: Usage::default(),
+    };
+    let legacy_parked = match store
+        .park_turn_for_agent_run_inbox(
+            running.id,
+            child_run_id,
+            lease_token,
+            running.steer_revision,
+            progress,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .expect("legacy checkpoint should commit")
+    {
+        ParkTurnForAgentRunInboxOutcome::Parked { turn, wait } => (turn, wait),
+        outcome => panic!("unexpected legacy checkpoint outcome: {outcome:?}"),
+    };
+    assert_eq!(legacy_parked.0.status, TurnRunStatus::WaitingForAgentRun);
+    assert_eq!(legacy_parked.1.child_run_id, child_run_id);
+
+    assert!(matches!(
+        store
+            .accept_sandbox_agent_run_and_park_turn(
+                AgentRunId::new(),
+                running.id,
+                spawn_call_id,
+                "accepted by an older boundary",
+                lease_token,
+                running.steer_revision,
+                progress,
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        Some(AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict)
+    ));
+    assert_eq!(
+        store.get_turn_run(running.id).await.unwrap(),
+        Some(legacy_parked.0)
+    );
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
 }
 
 #[tokio::test]

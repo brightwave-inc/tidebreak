@@ -70,8 +70,16 @@ spawn:
    together. A later wait transition may consume that entry and wake a parent.
 
 The foreground agent may continue or finish its current turn after spawning a
-child. If it needs the result before proceeding, it parks on a durable wait and
-releases its worker instead of polling in memory.
+child. If it needs the result before proceeding, the spawn boundary commits the
+queued child, its unique spawn identity, the durable wait, and release of the
+exact foreground worker lease in one transaction. It never leaves a child
+behind when that checkpoint is fenced by a stale lease or steer. The turn then
+waits without polling in memory.
+
+The wait also carries an immutable atomic-admission marker. Only that receipt
+allows a later retry to recover the combined transition; an older path that
+accepted a child and parked a turn in separate commits is never mistaken for
+proof that both effects committed together.
 
 ## One continuation model
 
@@ -187,9 +195,10 @@ The agent hierarchy preserves the runtime's existing rules:
 6. Steering and cancellation are resolved at explicit boundaries.
 7. A final result, terminal run state, and immutable parent inbox entry are
    committed atomically. A foreground turn may checkpoint against one exact
-   inbox delivery; consuming that delivery under an exact expiring continuation
-   lease also wakes the checkpointed turn to `resuming`, with exact retry
-   recovery.
+   inbox delivery. When the child is spawned from a wait boundary, that
+   checkpoint commits with child admission and releases the foreground lease;
+   consuming the delivery under an exact expiring continuation lease also wakes
+   the checkpointed turn to `resuming`, with exact retry recovery.
 8. Clients recover from a durable snapshot plus ordered event replay.
 
 Until a tool satisfies the side-effect receipt contract, OpenWave continues to
@@ -210,7 +219,7 @@ The implementation is intentionally incremental:
 7. Atomically join durable inbox consumption with a parent turn checkpoint and
    durable `resuming` wake signal. *(Shipped.)*
 8. Atomically accept a sandbox spawn and its parent checkpoint from the
-   foreground tool boundary.
+   foreground tool boundary. *(Shipped.)*
 9. Route sandbox folder access through the host broker.
 10. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work.

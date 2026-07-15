@@ -5,19 +5,26 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{AgentRunId, CallId, ChatId};
+use crate::id::{AgentRunId, CallId, ChatId, TurnId};
 use crate::model::{
     AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunResult,
     AgentRunStatus,
 };
 use crate::storage::{
-    AcceptAgentRunOutcome, ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
-    ConsumeAgentRunInboxOutcome, FinishAgentRunCancellationOutcome,
+    AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, ClaimAgentRunInboxOutcome,
+    ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
+    FinishAgentRunCancellationOutcome, ParkTurnForAgentRunInboxOutcome,
     RequestAgentRunCancellationOutcome, SubmitAgentRunResultOutcome,
 };
 
 use super::super::{entities, store_err, DbStore};
-use super::{acquire_chat_write_lock, acquire_turn_write_lock, turn::canonical_db_timestamp};
+use super::{
+    acquire_chat_write_lock, acquire_turn_write_lock,
+    turn::{
+        canonical_db_timestamp, park_turn_for_agent_run_inbox_on,
+        validate_agent_run_inbox_park_request,
+    },
+};
 
 pub(in crate::db) async fn insert_foreground_agent_run_on<C>(
     conn: &C,
@@ -223,6 +230,202 @@ pub(in crate::db) async fn accept_agent_run(
     let run = agent_run_from_model(model)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(AcceptAgentRunOutcome::Accepted(run))
+}
+
+/// Accept one sandbox child and park its exact foreground turn in the same
+/// transaction. The sandbox parent comes from the locked turn, which binds
+/// child hierarchy and checkpoint scope without trusting a caller-supplied
+/// parent id.
+pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
+    store: &DbStore,
+    child_run_id: AgentRunId,
+    turn_id: TurnId,
+    spawn_call_id: CallId,
+    input: &str,
+    lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
+    progress: crate::TurnCheckpointProgress,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<AcceptSandboxAgentRunAndParkTurnOutcome>> {
+    validate_agent_run_inbox_park_request(turn_id, child_run_id, lease_token, progress)?;
+    let now = canonical_db_timestamp(now)?;
+    let Some(scope) = entities::turn_run::Entity::find_by_id(turn_id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, ChatId(scope.chat_id)).await?
+        || !acquire_turn_write_lock(&transaction, turn_id).await?
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let turn = entities::turn_run::Entity::find_by_id(turn_id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .expect("locked turn exists");
+    let chat_id = ChatId(turn.chat_id);
+    let parent_id = AgentRunId(turn.agent_run_id);
+    validate_request(
+        child_run_id,
+        Some(parent_id),
+        Some(spawn_call_id),
+        AgentRunExecution::Sandbox,
+        Some(input),
+    )?;
+
+    let existing = match find_by_id_on(&transaction, child_run_id).await? {
+        Some(existing) => Some(existing),
+        None => find_by_spawn_call_on(&transaction, spawn_call_id).await?,
+    };
+    if let Some(existing) = existing {
+        let canonical_child_run_id = AgentRunId(existing.id);
+        let exact = matches!(
+            existing_request_outcome(
+                existing.clone(),
+                chat_id,
+                Some(parent_id),
+                Some(spawn_call_id),
+                AgentRunExecution::Sandbox,
+                Some(input),
+            )?,
+            AcceptAgentRunOutcome::Existing(_)
+        );
+        if !exact {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(
+                AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
+            ));
+        }
+        // A child accepted outside this operation must never be retrofitted
+        // into a foreground checkpoint. A committed checkpoint is the only
+        // durable proof that this is an exact retry of the combined action.
+        let atomic_wait =
+            entities::turn_agent_run_wait::Entity::find_by_id(canonical_child_run_id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+        if !atomic_wait.is_some_and(|wait| wait.atomic_admission) {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(
+                AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
+            ));
+        }
+        let outcome = park_turn_for_agent_run_inbox_on(
+            &transaction,
+            turn_id,
+            canonical_child_run_id,
+            lease_token,
+            expected_steer_revision,
+            progress,
+            now,
+            true,
+        )
+        .await?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(match outcome {
+            Some(ParkTurnForAgentRunInboxOutcome::Existing { turn, wait }) => {
+                AcceptSandboxAgentRunAndParkTurnOutcome::Existing {
+                    child: agent_run_from_model(existing)?,
+                    turn,
+                    wait,
+                }
+            }
+            _ => AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
+        }));
+    }
+
+    let parent = find_by_id_on(&transaction, parent_id).await?;
+    let parent_available = parent.is_some_and(|parent| {
+        parent.chat_id == chat_id.0
+            && parent.parent_id.is_none()
+            && parent.depth == 0
+            && parent.execution == AgentRunExecution::Foreground.as_str()
+            && parent.status == AgentRunStatus::Active.as_str()
+    });
+    if !parent_available {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(
+            AcceptSandboxAgentRunAndParkTurnOutcome::ParentUnavailable,
+        ));
+    }
+
+    let created_at = database_now(&transaction).await?;
+    let model = entities::agent_run::ActiveModel {
+        id: Set(child_run_id.0),
+        chat_id: Set(chat_id.0),
+        parent_id: Set(Some(parent_id.0)),
+        parent_depth: Set(Some(0)),
+        spawn_call_id: Set(Some(spawn_call_id.0)),
+        execution: Set(AgentRunExecution::Sandbox.as_str().into()),
+        depth: Set(i16::from(AgentRun::MAX_DEPTH)),
+        status: Set(AgentRunStatus::Queued.as_str().into()),
+        input: Set(Some(input.into())),
+        attempt_count: Set(0),
+        max_attempts: Set(AgentRun::DEFAULT_MAX_ATTEMPTS),
+        claim_count: Set(0),
+        available_at: Set(created_at),
+        deadline_at: Set(Some(created_at + AgentRun::DEFAULT_MAX_DURATION)),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        started_at: Set(None),
+        finished_at: Set(None),
+        last_error_code: Set(None),
+        last_error_detail: Set(None),
+        created_at: Set(created_at),
+        updated_at: Set(created_at),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+    let child = agent_run_from_model(model)?;
+
+    let outcome = park_turn_for_agent_run_inbox_on(
+        &transaction,
+        turn_id,
+        child_run_id,
+        lease_token,
+        expected_steer_revision,
+        progress,
+        now,
+        true,
+    )
+    .await?;
+    let Some(outcome) = outcome else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let outcome = match outcome {
+        ParkTurnForAgentRunInboxOutcome::Parked { turn, wait } => {
+            AcceptSandboxAgentRunAndParkTurnOutcome::Parked { child, turn, wait }
+        }
+        ParkTurnForAgentRunInboxOutcome::SteerPending(turn) => {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(Some(AcceptSandboxAgentRunAndParkTurnOutcome::SteerPending(
+                turn,
+            )));
+        }
+        ParkTurnForAgentRunInboxOutcome::OutputSuperseded(turn) => {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(Some(
+                AcceptSandboxAgentRunAndParkTurnOutcome::OutputSuperseded(turn),
+            ));
+        }
+        ParkTurnForAgentRunInboxOutcome::Existing { .. }
+        | ParkTurnForAgentRunInboxOutcome::IdentityConflict => {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(Some(
+                AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
+            ));
+        }
+    };
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(outcome))
 }
 
 pub(in crate::db) async fn get_agent_run(

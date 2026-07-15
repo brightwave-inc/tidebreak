@@ -80,8 +80,9 @@ pub use provider::{
 };
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
-    AcceptAgentRunOutcome, AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
-    ApplyTurnSteerOutcome, BeginRootAttachmentChangeOutcome, BlobStore, ClaimAgentRunInboxOutcome,
+    AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptToolCallOutcome,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, ApplyTurnSteerOutcome,
+    BeginRootAttachmentChangeOutcome, BlobStore, ClaimAgentRunInboxOutcome,
     ClaimClientToolCallOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim,
     CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
     DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
