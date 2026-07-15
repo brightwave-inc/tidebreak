@@ -8,11 +8,12 @@ use openwave_core::{
     AgentEvent, AgentRunExecution, AgentRunId, AgentRunStatus, ApplyTurnSteerOutcome,
     BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome, CallId, Chat, ChatId,
     ChatRootAttachment, ClaimClientToolCallOutcome, ClientToolCallRequest, CompleteTurnRunOutcome,
-    DbStore, FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId, ParkTurnForClientCallOutcome,
-    Project, ProjectId, RecordTurnFailureOutcome, RequestTurnCancellationOutcome,
-    ResolveToolCallOutcome, Role, RootAttachmentChangeAction, RootAttachmentChangeId,
-    RootAttachmentChangeTerminal, RootAttachmentOrigin, StopReason, Store, ToolCallExecution,
+    DbStore, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
+    ParkTurnForClientCallOutcome, Project, ProjectId, RecordTurnFailureOutcome,
+    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome,
+    Role, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentChangeTerminal,
+    RootAttachmentOrigin, StopReason, Store, SubmitAgentRunResultOutcome, ToolCallExecution,
     ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry,
     TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
 };
@@ -303,6 +304,120 @@ async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() 
         ))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn postgres_sandbox_terminal_transitions_are_exact_and_fenced() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let parent_id = AgentRunId::foreground_for_chat(chat.id);
+
+    let completed_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            completed_id,
+            chat.id,
+            Some(parent_id),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("postgres terminal result"),
+        )
+        .await
+        .unwrap();
+    let prioritizer = Database::connect(&url).await.unwrap();
+    prioritizer
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!(
+                "UPDATE agent_run \
+                 SET created_at = TIMESTAMPTZ '2000-01-01 00:00:00+00', \
+                     available_at = TIMESTAMPTZ '2000-01-01 00:00:00+00', \
+                     updated_at = clock_timestamp() \
+                 WHERE id = '{}'",
+                completed_id.0
+            ),
+        ))
+        .await
+        .unwrap();
+    let completed_token = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(completed_token, Duration::minutes(1), 1_024, 1_024)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        store
+            .submit_agent_run_result(completed_id, completed_token, "postgres result")
+            .await
+            .unwrap(),
+        Some(SubmitAgentRunResultOutcome::Completed(result))
+            if result.agent_run_id == completed_id && result.text == "postgres result"
+    ));
+    assert!(matches!(
+        store
+            .submit_agent_run_result(completed_id, completed_token, "postgres result")
+            .await
+            .unwrap(),
+        Some(SubmitAgentRunResultOutcome::Existing(_))
+    ));
+
+    let cancelling_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            cancelling_id,
+            chat.id,
+            Some(parent_id),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("postgres cancellation"),
+        )
+        .await
+        .unwrap();
+    prioritizer
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!(
+                "UPDATE agent_run \
+                 SET created_at = TIMESTAMPTZ '1999-01-01 00:00:00+00', \
+                     available_at = TIMESTAMPTZ '1999-01-01 00:00:00+00', \
+                     updated_at = clock_timestamp() \
+                 WHERE id = '{}'",
+                cancelling_id.0
+            ),
+        ))
+        .await
+        .unwrap();
+    let cancelling_token = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(cancelling_token, Duration::minutes(1), 1_024, 1_024)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        store
+            .request_agent_run_cancellation(cancelling_id)
+            .await
+            .unwrap(),
+        Some(RequestAgentRunCancellationOutcome::Requested(run))
+            if run.status == AgentRunStatus::Cancelling
+    ));
+    assert!(matches!(
+        store
+            .finish_agent_run_cancellation(cancelling_id, cancelling_token)
+            .await
+            .unwrap(),
+        Some(FinishAgentRunCancellationOutcome::Cancelled(run))
+            if run.status == AgentRunStatus::Cancelled
+    ));
 }
 
 #[tokio::test]

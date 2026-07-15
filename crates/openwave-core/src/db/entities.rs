@@ -402,6 +402,47 @@ pub mod agent_run_claim_lock {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod agent_run_result {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "agent_run_result")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub agent_run_id: Uuid,
+        pub lease_token: Uuid,
+        pub attempt_count: i32,
+        pub claim_count: i32,
+        pub text: String,
+        pub submitted_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod agent_run_cancellation {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "agent_run_cancellation")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub agent_run_id: Uuid,
+        pub lease_token: Uuid,
+        pub attempt_count: i32,
+        pub claim_count: i32,
+        pub cancelled_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod turn_run {
     use sea_orm::entity::prelude::*;
 

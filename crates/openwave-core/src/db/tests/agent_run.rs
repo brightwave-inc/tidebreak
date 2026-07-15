@@ -1,7 +1,8 @@
 use super::{sample_chat, temp_store};
 use crate::{
     AcceptAgentRunOutcome, AgentRun, AgentRunExecution, AgentRunId, AgentRunStatus, CallId, ChatId,
-    DbStore, Store,
+    DbStore, FinishAgentRunCancellationOutcome, RequestAgentRunCancellationOutcome, Store,
+    SubmitAgentRunResultOutcome,
 };
 use chrono::{Duration, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -486,6 +487,224 @@ async fn sandbox_claims_are_exact_reclaimable_and_heartbeatable() {
         .unwrap();
     assert!(store
         .claim_agent_run(exhausted_scan, Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn sandbox_result_submission_is_fenced_and_idempotent() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let child_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("return a concise result"),
+        )
+        .await
+        .unwrap();
+    let lease_token = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(lease_token, Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let result = match store
+        .submit_agent_run_result(child_id, lease_token, "finished analysis")
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        SubmitAgentRunResultOutcome::Completed(result) => result,
+        outcome => panic!("unexpected result submission outcome: {outcome:?}"),
+    };
+    assert_eq!(result.agent_run_id, child_id);
+    assert_eq!(result.lease_token, lease_token);
+    assert_eq!(result.text, "finished analysis");
+    let completed = store.get_agent_run(child_id).await.unwrap().unwrap();
+    assert_eq!(completed.status, AgentRunStatus::Completed);
+    assert_eq!(completed.lease_token, None);
+    assert!(completed.finished_at.is_some());
+    assert!(matches!(
+        store
+            .submit_agent_run_result(child_id, lease_token, "finished analysis")
+            .await
+            .unwrap(),
+        Some(SubmitAgentRunResultOutcome::Existing(existing)) if existing == result
+    ));
+    assert!(store
+        .submit_agent_run_result(child_id, uuid::Uuid::new_v4(), "finished analysis")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .submit_agent_run_result(child_id, lease_token, "different result")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn sandbox_cancellation_fences_running_work_and_recovers_exact_acknowledgement() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let queued_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            queued_id,
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("cancel before claim"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.request_agent_run_cancellation(queued_id).await.unwrap(),
+        Some(RequestAgentRunCancellationOutcome::Cancelled(run)) if run.status == AgentRunStatus::Cancelled
+    ));
+    assert!(matches!(
+        store.request_agent_run_cancellation(queued_id).await.unwrap(),
+        Some(RequestAgentRunCancellationOutcome::Existing(run)) if run.status == AgentRunStatus::Cancelled
+    ));
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .is_none());
+
+    let running_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            running_id,
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("cancel while running"),
+        )
+        .await
+        .unwrap();
+    let lease_token = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(lease_token, Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        store
+            .request_agent_run_cancellation(running_id)
+            .await
+            .unwrap(),
+        Some(RequestAgentRunCancellationOutcome::Requested(run)) if run.status == AgentRunStatus::Cancelling
+    ));
+    assert!(store
+        .submit_agent_run_result(running_id, lease_token, "too late")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .finish_agent_run_cancellation(running_id, uuid::Uuid::new_v4())
+        .await
+        .unwrap()
+        .is_none());
+    let cancelled = match store
+        .finish_agent_run_cancellation(running_id, lease_token)
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        FinishAgentRunCancellationOutcome::Cancelled(run) => run,
+        outcome => panic!("unexpected cancellation outcome: {outcome:?}"),
+    };
+    assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
+    assert!(matches!(
+        store
+            .finish_agent_run_cancellation(running_id, lease_token)
+            .await
+            .unwrap(),
+        Some(FinishAgentRunCancellationOutcome::Existing(existing)) if existing == cancelled
+    ));
+}
+
+#[tokio::test]
+async fn expired_sandbox_cancellation_is_terminal_and_cannot_fake_worker_acknowledgement() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let parent_id = AgentRunId::foreground_for_chat(chat.id);
+
+    let expired_before_request = AgentRunId::new();
+    store
+        .accept_agent_run(
+            expired_before_request,
+            chat.id,
+            Some(parent_id),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("cancel after lease expiry"),
+        )
+        .await
+        .unwrap();
+    store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    force_expired_agent_lease(&store, expired_before_request).await;
+    assert!(matches!(
+        store
+            .request_agent_run_cancellation(expired_before_request)
+            .await
+            .unwrap(),
+        Some(RequestAgentRunCancellationOutcome::Cancelled(run))
+            if run.status == AgentRunStatus::Cancelled && run.lease_token.is_none()
+    ));
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .is_none());
+
+    let expired_after_request = AgentRunId::new();
+    store
+        .accept_agent_run(
+            expired_after_request,
+            chat.id,
+            Some(parent_id),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("expire after cancellation request"),
+        )
+        .await
+        .unwrap();
+    let lease_token = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(lease_token, Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .request_agent_run_cancellation(expired_after_request)
+        .await
+        .unwrap();
+    force_expired_agent_lease(&store, expired_after_request).await;
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .finish_agent_run_cancellation(expired_after_request, lease_token)
         .await
         .unwrap()
         .is_none());

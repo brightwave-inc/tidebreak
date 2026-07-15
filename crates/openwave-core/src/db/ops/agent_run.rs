@@ -6,8 +6,11 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId};
-use crate::model::{AgentRun, AgentRunExecution, AgentRunStatus};
-use crate::storage::AcceptAgentRunOutcome;
+use crate::model::{AgentRun, AgentRunExecution, AgentRunResult, AgentRunStatus};
+use crate::storage::{
+    AcceptAgentRunOutcome, FinishAgentRunCancellationOutcome, RequestAgentRunCancellationOutcome,
+    SubmitAgentRunResultOutcome,
+};
 
 use super::super::{entities, store_err, DbStore};
 use super::{acquire_chat_write_lock, turn::canonical_db_timestamp};
@@ -474,7 +477,12 @@ pub(in crate::db) async fn heartbeat_agent_run(
             "agent-run heartbeat requires a non-nil token and positive duration".into(),
         ));
     }
-    let now = database_now(&store.conn).await?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    // Serialize lease extension with claim, cancellation, and terminal
+    // resolution. Otherwise a racing heartbeat could make a one-shot durable
+    // cancellation request lose its compare-and-swap.
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
     let lease_expires_at = now.checked_add_signed(lease_duration).ok_or_else(|| {
         AgentError::Store("agent-run lease duration overflows the database timestamp range".into())
     })?;
@@ -496,10 +504,352 @@ pub(in crate::db) async fn heartbeat_agent_run(
         .filter(entities::agent_run::Column::DeadlineAt.gt(now))
         .filter(entities::agent_run::Column::DeadlineAt.gte(lease_expires_at))
         .filter(entities::agent_run::Column::UpdatedAt.lte(now))
-        .exec(&store.conn)
+        .exec(&transaction)
         .await
         .map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
     Ok(heartbeat.rows_affected == 1)
+}
+
+pub(in crate::db) async fn request_agent_run_cancellation(
+    store: &DbStore,
+    id: AgentRunId,
+) -> Result<Option<RequestAgentRunCancellationOutcome>> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    let Some(run) = find_by_id_on(&transaction, id).await? else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if run.execution != AgentRunExecution::Sandbox.as_str() {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let status = agent_run_status_from_db(&run.status)?;
+    let existing = match status {
+        AgentRunStatus::Cancelling | AgentRunStatus::Cancelled => Some(
+            RequestAgentRunCancellationOutcome::Existing(agent_run_from_model(run.clone())?),
+        ),
+        AgentRunStatus::Completed | AgentRunStatus::Failed => Some(
+            RequestAgentRunCancellationOutcome::AlreadyTerminal(agent_run_from_model(run.clone())?),
+        ),
+        AgentRunStatus::Queued | AgentRunStatus::Waiting | AgentRunStatus::RetryWait => None,
+        AgentRunStatus::Running | AgentRunStatus::Active => None,
+    };
+    if let Some(outcome) = existing {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(outcome));
+    }
+    if run.updated_at > now {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    let immediate = status != AgentRunStatus::Running
+        || !run.lease_expires_at.is_some_and(|expiry| expiry > now)
+        || !run.deadline_at.is_some_and(|deadline| deadline > now);
+    let next_status = if immediate {
+        AgentRunStatus::Cancelled
+    } else {
+        AgentRunStatus::Cancelling
+    };
+    let mut update = entities::agent_run::Entity::update_many()
+        .col_expr(
+            entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(next_status.as_str()),
+        )
+        .col_expr(
+            entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::agent_run::Column::Id.eq(id.0))
+        .filter(entities::agent_run::Column::Status.eq(&run.status))
+        .filter(entities::agent_run::Column::AttemptCount.eq(run.attempt_count))
+        .filter(entities::agent_run::Column::ClaimCount.eq(run.claim_count))
+        .filter(entities::agent_run::Column::UpdatedAt.eq(run.updated_at))
+        .filter(entities::agent_run::Column::UpdatedAt.lte(now));
+    if immediate {
+        update = update
+            .col_expr(
+                entities::agent_run::Column::LeaseToken,
+                sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+            )
+            .col_expr(
+                entities::agent_run::Column::LeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .col_expr(
+                entities::agent_run::Column::FinishedAt,
+                sea_orm::sea_query::Expr::value(Some(now)),
+            )
+            .col_expr(
+                entities::agent_run::Column::LastErrorCode,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                entities::agent_run::Column::LastErrorDetail,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            );
+    } else {
+        update = update
+            .filter(entities::agent_run::Column::LeaseToken.eq(run.lease_token))
+            .filter(entities::agent_run::Column::LeaseExpiresAt.eq(run.lease_expires_at))
+            .filter(entities::agent_run::Column::LeaseExpiresAt.gt(now));
+    }
+    let updated = update.exec(&transaction).await.map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let updated = find_by_id_on(&transaction, id)
+        .await?
+        .ok_or_else(|| AgentError::Store(format!("cancelled agent run {id} disappeared")))
+        .and_then(agent_run_from_model)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(if immediate {
+        RequestAgentRunCancellationOutcome::Cancelled(updated)
+    } else {
+        RequestAgentRunCancellationOutcome::Requested(updated)
+    }))
+}
+
+pub(in crate::db) async fn finish_agent_run_cancellation(
+    store: &DbStore,
+    id: AgentRunId,
+    lease_token: uuid::Uuid,
+) -> Result<Option<FinishAgentRunCancellationOutcome>> {
+    if lease_token.is_nil() {
+        return Err(AgentError::Store(
+            "agent-run cancellation requires a non-nil lease token".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    if let Some(receipt) = entities::agent_run_cancellation::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    {
+        if receipt.lease_token != lease_token {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(None);
+        }
+        let Some(run) = find_by_id_on(&transaction, id).await? else {
+            return Err(AgentError::Store(format!(
+                "agent-run cancellation receipt references missing run {id}"
+            )));
+        };
+        if run.status != AgentRunStatus::Cancelled.as_str()
+            || run.attempt_count != receipt.attempt_count
+            || run.claim_count != receipt.claim_count
+        {
+            return Err(AgentError::Store(format!(
+                "agent-run cancellation receipt does not match terminal run {id}"
+            )));
+        }
+        let run = agent_run_from_model(run)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(FinishAgentRunCancellationOutcome::Existing(run)));
+    }
+    let Some(claim) = entities::agent_run_claim::Entity::find_by_id(lease_token)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .filter(|claim| claim.agent_run_id == Some(id.0))
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let Some(run) = find_by_id_on(&transaction, id).await? else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if run.execution != AgentRunExecution::Sandbox.as_str()
+        || Some(run.attempt_count) != claim.attempt_count
+        || Some(run.claim_count) != claim.claim_count
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    if run.status != AgentRunStatus::Cancelling.as_str()
+        || run.lease_token != Some(lease_token)
+        || !run.lease_expires_at.is_some_and(|expiry| expiry > now)
+        || !run.deadline_at.is_some_and(|deadline| deadline > now)
+        || run.updated_at > now
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    entities::agent_run_cancellation::ActiveModel {
+        agent_run_id: Set(id.0),
+        lease_token: Set(lease_token),
+        attempt_count: Set(run.attempt_count),
+        claim_count: Set(run.claim_count),
+        cancelled_at: Set(now),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+    let updated = entities::agent_run::Entity::update_many()
+        .col_expr(
+            entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(AgentRunStatus::Cancelled.as_str()),
+        )
+        .col_expr(
+            entities::agent_run::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            entities::agent_run::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::agent_run::Column::Id.eq(id.0))
+        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Cancelling.as_str()))
+        .filter(entities::agent_run::Column::AttemptCount.eq(run.attempt_count))
+        .filter(entities::agent_run::Column::ClaimCount.eq(run.claim_count))
+        .filter(entities::agent_run::Column::LeaseToken.eq(lease_token))
+        .filter(entities::agent_run::Column::LeaseExpiresAt.eq(run.lease_expires_at))
+        .filter(entities::agent_run::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::agent_run::Column::DeadlineAt.gt(now))
+        .filter(entities::agent_run::Column::UpdatedAt.eq(run.updated_at))
+        .filter(entities::agent_run::Column::UpdatedAt.lte(now))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let updated = find_by_id_on(&transaction, id)
+        .await?
+        .ok_or_else(|| AgentError::Store(format!("cancelled agent run {id} disappeared")))
+        .and_then(agent_run_from_model)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(FinishAgentRunCancellationOutcome::Cancelled(updated)))
+}
+
+pub(in crate::db) async fn submit_agent_run_result(
+    store: &DbStore,
+    id: AgentRunId,
+    lease_token: uuid::Uuid,
+    text: &str,
+) -> Result<Option<SubmitAgentRunResultOutcome>> {
+    if lease_token.is_nil() || text.is_empty() || text.chars().count() > AgentRun::MAX_RESULT_LEN {
+        return Err(AgentError::Store(format!(
+            "agent-run result requires a non-nil lease token and 1..={} characters",
+            AgentRun::MAX_RESULT_LEN
+        )));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    if let Some(result) = entities::agent_run_result::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    {
+        let result = agent_run_result_from_model(result)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok((result.lease_token == lease_token && result.text == text)
+            .then_some(SubmitAgentRunResultOutcome::Existing(result)));
+    }
+    let Some(run) = find_by_id_on(&transaction, id).await? else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if run.execution != AgentRunExecution::Sandbox.as_str()
+        || run.status != AgentRunStatus::Running.as_str()
+        || run.lease_token != Some(lease_token)
+        || !run.lease_expires_at.is_some_and(|expiry| expiry > now)
+        || !run.deadline_at.is_some_and(|deadline| deadline > now)
+        || run.updated_at > now
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    entities::agent_run_result::ActiveModel {
+        agent_run_id: Set(id.0),
+        lease_token: Set(lease_token),
+        attempt_count: Set(run.attempt_count),
+        claim_count: Set(run.claim_count),
+        text: Set(text.to_owned()),
+        submitted_at: Set(now),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+    let updated = entities::agent_run::Entity::update_many()
+        .col_expr(
+            entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(AgentRunStatus::Completed.as_str()),
+        )
+        .col_expr(
+            entities::agent_run::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            entities::agent_run::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::agent_run::Column::Id.eq(id.0))
+        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Running.as_str()))
+        .filter(entities::agent_run::Column::AttemptCount.eq(run.attempt_count))
+        .filter(entities::agent_run::Column::ClaimCount.eq(run.claim_count))
+        .filter(entities::agent_run::Column::LeaseToken.eq(lease_token))
+        .filter(entities::agent_run::Column::LeaseExpiresAt.eq(run.lease_expires_at))
+        .filter(entities::agent_run::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::agent_run::Column::DeadlineAt.gt(now))
+        .filter(entities::agent_run::Column::UpdatedAt.eq(run.updated_at))
+        .filter(entities::agent_run::Column::UpdatedAt.lte(now))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let result = entities::agent_run_result::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("completed agent run {id} is missing its result")))
+        .and_then(agent_run_result_from_model)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(SubmitAgentRunResultOutcome::Completed(result)))
 }
 
 fn validate_claim_request(
@@ -833,22 +1183,7 @@ fn agent_run_from_model(model: entities::agent_run::Model) -> Result<AgentRun> {
             )))
         }
     };
-    let status = match model.status.as_str() {
-        "active" => AgentRunStatus::Active,
-        "queued" => AgentRunStatus::Queued,
-        "running" => AgentRunStatus::Running,
-        "cancelling" => AgentRunStatus::Cancelling,
-        "waiting" => AgentRunStatus::Waiting,
-        "retry_wait" => AgentRunStatus::RetryWait,
-        "completed" => AgentRunStatus::Completed,
-        "failed" => AgentRunStatus::Failed,
-        "cancelled" => AgentRunStatus::Cancelled,
-        value => {
-            return Err(AgentError::Store(format!(
-                "invalid agent-run status {value}"
-            )))
-        }
-    };
+    let status = agent_run_status_from_db(&model.status)?;
     validate_stored_shape(&model, execution, status)?;
     Ok(AgentRun {
         id: AgentRunId(model.id),
@@ -873,6 +1208,45 @@ fn agent_run_from_model(model: entities::agent_run::Model) -> Result<AgentRun> {
         last_error_detail: model.last_error_detail,
         created_at: model.created_at,
         updated_at: model.updated_at,
+    })
+}
+
+fn agent_run_status_from_db(value: &str) -> Result<AgentRunStatus> {
+    let status = match value {
+        "active" => AgentRunStatus::Active,
+        "queued" => AgentRunStatus::Queued,
+        "running" => AgentRunStatus::Running,
+        "cancelling" => AgentRunStatus::Cancelling,
+        "waiting" => AgentRunStatus::Waiting,
+        "retry_wait" => AgentRunStatus::RetryWait,
+        "completed" => AgentRunStatus::Completed,
+        "failed" => AgentRunStatus::Failed,
+        "cancelled" => AgentRunStatus::Cancelled,
+        value => {
+            return Err(AgentError::Store(format!(
+                "invalid agent-run status {value}"
+            )))
+        }
+    };
+    Ok(status)
+}
+
+fn agent_run_result_from_model(model: entities::agent_run_result::Model) -> Result<AgentRunResult> {
+    if model.lease_token.is_nil()
+        || model.attempt_count < 1
+        || model.claim_count < model.attempt_count
+        || model.text.is_empty()
+        || model.text.chars().count() > AgentRun::MAX_RESULT_LEN
+    {
+        return Err(AgentError::Store("invalid stored agent-run result".into()));
+    }
+    Ok(AgentRunResult {
+        agent_run_id: AgentRunId(model.agent_run_id),
+        lease_token: model.lease_token,
+        attempt_count: model.attempt_count,
+        claim_count: model.claim_count,
+        text: model.text,
+        submitted_at: model.submitted_at,
     })
 }
 

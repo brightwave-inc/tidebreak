@@ -60,7 +60,7 @@ pub use id::{
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
 pub use model::{
-    validate_source_regions, AgentRun, AgentRunExecution, AgentRunStatus,
+    validate_source_regions, AgentRun, AgentRunExecution, AgentRunResult, AgentRunStatus,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, ByteSpan, Chat,
     ChatRootAttachment, ClientToolCallRequest, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
@@ -82,10 +82,11 @@ pub use storage::{
     ApplyTurnSteerOutcome, BeginRootAttachmentChangeOutcome, BlobStore, ClaimClientToolCallOutcome,
     ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim, CompleteTurnRunOutcome,
     DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
-    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledTurnOutcome,
-    JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
-    RequestTurnCancellationOutcome, ResolveToolCallOutcome, SecretProvider, Store,
+    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome,
+    RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
+    ResolveToolCallOutcome, SecretProvider, Store, SubmitAgentRunResultOutcome,
     MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
