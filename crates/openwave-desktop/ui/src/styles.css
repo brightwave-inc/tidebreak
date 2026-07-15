@@ -185,6 +185,16 @@ button {
   filter: brightness(1.15);
 }
 
+.btn-danger {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  color: var(--danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: oklch(0.97 0.01 25);
+}
+
 .btn:disabled,
 .new-chat:disabled {
   opacity: 0.5;
@@ -573,6 +583,59 @@ button {
   margin: 0;
   font-size: 0.9rem;
   text-transform: capitalize;
+}
+
+.web-search-state {
+  display: grid;
+  gap: 0.18rem;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--bg);
+  font-size: 0.82rem;
+}
+
+.web-search-state strong {
+  color: var(--ink);
+  font-size: 0.84rem;
+}
+
+.web-search-state.is-ready {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.web-search-state.is-not-configured {
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
+}
+
+.settings-field {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.settings-field select,
+.settings-field input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.35rem 0.45rem;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+.settings-hint,
+.settings-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.settings-note {
+  margin-top: 1rem;
+  line-height: 1.5;
 }
 
 .folder-list {

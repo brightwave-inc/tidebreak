@@ -9,6 +9,9 @@ import {
   type ProviderKind,
   type SequencedEvent,
   type ServerInfo,
+  type WebSearchConfigInfo,
+  type WebSearchCredentialReadiness,
+  type WebSearchProviderKind,
 } from "./api";
 import { resolveServerInfo } from "./boot";
 import {
@@ -73,7 +76,7 @@ export default function App() {
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [creatingChat, setCreatingChat] = useState(false);
   const [settingsPanel, setSettingsPanel] = useState<
-    "providers" | "folders" | null
+    "providers" | "web-search" | "folders" | null
   >(null);
   const [status, setStatus] = useState("starting…");
   const socketRef = useRef<WebSocket | null>(null);
@@ -669,6 +672,17 @@ export default function App() {
           >
             Providers
           </button>
+          <button
+            type="button"
+            className={`sidebar-action${settingsPanel === "web-search" ? " is-active" : ""}`}
+            onClick={() =>
+              setSettingsPanel((panel) =>
+                panel === "web-search" ? null : "web-search",
+              )
+            }
+          >
+            Web search
+          </button>
         </div>
       </aside>
 
@@ -704,6 +718,17 @@ export default function App() {
                   }
                 >
                   Providers
+                </button>
+                <button
+                  type="button"
+                  className={`btn${settingsPanel === "web-search" ? " is-active" : ""}`}
+                  onClick={() =>
+                    setSettingsPanel((panel) =>
+                      panel === "web-search" ? null : "web-search",
+                    )
+                  }
+                >
+                  Web search
                 </button>
               </div>
               <span className="status" title={status}>
@@ -868,6 +893,7 @@ export default function App() {
             onChanged={() => void refreshCatalog()}
           />
         )}
+        {settingsPanel === "web-search" && <WebSearchPanel client={client} />}
         {settingsPanel === "folders" && <FoldersPanel chat={chat} />}
       </div>
     </div>
@@ -1104,6 +1130,269 @@ function FoldersPanel({ chat }: { chat: Chat }) {
       {error && <div className="folder-error">{error}</div>}
     </aside>
   );
+}
+
+const MIN_WEB_SEARCH_TIMEOUT_MS = 1_000;
+const MAX_WEB_SEARCH_TIMEOUT_MS = 60_000;
+
+function WebSearchPanel({ client }: { client: ApiClient }) {
+  const [config, setConfig] = useState<WebSearchConfigInfo | null>(null);
+  const [credentials, setCredentials] = useState<WebSearchCredentialReadiness[]>([]);
+  const [provider, setProvider] = useState<WebSearchProviderKind | "">("");
+  const [timeoutMs, setTimeoutMs] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [savingCredential, setSavingCredential] = useState(false);
+  const [removingCredential, setRemovingCredential] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function refresh() {
+    const [nextConfig, nextCredentials] = await Promise.all([
+      client.getWebSearchConfig(),
+      client.listWebSearchCredentials(),
+    ]);
+    setConfig(nextConfig);
+    setCredentials(nextCredentials.credentials);
+    setProvider(nextConfig.provider ?? "");
+    setTimeoutMs(String(nextConfig.timeout_ms));
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    void (async () => {
+      try {
+        const [nextConfig, nextCredentials] = await Promise.all([
+          client.getWebSearchConfig(),
+          client.listWebSearchCredentials(),
+        ]);
+        if (cancelled) return;
+        setConfig(nextConfig);
+        setCredentials(nextCredentials.credentials);
+        setProvider(nextConfig.provider ?? "");
+        setTimeoutMs(String(nextConfig.timeout_ms));
+      } catch (err) {
+        if (!cancelled) setError(String(err));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+
+  const activeProvider = config?.provider;
+  const selectedCredential = activeProvider
+    ? credentials.find((credential) => credential.provider === activeProvider)
+    : undefined;
+  const selectedHasCredential = selectedCredential?.has_credential ?? false;
+  const working = savingConfig || savingCredential || removingCredential;
+  const state = webSearchState(config);
+
+  async function saveConfig() {
+    const parsedTimeout = Number(timeoutMs);
+    if (
+      !Number.isInteger(parsedTimeout) ||
+      parsedTimeout < MIN_WEB_SEARCH_TIMEOUT_MS ||
+      parsedTimeout > MAX_WEB_SEARCH_TIMEOUT_MS
+    ) {
+      setError(
+        `Timeout must be a whole number between ${MIN_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} and ${MAX_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} ms.`,
+      );
+      return;
+    }
+
+    setSavingConfig(true);
+    setError(null);
+    try {
+      const nextConfig = await client.putWebSearchConfig({
+        provider: provider || null,
+        timeout_ms: parsedTimeout,
+      });
+      setConfig(nextConfig);
+      setTimeoutMs(String(nextConfig.timeout_ms));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSavingConfig(false);
+    }
+  }
+
+  async function saveCredential() {
+    if (!activeProvider || !apiKey.trim()) return;
+    setSavingCredential(true);
+    setError(null);
+    try {
+      await client.putWebSearchCredential(activeProvider, apiKey.trim());
+      setApiKey("");
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSavingCredential(false);
+    }
+  }
+
+  async function removeCredential() {
+    if (!activeProvider) return;
+    setRemovingCredential(true);
+    setError(null);
+    try {
+      await client.deleteWebSearchCredential(activeProvider);
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setRemovingCredential(false);
+    }
+  }
+
+  return (
+    <aside className="settings web-search-settings" aria-busy={loading}>
+      <h2>Web search</h2>
+      <p>
+        Choose a local provider and a bounded request timeout. Existing keys are
+        never shown here.
+      </p>
+
+      {loading ? (
+        <div className="status">Loading web-search settings…</div>
+      ) : !config ? (
+        <div className="status">Web-search settings are unavailable.</div>
+      ) : (
+        <>
+          <div className={`web-search-state is-${state.kind}`} role="status">
+            <strong>{state.label}</strong>
+            <span>{state.description}</span>
+          </div>
+
+          <div className="provider">
+            <label className="settings-field">
+              <span>Provider</span>
+              <select
+                value={provider}
+                disabled={working}
+                onChange={(event) => setProvider(event.target.value as WebSearchProviderKind | "")}
+              >
+                <option value="">Disabled</option>
+                <option value="exa">Exa</option>
+                <option value="tavily">Tavily</option>
+              </select>
+            </label>
+
+            <label className="settings-field">
+              <span>Request timeout (ms)</span>
+              <input
+                type="number"
+                inputMode="numeric"
+                min={MIN_WEB_SEARCH_TIMEOUT_MS}
+                max={MAX_WEB_SEARCH_TIMEOUT_MS}
+                step="1000"
+                value={timeoutMs}
+                disabled={working}
+                onChange={(event) => setTimeoutMs(event.target.value)}
+              />
+            </label>
+            <p className="settings-hint">
+              Between {MIN_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} and {MAX_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} ms.
+            </p>
+            <div className="row">
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={working}
+                onClick={() => void saveConfig()}
+              >
+                {savingConfig ? "Saving…" : "Save configuration"}
+              </button>
+            </div>
+          </div>
+
+          {activeProvider && (
+            <div className="provider">
+              <h3>{activeProvider} credential</h3>
+              <span className="status">
+                {selectedHasCredential ? "credential saved" : "no credential saved"}
+              </span>
+              <label className="settings-field">
+                <span>{selectedHasCredential ? "Replace API key" : "API key"}</span>
+                <input
+                  type="password"
+                  placeholder="Paste a new API key"
+                  value={apiKey}
+                  maxLength={8_192}
+                  autoComplete="new-password"
+                  disabled={working}
+                  onChange={(event) => setApiKey(event.target.value)}
+                />
+              </label>
+              <div className="row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={working || !apiKey.trim()}
+                  onClick={() => void saveCredential()}
+                >
+                  {savingCredential ? "Saving…" : selectedHasCredential ? "Update key" : "Save key"}
+                </button>
+                {selectedHasCredential && (
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    disabled={working}
+                    onClick={() => void removeCredential()}
+                  >
+                    {removingCredential ? "Removing…" : "Remove saved key"}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {provider !== (activeProvider ?? "") && (
+            <p className="settings-hint">
+              Save the provider configuration before managing that provider’s key.
+            </p>
+          )}
+
+          <p className="settings-note">
+            This configures host-owned search access only. Search is not yet a
+            chat tool in this build.
+          </p>
+        </>
+      )}
+      {error && <div className="folder-error" role="alert">{error}</div>}
+    </aside>
+  );
+}
+
+function webSearchState(config: WebSearchConfigInfo | null): {
+  kind: "disabled" | "ready" | "not-configured";
+  label: string;
+  description: string;
+} {
+  if (!config?.provider) {
+    return {
+      kind: "disabled",
+      label: "Disabled",
+      description: "No web-search provider is selected.",
+    };
+  }
+  if (config.has_credential) {
+    return {
+      kind: "ready",
+      label: "Ready",
+      description: `${config.provider} is selected and has a saved credential.`,
+    };
+  }
+  return {
+    kind: "not-configured",
+    label: "Not configured",
+    description: `${config.provider} is selected but needs an API key.`,
+  };
 }
 
 function ProvidersPanel({

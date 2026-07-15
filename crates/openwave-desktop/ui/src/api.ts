@@ -18,6 +18,22 @@ export type ModelInfo = {
   provider: string;
 };
 
+/** The fixed, host-owned search providers supported by this build. */
+export type WebSearchProviderKind = "exa" | "tavily";
+
+/** Non-secret web-search policy and readiness for its selected provider. */
+export type WebSearchConfigInfo = {
+  provider?: WebSearchProviderKind;
+  timeout_ms: number;
+  has_credential: boolean;
+};
+
+/** Readiness only: the API never returns an existing provider key. */
+export type WebSearchCredentialReadiness = {
+  provider: WebSearchProviderKind;
+  has_credential: boolean;
+};
+
 export type Chat = {
   id: string;
   title: string | null;
@@ -153,6 +169,47 @@ export class ApiClient {
 
   listModels(): Promise<{ models: ModelInfo[] }> {
     return this.json("/models", { headers: this.headers() });
+  }
+
+  getWebSearchConfig(): Promise<WebSearchConfigInfo> {
+    return this.json("/web-search", { headers: this.headers() });
+  }
+
+  putWebSearchConfig(body: {
+    provider?: WebSearchProviderKind | null;
+    timeout_ms?: number;
+  }): Promise<WebSearchConfigInfo> {
+    return this.json("/web-search", {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify(body),
+    });
+  }
+
+  listWebSearchCredentials(): Promise<{
+    credentials: WebSearchCredentialReadiness[];
+  }> {
+    return this.json("/web-search/credentials", { headers: this.headers() });
+  }
+
+  putWebSearchCredential(
+    provider: WebSearchProviderKind,
+    apiKey: string,
+  ): Promise<WebSearchCredentialReadiness> {
+    return this.json(`/web-search/credentials/${provider}`, {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+  }
+
+  deleteWebSearchCredential(
+    provider: WebSearchProviderKind,
+  ): Promise<WebSearchCredentialReadiness> {
+    return this.json(`/web-search/credentials/${provider}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
   }
 
   createChat(model?: string): Promise<Chat> {
