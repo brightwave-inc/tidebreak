@@ -22,10 +22,11 @@ use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, ChatId, DocumentId, DocumentJobId, ProjectId, TurnId, TurnSteerId};
 use crate::model::{
-    BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
-    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentRecord, DocumentScope,
-    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project, ToolCallRecord,
-    ToolCallResolution, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
+    BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest, DocumentGeneration,
+    DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
+    DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
+    Message, Project, ToolCallRecord, ToolCallResolution, TurnClientWait, TurnFailureReceipt,
+    TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
 
@@ -154,9 +155,9 @@ pub enum RecordTurnFailureOutcome {
 /// Result of requesting durable cancellation for one exact turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestTurnCancellationOutcome {
-    /// Queued or retry-wait work was cancelled before a worker owned it.
+    /// Queued, retry-wait, or unclaimed client work was cancelled immediately.
     Cancelled(TurnRun),
-    /// Running work entered the durable `cancelling` phase.
+    /// Running work or claimed client work entered a durable cancelling phase.
     Requested(TurnRun),
     /// This turn was already cancelling or cancelled.
     Existing(TurnRun),
@@ -242,6 +243,40 @@ pub enum ResolveToolCallOutcome {
     AlreadyTerminal,
     /// The requested execution surface or exact live client lease did not own it.
     LeaseLost,
+}
+
+/// Result of checkpointing a live worker on one exact client tool call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParkTurnForClientCallOutcome {
+    /// The call, immutable wait receipt, and lease release committed together.
+    Parked {
+        turn: TurnRun,
+        call: ToolCallRecord,
+        wait: TurnClientWait,
+    },
+    /// An exact retry recovered the previously committed checkpoint.
+    Existing {
+        turn: TurnRun,
+        call: ToolCallRecord,
+        wait: TurnClientWait,
+    },
+    /// The call identity already names a different immutable request.
+    IdentityConflict,
+    /// A durable steer won the checkpoint race and must be applied first.
+    SteerPending(TurnRun),
+    /// The request came from provider output generated before an applied steer.
+    OutputSuperseded(TurnRun),
+}
+
+/// A client-call resolution together with the turn transition it triggered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JournaledClientToolCallOutcome {
+    /// Terminal tool-call result.
+    pub outcome: ResolveToolCallOutcome,
+    /// Wait-backed turn after it resumed or terminalized, when applicable.
+    pub turn: Option<TurnRun>,
+    /// Exact terminal event committed by client-owned cancellation.
+    pub terminal_event: Option<SequencedEvent>,
 }
 
 /// A durable turn transition together with any terminal event committed by it.
@@ -984,6 +1019,23 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Atomically persist one client-executed tool call, record the exact
+    /// originating worker claim, and release the turn lease.
+    ///
+    /// Exact retries recover through the immutable wait receipt even after the
+    /// client call resolves or the turn advances. A pending steer fences the
+    /// checkpoint so the worker can apply that instruction first.
+    async fn park_turn_for_client_tool_call(
+        &self,
+        _turn_id: TurnId,
+        _lease_token: uuid::Uuid,
+        _expected_steer_revision: i64,
+        _now: chrono::DateTime<chrono::Utc>,
+        _call: &ClientToolCallRequest,
+    ) -> Result<Option<ParkTurnForClientCallOutcome>> {
+        turn_storage_unavailable()
+    }
+
     /// Append a message to its chat.
     async fn append_message(&self, message: &Message) -> Result<()>;
 
@@ -1036,7 +1088,32 @@ pub trait Store: Send + Sync {
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<ResolveToolCallOutcome>;
+    ) -> Result<ResolveToolCallOutcome> {
+        Ok(self
+            .resolve_client_tool_call_and_append_event(
+                id,
+                chat_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+            )
+            .await?
+            .outcome)
+    }
+
+    /// Resolve a live client call and return any atomic turn transition receipt.
+    /// Exact retries recover the same terminal event when client-owned
+    /// cancellation completed with this resolution.
+    async fn resolve_client_tool_call_and_append_event(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<JournaledClientToolCallOutcome>;
 
     /// Resolve a known outcome after the exact client lease expired.
     ///
@@ -1050,7 +1127,31 @@ pub trait Store: Send + Sync {
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<ResolveToolCallOutcome>;
+    ) -> Result<ResolveToolCallOutcome> {
+        Ok(self
+            .resolve_expired_client_tool_call_and_append_event(
+                id,
+                chat_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+            )
+            .await?
+            .outcome)
+    }
+
+    /// Reconcile an expired client call and return any atomic turn transition
+    /// receipt, with the same retry behavior as the live resolution path.
+    async fn resolve_expired_client_tool_call_and_append_event(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<JournaledClientToolCallOutcome>;
 
     /// List unclaimed and claimed client work for authoritative recovery.
     async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>>;

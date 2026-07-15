@@ -54,12 +54,12 @@ pub use id::{
 pub use keychain::KeychainSecretProvider;
 pub use model::{
     validate_source_regions, BlobRetirement, BlobRetirementStatus, ByteSpan, Chat,
-    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
-    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
-    Project, Role, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
-    ToolCallResolution, ToolCallStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun,
-    TurnRunStatus, TurnSteer, TurnSteerStatus,
+    ClientToolCallRequest, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus,
+    DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus, DocumentRecord,
+    DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
+    Message, Project, Role, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
+    ToolCallResolution, ToolCallStatus, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
+    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
@@ -71,9 +71,9 @@ pub use storage::{
     BlobStore, ClaimClientToolCallOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome,
     ClientToolCallClaim, CompleteTurnRunOutcome, DocumentIndexJobReason,
     EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
-    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome,
-    SecretProvider, Store,
+    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledTurnOutcome,
+    JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
+    RequestTurnCancellationOutcome, ResolveToolCallOutcome, SecretProvider, Store,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 #[cfg(feature = "tools")]

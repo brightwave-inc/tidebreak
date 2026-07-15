@@ -10,9 +10,10 @@ use futures::stream::{self, BoxStream, StreamExt};
 // Tests use the in-memory store; production wires LanceDB in `bind`.
 use openwave_core::{
     AgentErrorInfo, AgentEvent, ApprovalClass, BlobStore, CallId, Chat, ChatId, ChatRequest,
-    Message, ModelProvider, Project, ProjectId, ProviderEvent, ProviderId, SecretProvider,
-    SequencedEvent, StopReason, Tool, ToolCallExecution, ToolCallRecord, ToolCallStatus, ToolCtx,
-    ToolOutput, ToolSpec, TurnId, TurnSteerId, Usage,
+    ClientToolCallRequest, Message, ModelProvider, ParkTurnForClientCallOutcome, Project,
+    ProjectId, ProviderEvent, ProviderId, SecretProvider, SequencedEvent, StopReason, Tool,
+    ToolCallExecution, ToolCallRecord, ToolCallStatus, ToolCtx, ToolOutput, ToolSpec, TurnId,
+    TurnRunStatus, TurnSteerId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -986,7 +987,7 @@ impl Store for PauseTerminalStore {
             .resolve_server_tool_call(id, resolution, resolved_at)
             .await
     }
-    async fn resolve_client_tool_call(
+    async fn resolve_client_tool_call_and_append_event(
         &self,
         id: openwave_core::CallId,
         chat_id: ChatId,
@@ -994,12 +995,19 @@ impl Store for PauseTerminalStore {
         now: chrono::DateTime<chrono::Utc>,
         resolution: &openwave_core::ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<openwave_core::ResolveToolCallOutcome> {
+    ) -> Result<openwave_core::JournaledClientToolCallOutcome> {
         self.inner
-            .resolve_client_tool_call(id, chat_id, lease_token, now, resolution, resolved_at)
+            .resolve_client_tool_call_and_append_event(
+                id,
+                chat_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+            )
             .await
     }
-    async fn resolve_expired_client_tool_call(
+    async fn resolve_expired_client_tool_call_and_append_event(
         &self,
         id: openwave_core::CallId,
         chat_id: ChatId,
@@ -1007,9 +1015,9 @@ impl Store for PauseTerminalStore {
         now: chrono::DateTime<chrono::Utc>,
         resolution: &openwave_core::ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<openwave_core::ResolveToolCallOutcome> {
+    ) -> Result<openwave_core::JournaledClientToolCallOutcome> {
         self.inner
-            .resolve_expired_client_tool_call(
+            .resolve_expired_client_tool_call_and_append_event(
                 id,
                 chat_id,
                 lease_token,
@@ -2402,6 +2410,47 @@ async fn post_json(
         .unwrap()
 }
 
+async fn park_client_wait_for_route_test(
+    store: &dyn Store,
+    chat_id: ChatId,
+) -> (TurnId, ClientToolCallRequest) {
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(turn_id, chat_id, "fake", "native action")
+        .await
+        .unwrap();
+    let turn_token = uuid::Uuid::new_v4();
+    let claimed_at = chrono::Utc::now();
+    let claimed = store
+        .claim_turn_run(
+            turn_token,
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    assert_eq!(claimed.id, turn_id);
+    let call = ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id,
+        turn_id,
+        provider_id: "native".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({}),
+    };
+    assert!(matches!(
+        store
+            .park_turn_for_client_tool_call(turn_id, turn_token, 0, chrono::Utc::now(), &call,)
+            .await
+            .unwrap()
+            .unwrap(),
+        ParkTurnForClientCallOutcome::Parked { .. }
+    ));
+    (turn_id, call)
+}
+
 #[tokio::test]
 async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently() {
     let (router, token, store, _dir) = test_app().await;
@@ -2580,6 +2629,135 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    let router = app(state.clone());
+    let bearer = format!("Bearer {token}");
+
+    let resume_chat = make_chat(&router, &bearer).await;
+    let (resume_turn, resume_call) = park_client_wait_for_route_test(&*store, resume_chat.id).await;
+    let resume_token = uuid::Uuid::new_v4();
+    let claimed_at = chrono::Utc::now();
+    store
+        .claim_client_tool_call(
+            resume_call.id,
+            resume_chat.id,
+            uuid::Uuid::new_v4(),
+            resume_token,
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    let resume_response = post_json(
+        &router,
+        &bearer,
+        &format!(
+            "/chats/{}/client-executions/{}/resolve",
+            resume_chat.id, resume_call.id
+        ),
+        serde_json::json!({
+            "lease_token": resume_token,
+            "resolution": {"status": "completed", "result": "root-1"},
+        }),
+    )
+    .await;
+    assert_eq!(resume_response.status(), StatusCode::OK);
+    tokio::time::timeout(Duration::from_secs(1), state.turn_job_wake.notified())
+        .await
+        .expect("resumable client resolution must wake the turn worker");
+    assert_eq!(
+        store
+            .get_turn_run(resume_turn)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TurnRunStatus::Resuming
+    );
+    store
+        .request_turn_cancellation(resume_turn, chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let cancel_chat = make_chat(&router, &bearer).await;
+    let (cancel_turn, cancel_call) = park_client_wait_for_route_test(&*store, cancel_chat.id).await;
+    let cancel_token = uuid::Uuid::new_v4();
+    let claimed_at = chrono::Utc::now();
+    store
+        .claim_client_tool_call(
+            cancel_call.id,
+            cancel_chat.id,
+            uuid::Uuid::new_v4(),
+            cancel_token,
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .request_turn_cancellation(cancel_turn, chrono::Utc::now())
+            .await
+            .unwrap()
+            .unwrap(),
+        openwave_core::RequestTurnCancellationOutcome::Requested(turn)
+            if turn.status == TurnRunStatus::CancellingClient
+    ));
+    let mut live = state.events.subscribe(cancel_chat.id);
+    let resolve_uri = format!(
+        "/chats/{}/client-executions/{}/resolve",
+        cancel_chat.id, cancel_call.id
+    );
+    let body = serde_json::json!({
+        "lease_token": cancel_token,
+        "resolution": {"status": "cancelled", "result": "cancelled by user"},
+    });
+    let cancelled = post_json(&router, &bearer, &resolve_uri, body.clone()).await;
+    assert_eq!(cancelled.status(), StatusCode::OK);
+    let first_live = tokio::time::timeout(Duration::from_secs(1), live.recv())
+        .await
+        .expect("client-owned cancellation must publish live")
+        .unwrap();
+    assert!(matches!(first_live.event, AgentEvent::TurnCancelled { .. }));
+
+    let retry = post_json(&router, &bearer, &resolve_uri, body).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    let retry: serde_json::Value = json_body(retry).await;
+    assert_eq!(retry["disposition"], "existing");
+    let recovered_live = tokio::time::timeout(Duration::from_secs(1), live.recv())
+        .await
+        .expect("exact retry must recover the terminal publication receipt")
+        .unwrap();
+    assert_eq!(recovered_live, first_live);
 }
 
 #[tokio::test]

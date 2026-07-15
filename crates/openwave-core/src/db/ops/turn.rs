@@ -19,8 +19,14 @@ use super::{
     },
 };
 
+mod client_wait;
 mod resolution;
 mod steer;
+
+pub(in crate::db) use client_wait::{
+    advance_turn_after_client_resolution_on, park_turn_for_client_tool_call,
+    recover_turn_after_client_resolution_on,
+};
 
 pub(in crate::db) use resolution::{
     complete_turn_run, complete_turn_run_and_append_event, finish_turn_cancellation,
@@ -776,6 +782,8 @@ where
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
             TurnRunStatus::Cancelling.as_str(),
+            TurnRunStatus::WaitingForClient.as_str(),
+            TurnRunStatus::CancellingClient.as_str(),
             TurnRunStatus::Resuming.as_str(),
             TurnRunStatus::RetryWait.as_str(),
         ]))
@@ -852,6 +860,8 @@ fn turn_run_status_from_db(text: &str) -> Result<TurnRunStatus> {
         "queued" => Ok(TurnRunStatus::Queued),
         "running" => Ok(TurnRunStatus::Running),
         "cancelling" => Ok(TurnRunStatus::Cancelling),
+        "waiting_for_client" => Ok(TurnRunStatus::WaitingForClient),
+        "cancelling_client" => Ok(TurnRunStatus::CancellingClient),
         "resuming" => Ok(TurnRunStatus::Resuming),
         "retry_wait" => Ok(TurnRunStatus::RetryWait),
         "completed" => Ok(TurnRunStatus::Completed),

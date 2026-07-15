@@ -86,6 +86,7 @@ pub(in crate::db) async fn accept_turn_steer(
             status,
             TurnRunStatus::Queued
                 | TurnRunStatus::Running
+                | TurnRunStatus::WaitingForClient
                 | TurnRunStatus::Resuming
                 | TurnRunStatus::RetryWait
         )

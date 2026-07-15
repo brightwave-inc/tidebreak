@@ -92,7 +92,7 @@ pub fn validate_source_regions(
     Ok(())
 }
 
-use crate::id::{ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, TurnId};
+use crate::id::{CallId, ChatId, DocumentId, DocumentJobId, MessageId, ProjectId, TurnId};
 
 /// An optional grouping of chats that share a workspace and (later) a document
 /// corpus. A chat may belong to a project or stand alone — unlike some designs
@@ -690,6 +690,12 @@ pub enum TurnRunStatus {
     /// The chat remains occupied until that worker acknowledges quiescence or
     /// the expired lease is cleaned up.
     Cancelling,
+    /// The worker checkpointed safely and released its lease while one exact
+    /// durable client call executes on the host.
+    WaitingForClient,
+    /// Cancellation was requested after the client call may have started. The
+    /// chat stays occupied until that exact call reports a terminal result.
+    CancellingClient,
     /// The blocking client call resolved and the checkpoint is eligible for a
     /// fresh worker lease without consuming another failure attempt.
     Resuming,
@@ -711,6 +717,8 @@ impl TurnRunStatus {
             Self::Queued => "queued",
             Self::Running => "running",
             Self::Cancelling => "cancelling",
+            Self::WaitingForClient => "waiting_for_client",
+            Self::CancellingClient => "cancelling_client",
             Self::Resuming => "resuming",
             Self::RetryWait => "retry_wait",
             Self::Completed => "completed",
@@ -723,6 +731,72 @@ impl TurnRunStatus {
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// Immutable request for one tool operation that must execute in a trusted
+/// client rather than the server process.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientToolCallRequest {
+    /// Caller-supplied idempotency identity.
+    pub id: CallId,
+    /// Owning conversation.
+    pub chat_id: ChatId,
+    /// Turn checkpointed for this call.
+    pub turn_id: TurnId,
+    /// Provider/tool namespace that produced the request.
+    pub provider_id: String,
+    /// Tool name understood by the trusted client.
+    pub name: String,
+    /// Canonical model-supplied arguments.
+    pub arguments: serde_json::Value,
+}
+
+/// Immutable receipt for one turn parked on a client tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnClientWait {
+    /// Exact durable client call.
+    pub call_id: CallId,
+    /// Turn that released its worker lease.
+    pub turn_id: TurnId,
+    /// Owning conversation.
+    pub chat_id: ChatId,
+    /// Worker lease segment that created the checkpoint.
+    pub park_lease_token: Uuid,
+    /// Failure attempt containing the checkpoint.
+    pub attempt_count: i32,
+    /// Exact lease-segment ordinal containing the checkpoint.
+    pub claim_count: i32,
+    /// Durable wait lifecycle.
+    pub status: TurnClientWaitStatus,
+    /// Store-owned time when parking committed.
+    pub parked_at: DateTime<Utc>,
+    /// Store-owned time when the wait stopped blocking the turn.
+    pub closed_at: Option<DateTime<Utc>>,
+}
+
+/// Durable lifecycle of a turn/client-call checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TurnClientWaitStatus {
+    /// The exact client call still blocks the turn.
+    Waiting,
+    /// The exact client call resolved and made the turn resumable.
+    Resumed,
+    /// Cancellation won and the turn will not resume from this checkpoint.
+    Cancelled,
+}
+
+impl TurnClientWaitStatus {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Resumed => "resumed",
+            Self::Cancelled => "cancelled",
+        }
     }
 }
 

@@ -2,7 +2,7 @@ use sea_orm_migration::prelude::*;
 
 use super::{
     BlobRetirementStatus, DocumentJobKind, DocumentJobStatus, DocumentProcessingStatus,
-    TurnRunStatus, TurnSteerStatus,
+    TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
 };
 
 pub struct Migrator;
@@ -232,6 +232,8 @@ impl MigrationTrait for Init {
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
             TurnRunStatus::Cancelling.as_str(),
+            TurnRunStatus::WaitingForClient.as_str(),
+            TurnRunStatus::CancellingClient.as_str(),
             TurnRunStatus::Resuming.as_str(),
             TurnRunStatus::RetryWait.as_str(),
             TurnRunStatus::Completed.as_str(),
@@ -268,6 +270,8 @@ impl MigrationTrait for Init {
                 TurnRunStatus::Queued.as_str(),
                 TurnRunStatus::Running.as_str(),
                 TurnRunStatus::Cancelling.as_str(),
+                TurnRunStatus::WaitingForClient.as_str(),
+                TurnRunStatus::CancellingClient.as_str(),
                 TurnRunStatus::Resuming.as_str(),
                 TurnRunStatus::RetryWait.as_str(),
             ])
@@ -289,8 +293,12 @@ impl MigrationTrait for Init {
             .and(Expr::col(TurnRun::AttemptCount).gte(1))
             .and(Expr::col(TurnRun::AttemptCount).lt(Expr::col(TurnRun::MaxAttempts)))
             .and(Expr::col(TurnRun::StartedAt).is_not_null());
-        let resuming_attempt = Expr::col(TurnRun::Status)
-            .eq(TurnRunStatus::Resuming.as_str())
+        let client_checkpoint_attempt = Expr::col(TurnRun::Status)
+            .is_in([
+                TurnRunStatus::WaitingForClient.as_str(),
+                TurnRunStatus::CancellingClient.as_str(),
+                TurnRunStatus::Resuming.as_str(),
+            ])
             .and(Expr::col(TurnRun::AttemptCount).gte(1))
             .and(Expr::col(TurnRun::StartedAt).is_not_null());
         let resolved_attempt = Expr::col(TurnRun::Status)
@@ -322,6 +330,8 @@ impl MigrationTrait for Init {
                 TurnRunStatus::Queued.as_str(),
                 TurnRunStatus::Running.as_str(),
                 TurnRunStatus::Cancelling.as_str(),
+                TurnRunStatus::WaitingForClient.as_str(),
+                TurnRunStatus::CancellingClient.as_str(),
                 TurnRunStatus::Resuming.as_str(),
                 TurnRunStatus::Completed.as_str(),
                 TurnRunStatus::Cancelled.as_str(),
@@ -476,7 +486,7 @@ impl MigrationTrait for Init {
                     .check(
                         queued_attempt
                             .or(leased_attempt)
-                            .or(resuming_attempt)
+                            .or(client_checkpoint_attempt)
                             .or(retryable_attempt)
                             .or(resolved_attempt)
                             .or(cancelled_attempt),
@@ -542,6 +552,8 @@ impl MigrationTrait for Init {
                         TurnRunStatus::Queued.as_str(),
                         TurnRunStatus::Running.as_str(),
                         TurnRunStatus::Cancelling.as_str(),
+                        TurnRunStatus::WaitingForClient.as_str(),
+                        TurnRunStatus::CancellingClient.as_str(),
                         TurnRunStatus::Resuming.as_str(),
                         TurnRunStatus::RetryWait.as_str(),
                     ]))
@@ -1227,6 +1239,11 @@ impl MigrationTrait for AddToolCalls {
                                             .ne(crate::model::ToolCallStatus::Pending.as_str())
                                             .and(Expr::col(ToolCall::ClientExecutorId).is_not_null())
                                             .and(Expr::col(ToolCall::ClientLeaseToken).is_not_null())
+                                            .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null()))
+                                        .or(Expr::col(ToolCall::Status)
+                                            .eq(crate::model::ToolCallStatus::Cancelled.as_str())
+                                            .and(Expr::col(ToolCall::ClientExecutorId).is_null())
+                                            .and(Expr::col(ToolCall::ClientLeaseToken).is_null())
                                             .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())),
                                 )),
                     )
@@ -1247,6 +1264,18 @@ impl MigrationTrait for AddToolCalls {
         manager
             .create_index(
                 Index::create()
+                    .name("idx_tool_call_wait_identity")
+                    .table(ToolCall::Table)
+                    .col(ToolCall::Id)
+                    .col(ToolCall::ChatId)
+                    .col(ToolCall::TurnId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
                     .name("idx_tool_call_client_pending")
                     .table(ToolCall::Table)
                     .col(ToolCall::ChatId)
@@ -1256,10 +1285,123 @@ impl MigrationTrait for AddToolCalls {
                     .to_owned(),
             )
             .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(TurnClientWait::Table)
+                    .col(
+                        ColumnDef::new(TurnClientWait::CallId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(TurnClientWait::TurnId).uuid().not_null())
+                    .col(ColumnDef::new(TurnClientWait::ChatId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(TurnClientWait::ParkLeaseToken)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnClientWait::AttemptCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnClientWait::ClaimCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(TurnClientWait::Status).text().not_null())
+                    .col(
+                        ColumnDef::new(TurnClientWait::ParkedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(TurnClientWait::ClosedAt).timestamp_with_time_zone())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_client_wait_call")
+                            .from_tbl(TurnClientWait::Table)
+                            .from_col(TurnClientWait::CallId)
+                            .from_col(TurnClientWait::ChatId)
+                            .from_col(TurnClientWait::TurnId)
+                            .to_tbl(ToolCall::Table)
+                            .to_col(ToolCall::Id)
+                            .to_col(ToolCall::ChatId)
+                            .to_col(ToolCall::TurnId)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_client_wait_claim")
+                            .from_tbl(TurnClientWait::Table)
+                            .from_col(TurnClientWait::ParkLeaseToken)
+                            .from_col(TurnClientWait::TurnId)
+                            .from_col(TurnClientWait::AttemptCount)
+                            .from_col(TurnClientWait::ClaimCount)
+                            .to_tbl(TurnClaim::Table)
+                            .to_col(TurnClaim::Token)
+                            .to_col(TurnClaim::TurnId)
+                            .to_col(TurnClaim::AttemptCount)
+                            .to_col(TurnClaim::ClaimCount)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(Expr::col(TurnClientWait::Status).is_in([
+                        TurnClientWaitStatus::Waiting.as_str(),
+                        TurnClientWaitStatus::Resumed.as_str(),
+                        TurnClientWaitStatus::Cancelled.as_str(),
+                    ]))
+                    .check(
+                        Expr::col(TurnClientWait::Status)
+                            .eq(TurnClientWaitStatus::Waiting.as_str())
+                            .and(Expr::col(TurnClientWait::ClosedAt).is_null())
+                            .or(Expr::col(TurnClientWait::Status)
+                                .ne(TurnClientWaitStatus::Waiting.as_str())
+                                .and(Expr::col(TurnClientWait::ClosedAt).is_not_null())),
+                    )
+                    .check(
+                        Expr::col(TurnClientWait::ClosedAt)
+                            .is_null()
+                            .or(Expr::col(TurnClientWait::ClosedAt)
+                                .gte(Expr::col(TurnClientWait::ParkedAt))),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_turn_client_wait_one_open")
+                    .table(TurnClientWait::Table)
+                    .col(TurnClientWait::TurnId)
+                    .unique()
+                    .and_where(
+                        Expr::col(TurnClientWait::Status)
+                            .eq(TurnClientWaitStatus::Waiting.as_str()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_turn_client_wait_history")
+                    .table(TurnClientWait::Table)
+                    .col(TurnClientWait::TurnId)
+                    .col(TurnClientWait::ParkedAt)
+                    .col(TurnClientWait::CallId)
+                    .to_owned(),
+            )
+            .await?;
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(TurnClientWait::Table).to_owned())
+            .await?;
         manager
             .drop_table(Table::drop().table(ToolCall::Table).to_owned())
             .await?;
@@ -2132,6 +2274,20 @@ enum ToolCall {
     ClientLeaseExpiresAt,
     CreatedAt,
     ResolvedAt,
+}
+
+#[derive(DeriveIden)]
+enum TurnClientWait {
+    Table,
+    CallId,
+    TurnId,
+    ChatId,
+    ParkLeaseToken,
+    AttemptCount,
+    ClaimCount,
+    Status,
+    ParkedAt,
+    ClosedAt,
 }
 
 #[derive(DeriveIden)]

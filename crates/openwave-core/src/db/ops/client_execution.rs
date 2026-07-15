@@ -8,7 +8,7 @@ use crate::id::{CallId, ChatId};
 use crate::model::{ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus};
 use crate::storage::{
     AcceptToolCallOutcome, ClaimClientToolCallOutcome, ClientToolCallClaim,
-    HeartbeatClientToolCallOutcome, ResolveToolCallOutcome,
+    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, ResolveToolCallOutcome,
 };
 
 use super::super::{entities, store_err, DbStore};
@@ -88,6 +88,10 @@ pub(in crate::db) async fn claim_client_tool_call(
         return Ok(ClaimClientToolCallOutcome::Unavailable);
     }
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(ClaimClientToolCallOutcome::Unavailable);
+    }
     if !acquire_tool_call_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ClaimClientToolCallOutcome::Unavailable);
@@ -141,6 +145,10 @@ pub(in crate::db) async fn heartbeat_client_tool_call(
     let lease_expires_at = canonical_db_timestamp(lease_expires_at)?;
     validate_lease(lease_token, now, lease_expires_at)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(HeartbeatClientToolCallOutcome::LeaseLost);
+    }
     if !acquire_tool_call_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(HeartbeatClientToolCallOutcome::LeaseLost);
@@ -177,17 +185,18 @@ pub(in crate::db) async fn resolve_server_tool_call(
     resolution: &ToolCallResolution,
     resolved_at: DateTime<Utc>,
 ) -> Result<ResolveToolCallOutcome> {
-    resolve_tool_call(
+    Ok(resolve_tool_call(
         store,
         id,
         ResolutionAuthority::Server,
         resolved_at,
         resolution,
     )
-    .await
+    .await?
+    .outcome)
 }
 
-pub(in crate::db) async fn resolve_client_tool_call(
+pub(in crate::db) async fn resolve_client_tool_call_and_append_event(
     store: &DbStore,
     id: CallId,
     chat_id: ChatId,
@@ -195,7 +204,7 @@ pub(in crate::db) async fn resolve_client_tool_call(
     now: DateTime<Utc>,
     resolution: &ToolCallResolution,
     resolved_at: DateTime<Utc>,
-) -> Result<ResolveToolCallOutcome> {
+) -> Result<JournaledClientToolCallOutcome> {
     if lease_token.is_nil() {
         return Err(AgentError::Store(
             "client lease token must not be nil".into(),
@@ -215,7 +224,7 @@ pub(in crate::db) async fn resolve_client_tool_call(
     .await
 }
 
-pub(in crate::db) async fn resolve_expired_client_tool_call(
+pub(in crate::db) async fn resolve_expired_client_tool_call_and_append_event(
     store: &DbStore,
     id: CallId,
     chat_id: ChatId,
@@ -223,7 +232,7 @@ pub(in crate::db) async fn resolve_expired_client_tool_call(
     now: DateTime<Utc>,
     resolution: &ToolCallResolution,
     resolved_at: DateTime<Utc>,
-) -> Result<ResolveToolCallOutcome> {
+) -> Result<JournaledClientToolCallOutcome> {
     if lease_token.is_nil() {
         return Err(AgentError::Store(
             "client lease token must not be nil".into(),
@@ -265,14 +274,20 @@ async fn resolve_tool_call(
     authority: ResolutionAuthority,
     resolved_at: DateTime<Utc>,
     resolution: &ToolCallResolution,
-) -> Result<ResolveToolCallOutcome> {
+) -> Result<JournaledClientToolCallOutcome> {
     validate_resolution(resolution)?;
     let resolved_at = canonical_db_timestamp(resolved_at)?;
     let authority = authority.canonicalized()?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    if let Some(chat_id) = authority.chat_id() {
+        if !acquire_chat_write_lock(&transaction, chat_id).await? {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(journaled_call_outcome(ResolveToolCallOutcome::LeaseLost));
+        }
+    }
     if !acquire_tool_call_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
-        return Ok(ResolveToolCallOutcome::NotFound);
+        return Ok(journaled_call_outcome(ResolveToolCallOutcome::NotFound));
     }
     let existing = entities::tool_call::Entity::find_by_id(id.0)
         .one(&transaction)
@@ -293,8 +308,19 @@ async fn resolve_tool_call(
         } else {
             ResolveToolCallOutcome::AlreadyTerminal
         };
+        let transition = if outcome == ResolveToolCallOutcome::Existing
+            && authority.chat_id().is_some()
+        {
+            super::turn::recover_turn_after_client_resolution_on(&transaction, &existing).await?
+        } else {
+            None
+        };
         transaction.commit().await.map_err(store_err)?;
-        return Ok(outcome);
+        return Ok(JournaledClientToolCallOutcome {
+            outcome,
+            turn: transition.as_ref().map(|item| item.turn.clone()),
+            terminal_event: transition.and_then(|item| item.terminal_event),
+        });
     }
 
     let owns = match authority {
@@ -326,7 +352,7 @@ async fn resolve_tool_call(
     };
     if !owns {
         transaction.commit().await.map_err(store_err)?;
-        return Ok(ResolveToolCallOutcome::LeaseLost);
+        return Ok(journaled_call_outcome(ResolveToolCallOutcome::LeaseLost));
     }
 
     let (error_code, error_detail) = resolution_error(resolution);
@@ -337,9 +363,27 @@ async fn resolve_tool_call(
     active.error_detail = Set(error_detail);
     active.client_lease_expires_at = Set(None);
     active.resolved_at = Set(Some(resolved_at));
-    active.update(&transaction).await.map_err(store_err)?;
+    let resolved = active.update(&transaction).await.map_err(store_err)?;
+    let transition = if authority.chat_id().is_some() {
+        super::turn::advance_turn_after_client_resolution_on(&transaction, &resolved, resolved_at)
+            .await?
+    } else {
+        None
+    };
     transaction.commit().await.map_err(store_err)?;
-    Ok(ResolveToolCallOutcome::Resolved)
+    Ok(JournaledClientToolCallOutcome {
+        outcome: ResolveToolCallOutcome::Resolved,
+        turn: transition.as_ref().map(|item| item.turn.clone()),
+        terminal_event: transition.and_then(|item| item.terminal_event),
+    })
+}
+
+fn journaled_call_outcome(outcome: ResolveToolCallOutcome) -> JournaledClientToolCallOutcome {
+    JournaledClientToolCallOutcome {
+        outcome,
+        turn: None,
+        terminal_event: None,
+    }
 }
 
 #[derive(Clone, Copy)]

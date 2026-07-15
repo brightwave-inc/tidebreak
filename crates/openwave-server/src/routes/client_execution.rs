@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use chrono::{Duration, Utc};
 use openwave_core::{
     CallId, ChatId, ClaimClientToolCallOutcome, HeartbeatClientToolCallOutcome,
-    ResolveToolCallOutcome, ToolCallRecord, ToolCallResolution,
+    ResolveToolCallOutcome, ToolCallRecord, ToolCallResolution, TurnRunStatus,
 };
 
 use crate::error::ServerError;
@@ -216,17 +216,31 @@ pub async fn resolve_client_execution(
     let resolution = body.resolution.into_core();
     validate_resolution(&resolution)?;
     let now = Utc::now();
-    let mut outcome = state
+    let mut resolution_receipt = state
         .store
-        .resolve_client_tool_call(call_id, id, body.lease_token, now, &resolution, now)
+        .resolve_client_tool_call_and_append_event(
+            call_id,
+            id,
+            body.lease_token,
+            now,
+            &resolution,
+            now,
+        )
         .await?;
-    if outcome == ResolveToolCallOutcome::LeaseLost {
-        outcome = state
+    if resolution_receipt.outcome == ResolveToolCallOutcome::LeaseLost {
+        resolution_receipt = state
             .store
-            .resolve_expired_client_tool_call(call_id, id, body.lease_token, now, &resolution, now)
+            .resolve_expired_client_tool_call_and_append_event(
+                call_id,
+                id,
+                body.lease_token,
+                now,
+                &resolution,
+                now,
+            )
             .await?;
     }
-    let disposition = match outcome {
+    let disposition = match resolution_receipt.outcome {
         ResolveToolCallOutcome::Resolved => ResolutionDisposition::Resolved,
         ResolveToolCallOutcome::Existing => ResolutionDisposition::Existing,
         ResolveToolCallOutcome::AlreadyTerminal => {
@@ -245,6 +259,17 @@ pub async fn resolve_client_execution(
             )));
         }
     };
+    if let Some(event) = resolution_receipt.terminal_event {
+        // Exact retries may publish the same sequence again; WebSocket cursors
+        // deduplicate it while this closes the commit-to-live delivery gap.
+        let _ = state.events.sender(id).send(event);
+    }
+    if resolution_receipt
+        .turn
+        .is_some_and(|turn| turn.status == TurnRunStatus::Resuming)
+    {
+        state.turn_job_wake.notify_one();
+    }
     Ok(Json(ResolvedClientExecution { disposition }))
 }
 
