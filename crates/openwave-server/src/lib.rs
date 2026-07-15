@@ -26,6 +26,7 @@ mod provider;
 mod providers;
 mod resolver;
 mod routes;
+mod sandbox_agent_run_worker;
 mod state;
 mod turn_worker;
 
@@ -219,6 +220,7 @@ pub struct Server {
     _document_auditor: AbortTask,
     _document_worker: AbortTask,
     _turn_worker: AbortTask,
+    _sandbox_agent_run_worker: AbortTask,
     _blob_retirement_worker: AbortTask,
     _blob_orphan_auditor: AbortTask,
     _instance_lock: InstanceLock,
@@ -400,6 +402,14 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
         Some(state.config.data_dir.join("scratch")),
         turn_worker::TurnWorkerConfig::default(),
     );
+    let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::new(
+        state.store.clone(),
+        state.resolver.clone(),
+        state.agent_run_wake.clone(),
+        state.agent_config.clone(),
+        Some(state.config.data_dir.join("scratch")),
+        sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default(),
+    );
     let server_store = state.store.clone();
     let router = app(state);
 
@@ -413,6 +423,7 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
     let document_auditor = tokio::spawn(document_auditor.run());
     let document_worker = tokio::spawn(document_worker.run());
     let turn_worker = tokio::spawn(turn_worker.run());
+    let sandbox_agent_run_worker = tokio::spawn(sandbox_agent_run_worker.run());
     let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
     let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
 
@@ -426,6 +437,7 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
         _document_auditor: AbortTask(document_auditor),
         _document_worker: AbortTask(document_worker),
         _turn_worker: AbortTask(turn_worker),
+        _sandbox_agent_run_worker: AbortTask(sandbox_agent_run_worker),
         _blob_retirement_worker: AbortTask(blob_retirement_worker),
         _blob_orphan_auditor: AbortTask(blob_orphan_auditor),
         _instance_lock: instance_lock,

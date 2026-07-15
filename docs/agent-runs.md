@@ -62,24 +62,25 @@ spawn:
 2. The tool-call identity is stored as the child's unique spawn identity, so an
    ambiguous retry recovers the original run instead of creating a duplicate.
 3. A bounded scheduler claims the child with an exact renewable lease.
-4. The scheduler creates or restores its sandbox and advances the shared agent
-   loop.
-5. The child submits an immutable terminal result or the scheduler records a
-   durable terminal failure.
+4. The scheduler gives the child private scratch and advances its isolated
+   no-tools task loop.
+5. The child submits an immutable terminal result. Provider failures leave the
+   exact lease for the bounded scheduler retry/reap path; they do not create an
+   unfenced executor-side failure transition.
 6. The result, terminal child state, and immutable parent inbox entry commit
    together. A later wait transition may consume that entry and wake a parent.
 
 The bounded `spawn_sandbox_agent` contract and its foreground checkpoint wiring
-are prepared, but deliberately disabled in the production tool registry: no
-sandbox executor exists yet to claim and complete the accepted child. When that
-executor lands, this will be a wait-form tool: it accepts one bounded `task`,
-derives the child identity from that exact tool call, and commits the queued
-child, durable wait, and release of the exact foreground worker lease in one
-transaction. It will be advertised only to a claimed foreground turn; sandbox
-workers will never receive it, and the store independently enforces depth one.
-A later non-blocking spawn tool can let the foreground continue after spawning,
-but must earn the same checkpoint and replay rules. The prepared boundary never
-leaves a child behind when a stale lease or steer fences its checkpoint.
+are prepared, but deliberately disabled in the production tool registry. The
+server now runs the executor that can claim and complete a child, but the tool
+will not be advertised until the final wiring wakes that worker after an atomic
+foreground spawn checkpoint. It will be a wait-form tool: it accepts one
+bounded `task`, derives the child identity from that exact tool call, and
+commits the queued child, durable wait, and release of the exact foreground
+worker lease in one transaction. It is advertised only to a claimed foreground
+turn; sandbox workers never receive it, and the store independently enforces
+depth one. A later non-blocking spawn tool can let the foreground continue after
+spawning, but must earn the same checkpoint and replay rules.
 
 The wait also carries an immutable atomic-admission marker. Only that receipt
 allows a later retry to recover the combined transition; an older path that
@@ -223,12 +224,13 @@ The implementation is intentionally incremental:
 6. Persist shared model/tool step boundaries and side-effect receipts.
 7. Atomically join durable inbox consumption with a parent turn checkpoint and
    durable `resuming` wake signal. *(Shipped.)*
-8. Atomically accept a sandbox spawn and its parent checkpoint from the
-   foreground tool boundary. The bounded foreground-only
-   `spawn_sandbox_agent` contract is wired to this transition, but remains
-   disabled until the sandbox executor lands. *(Groundwork shipped.)*
-9. Route sandbox folder access through the host broker.
-10. Add desktop surfaces for queued, running, waiting, failed, and completed
+8. Run isolated one-shot sandbox tasks with no tools or shared conversation
+   context, over the durable lease/result boundary. *(Shipped.)*
+9. Enable the bounded foreground-only `spawn_sandbox_agent` contract, wake the
+   sandbox worker after its atomic checkpoint, and resume the parked turn from
+   the already-delivered inbox receipt.
+10. Route sandbox folder access through the host broker.
+11. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work.
-11. Add richer context lifecycle, parallel-safe tool groups, and further
+12. Add richer context lifecycle, parallel-safe tool groups, and further
    orchestration only after these recovery boundaries are proven.

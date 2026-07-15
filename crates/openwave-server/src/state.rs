@@ -45,6 +45,12 @@ pub struct AppState {
     pub(crate) document_job_wake: Arc<Notify>,
     /// Wakes the durable turn worker after acceptance or cancellation commits.
     pub(crate) turn_job_wake: Arc<Notify>,
+    /// Wakes the bounded sandbox-run worker after delegated work commits.
+    ///
+    /// The foreground spawn contract is still intentionally disabled in the
+    /// production registry; this signal makes its later enablement immediate
+    /// rather than relying on the worker's idle poll.
+    pub(crate) agent_run_wake: Arc<Notify>,
     /// Wakes the source-blob retirement worker after a reference drop commits.
     pub(crate) blob_retirement_wake: Arc<Notify>,
     /// Serializes the final publish transition with source replacement/deletion.
@@ -124,6 +130,7 @@ impl AppState {
             retrieval,
             document_job_wake: Arc::new(Notify::new()),
             turn_job_wake: Arc::new(Notify::new()),
+            agent_run_wake: Arc::new(Notify::new()),
             blob_retirement_wake: Arc::new(Notify::new()),
             document_writes: Arc::new(DocumentWriteGuard::default()),
             blob_writes,
