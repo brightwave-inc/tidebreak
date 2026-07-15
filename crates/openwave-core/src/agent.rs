@@ -161,6 +161,21 @@ pub enum AgentTurnOutcome {
         /// Model-call steps consumed from the turn-wide execution budget.
         model_steps: usize,
     },
+    /// Execution failed after consuming provider work that must be retained.
+    Failed {
+        /// Stable terminal error payload for the durable failure event.
+        error: crate::AgentErrorInfo,
+        /// Aggregate provider usage consumed before the failure.
+        usage: Usage,
+        /// Model-call steps consumed before the failure.
+        model_steps: usize,
+    },
+}
+
+#[derive(Debug, Default)]
+struct AgentProgress {
+    usage: Usage,
+    model_steps: usize,
 }
 
 /// One emission from a durably claimed agent generation.
@@ -415,12 +430,19 @@ impl Agent {
                 turn_id: execution.turn_id,
             });
         }
-        match self.drive(chat, execution, events).await {
+        let mut progress = AgentProgress::default();
+        match self.drive(chat, execution, events, &mut progress).await {
             Ok(outcome) => Ok(outcome),
             Err(err) => {
                 if execution.publish_terminal {
                     events.send(AgentEvent::TurnFailed {
                         error: (&err).into(),
+                    });
+                } else if progress.model_steps > 0 {
+                    return Ok(AgentTurnOutcome::Failed {
+                        error: (&err).into(),
+                        usage: progress.usage,
+                        model_steps: progress.model_steps,
                     });
                 }
                 Err(err)
@@ -433,6 +455,7 @@ impl Agent {
         chat: &Chat,
         execution: TurnExecution<'_>,
         events: &EventSink<'_>,
+        progress: &mut AgentProgress,
     ) -> Result<AgentTurnOutcome> {
         let TurnExecution {
             turn_id,
@@ -479,6 +502,7 @@ impl Agent {
                     temperature: self.config.temperature,
                 };
 
+                progress.model_steps = step + 1;
                 match self.provider.stream(request).await {
                     Ok(stream) => {
                         // Tell clients the history was shortened for this call so
@@ -564,6 +588,7 @@ impl Agent {
                         total_usage = total_usage.checked_add(reported).ok_or_else(|| {
                             AgentError::msg("provider usage exceeded the supported turn total")
                         })?;
+                        progress.usage = total_usage;
                     }
                     ProviderEvent::Stop { reason } => stop_reason = reason,
                 }
@@ -1732,6 +1757,8 @@ mod tests {
                 failure_token,
                 Utc::now(),
                 crate::TurnFailureRetry::Permanent,
+                0,
+                Usage::default(),
                 "agent_error",
                 Some(&error_detail),
             )
@@ -1764,6 +1791,8 @@ mod tests {
                 failure_token,
                 failure_claimed_at + chrono::Duration::hours(1),
                 crate::TurnFailureRetry::Permanent,
+                0,
+                Usage::default(),
                 "agent_error",
                 Some(&error_detail),
             )
@@ -2005,6 +2034,79 @@ mod tests {
             .map(|m| m.role)
             .collect();
         assert_eq!(roles, vec![Role::User]);
+    }
+
+    #[tokio::test]
+    async fn claimed_max_steps_failure_retains_provider_progress() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("note.txt"), "secret").unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            workspace_dir: workspace.path().to_path_buf(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "read note.txt")
+            .await
+            .unwrap();
+        let claimed_at = Utc::now();
+        let lease_token = uuid::Uuid::new_v4();
+        store
+            .claim_turn_run(
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap();
+        let agent = Agent::new(
+            Arc::new(FakeProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(ReadFile))),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                max_steps: 1,
+                ..Default::default()
+            },
+        )
+        .with_durable_steer(lease_token);
+        let (tx, _rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            AgentTurnOutcome::Failed {
+                error,
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 2,
+                    ..
+                },
+                model_steps: 1,
+            } if error.kind == "message" && error.message == "max steps per turn exceeded"
+        ));
+        let calls = store.list_tool_calls(chat.id).await.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].status, ToolCallStatus::Pending);
+        assert_eq!(calls[0].result, None);
     }
 
     #[tokio::test]

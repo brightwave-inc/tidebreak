@@ -1769,6 +1769,8 @@ impl Store for DbStore {
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         retry: TurnFailureRetry,
+        model_steps: i32,
+        usage: Usage,
         error_code: &str,
         error_detail: Option<&str>,
     ) -> Result<Option<RecordTurnFailureOutcome>> {
@@ -1778,6 +1780,8 @@ impl Store for DbStore {
             lease_token,
             now,
             retry,
+            model_steps,
+            usage,
             error_code,
             error_detail,
         )
@@ -1790,6 +1794,8 @@ impl Store for DbStore {
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         retry: TurnFailureRetry,
+        model_steps: i32,
+        usage: Usage,
         error_code: &str,
         error_detail: Option<&str>,
     ) -> Result<Option<JournaledTurnOutcome<RecordTurnFailureOutcome>>> {
@@ -1799,6 +1805,8 @@ impl Store for DbStore {
             lease_token,
             now,
             retry,
+            model_steps,
+            usage,
             error_code,
             error_detail,
         )

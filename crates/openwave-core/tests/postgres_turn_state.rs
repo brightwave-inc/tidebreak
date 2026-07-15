@@ -410,6 +410,8 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                     failure_token,
                     failure_at,
                     TurnFailureRetry::RetryAt(requested_retry_at),
+                    0,
+                    Usage::default(),
                     "provider_unavailable",
                     Some("temporary outage"),
                 )

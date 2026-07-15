@@ -665,6 +665,27 @@ impl MigrationTrait for Init {
                             .integer()
                             .not_null(),
                     )
+                    .col(ColumnDef::new(TurnFailure::ModelSteps).integer().not_null())
+                    .col(
+                        ColumnDef::new(TurnFailure::InputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnFailure::OutputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnFailure::CacheReadInputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TurnFailure::CacheCreationInputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(TurnFailure::RequestedRetryAt).timestamp_with_time_zone())
                     .col(
                         ColumnDef::new(TurnFailure::ErrorCode)
@@ -699,6 +720,18 @@ impl MigrationTrait for Init {
                             .on_delete(ForeignKeyAction::Restrict),
                     )
                     .check(Expr::col(TurnFailure::AttemptCount).gte(1))
+                    .check(Expr::col(TurnFailure::ModelSteps).gte(0))
+                    .check(Expr::col(TurnFailure::ModelSteps).lte(i32::MAX))
+                    .check(Expr::col(TurnFailure::InputTokens).gte(0))
+                    .check(Expr::col(TurnFailure::OutputTokens).gte(0))
+                    .check(Expr::col(TurnFailure::CacheReadInputTokens).gte(0))
+                    .check(Expr::col(TurnFailure::CacheCreationInputTokens).gte(0))
+                    .check(Expr::col(TurnFailure::InputTokens).lte(i64::from(u32::MAX)))
+                    .check(Expr::col(TurnFailure::OutputTokens).lte(i64::from(u32::MAX)))
+                    .check(Expr::col(TurnFailure::CacheReadInputTokens).lte(i64::from(u32::MAX)))
+                    .check(
+                        Expr::col(TurnFailure::CacheCreationInputTokens).lte(i64::from(u32::MAX)),
+                    )
                     .check(Expr::col(TurnFailure::ResultStatus).is_in([
                         TurnRunStatus::RetryWait.as_str(),
                         TurnRunStatus::Failed.as_str(),
@@ -2328,6 +2361,11 @@ enum TurnFailure {
     LeaseToken,
     TurnId,
     AttemptCount,
+    ModelSteps,
+    InputTokens,
+    OutputTokens,
+    CacheReadInputTokens,
+    CacheCreationInputTokens,
     RequestedRetryAt,
     ErrorCode,
     ErrorDetail,
