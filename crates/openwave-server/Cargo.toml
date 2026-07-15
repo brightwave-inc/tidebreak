@@ -30,5 +30,5 @@ cap-std = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 tower = { version = "0.5", features = ["util"] }
 reqwest = { workspace = true }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 tempfile = "3"
