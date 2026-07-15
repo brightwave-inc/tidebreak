@@ -312,13 +312,12 @@ pub async fn create_chat(
 ) -> Result<impl IntoResponse, ServerError> {
     // Return a product-facing 400 for an unknown project. The Store and schema
     // independently enforce the same membership invariant inside insertion.
-    match body.project_id {
-        Some(project_id) => {
-            state.store.get_project(project_id).await?.ok_or_else(|| {
-                ServerError::bad_request(format!("project {project_id} not found"))
-            })?;
-        }
-        None => {}
+    if let Some(project_id) = body.project_id {
+        state
+            .store
+            .get_project(project_id)
+            .await?
+            .ok_or_else(|| ServerError::bad_request(format!("project {project_id} not found")))?;
     }
     if body.model.as_deref().is_some_and(str::is_empty) {
         return Err(ServerError::bad_request("model must not be empty"));
