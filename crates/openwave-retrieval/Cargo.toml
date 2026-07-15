@@ -46,7 +46,7 @@ sha2 = { workspace = true, optional = true }
 # pinned to the exact major LanceDB uses (58) so RecordBatch types are compatible.
 lancedb = { version = "0.31", optional = true }
 arrow-array = { version = "58", optional = true }
-arrow-schema = { version = "58", optional = true }
+arrow-schema = { version = "59", optional = true }
 arrow-select = { version = "58", optional = true }
 futures = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync"], optional = true }
