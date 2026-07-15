@@ -60,13 +60,13 @@ pub use id::{
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
 pub use model::{
-    validate_source_regions, AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult,
-    AgentRunStatus, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, ByteSpan,
-    Chat, ChatRootAttachment, ClientToolCallRequest, DocumentGeneration, DocumentJob,
-    DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
-    DocumentProcessingStatus, DocumentRecord, DocumentScope, DocumentSourceBlob,
-    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project, Role,
-    RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
+    validate_source_regions, AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunInboxStatus,
+    AgentRunResult, AgentRunStatus, BeginRootAttachmentChange, BlobRetirement,
+    BlobRetirementStatus, ByteSpan, Chat, ChatRootAttachment, ClientToolCallRequest,
+    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
+    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
+    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
+    Project, Role, RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
     RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentOrigin,
     RootAttachmentSubjectKind, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
     ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnClientWait,
@@ -80,9 +80,10 @@ pub use provider::{
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
     AcceptAgentRunOutcome, AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
-    ApplyTurnSteerOutcome, BeginRootAttachmentChangeOutcome, BlobStore, ClaimClientToolCallOutcome,
-    ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim, CompleteTurnRunOutcome,
-    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
+    ApplyTurnSteerOutcome, BeginRootAttachmentChangeOutcome, BlobStore, ClaimAgentRunInboxOutcome,
+    ClaimClientToolCallOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim,
+    CompleteTurnRunOutcome, ConsumeAgentRunInboxOutcome, DocumentIndexJobReason,
+    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
     JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome,
