@@ -193,6 +193,24 @@ pub enum SubmitAgentRunResultOutcome {
     Existing(AgentRunResult),
 }
 
+/// Result of acquiring durable ownership of one exact parent inbox delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimAgentRunInboxOutcome {
+    /// This call acquired the continuation lease.
+    Claimed(AgentRunInboxEntry),
+    /// The exact live lease was already acquired by this caller.
+    Existing(AgentRunInboxEntry),
+}
+
+/// Result of consuming one exact parent inbox delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsumeAgentRunInboxOutcome {
+    /// This exact live continuation lease committed consumption.
+    Consumed(AgentRunInboxEntry),
+    /// This exact lease already committed consumption.
+    Existing(AgentRunInboxEntry),
+}
+
 /// Result of atomically accepting one exact steering instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptTurnSteerOutcome {
@@ -1022,6 +1040,31 @@ pub trait Store: Send + Sync {
         &self,
         _parent_run_id: AgentRunId,
     ) -> Result<Vec<AgentRunInboxEntry>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Acquire an expiring, exact lease to advance one immutable parent inbox
+    /// delivery. Repeating the same live lease recovers its ownership; an
+    /// expired lease may be reclaimed by a different continuation worker.
+    async fn claim_agent_run_inbox_entry(
+        &self,
+        _parent_run_id: AgentRunId,
+        _child_run_id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _lease_duration: chrono::Duration,
+    ) -> Result<Option<ClaimAgentRunInboxOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Consume one exact inbox delivery under its live continuation lease.
+    /// An ambiguous exact retry recovers the consumed receipt, while a stale
+    /// lease cannot consume or overwrite a reclaimed delivery.
+    async fn consume_agent_run_inbox_entry(
+        &self,
+        _parent_run_id: AgentRunId,
+        _child_run_id: AgentRunId,
+        _lease_token: uuid::Uuid,
+    ) -> Result<Option<ConsumeAgentRunInboxOutcome>> {
         agent_run_storage_unavailable()
     }
 

@@ -39,14 +39,14 @@ use crate::model::{
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
     AcceptAgentRunOutcome, AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
-    BeginRootAttachmentChangeOutcome, ClaimClientToolCallOutcome, ClaimTurnRunOutcome,
-    CompleteTurnRunOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
-    EnsureDocumentParseJobOutcome, FinishAgentRunCancellationOutcome,
-    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledTurnOutcome,
-    JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
-    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome,
-    Store, SubmitAgentRunResultOutcome,
+    BeginRootAttachmentChangeOutcome, ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome,
+    ClaimTurnRunOutcome, CompleteTurnRunOutcome, ConsumeAgentRunInboxOutcome,
+    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
+    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome,
+    RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
+    ResolveToolCallOutcome, Store, SubmitAgentRunResultOutcome,
 };
 
 mod ops;
@@ -1809,6 +1809,38 @@ impl Store for DbStore {
         parent_run_id: AgentRunId,
     ) -> Result<Vec<AgentRunInboxEntry>> {
         ops::agent_run::list_agent_run_inbox(self, parent_run_id).await
+    }
+
+    async fn claim_agent_run_inbox_entry(
+        &self,
+        parent_run_id: AgentRunId,
+        child_run_id: AgentRunId,
+        lease_token: uuid::Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<Option<ClaimAgentRunInboxOutcome>> {
+        ops::agent_run::claim_agent_run_inbox_entry(
+            self,
+            parent_run_id,
+            child_run_id,
+            lease_token,
+            lease_duration,
+        )
+        .await
+    }
+
+    async fn consume_agent_run_inbox_entry(
+        &self,
+        parent_run_id: AgentRunId,
+        child_run_id: AgentRunId,
+        lease_token: uuid::Uuid,
+    ) -> Result<Option<ConsumeAgentRunInboxOutcome>> {
+        ops::agent_run::consume_agent_run_inbox_entry(
+            self,
+            parent_run_id,
+            child_run_id,
+            lease_token,
+        )
+        .await
     }
 
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {

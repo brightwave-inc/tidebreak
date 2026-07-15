@@ -457,6 +457,12 @@ pub mod agent_run_inbox {
         pub result_lease_token: Uuid,
         pub result_attempt_count: i32,
         pub result_claim_count: i32,
+        pub status: String,
+        pub claim_count: i32,
+        pub lease_token: Option<Uuid>,
+        pub lease_expires_at: Option<DateTimeUtc>,
+        pub consumed_lease_token: Option<Uuid>,
+        pub consumed_at: Option<DateTimeUtc>,
         pub delivered_at: DateTimeUtc,
     }
 

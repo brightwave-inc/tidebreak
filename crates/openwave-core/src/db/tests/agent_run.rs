@@ -1,6 +1,7 @@
 use super::{sample_chat, temp_store};
 use crate::{
-    AcceptAgentRunOutcome, AgentRun, AgentRunExecution, AgentRunId, AgentRunStatus, CallId, ChatId,
+    AcceptAgentRunOutcome, AgentRun, AgentRunExecution, AgentRunId, AgentRunInboxStatus,
+    AgentRunStatus, CallId, ChatId, ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxOutcome,
     DbStore, FinishAgentRunCancellationOutcome, RequestAgentRunCancellationOutcome, Store,
     SubmitAgentRunResultOutcome,
 };
@@ -44,6 +45,43 @@ async fn force_expired_agent_deadline(store: &DbStore, id: AgentRunId) {
         .exec(&store.conn)
         .await
         .unwrap();
+}
+
+async fn submit_sandbox_result(
+    store: &DbStore,
+    chat_id: ChatId,
+    input: &str,
+    text: &str,
+) -> (AgentRunId, crate::AgentRunResult) {
+    let child_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            child_id,
+            chat_id,
+            Some(AgentRunId::foreground_for_chat(chat_id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some(input),
+        )
+        .await
+        .unwrap();
+    let lease_token = uuid::Uuid::new_v4();
+    let claimed = store
+        .claim_agent_run(lease_token, Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .expect("sandbox child should claim");
+    assert_eq!(claimed.id, child_id);
+    let result = match store
+        .submit_agent_run_result(child_id, lease_token, text)
+        .await
+        .unwrap()
+        .expect("sandbox child should complete")
+    {
+        SubmitAgentRunResultOutcome::Completed(result) => result,
+        outcome => panic!("unexpected result submission outcome: {outcome:?}"),
+    };
+    (child_id, result)
 }
 
 #[tokio::test]
@@ -538,6 +576,12 @@ async fn sandbox_result_submission_is_fenced_and_idempotent() {
             child_run_id: child_id,
             chat_id: chat.id,
             result: result.clone(),
+            status: AgentRunInboxStatus::Pending,
+            claim_count: 0,
+            lease_token: None,
+            lease_expires_at: None,
+            consumed_lease_token: None,
+            consumed_at: None,
             delivered_at: result.submitted_at,
         }]
     );
@@ -562,6 +606,165 @@ async fn sandbox_result_submission_is_fenced_and_idempotent() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn parent_inbox_consumption_is_fenced_and_idempotent() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let parent_id = AgentRunId::foreground_for_chat(chat.id);
+    let (child_id, result) = submit_sandbox_result(
+        &store,
+        chat.id,
+        "prepare a parent continuation",
+        "completed child result",
+    )
+    .await;
+
+    let token = uuid::Uuid::new_v4();
+    let claimed = match store
+        .claim_agent_run_inbox_entry(parent_id, child_id, token, Duration::minutes(1))
+        .await
+        .unwrap()
+        .expect("pending delivery should claim")
+    {
+        ClaimAgentRunInboxOutcome::Claimed(entry) => entry,
+        outcome => panic!("unexpected inbox claim outcome: {outcome:?}"),
+    };
+    assert_eq!(claimed.result, result);
+    assert_eq!(claimed.status, AgentRunInboxStatus::Claimed);
+    assert_eq!(claimed.claim_count, 1);
+    assert_eq!(claimed.lease_token, Some(token));
+    assert!(claimed.lease_expires_at.is_some());
+    assert_eq!(claimed.consumed_lease_token, None);
+    assert_eq!(claimed.consumed_at, None);
+
+    assert!(matches!(
+        store
+            .claim_agent_run_inbox_entry(parent_id, child_id, token, Duration::minutes(1))
+            .await
+            .unwrap(),
+        Some(ClaimAgentRunInboxOutcome::Existing(entry)) if entry == claimed
+    ));
+    let stale_token = uuid::Uuid::new_v4();
+    assert!(store
+        .claim_agent_run_inbox_entry(parent_id, child_id, stale_token, Duration::minutes(1))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .consume_agent_run_inbox_entry(parent_id, child_id, stale_token)
+        .await
+        .unwrap()
+        .is_none());
+
+    let consumed = match store
+        .consume_agent_run_inbox_entry(parent_id, child_id, token)
+        .await
+        .unwrap()
+        .expect("live lease should consume")
+    {
+        ConsumeAgentRunInboxOutcome::Consumed(entry) => entry,
+        outcome => panic!("unexpected inbox consumption outcome: {outcome:?}"),
+    };
+    assert_eq!(consumed.status, AgentRunInboxStatus::Consumed);
+    assert_eq!(consumed.claim_count, 1);
+    assert_eq!(consumed.lease_token, None);
+    assert_eq!(consumed.lease_expires_at, None);
+    assert_eq!(consumed.consumed_lease_token, Some(token));
+    assert!(consumed.consumed_at.is_some());
+    assert!(matches!(
+        store
+            .consume_agent_run_inbox_entry(parent_id, child_id, token)
+            .await
+            .unwrap(),
+        Some(ConsumeAgentRunInboxOutcome::Existing(entry)) if entry == consumed
+    ));
+    assert!(store
+        .consume_agent_run_inbox_entry(parent_id, child_id, stale_token)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .claim_agent_run_inbox_entry(
+            parent_id,
+            child_id,
+            uuid::Uuid::new_v4(),
+            Duration::minutes(1)
+        )
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn expired_parent_inbox_lease_can_be_reclaimed_but_not_consumed_by_stale_owner() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let parent_id = AgentRunId::foreground_for_chat(chat.id);
+    let (child_id, _) = submit_sandbox_result(
+        &store,
+        chat.id,
+        "exercise recovery",
+        "recoverable child result",
+    )
+    .await;
+    let first_token = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run_inbox_entry(parent_id, child_id, first_token, Duration::minutes(1))
+        .await
+        .unwrap()
+        .expect("pending delivery should claim");
+    let expired_at = Utc::now() - Duration::minutes(5);
+    crate::db::entities::agent_run_inbox::Entity::update_many()
+        .col_expr(
+            crate::db::entities::agent_run_inbox::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Some(expired_at)),
+        )
+        .filter(crate::db::entities::agent_run_inbox::Column::ChildRunId.eq(child_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+
+    assert!(store
+        .claim_agent_run_inbox_entry(parent_id, child_id, first_token, Duration::minutes(1))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .consume_agent_run_inbox_entry(parent_id, child_id, first_token)
+        .await
+        .unwrap()
+        .is_none());
+
+    let replacement_token = uuid::Uuid::new_v4();
+    let reclaimed = match store
+        .claim_agent_run_inbox_entry(parent_id, child_id, replacement_token, Duration::minutes(1))
+        .await
+        .unwrap()
+        .expect("expired delivery should reclaim")
+    {
+        ClaimAgentRunInboxOutcome::Claimed(entry) => entry,
+        outcome => panic!("unexpected inbox claim outcome: {outcome:?}"),
+    };
+    assert_eq!(reclaimed.claim_count, 2);
+    assert_eq!(reclaimed.lease_token, Some(replacement_token));
+    assert!(store
+        .consume_agent_run_inbox_entry(parent_id, child_id, first_token)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        store
+            .consume_agent_run_inbox_entry(parent_id, child_id, replacement_token)
+            .await
+            .unwrap(),
+        Some(ConsumeAgentRunInboxOutcome::Consumed(entry))
+            if entry.claim_count == 2
+                && entry.consumed_lease_token == Some(replacement_token)
+    ));
 }
 
 #[tokio::test]

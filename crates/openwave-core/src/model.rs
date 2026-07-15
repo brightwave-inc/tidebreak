@@ -1182,8 +1182,58 @@ pub struct AgentRunInboxEntry {
     pub chat_id: ChatId,
     /// Exact result receipt that was delivered.
     pub result: AgentRunResult,
+    /// Durable continuation state for this exact child result.
+    pub status: AgentRunInboxStatus,
+    /// Number of distinct continuation leases issued for this delivery.
+    pub claim_count: i32,
+    /// Exact live continuation lease, when a worker currently owns it.
+    pub lease_token: Option<Uuid>,
+    /// Database-clock expiry of the live continuation lease.
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    /// Exact lease that durably consumed this delivery.
+    pub consumed_lease_token: Option<Uuid>,
+    /// Database time at which consumption committed.
+    pub consumed_at: Option<DateTime<Utc>>,
     /// Database time when the durable parent delivery committed.
     pub delivered_at: DateTime<Utc>,
+}
+
+/// Durable continuation lifecycle for one parent inbox delivery.
+///
+/// A delivery is immutable; only its fenced consumption state advances. A
+/// continuation lease may be reclaimed after expiry, while a consumed receipt
+/// remains available for an ambiguous exact retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AgentRunInboxStatus {
+    /// The parent has not yet claimed this child result.
+    Pending,
+    /// One exact continuation lease owns this child result.
+    Claimed,
+    /// One exact continuation lease durably consumed this child result.
+    Consumed,
+}
+
+impl AgentRunInboxStatus {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Claimed => "claimed",
+            Self::Consumed => "consumed",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "claimed" => Some(Self::Claimed),
+            "consumed" => Some(Self::Consumed),
+            _ => None,
+        }
+    }
 }
 
 /// Execution boundary for an [`AgentRun`].

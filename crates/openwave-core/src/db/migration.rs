@@ -525,6 +525,28 @@ async fn create_agent_run_inbox_table(manager: &SchemaManager<'_>) -> Result<(),
                         .integer()
                         .not_null(),
                 )
+                .col(ColumnDef::new(AgentRunInbox::Status).string().not_null())
+                .col(
+                    ColumnDef::new(AgentRunInbox::ClaimCount)
+                        .integer()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(AgentRunInbox::LeaseToken).uuid().null())
+                .col(
+                    ColumnDef::new(AgentRunInbox::LeaseExpiresAt)
+                        .timestamp_with_time_zone()
+                        .null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunInbox::ConsumedLeaseToken)
+                        .uuid()
+                        .null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunInbox::ConsumedAt)
+                        .timestamp_with_time_zone()
+                        .null(),
+                )
                 .col(
                     ColumnDef::new(AgentRunInbox::DeliveredAt)
                         .timestamp_with_time_zone()
@@ -576,6 +598,31 @@ async fn create_agent_run_inbox_table(manager: &SchemaManager<'_>) -> Result<(),
                 .check(
                     Expr::col(AgentRunInbox::ResultClaimCount)
                         .gte(Expr::col(AgentRunInbox::ResultAttemptCount)),
+                )
+                .check(Expr::col(AgentRunInbox::Status).is_in(["pending", "claimed", "consumed"]))
+                .check(Expr::col(AgentRunInbox::ClaimCount).gte(0))
+                .check(
+                    Expr::col(AgentRunInbox::Status)
+                        .eq("pending")
+                        .and(Expr::col(AgentRunInbox::ClaimCount).eq(0))
+                        .and(Expr::col(AgentRunInbox::LeaseToken).is_null())
+                        .and(Expr::col(AgentRunInbox::LeaseExpiresAt).is_null())
+                        .and(Expr::col(AgentRunInbox::ConsumedLeaseToken).is_null())
+                        .and(Expr::col(AgentRunInbox::ConsumedAt).is_null())
+                        .or(Expr::col(AgentRunInbox::Status)
+                            .eq("claimed")
+                            .and(Expr::col(AgentRunInbox::ClaimCount).gte(1))
+                            .and(Expr::col(AgentRunInbox::LeaseToken).is_not_null())
+                            .and(Expr::col(AgentRunInbox::LeaseExpiresAt).is_not_null())
+                            .and(Expr::col(AgentRunInbox::ConsumedLeaseToken).is_null())
+                            .and(Expr::col(AgentRunInbox::ConsumedAt).is_null()))
+                        .or(Expr::col(AgentRunInbox::Status)
+                            .eq("consumed")
+                            .and(Expr::col(AgentRunInbox::ClaimCount).gte(1))
+                            .and(Expr::col(AgentRunInbox::LeaseToken).is_null())
+                            .and(Expr::col(AgentRunInbox::LeaseExpiresAt).is_null())
+                            .and(Expr::col(AgentRunInbox::ConsumedLeaseToken).is_not_null())
+                            .and(Expr::col(AgentRunInbox::ConsumedAt).is_not_null())),
                 )
                 .to_owned(),
         )
@@ -3439,6 +3486,12 @@ enum AgentRunInbox {
     ResultLeaseToken,
     ResultAttemptCount,
     ResultClaimCount,
+    Status,
+    ClaimCount,
+    LeaseToken,
+    LeaseExpiresAt,
+    ConsumedLeaseToken,
+    ConsumedAt,
     DeliveredAt,
 }
 

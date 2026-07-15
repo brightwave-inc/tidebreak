@@ -7,10 +7,12 @@ use sea_orm::{
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId};
 use crate::model::{
-    AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult, AgentRunStatus,
+    AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunResult,
+    AgentRunStatus,
 };
 use crate::storage::{
-    AcceptAgentRunOutcome, FinishAgentRunCancellationOutcome, RequestAgentRunCancellationOutcome,
+    AcceptAgentRunOutcome, ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxOutcome,
+    FinishAgentRunCancellationOutcome, RequestAgentRunCancellationOutcome,
     SubmitAgentRunResultOutcome,
 };
 
@@ -826,6 +828,12 @@ pub(in crate::db) async fn submit_agent_run_result(
         result_lease_token: Set(lease_token),
         result_attempt_count: Set(run.attempt_count),
         result_claim_count: Set(run.claim_count),
+        status: Set(AgentRunInboxStatus::Pending.as_str().into()),
+        claim_count: Set(0),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        consumed_lease_token: Set(None),
+        consumed_at: Set(None),
         delivered_at: Set(now),
     }
     .insert(&transaction)
@@ -900,19 +908,238 @@ pub(in crate::db) async fn list_agent_run_inbox(
         .map_err(store_err)?;
     let mut inbox = Vec::with_capacity(entries.len());
     for entry in entries {
-        let result = entities::agent_run_result::Entity::find_by_id(entry.child_run_id)
-            .one(&store.conn)
-            .await
-            .map_err(store_err)?
-            .ok_or_else(|| {
-                AgentError::Store(format!(
-                    "agent-run inbox child {} is missing its result receipt",
-                    entry.child_run_id
-                ))
-            })?;
-        inbox.push(agent_run_inbox_from_models(entry, result)?);
+        inbox.push(load_agent_run_inbox_entry_on(&store.conn, entry).await?);
     }
     Ok(inbox)
+}
+
+/// Claim one exact immutable delivery as the next parent continuation boundary.
+///
+/// The shared scheduler lock deliberately serializes this with sandbox claims:
+/// a continuation must observe one database-clock ordering, and an expired
+/// continuation owner must never race a replacement owner into consumption.
+pub(in crate::db) async fn claim_agent_run_inbox_entry(
+    store: &DbStore,
+    parent_run_id: AgentRunId,
+    child_run_id: AgentRunId,
+    lease_token: uuid::Uuid,
+    lease_duration: chrono::Duration,
+) -> Result<Option<ClaimAgentRunInboxOutcome>> {
+    validate_inbox_claim_request(lease_token, lease_duration)?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    let lease_expires_at = now.checked_add_signed(lease_duration).ok_or_else(|| {
+        AgentError::Store(
+            "agent-run inbox lease duration overflows the database timestamp range".into(),
+        )
+    })?;
+    if !parent_is_active_on(&transaction, parent_run_id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(model) = find_agent_run_inbox_on(&transaction, parent_run_id, child_run_id).await?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let entry = load_agent_run_inbox_entry_on(&transaction, model.clone()).await?;
+    match entry.status {
+        AgentRunInboxStatus::Pending => {
+            let updated = entities::agent_run_inbox::Entity::update_many()
+                .col_expr(
+                    entities::agent_run_inbox::Column::Status,
+                    sea_orm::sea_query::Expr::value(AgentRunInboxStatus::Claimed.as_str()),
+                )
+                .col_expr(
+                    entities::agent_run_inbox::Column::ClaimCount,
+                    sea_orm::sea_query::Expr::value(1),
+                )
+                .col_expr(
+                    entities::agent_run_inbox::Column::LeaseToken,
+                    sea_orm::sea_query::Expr::value(Some(lease_token)),
+                )
+                .col_expr(
+                    entities::agent_run_inbox::Column::LeaseExpiresAt,
+                    sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
+                )
+                .filter(entities::agent_run_inbox::Column::ChildRunId.eq(child_run_id.0))
+                .filter(entities::agent_run_inbox::Column::ParentRunId.eq(parent_run_id.0))
+                .filter(
+                    entities::agent_run_inbox::Column::Status
+                        .eq(AgentRunInboxStatus::Pending.as_str()),
+                )
+                .filter(entities::agent_run_inbox::Column::ClaimCount.eq(0))
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+            if updated.rows_affected != 1 {
+                transaction.rollback().await.map_err(store_err)?;
+                return Ok(None);
+            }
+            let claimed = load_agent_run_inbox_by_ids_on(&transaction, parent_run_id, child_run_id)
+                .await?
+                .ok_or_else(|| {
+                    AgentError::Store("claimed agent-run inbox entry disappeared".into())
+                })?;
+            transaction.commit().await.map_err(store_err)?;
+            Ok(Some(ClaimAgentRunInboxOutcome::Claimed(claimed)))
+        }
+        AgentRunInboxStatus::Claimed
+            if entry.lease_token == Some(lease_token)
+                && entry
+                    .lease_expires_at
+                    .is_some_and(|expires_at| expires_at > now) =>
+        {
+            transaction.commit().await.map_err(store_err)?;
+            Ok(Some(ClaimAgentRunInboxOutcome::Existing(entry)))
+        }
+        AgentRunInboxStatus::Claimed
+            if entry
+                .lease_expires_at
+                .is_some_and(|expires_at| expires_at <= now) =>
+        {
+            // A lease token is a capability for one continuation attempt, not
+            // a retry identity. Once it expires, its former owner must not
+            // revive itself into a new attempt; only a fresh token may reclaim
+            // the immutable delivery.
+            if entry.lease_token == Some(lease_token) {
+                transaction.commit().await.map_err(store_err)?;
+                return Ok(None);
+            }
+            let next_claim_count = entry
+                .claim_count
+                .checked_add(1)
+                .ok_or_else(|| AgentError::Store("agent-run inbox claim count exhausted".into()))?;
+            let updated = entities::agent_run_inbox::Entity::update_many()
+                .col_expr(
+                    entities::agent_run_inbox::Column::ClaimCount,
+                    sea_orm::sea_query::Expr::value(next_claim_count),
+                )
+                .col_expr(
+                    entities::agent_run_inbox::Column::LeaseToken,
+                    sea_orm::sea_query::Expr::value(Some(lease_token)),
+                )
+                .col_expr(
+                    entities::agent_run_inbox::Column::LeaseExpiresAt,
+                    sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
+                )
+                .filter(entities::agent_run_inbox::Column::ChildRunId.eq(child_run_id.0))
+                .filter(entities::agent_run_inbox::Column::ParentRunId.eq(parent_run_id.0))
+                .filter(
+                    entities::agent_run_inbox::Column::Status
+                        .eq(AgentRunInboxStatus::Claimed.as_str()),
+                )
+                .filter(entities::agent_run_inbox::Column::ClaimCount.eq(entry.claim_count))
+                .filter(entities::agent_run_inbox::Column::LeaseToken.eq(entry.lease_token))
+                .filter(
+                    entities::agent_run_inbox::Column::LeaseExpiresAt.eq(entry.lease_expires_at),
+                )
+                .filter(entities::agent_run_inbox::Column::LeaseExpiresAt.lte(now))
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+            if updated.rows_affected != 1 {
+                transaction.rollback().await.map_err(store_err)?;
+                return Ok(None);
+            }
+            let claimed = load_agent_run_inbox_by_ids_on(&transaction, parent_run_id, child_run_id)
+                .await?
+                .ok_or_else(|| {
+                    AgentError::Store("reclaimed agent-run inbox entry disappeared".into())
+                })?;
+            transaction.commit().await.map_err(store_err)?;
+            Ok(Some(ClaimAgentRunInboxOutcome::Claimed(claimed)))
+        }
+        AgentRunInboxStatus::Claimed | AgentRunInboxStatus::Consumed => {
+            transaction.commit().await.map_err(store_err)?;
+            Ok(None)
+        }
+    }
+}
+
+/// Mark one exact inbox delivery consumed under its active continuation lease.
+///
+/// Consumption is the commit point for a future parent resume transition. The
+/// resulting receipt is retained so a worker can recover an ambiguous commit
+/// without re-consuming the child result.
+pub(in crate::db) async fn consume_agent_run_inbox_entry(
+    store: &DbStore,
+    parent_run_id: AgentRunId,
+    child_run_id: AgentRunId,
+    lease_token: uuid::Uuid,
+) -> Result<Option<ConsumeAgentRunInboxOutcome>> {
+    if lease_token.is_nil() {
+        return Err(AgentError::Store(
+            "agent-run inbox consumption requires a non-nil lease token".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    if !parent_is_active_on(&transaction, parent_run_id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(model) = find_agent_run_inbox_on(&transaction, parent_run_id, child_run_id).await?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let entry = load_agent_run_inbox_entry_on(&transaction, model).await?;
+    if entry.status == AgentRunInboxStatus::Consumed {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok((entry.consumed_lease_token == Some(lease_token))
+            .then_some(ConsumeAgentRunInboxOutcome::Existing(entry)));
+    }
+    if entry.status != AgentRunInboxStatus::Claimed
+        || entry.lease_token != Some(lease_token)
+        || !entry
+            .lease_expires_at
+            .is_some_and(|expires_at| expires_at > now)
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let updated = entities::agent_run_inbox::Entity::update_many()
+        .col_expr(
+            entities::agent_run_inbox::Column::Status,
+            sea_orm::sea_query::Expr::value(AgentRunInboxStatus::Consumed.as_str()),
+        )
+        .col_expr(
+            entities::agent_run_inbox::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::agent_run_inbox::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::agent_run_inbox::Column::ConsumedLeaseToken,
+            sea_orm::sea_query::Expr::value(Some(lease_token)),
+        )
+        .col_expr(
+            entities::agent_run_inbox::Column::ConsumedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .filter(entities::agent_run_inbox::Column::ChildRunId.eq(child_run_id.0))
+        .filter(entities::agent_run_inbox::Column::ParentRunId.eq(parent_run_id.0))
+        .filter(entities::agent_run_inbox::Column::Status.eq(AgentRunInboxStatus::Claimed.as_str()))
+        .filter(entities::agent_run_inbox::Column::LeaseToken.eq(lease_token))
+        .filter(entities::agent_run_inbox::Column::LeaseExpiresAt.eq(entry.lease_expires_at))
+        .filter(entities::agent_run_inbox::Column::LeaseExpiresAt.gt(now))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let consumed = load_agent_run_inbox_by_ids_on(&transaction, parent_run_id, child_run_id)
+        .await?
+        .ok_or_else(|| AgentError::Store("consumed agent-run inbox entry disappeared".into()))?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(ConsumeAgentRunInboxOutcome::Consumed(consumed)))
 }
 
 fn validate_claim_request(
@@ -934,6 +1161,18 @@ fn validate_claim_request(
             "agent-run concurrency limits must satisfy 1 <= per-chat <= global <= {}",
             AgentRun::MAX_CONCURRENCY_LIMIT
         )));
+    }
+    Ok(())
+}
+
+fn validate_inbox_claim_request(
+    lease_token: uuid::Uuid,
+    lease_duration: chrono::Duration,
+) -> Result<()> {
+    if lease_token.is_nil() || lease_duration <= chrono::Duration::zero() {
+        return Err(AgentError::Store(
+            "agent-run inbox claim requires a non-nil token and positive duration".into(),
+        ));
     }
     Ok(())
 }
@@ -1317,10 +1556,39 @@ fn agent_run_inbox_from_models(
     model: entities::agent_run_inbox::Model,
     result: entities::agent_run_result::Model,
 ) -> Result<AgentRunInboxEntry> {
+    let status = AgentRunInboxStatus::parse(&model.status).ok_or_else(|| {
+        AgentError::Store("invalid stored agent-run inbox continuation status".into())
+    })?;
+    let valid_continuation = match status {
+        AgentRunInboxStatus::Pending => {
+            model.claim_count == 0
+                && model.lease_token.is_none()
+                && model.lease_expires_at.is_none()
+                && model.consumed_lease_token.is_none()
+                && model.consumed_at.is_none()
+        }
+        AgentRunInboxStatus::Claimed => {
+            model.claim_count >= 1
+                && model.lease_token.is_some_and(|token| !token.is_nil())
+                && model.lease_expires_at.is_some()
+                && model.consumed_lease_token.is_none()
+                && model.consumed_at.is_none()
+        }
+        AgentRunInboxStatus::Consumed => {
+            model.claim_count >= 1
+                && model.lease_token.is_none()
+                && model.lease_expires_at.is_none()
+                && model
+                    .consumed_lease_token
+                    .is_some_and(|token| !token.is_nil())
+                && model.consumed_at.is_some()
+        }
+    };
     if model.parent_depth != 0
         || model.result_lease_token.is_nil()
         || model.result_attempt_count < 1
         || model.result_claim_count < model.result_attempt_count
+        || !valid_continuation
     {
         return Err(AgentError::Store(
             "invalid stored agent-run inbox entry".into(),
@@ -1341,8 +1609,75 @@ fn agent_run_inbox_from_models(
         child_run_id: AgentRunId(model.child_run_id),
         chat_id: ChatId(model.chat_id),
         result,
+        status,
+        claim_count: model.claim_count,
+        lease_token: model.lease_token,
+        lease_expires_at: model.lease_expires_at,
+        consumed_lease_token: model.consumed_lease_token,
+        consumed_at: model.consumed_at,
         delivered_at: model.delivered_at,
     })
+}
+
+async fn find_agent_run_inbox_on<C>(
+    conn: &C,
+    parent_run_id: AgentRunId,
+    child_run_id: AgentRunId,
+) -> Result<Option<entities::agent_run_inbox::Model>>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    entities::agent_run_inbox::Entity::find_by_id(child_run_id.0)
+        .filter(entities::agent_run_inbox::Column::ParentRunId.eq(parent_run_id.0))
+        .one(conn)
+        .await
+        .map_err(store_err)
+}
+
+async fn load_agent_run_inbox_by_ids_on<C>(
+    conn: &C,
+    parent_run_id: AgentRunId,
+    child_run_id: AgentRunId,
+) -> Result<Option<AgentRunInboxEntry>>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let Some(model) = find_agent_run_inbox_on(conn, parent_run_id, child_run_id).await? else {
+        return Ok(None);
+    };
+    load_agent_run_inbox_entry_on(conn, model).await.map(Some)
+}
+
+async fn load_agent_run_inbox_entry_on<C>(
+    conn: &C,
+    model: entities::agent_run_inbox::Model,
+) -> Result<AgentRunInboxEntry>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let result = entities::agent_run_result::Entity::find_by_id(model.child_run_id)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "agent-run inbox child {} is missing its result receipt",
+                model.child_run_id
+            ))
+        })?;
+    agent_run_inbox_from_models(model, result)
+}
+
+async fn parent_is_active_on<C>(conn: &C, parent_run_id: AgentRunId) -> Result<bool>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let parent = find_by_id_on(conn, parent_run_id).await?;
+    Ok(parent.is_some_and(|parent| {
+        parent.depth == 0
+            && parent.execution == AgentRunExecution::Foreground.as_str()
+            && parent.status == AgentRunStatus::Active.as_str()
+    }))
 }
 
 async fn find_by_id_on<C>(conn: &C, id: AgentRunId) -> Result<Option<entities::agent_run::Model>>
