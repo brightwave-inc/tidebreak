@@ -5,13 +5,15 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use openwave_core::{
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent,
-    ApplyTurnSteerOutcome, CallId, Chat, ChatId, ClaimClientToolCallOutcome, ClientToolCallRequest,
-    CompleteTurnRunOutcome, DbStore, FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome,
-    HostRootId, Message, MessageId, ParkTurnForClientCallOutcome, Project, ProjectId,
-    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome, Role,
-    RootAttachmentOrigin, StopReason, Store, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId,
-    TurnSteerStatus, Usage,
+    ApplyTurnSteerOutcome, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome, CallId,
+    Chat, ChatId, ChatRootAttachment, ClaimClientToolCallOutcome, ClientToolCallRequest,
+    CompleteTurnRunOutcome, DbStore, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
+    ParkTurnForClientCallOutcome, Project, ProjectId, RecordTurnFailureOutcome,
+    RequestTurnCancellationOutcome, ResolveToolCallOutcome, Role, RootAttachmentChangeAction,
+    RootAttachmentChangeId, RootAttachmentChangeTerminal, RootAttachmentOrigin, StopReason, Store,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress,
+    TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1225,5 +1227,301 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                 .unwrap()
                 .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn postgres_root_attachment_begin_and_finish_have_one_concurrent_winner() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let executor_id = uuid::Uuid::new_v4();
+    let created_at = chrono::DateTime::<Utc>::from_timestamp(1_810_000_000, 123_456_789).unwrap();
+    let canonical_created_at =
+        chrono::DateTime::<Utc>::from_timestamp_micros(created_at.timestamp_micros()).unwrap();
+    let requests = [
+        BeginRootAttachmentChange {
+            id: RootAttachmentChangeId::new(),
+            chat_id: chat.id,
+            executor_id,
+            root_id: HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap(),
+            action: RootAttachmentChangeAction::Attach,
+            expected_attachment_revision: 0,
+            created_at,
+        },
+        BeginRootAttachmentChange {
+            id: RootAttachmentChangeId::new(),
+            chat_id: chat.id,
+            executor_id,
+            root_id: HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap(),
+            action: RootAttachmentChangeAction::Attach,
+            expected_attachment_revision: 0,
+            created_at,
+        },
+    ];
+    let barrier = Arc::new(tokio::sync::Barrier::new(requests.len()));
+    let mut tasks = Vec::new();
+    for request in requests {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store.begin_root_attachment_change(&request).await.unwrap()
+        }));
+    }
+
+    let mut begun = None;
+    let mut busy = false;
+    for task in tasks {
+        match task.await.unwrap() {
+            BeginRootAttachmentChangeOutcome::Begun(change) => {
+                assert!(begun.replace(change).is_none(), "multiple begin winners");
+            }
+            BeginRootAttachmentChangeOutcome::ChatBusy => {
+                assert!(!busy, "multiple busy outcomes");
+                busy = true;
+            }
+            outcome => panic!("unexpected concurrent begin outcome: {outcome:?}"),
+        }
+    }
+    let begun = begun.expect("one attachment change began");
+    assert!(busy, "one concurrent begin was busy");
+    assert_eq!(begun.created_at, canonical_created_at);
+    let winning_request = requests
+        .into_iter()
+        .find(|request| request.id == begun.id)
+        .unwrap();
+    assert_eq!(
+        store
+            .begin_root_attachment_change(&winning_request)
+            .await
+            .unwrap(),
+        BeginRootAttachmentChangeOutcome::Existing(begun.clone())
+    );
+
+    let terminal = RootAttachmentChangeTerminal::Completed {
+        broker_changed: true,
+        broker_currently_attached: true,
+    };
+    let finished_at = [
+        chrono::DateTime::<Utc>::from_timestamp(1_810_000_001, 234_567_891).unwrap(),
+        chrono::DateTime::<Utc>::from_timestamp(1_810_000_002, 345_678_912).unwrap(),
+    ];
+    let canonical_finished_at = finished_at.map(|value| {
+        chrono::DateTime::<Utc>::from_timestamp_micros(value.timestamp_micros()).unwrap()
+    });
+    let barrier = Arc::new(tokio::sync::Barrier::new(finished_at.len()));
+    let mut tasks = Vec::new();
+    for value in finished_at {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        let terminal = terminal.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .finish_root_attachment_change(begun.id, executor_id, &terminal, value)
+                .await
+                .unwrap()
+        }));
+    }
+
+    let mut finished = None;
+    let mut existing = None;
+    for task in tasks {
+        match task.await.unwrap() {
+            FinishRootAttachmentChangeOutcome::Finished(change) => {
+                assert!(
+                    finished.replace(change).is_none(),
+                    "multiple finish winners"
+                );
+            }
+            FinishRootAttachmentChangeOutcome::Existing(change) => {
+                assert!(
+                    existing.replace(change).is_none(),
+                    "multiple recovered finishes"
+                );
+            }
+            outcome => panic!("unexpected concurrent finish outcome: {outcome:?}"),
+        }
+    }
+    let finished = finished.expect("one attachment change finished");
+    assert_eq!(existing, Some(finished.clone()));
+    assert!(canonical_finished_at.contains(&finished.finished_at.unwrap()));
+    assert_eq!(
+        store
+            .finish_root_attachment_change(
+                begun.id,
+                executor_id,
+                &terminal,
+                finished_at[0] + Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        FinishRootAttachmentChangeOutcome::Existing(finished.clone())
+    );
+    let projected = store.get_chat(chat.id).await.unwrap().unwrap();
+    assert_eq!(projected.attachment_revision, 1);
+    assert_eq!(
+        projected.root_attachments,
+        vec![ChatRootAttachment {
+            root_id: begun.root_id,
+            origin: RootAttachmentOrigin::Conversation,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn postgres_root_attachment_operation_id_collision_has_no_loser_side_effect() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let chats = [sample_chat(), sample_chat()];
+    for chat in &chats {
+        store.create_chat(chat).await.unwrap();
+    }
+    let operation_id = RootAttachmentChangeId::new();
+    let executor_id = uuid::Uuid::new_v4();
+    let requests = chats.map(|chat| BeginRootAttachmentChange {
+        id: operation_id,
+        chat_id: chat.id,
+        executor_id,
+        root_id: HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap(),
+        action: RootAttachmentChangeAction::Attach,
+        expected_attachment_revision: 0,
+        created_at: chrono::DateTime::<Utc>::from_timestamp(1_810_000_005, 345_678_912).unwrap(),
+    });
+    let barrier = Arc::new(tokio::sync::Barrier::new(requests.len()));
+    let mut tasks = Vec::new();
+    for request in requests {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let outcome = store.begin_root_attachment_change(&request).await.unwrap();
+            (request, outcome)
+        }));
+    }
+
+    let mut winner = None;
+    let mut loser = None;
+    for task in tasks {
+        let (request, outcome) = task.await.unwrap();
+        match outcome {
+            BeginRootAttachmentChangeOutcome::Begun(change) => {
+                assert_eq!(change.chat_id, request.chat_id);
+                assert_eq!(change.root_id, request.root_id);
+                assert!(winner.replace(request).is_none(), "multiple begin winners");
+            }
+            BeginRootAttachmentChangeOutcome::IdentityConflict => {
+                assert!(
+                    loser.replace(request).is_none(),
+                    "multiple identity conflicts"
+                );
+            }
+            outcome => panic!("unexpected operation ID collision outcome: {outcome:?}"),
+        }
+    }
+    let winner = winner.expect("one operation ID collision began");
+    let loser = loser.expect("one operation ID collision conflicted");
+
+    let winning_chat = store.get_chat(winner.chat_id).await.unwrap().unwrap();
+    assert_eq!(winning_chat.attachment_revision, 1);
+    assert_eq!(
+        winning_chat.root_attachments,
+        vec![ChatRootAttachment {
+            root_id: winner.root_id,
+            origin: RootAttachmentOrigin::Conversation,
+        }]
+    );
+    let losing_chat = store.get_chat(loser.chat_id).await.unwrap().unwrap();
+    assert_eq!(losing_chat.attachment_revision, 0);
+    assert!(losing_chat.root_attachments.is_empty());
+}
+
+#[tokio::test]
+async fn postgres_root_attachment_detach_compacts_the_ordered_projection() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let roots = [
+        HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap(),
+        HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap(),
+        HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap(),
+    ];
+    let mut chat = sample_chat();
+    chat.attachment_revision = 7;
+    chat.root_attachments = roots
+        .into_iter()
+        .map(|root_id| ChatRootAttachment {
+            root_id,
+            origin: RootAttachmentOrigin::Conversation,
+        })
+        .collect();
+    store.create_chat(&chat).await.unwrap();
+    let executor_id = uuid::Uuid::new_v4();
+    let request = BeginRootAttachmentChange {
+        id: RootAttachmentChangeId::new(),
+        chat_id: chat.id,
+        executor_id,
+        root_id: roots[1],
+        action: RootAttachmentChangeAction::Detach,
+        expected_attachment_revision: 7,
+        created_at: chrono::DateTime::<Utc>::from_timestamp(1_810_000_010, 456_789_123).unwrap(),
+    };
+    let pending = match store.begin_root_attachment_change(&request).await.unwrap() {
+        BeginRootAttachmentChangeOutcome::Begun(change) => change,
+        outcome => panic!("unexpected detach begin outcome: {outcome:?}"),
+    };
+    assert_eq!(pending.projection_position, Some(1));
+    assert_eq!(pending.intent_revision, 7);
+
+    let terminal = RootAttachmentChangeTerminal::Completed {
+        broker_changed: true,
+        broker_currently_attached: false,
+    };
+    let finished = match store
+        .finish_root_attachment_change(
+            request.id,
+            executor_id,
+            &terminal,
+            chrono::DateTime::<Utc>::from_timestamp(1_810_000_011, 567_891_234).unwrap(),
+        )
+        .await
+        .unwrap()
+    {
+        FinishRootAttachmentChangeOutcome::Finished(change) => change,
+        outcome => panic!("unexpected detach finish outcome: {outcome:?}"),
+    };
+    assert_eq!(finished.result_revision, Some(8));
+    assert_eq!(finished.projection_changed, Some(true));
+    let projected = store.get_chat(chat.id).await.unwrap().unwrap();
+    assert_eq!(projected.attachment_revision, 8);
+    assert_eq!(
+        projected
+            .root_attachments
+            .into_iter()
+            .map(|attachment| attachment.root_id)
+            .collect::<Vec<_>>(),
+        vec![roots[0], roots[2]]
     );
 }

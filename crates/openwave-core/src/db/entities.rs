@@ -163,11 +163,19 @@ pub mod chat {
     pub enum Relation {
         #[sea_orm(has_many = "super::chat_root_attachment::Entity")]
         RootAttachment,
+        #[sea_orm(has_many = "super::root_attachment_change::Entity")]
+        RootAttachmentChange,
     }
 
     impl Related<super::chat_root_attachment::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::RootAttachment.def()
+        }
+    }
+
+    impl Related<super::root_attachment_change::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::RootAttachmentChange.def()
         }
     }
 
@@ -230,6 +238,59 @@ pub mod chat_root_attachment {
             to = "super::chat::Column::Id",
             on_update = "NoAction",
             on_delete = "Cascade"
+        )]
+        Chat,
+    }
+
+    impl Related<super::chat::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Chat.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod root_attachment_change {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "root_attachment_change")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub chat_id: Uuid,
+        pub subject_kind: String,
+        pub subject_id: Uuid,
+        pub executor_id: Uuid,
+        pub root_id: Uuid,
+        pub action: String,
+        pub origin: Option<String>,
+        pub projection_position: Option<i32>,
+        pub projection_existed_before: bool,
+        pub expected_revision: i64,
+        pub before_revision: i64,
+        pub intent_revision: i64,
+        pub phase: String,
+        pub result_revision: Option<i64>,
+        pub projection_changed: Option<bool>,
+        pub broker_changed: Option<bool>,
+        pub broker_currently_attached: Option<bool>,
+        pub failure_code: Option<String>,
+        pub failure_message: Option<String>,
+        pub failure_retryable: Option<bool>,
+        pub created_at: DateTimeUtc,
+        pub finished_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::chat::Entity",
+            from = "Column::ChatId",
+            to = "super::chat::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Restrict"
         )]
         Chat,
     }

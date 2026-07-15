@@ -20,15 +20,22 @@ use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{CallId, ChatId, DocumentId, DocumentJobId, ProjectId, TurnId, TurnSteerId};
+use crate::id::{
+    CallId, ChatId, DocumentId, DocumentJobId, ProjectId, RootAttachmentChangeId, TurnId,
+    TurnSteerId,
+};
 use crate::model::{
-    BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest, DocumentGeneration,
-    DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
-    DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
-    Message, Project, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress, TurnClientWait,
-    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
+    BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
+    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
+    DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceUpsert,
+    DocumentSummaryRecord, DocumentUpsert, Message, Project, RootAttachmentChange,
+    RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress,
+    TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
+
+/// Largest pending attachment-reconciliation page accepted by [`Store`].
+pub const MAX_PENDING_ROOT_ATTACHMENT_CHANGES: u64 = 256;
 
 /// Why maintenance determined that a document needs an index job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +91,46 @@ pub enum EnsureDocumentParseJobOutcome {
     MissingDocument,
     /// The caller inspected an obsolete source generation.
     GenerationChanged(DocumentGeneration),
+}
+
+/// Result of atomically beginning one broker-backed root attachment change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeginRootAttachmentChangeOutcome {
+    /// Intent and immutable derived metadata were committed by this call.
+    Begun(RootAttachmentChange),
+    /// This exact identity and caller request were already committed.
+    Existing(RootAttachmentChange),
+    /// The change identity was already used for different immutable request data.
+    IdentityConflict,
+    /// The conversation does not exist.
+    ChatNotFound,
+    /// The caller's attachment revision no longer matches authoritative state.
+    RevisionConflict { current_attachment_revision: i64 },
+    /// Adding the root would exceed the bounded conversation projection.
+    CapacityExceeded,
+    /// The required intent or rollback transition cannot advance the revision.
+    RevisionExhausted,
+    /// Another awaiting operation owns this chat's single mutation slot.
+    /// Pending operation details are available only through executor-scoped
+    /// recovery scans, never through a competing begin request.
+    ChatBusy,
+}
+
+/// Result of atomically finishing one exact root attachment change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishRootAttachmentChangeOutcome {
+    /// Terminal broker observation and final projection committed by this call.
+    Finished(RootAttachmentChange),
+    /// An exact ambiguous retry recovered the same terminal change.
+    Existing(RootAttachmentChange),
+    /// No change exists under this idempotency identity.
+    NotFound,
+    /// The stable executor does not own this change.
+    ExecutorMismatch,
+    /// The change was already terminal under a different terminal payload.
+    AlreadyTerminal(RootAttachmentChange),
+    /// A terminal broker observation contradicts success or rollback state.
+    BrokerStateMismatch,
 }
 
 /// Result of atomically accepting one exact client turn request.
@@ -322,6 +369,12 @@ fn document_storage_unavailable<T>() -> Result<T> {
 fn turn_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "durable turn storage is not implemented by this Store".into(),
+    ))
+}
+
+fn root_attachment_storage_unavailable<T>() -> Result<T> {
+    Err(AgentError::Store(
+        "durable root attachment storage is not implemented by this Store".into(),
     ))
 }
 
@@ -765,6 +818,56 @@ pub trait Store: Send + Sync {
     /// Set (or clear, with `None`) a chat's model override. A no-op if the chat
     /// doesn't exist.
     async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()>;
+
+    /// Atomically begin one exact broker-backed attachment change.
+    ///
+    /// Implementations validate `request`, lock authoritative chat/projection
+    /// state, derive broker subject and prior projection metadata, enforce one
+    /// awaiting change per chat, and durably project intent before returning.
+    /// Transport adapters must derive `executor_id` from authenticated native
+    /// control; it is not renderer-selected authorization.
+    async fn begin_root_attachment_change(
+        &self,
+        _request: &BeginRootAttachmentChange,
+    ) -> Result<BeginRootAttachmentChangeOutcome> {
+        root_attachment_storage_unavailable()
+    }
+
+    /// Atomically finish one exact change under its stable executor.
+    ///
+    /// Exact terminal retries return `Existing`. Implementations apply the
+    /// final projection, terminal receipt, and result revision together.
+    /// Adapters must first bind the broker receipt to this exact persisted
+    /// operation; arbitrary transport failures are not durable broker failures.
+    async fn finish_root_attachment_change(
+        &self,
+        _id: RootAttachmentChangeId,
+        _executor_id: uuid::Uuid,
+        _terminal: &RootAttachmentChangeTerminal,
+        _finished_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<FinishRootAttachmentChangeOutcome> {
+        root_attachment_storage_unavailable()
+    }
+
+    /// Fetch one attachment change by exact idempotency identity.
+    async fn get_root_attachment_change(
+        &self,
+        _id: RootAttachmentChangeId,
+    ) -> Result<Option<RootAttachmentChange>> {
+        root_attachment_storage_unavailable()
+    }
+
+    /// List up to `limit` awaiting changes owned by one stable native executor.
+    ///
+    /// `limit` must be in `1..=MAX_PENDING_ROOT_ATTACHMENT_CHANGES` and results
+    /// are returned in deterministic oldest-first order.
+    async fn list_pending_root_attachment_changes(
+        &self,
+        _executor_id: uuid::Uuid,
+        _limit: u64,
+    ) -> Result<Vec<RootAttachmentChange>> {
+        root_attachment_storage_unavailable()
+    }
 
     /// Fetch one durable turn by its exact idempotency identity.
     async fn get_turn_run(&self, _id: TurnId) -> Result<Option<TurnRun>> {

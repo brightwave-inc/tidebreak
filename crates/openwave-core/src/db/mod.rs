@@ -21,27 +21,29 @@ use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
 use crate::id::MessageId;
 use crate::id::{
-    CallId, ChatId, DocumentId, DocumentJobId, HostRootId, ProjectId, TurnId, TurnSteerId,
+    CallId, ChatId, DocumentId, DocumentJobId, HostRootId, ProjectId, RootAttachmentChangeId,
+    TurnId, TurnSteerId,
 };
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
-    validate_project_root_projection, BlobRetirement, BlobRetirementStatus, Chat,
-    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
-    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
-    Project, SourceRegion, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress,
-    TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus,
-    MAX_ROOT_ATTACHMENTS,
+    validate_project_root_projection, BeginRootAttachmentChange, BlobRetirement,
+    BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
+    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
+    DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
+    DocumentUpsert, Message, Project, RootAttachmentChange, RootAttachmentChangeTerminal,
+    SourceRegion, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress, TurnClientWaitStatus,
+    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
-    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, ClaimClientToolCallOutcome,
-    ClaimTurnRunOutcome, CompleteTurnRunOutcome, DocumentIndexJobReason,
-    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledTurnOutcome,
-    JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
-    RequestTurnCancellationOutcome, ResolveToolCallOutcome, Store,
+    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
+    BeginRootAttachmentChangeOutcome, ClaimClientToolCallOutcome, ClaimTurnRunOutcome,
+    CompleteTurnRunOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
+    EnsureDocumentParseJobOutcome, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkTurnForClientCallOutcome,
+    RecordTurnFailureOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome, Store,
 };
 
 mod ops;
@@ -1679,6 +1681,45 @@ impl Store for DbStore {
 
     async fn list_chats(&self) -> Result<Vec<Chat>> {
         ops::conversation::list_chats(self).await
+    }
+
+    async fn begin_root_attachment_change(
+        &self,
+        request: &BeginRootAttachmentChange,
+    ) -> Result<BeginRootAttachmentChangeOutcome> {
+        ops::root_attachment::begin_root_attachment_change(self, request).await
+    }
+
+    async fn finish_root_attachment_change(
+        &self,
+        id: RootAttachmentChangeId,
+        executor_id: uuid::Uuid,
+        terminal: &RootAttachmentChangeTerminal,
+        finished_at: chrono::DateTime<Utc>,
+    ) -> Result<FinishRootAttachmentChangeOutcome> {
+        ops::root_attachment::finish_root_attachment_change(
+            self,
+            id,
+            executor_id,
+            terminal,
+            finished_at,
+        )
+        .await
+    }
+
+    async fn get_root_attachment_change(
+        &self,
+        id: RootAttachmentChangeId,
+    ) -> Result<Option<RootAttachmentChange>> {
+        ops::root_attachment::get_root_attachment_change(self, id).await
+    }
+
+    async fn list_pending_root_attachment_changes(
+        &self,
+        executor_id: uuid::Uuid,
+        limit: u64,
+    ) -> Result<Vec<RootAttachmentChange>> {
+        ops::root_attachment::list_pending_root_attachment_changes(self, executor_id, limit).await
     }
 
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {

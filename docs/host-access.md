@@ -42,9 +42,9 @@ revision. Project defaults are snapshotted into a new chat's exact attachment
 set; later project changes cannot silently widen that chat. These product rows
 are not grants: they contain no path, capability, consent, or display name, and
 host access still requires the broker's live attachment and authorization. The
-current native picker still updates broker state only; synchronizing those
-connections into this product projection is the next native CAS/reconciliation
-slice, before any tool treats the projection as usable context.
+product store now has a durable attachment-change state machine, but the current
+native picker still updates broker state only. Native reconciliation and routes
+are the next slice, before any tool treats the projection as usable context.
 
 ## The four layers
 
@@ -138,6 +138,30 @@ receipt lets a recovering native client distinguish unknown, completed, and
 failed work without starting or replaying the mutation. Attachment changes are
 computed and published in one durable state replacement, so they do not expose
 a recoverable intermediate phase.
+
+The product database coordinates its side of the operation separately. It
+stores an `awaiting_broker` change before native code talks to the broker, then
+finishes it as `completed` or `failed` from an exact broker receipt. Only one
+change may wait for the broker per conversation. Attach records product intent
+first and rolls it back if the broker fails; detach leaves the root visible until
+the broker confirms it is detached. The final projection and terminal receipt
+commit together. A crash therefore leaves durable work that a native reconciler
+can resume instead of an ambiguous half-update.
+
+The store derives the broker subject from the locked chat: project chats use the
+project subject, while standalone chats use the conversation subject. Callers
+provide only the stable operation ID, chat, executor, root, action, expected
+revision, and creation time. They cannot choose a project, path, projection
+position, or provenance.
+
+The native reconciler must derive its stable executor identity from its private
+authenticated session; renderer input cannot choose or learn that identity. It
+must also bind a broker receipt back to the persisted operation ID, subject,
+conversation, root, and action before constructing a product terminal result.
+An unknown attachment receipt may dispatch the exact fingerprinted mutation. A
+matching completed or durable failed receipt may finish the product change. A
+contradictory receipt returns `BrokerStateMismatch`, leaves the change pending,
+and must be escalated rather than converted into an ordinary failure.
 
 The host-access context and the conversation's attached-root set are supplied by
 trusted conversation execution state, not by model-generated tool arguments.
@@ -312,8 +336,8 @@ This will land in independently reviewable pieces:
    while runtime-only legacy scratch is derived under private server data and
    never returned by the product API. The broker now supports exact,
    idempotent per-conversation attach/detach plus read-only recovery receipts.
-   The durable product-side attachment operation and native reconciliation loop
-   remain separate slices.
+   The durable product-side attachment operation is now implemented in core.
+   Native routes and the reconciliation loop remain separate slices.
 9. Route built-in file tools through the operation interface and remove direct
    ambient host-directory opening from `ToolCtx`.
 10. Port bounded imports, writes, approvals, and confined command execution as
