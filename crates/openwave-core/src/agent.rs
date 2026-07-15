@@ -27,12 +27,13 @@ use futures::StreamExt;
 use futures_timer::Delay;
 use serde_json::Value;
 
+use crate::agent_tools::{validate_spawn_sandbox_agent_arguments, SpawnSandboxAgentArgs};
 use crate::approval::{ApprovalDecision, ApprovalGate, ApprovalRequest, RefuseGate};
 use crate::cancel::CancelToken;
 use crate::context;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{CallId, MessageId, TurnId};
+use crate::id::{AgentRunId, CallId, MessageId, TurnId};
 use crate::model::{
     Chat, Message, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
     TurnRunStatus,
@@ -58,6 +59,9 @@ enum RegisteredTool {
     Client {
         spec: ToolSpec,
         validate_arguments: Option<fn(&Value) -> bool>,
+    },
+    ForegroundSandboxSpawn {
+        spec: ToolSpec,
     },
 }
 
@@ -100,6 +104,21 @@ impl ToolRegistry {
         );
     }
 
+    /// Register the prepared foreground-only sandbox delegation contract.
+    ///
+    /// This integration seam is intentionally not enabled by the production
+    /// registry until a sandbox executor can claim and complete the child. A
+    /// claimed foreground worker must opt in before it is advertised, then
+    /// atomically parks its exact turn with durable child admission. Sandboxed
+    /// workers never opt in.
+    pub fn register_foreground_sandbox_spawn(&mut self) {
+        let spec = crate::spawn_sandbox_agent_tool_spec();
+        self.tools.insert(
+            spec.name.clone(),
+            RegisteredTool::ForegroundSandboxSpawn { spec },
+        );
+    }
+
     /// Builder-style [`register`](Self::register).
     #[must_use]
     pub fn with(mut self, tool: Box<dyn Tool>) -> Self {
@@ -112,27 +131,43 @@ impl ToolRegistry {
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         match self.tools.get(name) {
             Some(RegisteredTool::Server(tool)) => Some(tool.as_ref()),
-            Some(RegisteredTool::Client { .. }) | None => None,
+            Some(RegisteredTool::Client { .. })
+            | Some(RegisteredTool::ForegroundSandboxSpawn { .. })
+            | None => None,
         }
     }
 
     /// Resolve the trusted execution surface for a registered tool name.
     #[must_use]
     pub fn execution(&self, name: &str) -> Option<ToolCallExecution> {
-        self.tools.get(name).map(|tool| match tool {
+        Some(match self.tools.get(name)? {
             RegisteredTool::Server(_) => ToolCallExecution::Server,
             RegisteredTool::Client { .. } => ToolCallExecution::Client,
+            RegisteredTool::ForegroundSandboxSpawn { .. } => return None,
         })
     }
 
     /// The specs of every registered tool, to advertise to the model.
     #[must_use]
     pub fn specs(&self) -> Vec<ToolSpec> {
+        self.specs_for_foreground(false)
+    }
+
+    /// The model-visible definitions for one execution surface.
+    ///
+    /// The foreground coordinator may opt into the sandbox control tool. All
+    /// other contexts receive the ordinary server/client tool set only.
+    #[must_use]
+    pub fn specs_for_foreground(&self, allow_sandbox_spawn: bool) -> Vec<ToolSpec> {
         self.tools
             .values()
-            .map(|tool| match tool {
-                RegisteredTool::Server(tool) => tool.spec(),
-                RegisteredTool::Client { spec, .. } => spec.clone(),
+            .filter_map(|tool| match tool {
+                RegisteredTool::Server(tool) => Some(tool.spec()),
+                RegisteredTool::Client { spec, .. } => Some(spec.clone()),
+                RegisteredTool::ForegroundSandboxSpawn { spec } if allow_sandbox_spawn => {
+                    Some(spec.clone())
+                }
+                RegisteredTool::ForegroundSandboxSpawn { .. } => None,
             })
             .collect()
     }
@@ -149,8 +184,32 @@ impl ToolRegistry {
                 validate_arguments: None,
                 ..
             }) => true,
-            Some(RegisteredTool::Server(_)) | None => false,
+            Some(RegisteredTool::Server(_))
+            | Some(RegisteredTool::ForegroundSandboxSpawn { .. })
+            | None => false,
         }
+    }
+
+    /// Whether `name` identifies the foreground-only sandbox control tool.
+    #[must_use]
+    pub fn is_foreground_sandbox_spawn(&self, name: &str) -> bool {
+        matches!(
+            self.tools.get(name),
+            Some(RegisteredTool::ForegroundSandboxSpawn { .. })
+        )
+    }
+
+    /// Parse and validate one foreground sandbox task.
+    #[must_use]
+    pub fn sandbox_spawn_task(&self, name: &str, arguments: &Value) -> Option<String> {
+        if !self.is_foreground_sandbox_spawn(name)
+            || !validate_spawn_sandbox_agent_arguments(arguments)
+        {
+            return None;
+        }
+        serde_json::from_value::<SpawnSandboxAgentArgs>(arguments.clone())
+            .ok()
+            .map(|arguments| arguments.task)
     }
 
     /// Whether no tools are registered.
@@ -246,6 +305,21 @@ pub enum AgentTurnOutcome {
         /// Model-call steps consumed in this agent invocation.
         model_steps: usize,
     },
+    /// The foreground model requested one durable sandbox child.
+    ///
+    /// The foreground worker validates this exact request and invokes
+    /// [`Store::accept_sandbox_agent_run_and_park_turn`] with its live lease,
+    /// steering epoch, and accumulated checkpoint totals.
+    SandboxAgentSpawn {
+        /// Canonical child identity and bounded task derived from the tool call.
+        request: SandboxAgentSpawnRequest,
+        /// Provider usage incurred in this agent invocation.
+        usage: Usage,
+        /// Durable steering epoch captured before the producing model call.
+        steer_revision: i64,
+        /// Model-call steps consumed in this agent invocation.
+        model_steps: usize,
+    },
     /// Execution failed after consuming provider work that must be retained.
     Failed {
         /// Stable terminal error payload for the durable failure event.
@@ -255,6 +329,29 @@ pub enum AgentTurnOutcome {
         /// Model-call steps consumed before the failure.
         model_steps: usize,
     },
+}
+
+/// One model proposal to create a durable depth-one sandbox child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxAgentSpawnRequest {
+    /// Stable call identity emitted by the model stream.
+    pub call_id: CallId,
+    /// Deterministic sandbox child identity derived from [`Self::call_id`].
+    pub child_run_id: AgentRunId,
+    /// Bounded, self-contained child input.
+    pub task: String,
+}
+
+impl SandboxAgentSpawnRequest {
+    /// Whether the immutable identities and task agree with the core contract.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.call_id.0 != uuid::Uuid::nil()
+            && self.child_run_id == AgentRunId::sandbox_for_spawn_call(self.call_id)
+            && validate_spawn_sandbox_agent_arguments(&serde_json::json!({
+                "task": self.task,
+            }))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -364,6 +461,7 @@ pub struct Agent {
     cancel: CancelToken,
     steer: SteerInbox,
     durable_steer_lease: Option<uuid::Uuid>,
+    sandbox_spawns_enabled: bool,
 }
 
 /// A tool call accumulated from the provider stream.
@@ -394,6 +492,7 @@ impl Agent {
             cancel: CancelToken::new(),
             steer: SteerInbox::new(),
             durable_steer_lease: None,
+            sandbox_spawns_enabled: false,
         }
     }
 
@@ -425,6 +524,20 @@ impl Agent {
     pub fn with_durable_steer(mut self, lease_token: uuid::Uuid) -> Self {
         self.durable_steer_lease = Some(lease_token);
         self
+    }
+
+    /// Advertise and accept the foreground-only sandbox delegation tool.
+    ///
+    /// This is intentionally opt-in: sandbox workers must not set it, keeping
+    /// the v1 hierarchy at a single child depth.
+    #[must_use]
+    pub fn with_foreground_sandbox_spawns(mut self) -> Self {
+        self.sandbox_spawns_enabled = true;
+        self
+    }
+
+    fn sandbox_spawns_active(&self) -> bool {
+        self.sandbox_spawns_enabled && self.durable_steer_lease.is_some()
     }
 
     /// Run one turn: submit `user_input`, drive the loop to a final answer,
@@ -591,7 +704,9 @@ impl Agent {
                     model: self.config.model.clone(),
                     system: self.config.system_prompt.clone(),
                     messages: fitted,
-                    tools: self.tools.specs(),
+                    tools: self
+                        .tools
+                        .specs_for_foreground(self.sandbox_spawns_active()),
                     max_tokens: self.config.max_tokens,
                     temperature: self.config.temperature,
                 };
@@ -756,6 +871,67 @@ impl Agent {
                 })?;
                 return Ok(AgentTurnOutcome::ClientToolCall {
                     request,
+                    usage: total_usage,
+                    steer_revision,
+                    model_steps: step + 1,
+                });
+            }
+
+            let sandbox_spawns = calls
+                .iter()
+                .filter(|call| {
+                    self.sandbox_spawns_active()
+                        && self.tools.is_foreground_sandbox_spawn(&call.name)
+                })
+                .collect::<Vec<_>>();
+            if !sandbox_spawns.is_empty() {
+                if calls.len() != 1 || sandbox_spawns.len() != 1 || !text.is_empty() {
+                    events.send(AgentEvent::StreamInterrupted);
+                    transcript.push(ChatMessage {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "A sandbox delegation must be requested alone, without assistant text or sibling tool calls. Retry the request in that form.".into(),
+                        }],
+                    });
+                    continue;
+                }
+                let call = sandbox_spawns[0];
+                let Some(arguments) = parse_client_args(&call.args) else {
+                    events.send(AgentEvent::StreamInterrupted);
+                    transcript.push(ChatMessage {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "The sandbox task arguments were not valid JSON. Retry with one complete task value.".into(),
+                        }],
+                    });
+                    continue;
+                };
+                let Some(task) = self.tools.sandbox_spawn_task(&call.name, &arguments) else {
+                    events.send(AgentEvent::StreamInterrupted);
+                    transcript.push(ChatMessage {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "The sandbox task must be one non-empty, bounded `task` field with no extra properties. Retry with that exact shape.".into(),
+                        }],
+                    });
+                    continue;
+                };
+                let Some(steer_revision) = generation_steer_revision else {
+                    events.send(AgentEvent::StreamInterrupted);
+                    transcript.push(ChatMessage {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "Sandbox delegation is available only from a durably claimed foreground turn. Continue without delegating.".into(),
+                        }],
+                    });
+                    continue;
+                };
+                return Ok(AgentTurnOutcome::SandboxAgentSpawn {
+                    request: SandboxAgentSpawnRequest {
+                        call_id: call.call_id,
+                        child_run_id: AgentRunId::sandbox_for_spawn_call(call.call_id),
+                        task,
+                    },
                     usage: total_usage,
                     steer_revision,
                     model_steps: step + 1,
@@ -1815,6 +1991,99 @@ mod tests {
             } if error.kind == "max_steps_exceeded"
         ));
         assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn claimed_foreground_agent_returns_one_bounded_sandbox_checkpoint() {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "research this")
+            .await
+            .unwrap();
+        let lease_token = uuid::Uuid::new_v4();
+        let claimed_at = Utc::now();
+        store
+            .claim_turn_run(
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap();
+
+        let mut registry = ToolRegistry::new();
+        registry.register_foreground_sandbox_spawn();
+        assert!(registry.specs().is_empty());
+        assert_eq!(
+            registry.specs_for_foreground(true)[0].name,
+            crate::SPAWN_SANDBOX_AGENT_TOOL
+        );
+        let agent = Agent::new(
+            Arc::new(ClientToolProvider {
+                assistant_text: false,
+                name: crate::SPAWN_SANDBOX_AGENT_TOOL,
+                arguments: r#"{"task":"Research the error handling options."}"#,
+            }),
+            Arc::new(registry),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        )
+        .with_durable_steer(lease_token)
+        .with_foreground_sandbox_spawns();
+        let (tx, rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        drop(tx);
+        let events = emitted_events(rx.collect().await);
+        let AgentTurnOutcome::SandboxAgentSpawn {
+            request,
+            usage,
+            steer_revision,
+            model_steps,
+        } = outcome
+        else {
+            panic!("foreground agent should return a sandbox checkpoint");
+        };
+        assert_eq!(request.task, "Research the error handling options.");
+        assert_eq!(
+            request.child_run_id,
+            AgentRunId::sandbox_for_spawn_call(request.call_id)
+        );
+        assert!(request.is_well_formed());
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(steer_revision, 0);
+        assert_eq!(model_steps, 1);
+        assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallStarted { name, .. }
+                if name == crate::SPAWN_SANDBOX_AGENT_TOOL
+        )));
     }
 
     #[tokio::test]

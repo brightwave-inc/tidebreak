@@ -69,12 +69,17 @@ spawn:
 6. The result, terminal child state, and immutable parent inbox entry commit
    together. A later wait transition may consume that entry and wake a parent.
 
-The foreground agent may continue or finish its current turn after spawning a
-child. If it needs the result before proceeding, the spawn boundary commits the
-queued child, its unique spawn identity, the durable wait, and release of the
-exact foreground worker lease in one transaction. It never leaves a child
-behind when that checkpoint is fenced by a stale lease or steer. The turn then
-waits without polling in memory.
+The bounded `spawn_sandbox_agent` contract and its foreground checkpoint wiring
+are prepared, but deliberately disabled in the production tool registry: no
+sandbox executor exists yet to claim and complete the accepted child. When that
+executor lands, this will be a wait-form tool: it accepts one bounded `task`,
+derives the child identity from that exact tool call, and commits the queued
+child, durable wait, and release of the exact foreground worker lease in one
+transaction. It will be advertised only to a claimed foreground turn; sandbox
+workers will never receive it, and the store independently enforces depth one.
+A later non-blocking spawn tool can let the foreground continue after spawning,
+but must earn the same checkpoint and replay rules. The prepared boundary never
+leaves a child behind when a stale lease or steer fences its checkpoint.
 
 The wait also carries an immutable atomic-admission marker. Only that receipt
 allows a later retry to recover the combined transition; an older path that
@@ -219,7 +224,9 @@ The implementation is intentionally incremental:
 7. Atomically join durable inbox consumption with a parent turn checkpoint and
    durable `resuming` wake signal. *(Shipped.)*
 8. Atomically accept a sandbox spawn and its parent checkpoint from the
-   foreground tool boundary. *(Shipped.)*
+   foreground tool boundary. The bounded foreground-only
+   `spawn_sandbox_agent` contract is wired to this transition, but remains
+   disabled until the sandbox executor lands. *(Groundwork shipped.)*
 9. Route sandbox folder access through the host broker.
 10. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work.

@@ -56,6 +56,11 @@ The foreground coordinator needs tools for:
 - spawning, inspecting, messaging, waiting for, cancelling, and reviewing
   depth-one sandbox agents.
 
+`spawn_sandbox_agent` has a prepared bounded contract and durable foreground
+checkpoint path, but is intentionally disabled in the production registry
+until a sandbox executor exists. Enabling it earlier would park a foreground
+chat with no worker able to complete the child.
+
 A background sandbox starts with a deliberately smaller surface:
 
 - confined command execution;
@@ -126,4 +131,3 @@ Every new tool should answer these questions before it is registered:
 
 Until an effect has an idempotency or reconciliation contract, OpenWave fails
 conservatively after an ambiguous execution instead of replaying it.
-

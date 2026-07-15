@@ -4868,7 +4868,7 @@ async fn root_search_never_returns_project_owned_vectors() {
 }
 
 #[test]
-fn agent_deps_registers_server_tools_and_the_folder_consent_contract() {
+fn agent_deps_registers_server_tools_and_the_folder_consent_contract_without_sandbox_spawn() {
     let (_retrieval, tools, _config) = agent_deps(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
@@ -4881,6 +4881,19 @@ fn agent_deps_registers_server_tools_and_the_folder_consent_contract() {
     assert!(
         names.iter().any(|n| n == "read_file"),
         "file tools still present"
+    );
+    assert!(
+        !names
+            .iter()
+            .any(|name| name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL),
+        "production registry must not advertise sandbox spawning before an executor exists"
+    );
+    assert!(
+        !tools
+            .specs_for_foreground(true)
+            .iter()
+            .any(|spec| spec.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL),
+        "ordinary claimed foreground turns must not expose the disabled sandbox tool"
     );
     assert_eq!(
         tools.execution(openwave_core::REQUEST_FOLDER_ACCESS_TOOL),
