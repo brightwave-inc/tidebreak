@@ -924,6 +924,35 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Atomically claim the oldest due sandbox run under exact bounded lease
+    /// ownership.
+    ///
+    /// The global scheduler lock makes global and per-chat concurrency limits
+    /// race-safe across processes. Expired leases are reclaimed only while the
+    /// attempt budget remains; exhausted attempts and wall-clock deadlines are
+    /// terminalized before scanning continues. Reusing `lease_token` recovers
+    /// only its original still-live claim and can never claim different work.
+    async fn claim_agent_run(
+        &self,
+        _lease_token: uuid::Uuid,
+        _lease_duration: chrono::Duration,
+        _max_running_global: u32,
+        _max_running_per_chat: u32,
+    ) -> Result<Option<AgentRun>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Monotonically extend one exact live sandbox lease without resurrecting
+    /// expiry or crossing the run's absolute deadline.
+    async fn heartbeat_agent_run(
+        &self,
+        _id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _lease_duration: chrono::Duration,
+    ) -> Result<bool> {
+        agent_run_storage_unavailable()
+    }
+
     /// Fetch one durable turn by its exact idempotency identity.
     async fn get_turn_run(&self, _id: TurnId) -> Result<Option<TurnRun>> {
         turn_storage_unavailable()

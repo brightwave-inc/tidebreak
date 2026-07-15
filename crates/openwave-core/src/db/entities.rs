@@ -344,8 +344,56 @@ pub mod agent_run {
         pub depth: i16,
         pub status: String,
         pub input: Option<String>,
+        pub attempt_count: i32,
+        pub max_attempts: i32,
+        pub claim_count: i32,
+        pub available_at: DateTimeUtc,
+        pub deadline_at: Option<DateTimeUtc>,
+        pub lease_token: Option<Uuid>,
+        pub lease_expires_at: Option<DateTimeUtc>,
+        pub started_at: Option<DateTimeUtc>,
+        pub finished_at: Option<DateTimeUtc>,
+        pub last_error_code: Option<String>,
+        pub last_error_detail: Option<String>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod agent_run_claim {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "agent_run_claim")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub token: Uuid,
+        pub agent_run_id: Option<Uuid>,
+        pub attempt_count: Option<i32>,
+        pub claim_count: Option<i32>,
+        pub claimed_at: DateTimeUtc,
+        pub lease_expires_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod agent_run_claim_lock {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "agent_run_claim_lock")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: i32,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

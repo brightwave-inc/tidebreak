@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration as StdDuration};
 
 use chrono::{Duration, Utc};
 use openwave_core::{
@@ -16,6 +16,7 @@ use openwave_core::{
     ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry,
     TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
 };
+use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement, TransactionTrait};
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -116,7 +117,7 @@ async fn postgres_agent_run_identity_collision_recovers_exactly_across_chats() {
         }
         Err(_) => return,
     };
-    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let store = DbStore::connect(&url).await.unwrap();
     let first_chat = sample_chat();
     let second_chat = sample_chat();
     store.create_chat(&first_chat).await.unwrap();
@@ -157,6 +158,151 @@ async fn postgres_agent_run_identity_collision_recovers_exactly_across_chats() {
         }
     }
     assert_eq!((accepted, conflicted), (1, 1));
+}
+
+#[tokio::test]
+async fn postgres_concurrent_sandbox_claims_respect_global_and_per_chat_limits() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    for chat_id in [first_chat.id, first_chat.id, second_chat.id, second_chat.id] {
+        let _accepted = match store
+            .accept_agent_run(
+                AgentRunId::new(),
+                chat_id,
+                Some(AgentRunId::foreground_for_chat(chat_id)),
+                Some(CallId::new()),
+                AgentRunExecution::Sandbox,
+                Some("postgres concurrent claim"),
+            )
+            .await
+            .unwrap()
+        {
+            AcceptAgentRunOutcome::Accepted(run) => run,
+            outcome => panic!("unexpected sandbox outcome: {outcome:?}"),
+        };
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(8));
+    let mut claimers = Vec::new();
+    for _ in 0..8 {
+        claimers.push(DbStore::connect(&url).await.unwrap());
+    }
+    let mut tasks = Vec::new();
+    for store in claimers {
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 2, 1)
+                .await
+                .unwrap()
+        }));
+    }
+    let claimed = futures::future::join_all(tasks)
+        .await
+        .into_iter()
+        .filter_map(|result| result.unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(claimed.len(), 2);
+    assert_ne!(claimed[0].chat_id, claimed[1].chat_id);
+}
+
+#[tokio::test]
+async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let child_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("scheduler lock clock regression"),
+        )
+        .await
+        .unwrap();
+
+    let blocker = Database::connect(&url).await.unwrap();
+    blocker
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!(
+                "UPDATE agent_run \
+                 SET created_at = TIMESTAMPTZ '2000-01-01 00:00:00+00', \
+                     available_at = TIMESTAMPTZ '2000-01-01 00:00:00+00', \
+                     updated_at = clock_timestamp() \
+                 WHERE id = '{}'",
+                child_id.0
+            ),
+        ))
+        .await
+        .unwrap();
+    let transaction = blocker.begin().await.unwrap();
+    transaction
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "UPDATE agent_run_claim_lock SET id = id WHERE id = 1",
+        ))
+        .await
+        .unwrap();
+
+    let claimant = DbStore::connect(&url).await.unwrap();
+    let claim = tokio::spawn(async move {
+        claimant
+            .claim_agent_run(
+                uuid::Uuid::new_v4(),
+                Duration::milliseconds(100),
+                1_024,
+                1_024,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    // Give the claimant time to begin its transaction and block on the row.
+    // The wait is deliberately longer than the requested lease duration.
+    tokio::time::sleep(StdDuration::from_millis(500)).await;
+    transaction.commit().await.unwrap();
+
+    let claimed = claim.await.unwrap();
+    assert_eq!(claimed.id, child_id);
+    assert!(claimed.lease_expires_at.unwrap() > Utc::now());
+    // The integration suite shares an isolated database, so leave no live
+    // scheduler capacity behind for its independent concurrency cases.
+    blocker
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!(
+                "UPDATE agent_run \
+                 SET status = 'completed', lease_token = NULL, lease_expires_at = NULL, \
+                     finished_at = clock_timestamp(), updated_at = clock_timestamp() \
+                 WHERE id = '{}'",
+                child_id.0
+            ),
+        ))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

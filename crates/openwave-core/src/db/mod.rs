@@ -1752,6 +1752,32 @@ impl Store for DbStore {
         ops::agent_run::list_agent_runs(self, chat_id).await
     }
 
+    async fn claim_agent_run(
+        &self,
+        lease_token: uuid::Uuid,
+        lease_duration: chrono::Duration,
+        max_running_global: u32,
+        max_running_per_chat: u32,
+    ) -> Result<Option<AgentRun>> {
+        ops::agent_run::claim_agent_run(
+            self,
+            lease_token,
+            lease_duration,
+            max_running_global,
+            max_running_per_chat,
+        )
+        .await
+    }
+
+    async fn heartbeat_agent_run(
+        &self,
+        id: AgentRunId,
+        lease_token: uuid::Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<bool> {
+        ops::agent_run::heartbeat_agent_run(self, id, lease_token, lease_duration).await
+    }
+
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {
         ops::turn::get_turn_run(self, id).await
     }

@@ -1,8 +1,49 @@
 use super::{sample_chat, temp_store};
 use crate::{
-    AcceptAgentRunOutcome, AgentRunExecution, AgentRunId, AgentRunStatus, CallId, ChatId, Store,
+    AcceptAgentRunOutcome, AgentRun, AgentRunExecution, AgentRunId, AgentRunStatus, CallId, ChatId,
+    DbStore, Store,
 };
-use sea_orm::{ActiveModelTrait, Set};
+use chrono::{Duration, Utc};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+async fn force_expired_agent_lease(store: &DbStore, id: AgentRunId) {
+    let past = Utc::now() - Duration::minutes(5);
+    crate::db::entities::agent_run::Entity::update_many()
+        .col_expr(
+            crate::db::entities::agent_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Some(past)),
+        )
+        .filter(crate::db::entities::agent_run::Column::Id.eq(id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+}
+
+async fn force_expired_agent_deadline(store: &DbStore, id: AgentRunId) {
+    let deadline = Utc::now() - Duration::minutes(5);
+    let created_at = deadline - Duration::hours(1);
+    crate::db::entities::agent_run::Entity::update_many()
+        .col_expr(
+            crate::db::entities::agent_run::Column::CreatedAt,
+            sea_orm::sea_query::Expr::value(created_at),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(created_at),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::DeadlineAt,
+            sea_orm::sea_query::Expr::value(Some(deadline)),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(deadline),
+        )
+        .filter(crate::db::entities::agent_run::Column::Id.eq(id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+}
 
 #[tokio::test]
 async fn foreground_and_sandbox_runs_roundtrip_with_exact_idempotency() {
@@ -23,6 +64,10 @@ async fn foreground_and_sandbox_runs_roundtrip_with_exact_idempotency() {
     assert_eq!(foreground.execution, AgentRunExecution::Foreground);
     assert_eq!(foreground.status, AgentRunStatus::Active);
     assert_eq!(foreground.input, None);
+    assert_eq!(foreground.attempt_count, 0);
+    assert_eq!(foreground.max_attempts, 0);
+    assert_eq!(foreground.claim_count, 0);
+    assert_eq!(foreground.deadline_at, None);
 
     assert!(matches!(
         store
@@ -61,6 +106,13 @@ async fn foreground_and_sandbox_runs_roundtrip_with_exact_idempotency() {
     assert_eq!(sandbox.depth, 1);
     assert_eq!(sandbox.execution, AgentRunExecution::Sandbox);
     assert_eq!(sandbox.status, AgentRunStatus::Queued);
+    assert_eq!(sandbox.attempt_count, 0);
+    assert_eq!(
+        sandbox.max_attempts,
+        crate::model::AgentRun::DEFAULT_MAX_ATTEMPTS
+    );
+    assert_eq!(sandbox.claim_count, 0);
+    assert!(sandbox.deadline_at.is_some());
     assert_eq!(
         sandbox.input.as_deref(),
         Some("Inspect the selected documents")
@@ -291,8 +343,343 @@ async fn agent_run_schema_rejects_cross_chat_parentage() {
         depth: Set(1),
         status: Set(AgentRunStatus::Queued.as_str().into()),
         input: Set(Some("cross-chat raw insert".into())),
+        attempt_count: Set(0),
+        max_attempts: Set(crate::model::AgentRun::DEFAULT_MAX_ATTEMPTS),
+        claim_count: Set(0),
+        available_at: Set(now),
+        deadline_at: Set(Some(now + crate::model::AgentRun::DEFAULT_MAX_DURATION)),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        started_at: Set(None),
+        finished_at: Set(None),
+        last_error_code: Set(None),
+        last_error_detail: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     };
     assert!(malformed.insert(&store.conn).await.is_err());
+
+    let partial_claim = crate::db::entities::agent_run_claim::ActiveModel {
+        token: Set(uuid::Uuid::new_v4()),
+        agent_run_id: Set(Some(AgentRunId::new().0)),
+        attempt_count: Set(None),
+        claim_count: Set(None),
+        claimed_at: Set(now),
+        lease_expires_at: Set(None),
+    };
+    assert!(partial_claim.insert(&store.conn).await.is_err());
+}
+
+#[tokio::test]
+async fn sandbox_claims_are_exact_reclaimable_and_heartbeatable() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let foreground_id = AgentRunId::foreground_for_chat(chat.id);
+    let child_id = AgentRunId::new();
+    let _child = match store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(foreground_id),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("claim and heartbeat"),
+        )
+        .await
+        .unwrap()
+    {
+        AcceptAgentRunOutcome::Accepted(run) => run,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+
+    let first_token = uuid::Uuid::new_v4();
+    let first = store
+        .claim_agent_run(first_token, Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.id, child_id);
+    assert_eq!(first.status, AgentRunStatus::Running);
+    assert_eq!(first.attempt_count, 1);
+    assert_eq!(first.claim_count, 1);
+    assert_eq!(first.lease_token, Some(first_token));
+    assert!(first.lease_expires_at.is_some());
+    assert_eq!(
+        store
+            .claim_agent_run(first_token, Duration::minutes(1), 2, 1)
+            .await
+            .unwrap(),
+        Some(first.clone())
+    );
+
+    assert!(!store
+        .heartbeat_agent_run(child_id, uuid::Uuid::new_v4(), Duration::minutes(1))
+        .await
+        .unwrap());
+    assert!(store
+        .heartbeat_agent_run(child_id, first_token, Duration::minutes(2))
+        .await
+        .unwrap());
+    assert!(!store
+        .heartbeat_agent_run(child_id, first_token, Duration::minutes(2))
+        .await
+        .unwrap());
+    assert!(!store
+        .heartbeat_agent_run(
+            child_id,
+            first_token,
+            AgentRun::DEFAULT_MAX_DURATION + Duration::seconds(1),
+        )
+        .await
+        .unwrap());
+
+    force_expired_agent_lease(&store, child_id).await;
+    let second_token = uuid::Uuid::new_v4();
+    let second = store
+        .claim_agent_run(second_token, Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.id, child_id);
+    assert_eq!(second.attempt_count, 2);
+    assert_eq!(second.claim_count, 2);
+    assert_eq!(second.lease_token, Some(second_token));
+    assert!(!store
+        .heartbeat_agent_run(child_id, first_token, Duration::minutes(1))
+        .await
+        .unwrap());
+
+    force_expired_agent_lease(&store, child_id).await;
+    let third_token = uuid::Uuid::new_v4();
+    let third = store
+        .claim_agent_run(third_token, Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(third.attempt_count, 3);
+
+    force_expired_agent_lease(&store, child_id).await;
+    let exhausted_scan = uuid::Uuid::new_v4();
+    assert!(store
+        .claim_agent_run(exhausted_scan, Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .is_none());
+    let failed = store.get_agent_run(child_id).await.unwrap().unwrap();
+    assert_eq!(failed.status, AgentRunStatus::Failed);
+    assert_eq!(failed.last_error_code.as_deref(), Some("lease_expired"));
+    assert!(failed.finished_at.is_some());
+
+    let later_chat = sample_chat();
+    store.create_chat(&later_chat).await.unwrap();
+    store
+        .accept_agent_run(
+            AgentRunId::new(),
+            later_chat.id,
+            Some(AgentRunId::foreground_for_chat(later_chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("later work"),
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .claim_agent_run(exhausted_scan, Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn sandbox_claims_enforce_global_and_per_chat_limits() {
+    let (_dir, store) = temp_store().await;
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    let mut accepted = Vec::new();
+    for (chat_id, task) in [
+        (first_chat.id, "first-a"),
+        (first_chat.id, "first-b"),
+        (second_chat.id, "second-a"),
+    ] {
+        let run = match store
+            .accept_agent_run(
+                AgentRunId::new(),
+                chat_id,
+                Some(AgentRunId::foreground_for_chat(chat_id)),
+                Some(CallId::new()),
+                AgentRunExecution::Sandbox,
+                Some(task),
+            )
+            .await
+            .unwrap()
+        {
+            AcceptAgentRunOutcome::Accepted(run) => run,
+            outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+        };
+        accepted.push(run);
+    }
+
+    let first = store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first.chat_id, second.chat_id);
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn sandbox_claim_terminalizes_expired_deadlines() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let child_id = AgentRunId::new();
+    let child = match store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("deadline"),
+        )
+        .await
+        .unwrap()
+    {
+        AcceptAgentRunOutcome::Accepted(run) => run,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    force_expired_agent_deadline(&store, child.id).await;
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .is_none());
+    let failed = store.get_agent_run(child_id).await.unwrap().unwrap();
+    assert_eq!(failed.status, AgentRunStatus::Failed);
+    assert_eq!(failed.last_error_code.as_deref(), Some("deadline_exceeded"));
+}
+
+#[tokio::test]
+async fn expired_cancelling_sandbox_run_is_reaped_and_releases_capacity() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    let other_chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    store.create_chat(&other_chat).await.unwrap();
+    let child_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("cancellation reaper"),
+        )
+        .await
+        .unwrap();
+    store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let other_child_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            other_child_id,
+            other_chat.id,
+            Some(AgentRunId::foreground_for_chat(other_chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("capacity-consuming live worker"),
+        )
+        .await
+        .unwrap();
+    let other = store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 2, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(other.id, other_child_id);
+    crate::db::entities::agent_run::Entity::update_many()
+        .col_expr(
+            crate::db::entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(AgentRunStatus::Cancelling.as_str()),
+        )
+        .filter(crate::db::entities::agent_run::Column::Id.eq(child_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    force_expired_agent_lease(&store, child_id).await;
+
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .is_none());
+    let cancelled = store.get_agent_run(child_id).await.unwrap().unwrap();
+    assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
+    assert!(cancelled.finished_at.is_some());
+    assert_eq!(cancelled.lease_token, None);
+}
+
+#[tokio::test]
+async fn concurrent_sandbox_claimers_respect_both_limits() {
+    let (_dir, store) = temp_store().await;
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    for chat_id in [first_chat.id, first_chat.id, second_chat.id, second_chat.id] {
+        let _accepted = match store
+            .accept_agent_run(
+                AgentRunId::new(),
+                chat_id,
+                Some(AgentRunId::foreground_for_chat(chat_id)),
+                Some(CallId::new()),
+                AgentRunExecution::Sandbox,
+                Some("concurrent claim"),
+            )
+            .await
+            .unwrap()
+        {
+            AcceptAgentRunOutcome::Accepted(run) => run,
+            outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+        };
+    }
+
+    let store = std::sync::Arc::new(store);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 2, 1)
+                .await
+                .unwrap()
+        }));
+    }
+    let claimed = futures::future::join_all(tasks)
+        .await
+        .into_iter()
+        .filter_map(|result| result.unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(claimed.len(), 2);
+    assert_ne!(claimed[0].chat_id, claimed[1].chat_id);
 }
