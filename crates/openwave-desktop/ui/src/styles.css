@@ -282,6 +282,86 @@ button {
   font-size: 0.8rem;
 }
 
+.agent-runs,
+.agent-runs-state {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+  font-size: 0.75rem;
+}
+
+.agent-runs-label {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.agent-run-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  max-width: 15rem;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.19rem 0.45rem;
+  background: var(--bg-elevated);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.agent-run-pill strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 600;
+  text-overflow: ellipsis;
+}
+
+.agent-run-pill.is-active,
+.agent-run-pill.is-completed {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.agent-run-pill.is-queued,
+.agent-run-pill.is-running,
+.agent-run-pill.is-waiting,
+.agent-run-pill.is-retry_wait,
+.agent-run-pill.is-cancelling {
+  border-color: color-mix(in srgb, var(--ink) 24%, var(--line));
+  background: var(--sidebar-active);
+}
+
+.agent-run-pill.is-failed,
+.agent-run-pill.is-cancelled {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--line));
+}
+
+.agent-run-pill.is-failed strong,
+.agent-run-pill.is-cancelled strong,
+.agent-runs-state.is-error {
+  color: var(--danger);
+}
+
+.agent-run-empty,
+.agent-runs-state {
+  color: var(--muted);
+}
+
+.agent-runs-retry {
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font-size: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
 .messages {
   overflow: auto;
   padding: 1.25rem clamp(1rem, 7vw, 7rem);
@@ -544,5 +624,11 @@ button {
 
   .conversation-header .status {
     display: none;
+  }
+
+  .agent-runs,
+  .agent-runs-state {
+    width: 100%;
+    margin-left: 0;
   }
 }

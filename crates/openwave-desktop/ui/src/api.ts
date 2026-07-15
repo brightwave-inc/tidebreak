@@ -31,6 +31,29 @@ export type Chat = {
   created_at: string;
 };
 
+/** A durable foreground coordinator or sandboxed background run. */
+export type AgentRun = {
+  id: string;
+  parent_id: string | null;
+  execution: "foreground" | "sandbox";
+  status:
+    | "active"
+    | "queued"
+    | "running"
+    | "cancelling"
+    | "waiting"
+    | "retry_wait"
+    | "completed"
+    | "failed"
+    | "cancelled";
+  started_at: string | null;
+  finished_at: string | null;
+  last_error_code: string | null;
+  last_error_detail: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type SequencedEvent = {
   seq: number;
   event: AgentEvent;
@@ -145,6 +168,12 @@ export class ApiClient {
       method: "PATCH",
       headers: this.headers(true),
       body: JSON.stringify({ model }),
+    });
+  }
+
+  listAgentRuns(chatId: string): Promise<AgentRun[]> {
+    return this.json(`/chats/${chatId}/agent-runs`, {
+      headers: this.headers(),
     });
   }
 
