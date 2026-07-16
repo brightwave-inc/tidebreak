@@ -989,19 +989,48 @@ function AgentActivityPanel({
 }
 
 function AgentActivityItem({ run, label }: { run: AgentRun; label: string }) {
-  const status = readableAgentRunStatus(run.status);
+  const activity = sandboxActivityPresentation(run.activity);
+  const status = activity?.status ?? readableAgentRunStatus(run.status);
   return (
-    <li className={`agent-activity-item is-${run.status}`}>
+    <li
+      className={`agent-activity-item is-${run.status}${activity ? ` is-activity-${activity.sourceStatus}` : ""}`}
+    >
       <span className="agent-activity-indicator" aria-hidden="true" />
       <span className="agent-activity-item-copy">
-        <span>{label}</span>
+        <span>{activity?.label ?? label}</span>
         <span className="agent-activity-detail">
-          {agentRunStatusDescription(run.status)}
+          {activity?.detail ?? agentRunStatusDescription(run.status)}
         </span>
       </span>
       <strong>{status}</strong>
     </li>
   );
+}
+
+function sandboxActivityPresentation(
+  activity: AgentRun["activity"],
+): { label: string; detail: string; status: string; sourceStatus: string } | null {
+  if (!activity) return null;
+
+  switch (activity.kind) {
+    case "web_search":
+      switch (activity.status) {
+        case "waiting":
+          return {
+            label: "Web search",
+            detail: "Waiting to search",
+            status: "waiting",
+            sourceStatus: "waiting",
+          };
+        case "running":
+          return {
+            label: "Web search",
+            detail: "Searching the web",
+            status: "searching",
+            sourceStatus: "running",
+          };
+      }
+  }
 }
 
 function readableAgentRunStatus(status: AgentRun["status"]): string {
