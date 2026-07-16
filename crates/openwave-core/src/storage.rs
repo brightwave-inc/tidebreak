@@ -1090,6 +1090,7 @@ pub trait Store: Send + Sync {
     /// coordinator. Exact retries recover the immutable child and checkpoint
     /// receipt; a child accepted through any other path is never retrofitted
     /// into this transition.
+    #[allow(clippy::too_many_arguments)] // This durable checkpoint contract intentionally keeps its receipt fields explicit.
     async fn accept_sandbox_agent_run_and_park_turn(
         &self,
         _child_run_id: AgentRunId,

@@ -1750,6 +1750,7 @@ impl Store for DbStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the Store checkpoint contract.
     async fn accept_sandbox_agent_run_and_park_turn(
         &self,
         child_run_id: AgentRunId,

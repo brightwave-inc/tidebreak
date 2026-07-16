@@ -53,8 +53,8 @@ impl ModelProvider for FakeProvider {
 }
 
 /// Drives the complete foreground-child-foreground round trip. The sandbox
-/// request is identified by its deliberately empty tool surface; foreground
-/// requests retain the registered delegation contract.
+/// request is identified by its absence of the foreground delegation contract;
+/// its fixed web-search capability is deliberately separate.
 #[derive(Default)]
 struct SandboxRoundTripProvider {
     foreground_calls: AtomicUsize,
@@ -68,7 +68,10 @@ impl ModelProvider for SandboxRoundTripProvider {
     }
 
     async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let sandbox = request.tools.is_empty();
+        let sandbox = !request
+            .tools
+            .iter()
+            .any(|tool| tool.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL);
         self.requests.lock().unwrap().push(request);
         let events = if sandbox {
             vec![
@@ -6562,8 +6565,11 @@ async fn foreground_sandbox_spawn_parks_executes_delivers_and_resumes() {
         .iter()
         .any(|tool| tool.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL));
     assert!(
-        requests[1].tools.is_empty(),
-        "sandbox receives no tool surface"
+        requests[1]
+            .tools
+            .iter()
+            .any(|tool| tool.name == openwave_core::SANDBOX_WEB_SEARCH_TOOL),
+        "sandbox receives only the fixed web-search tool surface"
     );
     assert!(
         requests[2].messages.iter().any(|message| {

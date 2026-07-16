@@ -470,15 +470,15 @@ impl SandboxAgentRunWorker {
         let Some(run) = self.store.get_agent_run(id).await? else {
             return Ok(SandboxAgentRunWorkerOutcome::LeaseLost(id));
         };
-        if run.status == AgentRunStatus::Cancelling && run.lease_token == Some(lease_token) {
-            if self
+        if run.status == AgentRunStatus::Cancelling
+            && run.lease_token == Some(lease_token)
+            && self
                 .store
                 .finish_agent_run_cancellation(id, lease_token)
                 .await?
                 .is_some()
-            {
-                return Ok(SandboxAgentRunWorkerOutcome::Cancelled(id));
-            }
+        {
+            return Ok(SandboxAgentRunWorkerOutcome::Cancelled(id));
         }
         Ok(SandboxAgentRunWorkerOutcome::LeaseLost(id))
     }
