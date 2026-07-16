@@ -525,10 +525,10 @@ button {
 .messages {
   height: 100%;
   overflow: auto;
-  padding: 1.25rem clamp(1rem, 7vw, 7rem);
+  padding: 2rem clamp(1rem, 9vw, 10rem) 2.5rem;
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 1.15rem;
 }
 
 .new-activity {
@@ -550,37 +550,66 @@ button {
   background: var(--sidebar-active);
 }
 
-.bubble {
-  max-width: 46rem;
-  padding: 0.7rem 0.85rem;
-  border-radius: 8px;
-  word-break: break-word;
+.message {
+  width: min(100%, 48rem);
+  overflow-wrap: anywhere;
 }
 
-.bubble.user {
+.message-user {
+  width: fit-content;
+  max-width: min(80%, 38rem);
   align-self: flex-end;
-  background: var(--user-bg);
+  border-radius: 15px 15px 4px 15px;
+  padding: 0.52rem 0.78rem;
+  background: color-mix(in srgb, var(--sidebar-active) 84%, var(--bg-elevated));
+  color: var(--ink);
 }
 
-.bubble.assistant {
+.message-assistant {
   align-self: flex-start;
-  background: var(--assistant-bg);
-  border: 1px solid var(--line);
+  padding: 0.1rem 0;
+  background: transparent;
 }
 
-.bubble.system {
+.message-notice {
   align-self: center;
+  max-width: min(100%, 42rem);
+  padding: 0.35rem 0.6rem;
+  border-radius: 7px;
   color: var(--muted);
   font-size: 0.8rem;
-  background: transparent;
-  padding: 0.25rem 0.5rem;
+  text-align: center;
+  background: color-mix(in srgb, var(--sidebar) 68%, transparent);
 }
 
-.bubble.error {
+.message-notice.is-error {
   align-self: stretch;
   border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
   color: var(--danger);
   background: oklch(0.97 0.01 25);
+  text-align: left;
+}
+
+.message-stream-placeholder {
+  display: inline-block;
+  min-width: 1.2rem;
+  color: var(--muted);
+  letter-spacing: 0.12em;
+}
+
+.message-approval {
+  width: min(100%, 38rem);
+  align-self: flex-start;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 9px;
+  padding: 0.7rem 0.8rem;
+  background: color-mix(in srgb, var(--bg-elevated) 88%, var(--sidebar));
+}
+
+.message-approval p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.84rem;
 }
 
 .message-markdown {
@@ -731,7 +760,7 @@ button {
   border-radius: 9px;
   padding: 0.6rem 0.7rem;
   color: var(--muted);
-  background: var(--bg-elevated);
+  background: color-mix(in srgb, var(--bg-elevated) 88%, var(--sidebar));
 }
 
 .tool-call-icon {
