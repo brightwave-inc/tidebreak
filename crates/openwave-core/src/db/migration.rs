@@ -1,3 +1,4 @@
+use sea_orm::DatabaseBackend;
 use sea_orm_migration::prelude::*;
 
 use super::{
@@ -20,6 +21,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddToolCalls),
             Box::new(AddDocuments),
             Box::new(AddSandboxToolCalls),
+            Box::new(AddAgentRunResultPayload),
         ]
     }
 }
@@ -3686,6 +3688,79 @@ impl MigrationName for AddSandboxToolCalls {
     }
 }
 
+struct AddAgentRunResultPayload;
+
+impl MigrationName for AddAgentRunResultPayload {
+    fn name(&self) -> &str {
+        "m20260716_000008_add_agent_run_result_payload"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddAgentRunResultPayload {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AgentRunResult::Table)
+                    .add_column(
+                        ColumnDef::new(AgentRunResult::PayloadKind)
+                            .string_len(32)
+                            .not_null()
+                            .default("final_text"),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AgentRunResult::Table)
+                    .add_column(
+                        ColumnDef::new(AgentRunResult::PayloadJson)
+                            .text()
+                            .not_null()
+                            .default("{\\\"text\\\":\\\"\\\"}"),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        let existing_payloads = match manager.get_database_backend() {
+            DatabaseBackend::Postgres => {
+                "UPDATE agent_run_result SET payload_json = json_build_object('text', text)::text"
+            }
+            DatabaseBackend::Sqlite | DatabaseBackend::MySql => {
+                "UPDATE agent_run_result SET payload_json = json_object('text', text)"
+            }
+        };
+        manager
+            .get_connection()
+            .execute_unprepared(existing_payloads)
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AgentRunResult::Table)
+                    .drop_column(AgentRunResult::PayloadJson)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AgentRunResult::Table)
+                    .drop_column(AgentRunResult::PayloadKind)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl MigrationTrait for AddSandboxToolCalls {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -3855,6 +3930,8 @@ enum AgentRunResult {
     LeaseToken,
     AttemptCount,
     ClaimCount,
+    PayloadKind,
+    PayloadJson,
     Text,
     SubmittedAt,
 }

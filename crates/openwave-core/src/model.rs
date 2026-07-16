@@ -1162,10 +1162,30 @@ pub struct AgentRunResult {
     pub attempt_count: i32,
     /// Exact claim segment that produced the result.
     pub claim_count: i32,
-    /// Bounded final text returned to the parent in a later delivery slice.
+    /// Typed terminal payload returned to the parent in a later delivery slice.
+    pub payload: AgentRunResultPayload,
+    /// Bounded deterministic display text for the terminal payload.
     pub text: String,
     /// Database time at which the terminal submission committed.
     pub submitted_at: DateTime<Utc>,
+}
+
+/// One immutable terminal outcome produced by a sandbox child.
+///
+/// These are deliberately proposals rather than authority. A folder-access
+/// proposal has no root identity, path, grant, or client-call identity; the
+/// foreground parent must independently decide whether to ask the trusted
+/// client through its ordinary tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentRunResultPayload {
+    /// Ordinary final text from the sandbox model.
+    FinalText { text: String },
+    /// A sandbox request for its foreground parent to consider folder consent.
+    FolderAccessProposal {
+        /// Non-authoritative, validated request arguments.
+        request: crate::RequestFolderAccessArgs,
+    },
 }
 
 /// One immutable result delivered from a sandbox child to its foreground parent.

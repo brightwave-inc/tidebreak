@@ -1287,6 +1287,18 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Atomically submit one validated folder-consent proposal as a sandbox's
+    /// typed terminal receipt. This only wakes the foreground parent through
+    /// its durable inbox; it cannot grant host access or invoke a client tool.
+    async fn submit_agent_run_folder_access_proposal(
+        &self,
+        _id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _request: &crate::RequestFolderAccessArgs,
+    ) -> Result<Option<SubmitAgentRunResultOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
     /// Fence one exact sandbox lease after an execution failure. Attempts below
     /// the run budget become replay-safe retry work; the final attempt writes a
     /// parent-visible terminal receipt in the same transaction as `failed`.

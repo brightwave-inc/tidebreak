@@ -8,7 +8,7 @@ use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::model::{
     AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunResult,
-    AgentRunStatus, TurnRun,
+    AgentRunResultPayload, AgentRunStatus, TurnRun,
 };
 use crate::storage::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, ClaimAgentRunInboxOutcome,
@@ -16,6 +16,7 @@ use crate::storage::{
     FinishAgentRunCancellationOutcome, ParkTurnForAgentRunInboxOutcome,
     RequestAgentRunCancellationOutcome, SubmitAgentRunResultOutcome,
 };
+use crate::{RequestFolderAccessArgs, RequestedFolderHint};
 
 use super::super::{entities, store_err, DbStore};
 use super::{
@@ -1236,11 +1237,14 @@ pub(in crate::db) async fn fail_agent_run(
         return Err(AgentError::Store("sandbox run missing parent".into()));
     };
     let text = format!("Sandbox task failed ({error_code}): {error_detail}");
+    let payload = AgentRunResultPayload::FinalText { text: text.clone() };
     entities::agent_run_result::ActiveModel {
         agent_run_id: Set(id.0),
         lease_token: Set(lease_token),
         attempt_count: Set(run.attempt_count),
         claim_count: Set(run.claim_count),
+        payload_kind: Set(agent_run_result_payload_kind(&payload).into()),
+        payload_json: Set(agent_run_result_payload_json(&payload)?),
         text: Set(text),
         submitted_at: Set(now),
     }
@@ -1283,12 +1287,44 @@ pub(in crate::db) async fn submit_agent_run_result(
     lease_token: uuid::Uuid,
     text: &str,
 ) -> Result<Option<SubmitAgentRunResultOutcome>> {
-    if lease_token.is_nil() || text.is_empty() || text.chars().count() > AgentRun::MAX_RESULT_LEN {
-        return Err(AgentError::Store(format!(
-            "agent-run result requires a non-nil lease token and 1..={} characters",
-            AgentRun::MAX_RESULT_LEN
-        )));
-    }
+    submit_agent_run_result_payload(
+        store,
+        id,
+        lease_token,
+        AgentRunResultPayload::FinalText {
+            text: text.to_owned(),
+        },
+    )
+    .await
+}
+
+/// Submit the one typed folder-consent proposal a sandbox may return to its
+/// foreground parent. This is a terminal child result, never a client call.
+pub(in crate::db) async fn submit_agent_run_folder_access_proposal(
+    store: &DbStore,
+    id: AgentRunId,
+    lease_token: uuid::Uuid,
+    request: &RequestFolderAccessArgs,
+) -> Result<Option<SubmitAgentRunResultOutcome>> {
+    submit_agent_run_result_payload(
+        store,
+        id,
+        lease_token,
+        AgentRunResultPayload::FolderAccessProposal {
+            request: request.clone(),
+        },
+    )
+    .await
+}
+
+async fn submit_agent_run_result_payload(
+    store: &DbStore,
+    id: AgentRunId,
+    lease_token: uuid::Uuid,
+    payload: AgentRunResultPayload,
+) -> Result<Option<SubmitAgentRunResultOutcome>> {
+    validate_agent_run_result_payload(&payload)?;
+    let text = agent_run_result_display_text(&payload);
     let transaction = store.conn.begin().await.map_err(store_err)?;
     acquire_agent_run_claim_lock(&transaction).await?;
     let now = database_now(&transaction).await?;
@@ -1299,14 +1335,17 @@ pub(in crate::db) async fn submit_agent_run_result(
     {
         let result = agent_run_result_from_model(result)?;
         transaction.commit().await.map_err(store_err)?;
-        return Ok((result.lease_token == lease_token && result.text == text)
-            .then_some(SubmitAgentRunResultOutcome::Existing(result)));
+        return Ok(
+            (result.lease_token == lease_token && result.payload == payload)
+                .then_some(SubmitAgentRunResultOutcome::Existing(result)),
+        );
     }
     let Some(run) = find_by_id_on(&transaction, id).await? else {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
     if run.execution != AgentRunExecution::Sandbox.as_str()
+        || run.depth != 1
         || run.status != AgentRunStatus::Running.as_str()
         || run.lease_token != Some(lease_token)
         || run.lease_expires_at.is_none_or(|expiry| expiry <= now)
@@ -1341,7 +1380,9 @@ pub(in crate::db) async fn submit_agent_run_result(
         lease_token: Set(lease_token),
         attempt_count: Set(run.attempt_count),
         claim_count: Set(run.claim_count),
-        text: Set(text.to_owned()),
+        payload_kind: Set(agent_run_result_payload_kind(&payload).into()),
+        payload_json: Set(agent_run_result_payload_json(&payload)?),
+        text: Set(text),
         submitted_at: Set(now),
     }
     .insert(&transaction)
@@ -2278,14 +2319,16 @@ where
             (lease_token, attempt_count, claim_count)
         }
     };
+    let text = format!("Sandbox task failed ({error_code}): {error_detail}");
+    let payload = AgentRunResultPayload::FinalText { text: text.clone() };
     entities::agent_run_result::ActiveModel {
         agent_run_id: Set(candidate.id),
         lease_token: Set(lease_token),
         attempt_count: Set(attempt_count),
         claim_count: Set(claim_count),
-        text: Set(format!(
-            "Sandbox task failed ({error_code}): {error_detail}"
-        )),
+        payload_kind: Set(agent_run_result_payload_kind(&payload).into()),
+        payload_json: Set(agent_run_result_payload_json(&payload)?),
+        text: Set(text),
         submitted_at: Set(now),
     }
     .insert(conn)
@@ -2445,14 +2488,104 @@ fn agent_run_result_from_model(model: entities::agent_run_result::Model) -> Resu
     {
         return Err(AgentError::Store("invalid stored agent-run result".into()));
     }
+    let payload = agent_run_result_payload_from_columns(&model.payload_kind, &model.payload_json)?;
+    if model.text != agent_run_result_display_text(&payload) {
+        return Err(AgentError::Store(
+            "agent-run result display text does not match its typed payload".into(),
+        ));
+    }
     Ok(AgentRunResult {
         agent_run_id: AgentRunId(model.agent_run_id),
         lease_token: model.lease_token,
         attempt_count: model.attempt_count,
         claim_count: model.claim_count,
+        payload,
         text: model.text,
         submitted_at: model.submitted_at,
     })
+}
+
+fn validate_agent_run_result_payload(payload: &AgentRunResultPayload) -> Result<()> {
+    match payload {
+        AgentRunResultPayload::FinalText { text }
+            if !text.is_empty() && text.chars().count() <= AgentRun::MAX_RESULT_LEN =>
+        {
+            Ok(())
+        }
+        AgentRunResultPayload::FinalText { .. } => Err(AgentError::Store(format!(
+            "agent-run result requires 1..={} characters",
+            AgentRun::MAX_RESULT_LEN
+        ))),
+        AgentRunResultPayload::FolderAccessProposal { request } if request.is_well_formed() => {
+            Ok(())
+        }
+        AgentRunResultPayload::FolderAccessProposal { .. } => Err(AgentError::Store(
+            "invalid sandbox folder-access proposal".into(),
+        )),
+    }
+}
+
+fn agent_run_result_payload_kind(payload: &AgentRunResultPayload) -> &'static str {
+    match payload {
+        AgentRunResultPayload::FinalText { .. } => "final_text",
+        AgentRunResultPayload::FolderAccessProposal { .. } => "folder_access_proposal",
+    }
+}
+
+fn agent_run_result_payload_json(payload: &AgentRunResultPayload) -> Result<String> {
+    match payload {
+        AgentRunResultPayload::FinalText { text } => serde_json::to_string(&serde_json::json!({
+            "text": text,
+        })),
+        AgentRunResultPayload::FolderAccessProposal { request } => serde_json::to_string(request),
+    }
+    .map_err(|error| AgentError::Store(format!("serialize agent-run result payload: {error}")))
+}
+
+fn agent_run_result_payload_from_columns(kind: &str, json: &str) -> Result<AgentRunResultPayload> {
+    let payload = match kind {
+        "final_text" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct FinalTextPayload {
+                text: String,
+            }
+            let payload = serde_json::from_str::<FinalTextPayload>(json).map_err(|_| {
+                AgentError::Store("invalid stored final-text agent-run result payload".into())
+            })?;
+            AgentRunResultPayload::FinalText { text: payload.text }
+        }
+        "folder_access_proposal" => {
+            let request = serde_json::from_str::<RequestFolderAccessArgs>(json).map_err(|_| {
+                AgentError::Store("invalid stored folder-access proposal payload".into())
+            })?;
+            AgentRunResultPayload::FolderAccessProposal { request }
+        }
+        _ => {
+            return Err(AgentError::Store(
+                "invalid stored agent-run result payload kind".into(),
+            ))
+        }
+    };
+    validate_agent_run_result_payload(&payload)?;
+    Ok(payload)
+}
+
+fn agent_run_result_display_text(payload: &AgentRunResultPayload) -> String {
+    match payload {
+        AgentRunResultPayload::FinalText { text } => text.clone(),
+        AgentRunResultPayload::FolderAccessProposal { request } => {
+            let hint = match request.folder_hint {
+                Some(RequestedFolderHint::Documents) => "\nPicker hint: Documents",
+                Some(RequestedFolderHint::Downloads) => "\nPicker hint: Downloads",
+                None => "",
+            };
+            format!(
+                "Sandbox agent requested that you decide whether to ask the user to connect a folder. This grants no access. If appropriate, issue the normal request_folder_access tool; otherwise continue without host access.\nReason: {}\nRequested capability: read_files{hint}",
+                request.reason
+            )
+        }
+    }
 }
 
 fn agent_run_inbox_from_models(
@@ -2634,10 +2767,13 @@ where
         }
     };
     let message_id = MessageId::sandbox_result_for_child(entry.child_run_id);
-    let content = format!(
-        "Sandbox agent {disposition}. Its exact final result follows:\n{}",
-        entry.result.text
-    );
+    let content = match &entry.result.payload {
+        AgentRunResultPayload::FinalText { .. } => format!(
+            "Sandbox agent {disposition}. Its exact final result follows:\n{}",
+            entry.result.text
+        ),
+        AgentRunResultPayload::FolderAccessProposal { .. } => entry.result.text.clone(),
+    };
     let existing = entities::message::Entity::find_by_id(message_id.0)
         .one(conn)
         .await

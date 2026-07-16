@@ -5,10 +5,10 @@ use crate::{
     ClaimAgentRunInboxOutcome, ClaimSandboxToolCallOutcome,
     ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome, DbStore,
     FinishAgentRunCancellationOutcome, MessageId, ParkSandboxToolCallOutcome,
-    ParkTurnForAgentRunInboxOutcome, RequestAgentRunCancellationOutcome,
-    ResolveSandboxToolCallOutcome, Role, SandboxToolCallRequest, Store,
-    SubmitAgentRunResultOutcome, ToolCallResolution, TurnCheckpointProgress, TurnId, TurnRunStatus,
-    Usage,
+    ParkTurnForAgentRunInboxOutcome, RequestAgentRunCancellationOutcome, RequestFolderAccessArgs,
+    RequestedFolderCapability, RequestedFolderHint, ResolveSandboxToolCallOutcome, Role,
+    SandboxToolCallRequest, Store, SubmitAgentRunResultOutcome, ToolCallResolution,
+    TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
 };
 use chrono::{Duration, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -944,6 +944,72 @@ async fn sandbox_result_submission_is_fenced_and_idempotent() {
         .is_none());
     assert!(store
         .submit_agent_run_result(child_id, lease_token, "different result")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn sandbox_folder_proposal_is_typed_fenced_and_idempotent() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let child_id = AgentRunId::new();
+    store
+        .accept_agent_run(
+            child_id,
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("ask the parent about folder consent"),
+        )
+        .await
+        .unwrap();
+    let lease_token = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(lease_token, Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = RequestFolderAccessArgs {
+        reason: "Read the documents needed for this task".into(),
+        requested_capabilities: vec![RequestedFolderCapability::ReadFiles],
+        folder_hint: Some(RequestedFolderHint::Documents),
+    };
+    let result = match store
+        .submit_agent_run_folder_access_proposal(child_id, lease_token, &request)
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        SubmitAgentRunResultOutcome::Completed(result) => result,
+        outcome => panic!("unexpected proposal submission outcome: {outcome:?}"),
+    };
+    assert!(matches!(
+        &result.payload,
+        crate::AgentRunResultPayload::FolderAccessProposal { request: stored } if stored == &request
+    ));
+    assert!(result.text.contains("This grants no access"));
+    assert!(!result.text.contains("root_id"));
+    assert!(matches!(
+        store
+            .submit_agent_run_folder_access_proposal(child_id, lease_token, &request)
+            .await
+            .unwrap(),
+        Some(SubmitAgentRunResultOutcome::Existing(existing)) if existing == result
+    ));
+    let changed = RequestFolderAccessArgs {
+        reason: "Read a different folder".into(),
+        ..request.clone()
+    };
+    assert!(store
+        .submit_agent_run_folder_access_proposal(child_id, lease_token, &changed)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .submit_agent_run_folder_access_proposal(child_id, uuid::Uuid::new_v4(), &request)
         .await
         .unwrap()
         .is_none());

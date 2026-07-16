@@ -1923,6 +1923,16 @@ impl Store for DbStore {
         ops::agent_run::submit_agent_run_result(self, id, lease_token, text).await
     }
 
+    async fn submit_agent_run_folder_access_proposal(
+        &self,
+        id: AgentRunId,
+        lease_token: uuid::Uuid,
+        request: &crate::RequestFolderAccessArgs,
+    ) -> Result<Option<SubmitAgentRunResultOutcome>> {
+        ops::agent_run::submit_agent_run_folder_access_proposal(self, id, lease_token, request)
+            .await
+    }
+
     async fn fail_agent_run(
         &self,
         id: AgentRunId,
