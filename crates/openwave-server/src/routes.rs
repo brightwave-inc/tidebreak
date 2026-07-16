@@ -514,6 +514,9 @@ pub struct ChatMessageSnapshot {
 #[derive(Debug, Serialize)]
 pub struct ChatTranscript {
     pub messages: Vec<ChatMessageSnapshot>,
+    /// Finished tool activity from terminal turns, projected through a fixed
+    /// renderer-safe allowlist. Canonical tool records never cross this API.
+    pub tool_activity: Vec<openwave_core::ChatToolActivitySnapshot>,
     pub last_event_seq: i64,
 }
 
@@ -548,6 +551,7 @@ pub async fn list_chat_messages(
         .collect();
     Ok(Json(ChatTranscript {
         messages,
+        tool_activity: transcript.tool_activity,
         last_event_seq: transcript.last_event_seq,
     }))
 }

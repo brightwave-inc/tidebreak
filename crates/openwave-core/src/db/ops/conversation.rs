@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
@@ -13,9 +15,9 @@ use crate::model::{
     ChatRootAttachment, Message, Role, RootAttachmentOrigin, ToolCallRecord, TurnRunStatus,
     MAX_ROOT_ATTACHMENTS,
 };
-use crate::storage::ChatTranscriptSnapshot;
-use crate::storage::DeleteChatOutcome;
-use std::collections::HashSet;
+use crate::storage::{
+    ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome,
+};
 
 use super::super::{entities, project_from_models, store_err, DbStore};
 use super::turn::canonical_db_timestamp;
@@ -518,19 +520,105 @@ pub(in crate::db) async fn get_chat_transcript(
         return Ok(None);
     }
     let messages = list_messages_on(&transaction, chat_id).await?;
-    let last_event_seq = entities::event::Entity::find()
-        .filter(entities::event::Column::ChatId.eq(chat_id.0))
-        .filter(entities::event::Column::Terminal.eq(true))
-        .order_by_desc(entities::event::Column::Seq)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-        .map_or(0, |event| event.seq);
+    let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id).await?;
+    let last_event_seq = terminal_event_cursor_on(&transaction, chat_id).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(ChatTranscriptSnapshot {
         messages,
+        tool_activity,
         last_event_seq,
     }))
+}
+
+/// Read only tool calls whose owning foreground turn has reached a terminal
+/// state. A live call is reconstructed from the event journal instead: showing
+/// it in the snapshot before its event is committed would make reconnecting
+/// renderers duplicate or skip activity.
+async fn list_terminal_tool_activity_on<C>(
+    conn: &C,
+    chat_id: ChatId,
+) -> Result<Vec<ChatToolActivitySnapshot>>
+where
+    C: ConnectionTrait,
+{
+    let terminal_turn_ids: HashSet<_> = entities::turn_run::Entity::find()
+        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::turn_run::Column::Status.is_in([
+            TurnRunStatus::Completed.as_str(),
+            TurnRunStatus::Failed.as_str(),
+            TurnRunStatus::Cancelled.as_str(),
+        ]))
+        .all(conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(|turn| turn.id)
+        .collect();
+    entities::tool_call::Entity::find()
+        .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
+        .filter(entities::tool_call::Column::Status.is_in([
+            crate::model::ToolCallStatus::Completed.as_str(),
+            crate::model::ToolCallStatus::Failed.as_str(),
+            crate::model::ToolCallStatus::Cancelled.as_str(),
+        ]))
+        .order_by_asc(entities::tool_call::Column::CreatedAt)
+        .order_by_asc(entities::tool_call::Column::Id)
+        .all(conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .filter(|call| terminal_turn_ids.contains(&call.turn_id))
+        .map(super::client_execution::tool_call_from_model)
+        .map(|call| call.map(tool_activity_from_call))
+        .collect::<Result<Vec<_>>>()
+}
+
+fn tool_activity_from_call(call: ToolCallRecord) -> ChatToolActivitySnapshot {
+    let status = match call.status {
+        crate::model::ToolCallStatus::Completed => ChatToolActivityStatus::Completed,
+        crate::model::ToolCallStatus::Failed => ChatToolActivityStatus::Failed,
+        crate::model::ToolCallStatus::Cancelled => ChatToolActivityStatus::Cancelled,
+        crate::model::ToolCallStatus::Pending => {
+            unreachable!("pending tool calls are excluded from durable activity")
+        }
+    };
+    ChatToolActivitySnapshot {
+        title: historical_tool_title(&call.name),
+        status,
+        started_at: call.created_at,
+        finished_at: call.resolved_at,
+    }
+}
+
+/// The tool name is canonical but still not renderer-safe: unknown names can
+/// leak provider, extension, or local capability details. Historical cards use
+/// this explicit vocabulary and collapse anything else to a generic action.
+fn historical_tool_title(name: &str) -> &'static str {
+    match name {
+        "web_search" => "Search the web",
+        "read_file" | "read_connected_file" => "Read a file",
+        "list_dir" => "Browse files",
+        "write_file" => "Update a file",
+        "request_folder_access" => "Request folder access",
+        "connect_folder" => "Connect a folder",
+        "list_connected_folders" => "Check connected folders",
+        "spawn_sandbox_agent" => "Delegate a task",
+        _ => "Use a tool",
+    }
+}
+
+async fn terminal_event_cursor_on<C>(conn: &C, chat_id: ChatId) -> Result<i64>
+where
+    C: ConnectionTrait,
+{
+    entities::event::Entity::find()
+        .filter(entities::event::Column::ChatId.eq(chat_id.0))
+        .filter(entities::event::Column::Terminal.eq(true))
+        .order_by_desc(entities::event::Column::Seq)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .map_or(Ok(0), |event| Ok(event.seq))
 }
 
 pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) -> Result<()> {

@@ -16,6 +16,7 @@
 //! introduce those record types.
 
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{AgentError, Result};
@@ -46,6 +47,9 @@ pub const MAX_PENDING_ROOT_ATTACHMENT_CHANGES: u64 = 256;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatTranscriptSnapshot {
     pub messages: Vec<Message>,
+    /// A renderer-safe historical projection. It contains fixed titles and
+    /// lifecycle timestamps only; canonical tool records never leave storage.
+    pub tool_activity: Vec<ChatToolActivitySnapshot>,
     pub last_event_seq: i64,
 }
 
@@ -67,6 +71,26 @@ pub enum DeleteChatOutcome {
     RootsAttached,
     /// Broker history cannot conclusively prove every detached root is gone.
     RootAttachmentStateUnresolved,
+}
+
+/// Fixed lifecycle vocabulary exposed for a historical tool card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatToolActivityStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// A completed tool invocation with no arguments, results, tool identity,
+/// provider metadata, executor identity, lease, or diagnostic detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChatToolActivitySnapshot {
+    /// Fixed allowlisted presentation title, never a provider-supplied name.
+    pub title: &'static str,
+    pub status: ChatToolActivityStatus,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Why maintenance determined that a document needs an index job.
