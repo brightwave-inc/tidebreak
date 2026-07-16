@@ -69,12 +69,17 @@ agents never receive this tool.
 
 A background sandbox has no shared conversation, filesystem, network, or
 host-folder access. It receives one bounded task and may be offered exactly
-one fixed `web_search` contract when its remaining model-step budget can also
-consume the result. The worker atomically parks the sandbox under its exact
-lease; a separate host-owned executor performs the bounded search and writes
-an immutable receipt. On a later claim, the sandbox reconstructs the matching
-`ToolUse`/`ToolResult` from that receipt before it can finalize. Sandboxes do
-not receive `spawn_sandbox_agent` and cannot create further agents.
+one tool call: `web_search` when its remaining model-step budget can also
+consume the result, or a sandbox-only `request_folder_access` proposal. The
+proposal is a typed terminal child result, not a client call: it cannot open a
+picker, name a root, expose a path, or grant access. Its foreground parent
+receives deterministic system context and independently decides whether to
+issue the ordinary foreground `request_folder_access` client tool. The worker
+atomically parks only web search under its exact lease; a separate host-owned
+executor performs that bounded search and writes an immutable receipt. On a
+later claim, the sandbox reconstructs the matching `ToolUse`/`ToolResult` from
+that receipt before it can finalize. Sandboxes do not receive
+`spawn_sandbox_agent` and cannot create further agents.
 
 Future sandbox-safe capabilities, such as broker-mediated folder reads, must
 be added one at a time behind the same durable continuation and consent

@@ -13,12 +13,12 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use openwave_core::{
-    sandbox_web_search_tool_spec, AgentConfig, AgentError, AgentRun, AgentRunInboxEntry,
-    AgentRunStatus, CallId, ChatMessage, ChatRequest, ClaimAgentRunInboxOutcome,
-    ConsumeAgentRunInboxAndResumeTurnOutcome, ContentBlock, FailAgentRunOutcome, ModelProvider,
-    ParkSandboxToolCallOutcome, ProviderEvent, Result, Role, SandboxToolCall,
-    SandboxToolCallRequest, SandboxToolCallStatus, StopReason, Store, SubmitAgentRunResultOutcome,
-    ToolCallRecord,
+    sandbox_folder_access_proposal_tool_spec, sandbox_web_search_tool_spec, AgentConfig,
+    AgentError, AgentRun, AgentRunInboxEntry, AgentRunStatus, CallId, ChatMessage, ChatRequest,
+    ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome, ContentBlock,
+    FailAgentRunOutcome, ModelProvider, ParkSandboxToolCallOutcome, ProviderEvent,
+    RequestFolderAccessArgs, Result, Role, SandboxToolCall, SandboxToolCallRequest,
+    SandboxToolCallStatus, StopReason, Store, SubmitAgentRunResultOutcome, ToolCallRecord,
 };
 use tokio::sync::Notify;
 
@@ -29,7 +29,7 @@ use crate::resolver::ProviderResolver;
 /// Deliberately do not inherit the foreground system prompt: it may describe
 /// interactive tools or conversation-wide responsibilities that are outside a
 /// depth-one child run's authority.
-const SANDBOX_SYSTEM_PROMPT: &str = "You are a sandboxed background agent. Work only on the delegated task below and return a concise, self-contained result for your parent agent. You cannot access the conversation, filesystem, or other agents. You may use the single web_search tool at most once when current public-web information is necessary; otherwise finish directly.";
+const SANDBOX_SYSTEM_PROMPT: &str = "You are a sandboxed background agent. Work only on the delegated task below and return a concise, self-contained result for your parent agent. You cannot access the conversation, filesystem, connected folders, or other agents. You may use at most one tool: web_search when current public-web information is necessary, or request_folder_access only to propose that your foreground parent decide whether to ask the user. The proposal grants no access and cannot open a picker. Otherwise finish directly.";
 const SANDBOX_WEB_SEARCH_TOOL_LIMIT: usize = 1;
 
 #[derive(Debug, Clone, Copy)]
@@ -290,6 +290,9 @@ impl SandboxAgentRunWorker {
                     Ok(SandboxCompletion::WebSearch { provider_id, arguments }) => {
                         return self.park_web_search(run, lease_token, provider_id, arguments).await;
                     }
+                    Ok(SandboxCompletion::FolderAccessProposal { request }) => {
+                        return self.submit_folder_access_proposal(run.id, lease_token, request).await;
+                    }
                     // No terminal failure transition exists yet. Keep the exact
                     // lease alive only until its scheduler expiry; then the
                     // durable claim state machine safely retries or exhausts
@@ -382,6 +385,28 @@ impl SandboxAgentRunWorker {
         match self
             .store
             .submit_agent_run_result(id, lease_token, &text)
+            .await?
+        {
+            Some(SubmitAgentRunResultOutcome::Completed(_))
+            | Some(SubmitAgentRunResultOutcome::Existing(_)) => {
+                Ok(SandboxAgentRunWorkerOutcome::Completed(id))
+            }
+            None => {
+                self.acknowledge_cancellation_or_lease_loss(id, lease_token)
+                    .await
+            }
+        }
+    }
+
+    async fn submit_folder_access_proposal(
+        &self,
+        id: openwave_core::AgentRunId,
+        lease_token: uuid::Uuid,
+        request: RequestFolderAccessArgs,
+    ) -> Result<SandboxAgentRunWorkerOutcome> {
+        match self
+            .store
+            .submit_agent_run_folder_access_proposal(id, lease_token, &request)
             .await?
         {
             Some(SubmitAgentRunResultOutcome::Completed(_))
@@ -559,7 +584,12 @@ async fn sandbox_request(
         // completion. Never advertise work that the remaining model budget
         // cannot consume after its durable receipt arrives.
         tools: if calls.is_empty() && config.max_steps >= 2 {
-            vec![sandbox_web_search_tool_spec()]
+            vec![
+                sandbox_web_search_tool_spec(),
+                sandbox_folder_access_proposal_tool_spec(),
+            ]
+        } else if calls.is_empty() && config.max_steps >= 1 {
+            vec![sandbox_folder_access_proposal_tool_spec()]
         } else {
             vec![]
         },
@@ -574,6 +604,9 @@ enum SandboxCompletion {
         provider_id: String,
         arguments: serde_json::Value,
     },
+    FolderAccessProposal {
+        request: RequestFolderAccessArgs,
+    },
 }
 
 async fn complete_sandbox_task(
@@ -584,6 +617,10 @@ async fn complete_sandbox_task(
         .tools
         .iter()
         .any(|tool| tool.name == openwave_core::SANDBOX_WEB_SEARCH_TOOL);
+    let folder_proposal_advertised = request
+        .tools
+        .iter()
+        .any(|tool| tool.name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL);
     let mut stream = provider.stream(request).await?;
     let mut text = String::new();
     let mut calls = std::collections::BTreeMap::<u32, (String, String, String)>::new();
@@ -627,29 +664,43 @@ async fn complete_sandbox_task(
                     ));
                 }
                 if reason == StopReason::ToolUse {
-                    if !web_search_advertised {
-                        return Err(AgentError::msg(
-                            "sandbox agent requested an unadvertised tool",
-                        ));
-                    }
                     if !text.is_empty() || calls.len() != 1 {
                         return Err(AgentError::msg(
                             "sandbox agent emitted an ambiguous tool checkpoint",
                         ));
                     }
                     let (_, (provider_id, name, arguments)) = calls.into_iter().next().unwrap();
-                    if name != openwave_core::SANDBOX_WEB_SEARCH_TOOL || provider_id.is_empty() {
+                    if provider_id.is_empty() {
                         return Err(AgentError::msg(
                             "sandbox agent requested an unavailable tool",
                         ));
                     }
-                    let arguments = serde_json::from_str(&arguments).map_err(|_| {
-                        AgentError::msg("sandbox agent emitted invalid web-search arguments")
-                    })?;
-                    return Ok(SandboxCompletion::WebSearch {
-                        provider_id,
-                        arguments,
-                    });
+                    if name == openwave_core::SANDBOX_WEB_SEARCH_TOOL && web_search_advertised {
+                        let arguments = serde_json::from_str(&arguments).map_err(|_| {
+                            AgentError::msg("sandbox agent emitted invalid web-search arguments")
+                        })?;
+                        return Ok(SandboxCompletion::WebSearch {
+                            provider_id,
+                            arguments,
+                        });
+                    }
+                    if name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL
+                        && folder_proposal_advertised
+                    {
+                        let request = serde_json::from_str::<RequestFolderAccessArgs>(&arguments)
+                            .map_err(|_| {
+                            AgentError::msg("sandbox agent emitted invalid folder-access proposal")
+                        })?;
+                        if !request.is_well_formed() {
+                            return Err(AgentError::msg(
+                                "sandbox agent emitted invalid folder-access proposal",
+                            ));
+                        }
+                        return Ok(SandboxCompletion::FolderAccessProposal { request });
+                    }
+                    return Err(AgentError::msg(
+                        "sandbox agent requested an unadvertised tool",
+                    ));
                 }
                 if !calls.is_empty() {
                     return Err(AgentError::msg(
@@ -915,7 +966,13 @@ mod tests {
 
         let requests = provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].tools, vec![sandbox_web_search_tool_spec()]);
+        assert_eq!(
+            requests[0].tools,
+            vec![
+                sandbox_web_search_tool_spec(),
+                sandbox_folder_access_proposal_tool_spec(),
+            ]
+        );
         assert_eq!(
             requests[0].messages,
             vec![ChatMessage::text(
@@ -1192,6 +1249,111 @@ mod tests {
             store.get_turn_run(turn_id).await.unwrap().unwrap().status,
             TurnRunStatus::Resuming
         );
+    }
+
+    #[tokio::test]
+    async fn folder_proposal_completes_the_child_then_resumes_the_parent_without_a_tool_checkpoint()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = sandbox_chat();
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "sandbox-model", "delegate")
+            .await
+            .unwrap();
+        let foreground_lease = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let foreground = store
+            .claim_turn_run(foreground_lease, now, now + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .turn
+            .unwrap();
+        let call = CallId::new();
+        let child_id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
+        assert!(matches!(
+            store
+                .accept_sandbox_agent_run_and_park_turn(
+                    child_id,
+                    foreground.id,
+                    call,
+                    "ask whether a folder is needed",
+                    foreground_lease,
+                    foreground.steer_revision,
+                    TurnCheckpointProgress {
+                        model_steps: 1,
+                        usage: Usage::default()
+                    },
+                    chrono::Utc::now(),
+                )
+                .await
+                .unwrap(),
+            Some(openwave_core::AcceptSandboxAgentRunAndParkTurnOutcome::Parked { .. })
+        ));
+        let provider = Arc::new(EventProvider(vec![
+            ProviderEvent::ToolCallStarted {
+                index: 0,
+                id: "folder_1".into(),
+                name: openwave_core::REQUEST_FOLDER_ACCESS_TOOL.into(),
+            },
+            ProviderEvent::ToolCallArgsDelta {
+                index: 0,
+                fragment: r#"{"reason":"Read documents needed for the task","requested_capabilities":["read_files"],"folder_hint":"documents"}"#.into(),
+            },
+            ProviderEvent::Stop { reason: StopReason::ToolUse },
+        ]));
+        let worker = SandboxAgentRunWorker::new(
+            store.clone(),
+            Arc::new(FixedResolver(provider)),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            AgentConfig {
+                model: "sandbox-model".into(),
+                max_steps: 2,
+                ..AgentConfig::default()
+            },
+            None,
+            SandboxAgentRunWorkerConfig::default(),
+        );
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::Completed(child_id)
+        );
+        assert!(store
+            .list_sandbox_tool_calls_for_agent_run(child_id)
+            .await
+            .unwrap()
+            .is_empty());
+        let inbox = store
+            .list_agent_run_inbox(openwave_core::AgentRunId::foreground_for_chat(chat.id))
+            .await
+            .unwrap();
+        assert!(matches!(
+            &inbox[0].result.payload,
+            openwave_core::AgentRunResultPayload::FolderAccessProposal { request }
+                if request.reason == "Read documents needed for the task"
+        ));
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::ParentResumed(child_id)
+        );
+        let messages = store.list_messages(chat.id).await.unwrap();
+        let proposal = messages.last().unwrap();
+        assert_eq!(proposal.role, Role::System);
+        assert!(proposal.content.contains("This grants no access"));
+        assert!(proposal
+            .content
+            .contains("normal request_folder_access tool"));
+        assert!(!proposal.content.contains("root_id"));
     }
 
     #[tokio::test]
@@ -1489,7 +1651,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(request.system.as_deref(), Some(SANDBOX_SYSTEM_PROMPT));
-        assert_eq!(request.tools, vec![sandbox_web_search_tool_spec()]);
+        assert_eq!(
+            request.tools,
+            vec![
+                sandbox_web_search_tool_spec(),
+                sandbox_folder_access_proposal_tool_spec(),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1513,7 +1681,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(request.tools.is_empty());
+        assert_eq!(
+            request.tools,
+            vec![sandbox_folder_access_proposal_tool_spec()]
+        );
         let provider = Arc::new(EventProvider(vec![
             ProviderEvent::ToolCallStarted {
                 index: 0,

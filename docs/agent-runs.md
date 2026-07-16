@@ -152,10 +152,14 @@ The scheduler's ownership rules are deliberately strict:
 - a worker's writes must carry its exact live lease token, so a reclaimed or
   expired worker cannot resume ownership.
 
-Final sandbox text is stored as an immutable receipt keyed by the child run and
-the exact lease segment that submitted it. The receipt, `completed` state, and
-one parent inbox entry commit together, so an ambiguous worker retry can recover
-its original result but cannot overwrite or double-deliver it. Each inbox entry
+Final sandbox output is stored as an immutable typed receipt keyed by the child
+run and the exact lease segment that submitted it. Besides final text, the only
+current non-text outcome is a validated folder-consent proposal. It carries no
+host path, root identity, broker grant, or client-call identity; it only tells
+the foreground parent to decide whether the existing foreground consent tool is
+appropriate. The receipt, `completed` state, and one parent inbox entry commit
+together, so an ambiguous worker retry can recover its original result but
+cannot overwrite or double-deliver it. Each inbox entry
 then advances through its own fenced continuation state machine:
 `pending -> claimed -> consumed` (or `cancelled` when its parked parent is
 cancelled). A parent continuation claims one exact child
@@ -249,8 +253,11 @@ The implementation is intentionally incremental:
    the already-delivered inbox receipt. *(Shipped.)*
 10. Add the one-call sandbox `web_search` checkpoint, host executor, and
     receipt-backed model resume. *(Shipped.)*
-11. Route sandbox folder access through the host broker.
-12. Add desktop surfaces for queued, running, waiting, failed, and completed
+11. Let a sandbox relay a typed folder-consent proposal to its foreground
+    parent, without host access or a picker. *(Shipped.)*
+12. Add a fenced read-only proxy for roots the foreground chat already
+    attached; sandbox broker access remains deferred.
+13. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work.
-13. Add richer context lifecycle, parallel-safe tool groups, and further
+14. Add richer context lifecycle, parallel-safe tool groups, and further
    orchestration only after these recovery boundaries are proven.

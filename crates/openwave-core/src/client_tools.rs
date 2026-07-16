@@ -103,8 +103,21 @@ impl RequestFolderAccessArgs {
         !self.reason.trim().is_empty()
             && self.reason.chars().count() <= MAX_FOLDER_ACCESS_REASON_CHARS
             && !self.reason.contains('\0')
+            && !contains_absolute_path_like_text(&self.reason)
             && self.requested_capabilities == [RequestedFolderCapability::ReadFiles]
     }
+}
+
+fn contains_absolute_path_like_text(value: &str) -> bool {
+    value.split_whitespace().any(|word| {
+        word.starts_with('/')
+            || word.starts_with("~/")
+            || word.starts_with("\\\\")
+            || (word.len() >= 3
+                && word.as_bytes()[0].is_ascii_alphabetic()
+                && word.as_bytes()[1] == b':'
+                && matches!(word.as_bytes()[2], b'/' | b'\\'))
+    })
 }
 
 /// Validate one canonical JSON payload before it crosses the trusted-client boundary.
@@ -146,6 +159,15 @@ pub fn request_folder_access_tool_spec() -> ToolSpec {
             "additionalProperties": false
         }),
     }
+}
+
+/// Sandbox-only contract for proposing that the foreground parent consider
+/// the normal folder-consent flow. It never opens a picker or grants access.
+#[must_use]
+pub fn sandbox_folder_access_proposal_tool_spec() -> ToolSpec {
+    let mut tool = request_folder_access_tool_spec();
+    tool.description = "Ask the foreground parent to decide whether it should ask the user to connect a folder. This is only a proposal: it grants no access, opens no picker, and must not include a path, root ID, or grant data.".into();
+    tool
 }
 
 /// Canonical arguments for [`LIST_CONNECTED_FOLDERS_TOOL`].
@@ -308,6 +330,12 @@ mod tests {
         assert!(!invalid.is_well_formed());
         invalid = args;
         invalid.reason = format!("{}x", " ".repeat(MAX_FOLDER_ACCESS_REASON_CHARS));
+        assert!(!invalid.is_well_formed());
+        invalid = RequestFolderAccessArgs {
+            reason: "Read /Users/example/Documents".into(),
+            requested_capabilities: vec![RequestedFolderCapability::ReadFiles],
+            folder_hint: None,
+        };
         assert!(!invalid.is_well_formed());
         assert!(
             serde_json::from_value::<RequestFolderAccessArgs>(serde_json::json!({

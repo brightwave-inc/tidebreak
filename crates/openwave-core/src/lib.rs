@@ -53,13 +53,13 @@ pub use blob::FsBlobStore;
 pub use cancel::{CancelToken, Cancelled};
 pub use client_tools::{
     list_connected_folders_tool_spec, list_folder_tool_spec, read_connected_file_tool_spec,
-    request_folder_access_tool_spec, validate_list_connected_folders_arguments,
-    validate_list_folder_arguments, validate_read_connected_file_arguments,
-    validate_request_folder_access_arguments, ListConnectedFoldersArgs, ListFolderArgs,
-    ReadConnectedFileArgs, RequestFolderAccessArgs, RequestFolderAccessResult,
-    RequestedFolderCapability, RequestedFolderHint, LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL,
-    MAX_CONNECTED_FOLDER_PATH_BYTES, MAX_FOLDER_ACCESS_REASON_CHARS, READ_CONNECTED_FILE_TOOL,
-    REQUEST_FOLDER_ACCESS_TOOL,
+    request_folder_access_tool_spec, sandbox_folder_access_proposal_tool_spec,
+    validate_list_connected_folders_arguments, validate_list_folder_arguments,
+    validate_read_connected_file_arguments, validate_request_folder_access_arguments,
+    ListConnectedFoldersArgs, ListFolderArgs, ReadConnectedFileArgs, RequestFolderAccessArgs,
+    RequestFolderAccessResult, RequestedFolderCapability, RequestedFolderHint,
+    LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL, MAX_CONNECTED_FOLDER_PATH_BYTES,
+    MAX_FOLDER_ACCESS_REASON_CHARS, READ_CONNECTED_FILE_TOOL, REQUEST_FOLDER_ACCESS_TOOL,
 };
 pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -74,16 +74,16 @@ pub use id::{
 pub use keychain::KeychainSecretProvider;
 pub use model::{
     validate_source_regions, AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunInboxStatus,
-    AgentRunResult, AgentRunStatus, BeginRootAttachmentChange, BlobRetirement,
-    BlobRetirementStatus, ByteSpan, Chat, ChatRootAttachment, ClientToolCallRequest,
-    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
-    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
-    Project, Role, RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
-    RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentOrigin,
-    RootAttachmentSubjectKind, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
-    SandboxToolCallStatus, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
-    ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitStatus,
+    AgentRunResult, AgentRunResultPayload, AgentRunStatus, BeginRootAttachmentChange,
+    BlobRetirement, BlobRetirementStatus, ByteSpan, Chat, ChatRootAttachment,
+    ClientToolCallRequest, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus,
+    DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus, DocumentRecord,
+    DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
+    Message, Project, Role, RootAttachmentChange, RootAttachmentChangeAction,
+    RootAttachmentChangeFailure, RootAttachmentChangePhase, RootAttachmentChangeTerminal,
+    RootAttachmentOrigin, RootAttachmentSubjectKind, SandboxToolCall, SandboxToolCallReceipt,
+    SandboxToolCallRequest, SandboxToolCallStatus, SourceLocation, SourceRegion, ToolCallExecution,
+    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitStatus,
     TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
     TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus, MAX_ATTACHMENT_REVISION,
     MAX_ROOT_ATTACHMENTS,

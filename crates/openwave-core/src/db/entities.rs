@@ -413,6 +413,8 @@ pub mod agent_run_result {
         pub lease_token: Uuid,
         pub attempt_count: i32,
         pub claim_count: i32,
+        pub payload_kind: String,
+        pub payload_json: String,
         pub text: String,
         pub submitted_at: DateTimeUtc,
     }
