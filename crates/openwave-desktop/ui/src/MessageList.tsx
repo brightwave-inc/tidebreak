@@ -1,9 +1,10 @@
-import type { RefObject, UIEvent } from "react";
+import type { ReactNode, RefObject, UIEvent } from "react";
 import type { PendingFolderAccessRequest } from "./api";
 import { FolderAccessCard } from "./FolderAccessCard";
 import type { FolderAccessDecision } from "./host";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { ToolCallCard, type ToolCallStatus } from "./ToolCallCard";
+import { ToolActivityGroup } from "./ToolActivityGroup";
 
 export type ChatMessage =
   | { id: string; role: "user"; text: string }
@@ -57,6 +58,8 @@ export function MessageList({
   onFolderAccessDecision,
   onFolderAccessCancel,
 }: MessageListProps) {
+  const messageItems = groupMessageItems(messages, busy, onApproval);
+
   return (
     <div className="messages" ref={scrollRef} onScroll={onScroll}>
       {messages.length === 0 && folderAccessRequests.length === 0 && (
@@ -64,14 +67,7 @@ export function MessageList({
           Configure a provider, pick a model, then send a message.
         </div>
       )}
-      {messages.map((message) => (
-        <MessageBubble
-          key={message.id}
-          message={message}
-          busy={busy}
-          onApproval={onApproval}
-        />
-      ))}
+      {messageItems}
       {folderAccessRequests.map((request) => (
         <FolderAccessCard
           key={request.callId}
@@ -88,6 +84,83 @@ export function MessageList({
       ))}
     </div>
   );
+}
+
+function isGroupableTerminalTool(
+  message: ChatMessage,
+): message is Extract<ChatMessage, { role: "tool" }> {
+  // Folder access is an authority boundary. It stays separate even when its
+  // corresponding tool event is terminal, so it cannot be mistaken for a
+  // passive historical activity item.
+  return (
+    message.role === "tool" &&
+    message.name !== "request_folder_access" &&
+    (message.status === "completed" ||
+      message.status === "failed" ||
+      message.status === "cancelled")
+  );
+}
+
+export function groupMessageItems(
+  messages: ChatMessage[],
+  busy: boolean,
+  onApproval: (callId: string, decision: "approve" | "reject") => void,
+) {
+  const items: ReactNode[] = [];
+  let index = 0;
+  let groupIndex = 0;
+
+  while (index < messages.length) {
+    const message = messages[index];
+
+    if (!isGroupableTerminalTool(message)) {
+      items.push(
+        <MessageBubble
+          key={message.id}
+          message={message}
+          busy={busy}
+          onApproval={onApproval}
+        />,
+      );
+      index += 1;
+      continue;
+    }
+
+    const activities = [message];
+    index += 1;
+    while (index < messages.length) {
+      const nextMessage = messages[index];
+      if (!isGroupableTerminalTool(nextMessage)) {
+        break;
+      }
+
+      activities.push(nextMessage);
+      index += 1;
+    }
+
+    if (activities.length === 1) {
+      items.push(
+        <MessageBubble
+          key={message.id}
+          message={message}
+          busy={busy}
+          onApproval={onApproval}
+        />,
+      );
+      continue;
+    }
+
+    items.push(
+      <ToolActivityGroup
+        key={activities[0].id}
+        activities={activities}
+        groupIndex={groupIndex}
+      />,
+    );
+    groupIndex += 1;
+  }
+
+  return items;
 }
 
 export function MessageBubble({
