@@ -1,8 +1,8 @@
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait, TryInsertResult,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, QueryTrait, Set, TransactionTrait, TryInsertResult,
 };
 
 use crate::error::{AgentError, Result};
@@ -14,6 +14,8 @@ use crate::model::{
     MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::ChatTranscriptSnapshot;
+use crate::storage::DeleteChatOutcome;
+use std::collections::HashSet;
 
 use super::super::{entities, project_from_models, store_err, DbStore};
 use super::turn::canonical_db_timestamp;
@@ -283,6 +285,222 @@ pub(in crate::db) async fn list_chats(store: &DbStore) -> Result<Vec<Chat>> {
             .then_with(|| right.id.0.cmp(&left.id.0))
     });
     Ok(chats)
+}
+
+/// Remove one fully quiesced conversation and its terminal history.
+///
+/// Every turn writer takes the chat fence, and all runnable work is rejected
+/// before this transaction begins erasing state. Host-root attachment changes
+/// are intentionally not treated as ordinary rows: they represent native
+/// authority outside this database, so any attached or unreconciled root keeps
+/// deletion fail-closed.
+pub(in crate::db) async fn delete_chat(
+    store: &DbStore,
+    chat_id: ChatId,
+) -> Result<DeleteChatOutcome> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DeleteChatOutcome::NotFound);
+    }
+
+    let roots_attached = entities::chat_root_attachment::Entity::find()
+        .filter(entities::chat_root_attachment::Column::ChatId.eq(chat_id.0))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if roots_attached {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DeleteChatOutcome::RootsAttached);
+    }
+
+    // A terminal `failed` attachment can intentionally retain an unknown broker
+    // observation. Looking only for `awaiting_broker` would let a failed attach
+    // with no final broker state erase the product record while native authority
+    // might still exist. The latest operation per root must conclusively say
+    // detached; older attach receipts are superseded by a later detach receipt.
+    let changes = entities::root_attachment_change::Entity::find()
+        .filter(entities::root_attachment_change::Column::ChatId.eq(chat_id.0))
+        .order_by_desc(entities::root_attachment_change::Column::CreatedAt)
+        .order_by_desc(entities::root_attachment_change::Column::Id)
+        .all(&transaction)
+        .await
+        .map_err(store_err)?;
+    let mut observed_roots = HashSet::new();
+    let attachment_state_unresolved = changes.into_iter().any(|change| {
+        observed_roots.insert(change.root_id)
+            && (change.phase == "awaiting_broker"
+                || change.broker_currently_attached != Some(false))
+    });
+    if attachment_state_unresolved {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DeleteChatOutcome::RootAttachmentStateUnresolved);
+    }
+
+    let active_turn = entities::turn_run::Entity::find()
+        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::turn_run::Column::Status.is_not_in([
+            TurnRunStatus::Completed.as_str(),
+            TurnRunStatus::Failed.as_str(),
+            TurnRunStatus::Cancelled.as_str(),
+        ]))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    let active_sandbox = entities::agent_run::Entity::find()
+        .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::agent_run::Column::Execution.eq("sandbox"))
+        .filter(entities::agent_run::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if active_turn || active_sandbox {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DeleteChatOutcome::ActiveWork);
+    }
+
+    // Delete dependency leaves before their parent lifecycle rows. These
+    // tables intentionally use restrictive foreign keys to make normal state
+    // machine mistakes visible; conversation deletion is the explicit terminal
+    // owner that can erase their complete, quiesced graph in one transaction.
+    entities::event::Entity::delete_many()
+        .filter(entities::event::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::turn_client_wait::Entity::delete_many()
+        .filter(entities::turn_client_wait::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::turn_agent_run_wait::Entity::delete_many()
+        .filter(entities::turn_agent_run_wait::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::turn_steer::Entity::delete_many()
+        .filter(entities::turn_steer::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::tool_call::Entity::delete_many()
+        .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::sandbox_tool_call_receipt::Entity::delete_many()
+        .filter(
+            entities::sandbox_tool_call_receipt::Column::CallId.in_subquery(
+                entities::sandbox_tool_call::Entity::find()
+                    .select_only()
+                    .column(entities::sandbox_tool_call::Column::Id)
+                    .filter(entities::sandbox_tool_call::Column::ChatId.eq(chat_id.0))
+                    .into_query(),
+            ),
+        )
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::sandbox_tool_call::Entity::delete_many()
+        .filter(entities::sandbox_tool_call::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::agent_run_inbox::Entity::delete_many()
+        .filter(entities::agent_run_inbox::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    let agent_runs = entities::agent_run::Entity::find()
+        .select_only()
+        .column(entities::agent_run::Column::Id)
+        .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
+        .into_query();
+    entities::agent_run_cancellation::Entity::delete_many()
+        .filter(
+            entities::agent_run_cancellation::Column::AgentRunId.in_subquery(agent_runs.clone()),
+        )
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::agent_run_result::Entity::delete_many()
+        .filter(entities::agent_run_result::Column::AgentRunId.in_subquery(agent_runs.clone()))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::turn_failure::Entity::delete_many()
+        .filter(
+            entities::turn_failure::Column::TurnId.in_subquery(
+                entities::turn_run::Entity::find()
+                    .select_only()
+                    .column(entities::turn_run::Column::Id)
+                    .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+                    .into_query(),
+            ),
+        )
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::turn_claim::Entity::delete_many()
+        .filter(
+            entities::turn_claim::Column::TurnId.in_subquery(
+                entities::turn_run::Entity::find()
+                    .select_only()
+                    .column(entities::turn_run::Column::Id)
+                    .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+                    .into_query(),
+            ),
+        )
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::turn_run::Entity::delete_many()
+        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::message_identity::Entity::delete_many()
+        .filter(entities::message_identity::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::message::Entity::delete_many()
+        .filter(entities::message::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::agent_run_claim::Entity::delete_many()
+        .filter(entities::agent_run_claim::Column::AgentRunId.in_subquery(agent_runs))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::agent_run::Entity::delete_many()
+        .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::agent_run::Column::Depth.eq(1))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::agent_run::Entity::delete_many()
+        .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::agent_run::Column::Depth.eq(0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::root_attachment_change::Entity::delete_many()
+        .filter(entities::root_attachment_change::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::chat::Entity::delete_by_id(chat_id.0)
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+
+    transaction.commit().await.map_err(store_err)?;
+    Ok(DeleteChatOutcome::Deleted)
 }
 
 /// Read the visible transcript and cursor for future journal replay under the

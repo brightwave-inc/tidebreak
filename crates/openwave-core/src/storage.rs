@@ -49,6 +49,26 @@ pub struct ChatTranscriptSnapshot {
     pub last_event_seq: i64,
 }
 
+/// Result of a fail-closed conversation deletion request.
+///
+/// A conversation is only removable after every turn is terminal and no host
+/// root remains attached. Root detachment is a broker-backed operation, so the
+/// deletion path never tries to revoke native authority as an incidental side
+/// effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteChatOutcome {
+    /// The conversation and its terminal product history were removed.
+    Deleted,
+    /// No conversation owns this id.
+    NotFound,
+    /// A foreground turn or sandboxed run can still make progress.
+    ActiveWork,
+    /// A root is still projected into the conversation's broker context.
+    RootsAttached,
+    /// Broker history cannot conclusively prove every detached root is gone.
+    RootAttachmentStateUnresolved,
+}
+
 /// Why maintenance determined that a document needs an index job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentIndexJobReason {
@@ -1015,6 +1035,18 @@ pub trait Store: Send + Sync {
 
     /// List chats, most-recently-created first.
     async fn list_chats(&self) -> Result<Vec<Chat>>;
+
+    /// Remove a conversation and its terminal product history atomically.
+    ///
+    /// This deliberately fails closed while any turn can still run, while any
+    /// root remains attached, or while broker reconciliation is pending. The
+    /// caller must first finish cancellation and use the durable root-detach
+    /// flow; deletion never guesses at native broker state.
+    async fn delete_chat(&self, _id: ChatId) -> Result<DeleteChatOutcome> {
+        Err(AgentError::Store(
+            "conversation deletion is not implemented by this Store".into(),
+        ))
+    }
 
     /// Atomically load a chat's durable messages and its event-journal
     /// watermark. Returns `None` when the chat does not exist.

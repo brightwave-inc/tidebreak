@@ -1,6 +1,7 @@
 use super::*;
 use crate::model::{
     ByteSpan, ChatRootAttachment, DocumentParseOutput, DocumentSourceBlob, DocumentSourceUpsert,
+    RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangeTerminal,
     RootAttachmentOrigin, SourceLocation, ToolCallExecution, ToolCallResolution, ToolCallStatus,
     MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
 };
@@ -8987,6 +8988,122 @@ async fn list_chats_is_newest_first_and_messages_follow_commit_sequence() {
     store.append_message(&m2).await.unwrap();
     let listed = store.list_messages(newer.id).await.unwrap();
     assert_eq!(listed, vec![m1, m2]);
+}
+
+#[tokio::test]
+async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_roots() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let message = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        role: Role::User,
+        content: "delete this history".into(),
+        created_at: Utc::now(),
+    };
+    store.append_message(&message).await.unwrap();
+    store
+        .append_event(
+            chat.id,
+            &AgentEvent::TextDelta {
+                text: "live".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.delete_chat(chat.id).await.unwrap(),
+        DeleteChatOutcome::Deleted
+    );
+    assert_eq!(store.get_chat(chat.id).await.unwrap(), None);
+    assert!(store.list_messages(chat.id).await.unwrap().is_empty());
+    assert!(store.list_events(chat.id, 0).await.unwrap().is_empty());
+    assert_eq!(
+        store.delete_chat(chat.id).await.unwrap(),
+        DeleteChatOutcome::NotFound
+    );
+
+    let active = sample_chat();
+    store.create_chat(&active).await.unwrap();
+    let active_turn_id = TurnId::new();
+    store
+        .accept_turn(active_turn_id, active.id, "test", "still working")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.delete_chat(active.id).await.unwrap(),
+        DeleteChatOutcome::ActiveWork
+    );
+    assert!(store.get_chat(active.id).await.unwrap().is_some());
+    let active_turn = store.get_turn_run(active_turn_id).await.unwrap().unwrap();
+    store
+        .request_turn_cancellation_and_append_event(
+            active_turn_id,
+            active_turn.updated_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.delete_chat(active.id).await.unwrap(),
+        DeleteChatOutcome::Deleted
+    );
+
+    let root = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let mut rooted = sample_chat();
+    rooted.attachment_revision = 1;
+    rooted.root_attachments = vec![ChatRootAttachment {
+        root_id: root,
+        origin: RootAttachmentOrigin::Conversation,
+    }];
+    store.create_chat(&rooted).await.unwrap();
+    assert_eq!(
+        store.delete_chat(rooted.id).await.unwrap(),
+        DeleteChatOutcome::RootsAttached
+    );
+    assert!(store.get_chat(rooted.id).await.unwrap().is_some());
+
+    let ambiguous = sample_chat();
+    store.create_chat(&ambiguous).await.unwrap();
+    let change = BeginRootAttachmentChange {
+        id: RootAttachmentChangeId::new(),
+        chat_id: ambiguous.id,
+        executor_id: uuid::Uuid::new_v4(),
+        root_id: HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap(),
+        action: RootAttachmentChangeAction::Attach,
+        expected_attachment_revision: 0,
+        created_at: Utc::now(),
+    };
+    assert!(matches!(
+        store.begin_root_attachment_change(&change).await.unwrap(),
+        BeginRootAttachmentChangeOutcome::Begun(_)
+    ));
+    assert!(matches!(
+        store
+            .finish_root_attachment_change(
+                change.id,
+                change.executor_id,
+                &RootAttachmentChangeTerminal::Failed {
+                    broker_changed: None,
+                    broker_currently_attached: None,
+                    failure: RootAttachmentChangeFailure {
+                        code: "broker_unavailable".into(),
+                        message: "could not verify the folder attachment".into(),
+                        retryable: true,
+                    },
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        FinishRootAttachmentChangeOutcome::Finished(_)
+    ));
+    assert_eq!(
+        store.delete_chat(ambiguous.id).await.unwrap(),
+        DeleteChatOutcome::RootAttachmentStateUnresolved
+    );
+    assert!(store.get_chat(ambiguous.id).await.unwrap().is_some());
 }
 
 #[tokio::test]

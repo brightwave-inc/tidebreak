@@ -145,16 +145,65 @@ button {
   text-align: left;
 }
 
-.conversation-item:hover {
-  color: var(--ink);
-  background: color-mix(in srgb, var(--sidebar-active) 72%, transparent);
+.conversation-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: 7px;
 }
 
-.conversation-item.is-active,
+.conversation-row:hover,
+.conversation-row.is-active {
+  background: var(--sidebar-active);
+}
+
+.conversation-row:hover .conversation-item,
+.conversation-row.is-active .conversation-item {
+  color: var(--ink);
+}
+
+.conversation-item:hover {
+  color: var(--ink);
+  background: transparent;
+}
+
 .sidebar-action.is-active,
 .sidebar-action:hover {
   color: var(--ink);
   background: var(--sidebar-active);
+}
+
+.conversation-item {
+  flex: 1 1 auto;
+}
+
+.conversation-delete {
+  width: 1.65rem;
+  height: 1.65rem;
+  flex: 0 0 auto;
+  margin-right: 0.2rem;
+  border: 0;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 1.1rem;
+  line-height: 1;
+  opacity: 0;
+}
+
+.conversation-row:hover .conversation-delete,
+.conversation-row.is-active .conversation-delete,
+.conversation-delete:focus-visible {
+  opacity: 1;
+}
+
+.conversation-delete:hover:not(:disabled) {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.conversation-delete:disabled {
+  cursor: progress;
 }
 
 .conversation-item span:last-child {

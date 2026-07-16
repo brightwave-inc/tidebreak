@@ -6137,6 +6137,63 @@ async fn patch_chat_sets_and_clears_a_trimmed_title() {
 }
 
 #[tokio::test]
+async fn delete_chat_removes_a_quiesced_conversation_and_reports_safe_conflicts() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    let deleted = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/chats/{}", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert!(store.get_chat(chat.id).await.unwrap().is_none());
+
+    let missing = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/chats/{}", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let active = make_chat(&router, &bearer).await;
+    store
+        .accept_turn(TurnId::new(), active.id, "fake", "do not remove")
+        .await
+        .unwrap();
+    let blocked = router
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/chats/{}", active.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::CONFLICT);
+    let info: AgentErrorInfo = json_body(blocked).await;
+    assert_eq!(info.kind, "chat_active");
+    assert!(store.get_chat(active.id).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn chat_transcript_replays_only_visible_durable_messages() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");

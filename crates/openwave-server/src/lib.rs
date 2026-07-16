@@ -177,7 +177,9 @@ pub fn app(state: AppState) -> Router {
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route(
             "/chats/{id}",
-            get(routes::get_chat).patch(routes::patch_chat),
+            get(routes::get_chat)
+                .patch(routes::patch_chat)
+                .delete(routes::delete_chat),
         )
         .route("/chats/{id}/messages", get(routes::list_chat_messages))
         .route("/chats/{id}/agent-runs", get(routes::list_agent_runs))
