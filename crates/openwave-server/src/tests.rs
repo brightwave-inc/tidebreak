@@ -6243,6 +6243,183 @@ async fn chat_transcript_replays_only_visible_durable_messages() {
 }
 
 #[tokio::test]
+async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "finish a turn first").await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_turn(&store, chat.id).await;
+    let turn = store
+        .list_turn_runs(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("accepted turn exists");
+    assert_eq!(turn.status, TurnRunStatus::Completed);
+
+    let call_id = CallId::new();
+    let started_at = chrono::Utc::now();
+    let secret_path = "/Users/alice/Documents/payroll-secret.csv";
+    let secret_result = "private tool result: 123-45-6789";
+    let secret_provider_id = "provider-secret-call-id";
+    store
+        .accept_tool_call(&ToolCallRecord {
+            id: call_id,
+            chat_id: chat.id,
+            turn_id: turn.id,
+            provider_id: secret_provider_id.into(),
+            name: "mcp__private_server__read_sensitive_path".into(),
+            arguments: serde_json::json!({"path": secret_path}),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: started_at,
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_server_tool_call(
+                call_id,
+                &ToolCallResolution::Failed {
+                    result: secret_result.into(),
+                    error_code: "private_error_code".into(),
+                    error_detail: Some("private diagnostic detail".into()),
+                },
+                started_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap(),
+        openwave_core::ResolveToolCallOutcome::Resolved
+    );
+
+    // An approval-in-flight call must stay on the event journal. Including it
+    // in this durable snapshot could race its corresponding live event.
+    store
+        .accept_tool_call(&ToolCallRecord {
+            id: CallId::new(),
+            chat_id: chat.id,
+            turn_id: turn.id,
+            provider_id: "provider-pending".into(),
+            name: "web_search".into(),
+            arguments: serde_json::json!({"query": "pending secret query"}),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: started_at + chrono::Duration::milliseconds(2),
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+
+    let cancelled_call_id = CallId::new();
+    store
+        .accept_tool_call(&ToolCallRecord {
+            id: cancelled_call_id,
+            chat_id: chat.id,
+            turn_id: turn.id,
+            provider_id: "provider-cancelled".into(),
+            name: "request_folder_access".into(),
+            arguments: serde_json::json!({"path": "/private/ignored"}),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: started_at + chrono::Duration::milliseconds(1),
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_server_tool_call(
+                cancelled_call_id,
+                &ToolCallResolution::Cancelled {
+                    result: "declined by the user".into(),
+                },
+                started_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap(),
+        openwave_core::ResolveToolCallOutcome::Resolved
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let call_id_text = call_id.to_string();
+    for hidden in [
+        secret_path,
+        secret_result,
+        secret_provider_id,
+        "/private/ignored",
+        "declined by the user",
+        "pending secret query",
+        "private_error_code",
+        "private diagnostic detail",
+        call_id_text.as_str(),
+        "mcp__private_server__read_sensitive_path",
+        "arguments",
+        "result",
+        "provider_id",
+        "execution",
+        "error_code",
+        "error_detail",
+        "client_executor_id",
+        "client_lease",
+    ] {
+        assert!(
+            !body.contains(hidden),
+            "renderer-safe transcript leaked canonical tool data: {hidden}"
+        );
+    }
+    let transcript: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let activity = transcript["tool_activity"].as_array().unwrap();
+    assert_eq!(activity.len(), 2);
+    assert!(activity.iter().any(|card| {
+        card["title"] == "Use a tool"
+            && card["status"] == "failed"
+            && card["started_at"].is_string()
+            && card["finished_at"].is_string()
+    }));
+    assert!(activity
+        .iter()
+        .any(|card| { card["title"] == "Request folder access" && card["status"] == "cancelled" }));
+}
+
+#[tokio::test]
 async fn transcript_cursor_replays_an_active_turn_after_the_durable_boundary() {
     let active_delta_entered = Arc::new(Notify::new());
     let (router, token, store, _dir) = test_app_with(Arc::new(ReplayBoundaryProvider {
