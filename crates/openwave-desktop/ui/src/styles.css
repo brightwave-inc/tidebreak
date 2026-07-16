@@ -597,6 +597,85 @@ button {
   font-size: 0.82em;
 }
 
+.tool-call-card {
+  display: flex;
+  width: min(100%, 31rem);
+  align-self: flex-start;
+  align-items: center;
+  gap: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 0.6rem 0.7rem;
+  color: var(--muted);
+  background: var(--bg-elevated);
+}
+
+.tool-call-icon {
+  display: grid;
+  width: 1.55rem;
+  height: 1.55rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--ink);
+  background: var(--user-bg);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.tool-call-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.03rem;
+}
+
+.tool-call-copy strong {
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.tool-call-copy span {
+  font-size: 0.75rem;
+}
+
+.tool-call-spinner {
+  width: 0.8rem;
+  height: 0.8rem;
+  flex: 0 0 auto;
+  margin-left: auto;
+  border: 2px solid color-mix(in srgb, var(--muted) 25%, transparent);
+  border-top-color: var(--muted);
+  border-radius: 999px;
+  animation: tool-call-spin 800ms linear infinite;
+}
+
+.tool-call-card.is-completed .tool-call-icon {
+  color: oklch(0.42 0.13 150);
+  background: oklch(0.95 0.035 150);
+}
+
+.tool-call-card.is-failed .tool-call-icon {
+  color: var(--danger);
+  background: oklch(0.97 0.01 25);
+}
+
+.tool-call-card.is-cancelled {
+  opacity: 0.7;
+}
+
+@keyframes tool-call-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-call-spinner {
+    animation: none;
+  }
+}
+
 .folder-consent {
   align-self: flex-start;
   width: min(100%, 34rem);

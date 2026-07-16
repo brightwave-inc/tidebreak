@@ -26,11 +26,19 @@ import {
 import { FolderAccessCard } from "./FolderAccessCard";
 import { Logomark } from "./Logomark";
 import { MessageMarkdown } from "./MessageMarkdown";
+import { ToolCallCard, type ToolCallStatus } from "./ToolCallCard";
 
 type Msg =
   | { id: string; role: "user"; text: string }
   | { id: string; role: "assistant"; text: string }
   | { id: string; role: "system"; text: string }
+  | {
+      id: string;
+      role: "tool";
+      callId: string;
+      name: string;
+      status: ToolCallStatus;
+    }
   | {
       id: string;
       role: "approval";
@@ -90,6 +98,7 @@ export default function App() {
   const resolvingFolderCallsRef = useRef<Set<string>>(new Set());
   const visibleFolderCallIdsRef = useRef<Set<string>>(new Set());
   const cancelRequestTurnRef = useRef<string | null>(null);
+  const provisionalToolCallIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -313,6 +322,7 @@ export default function App() {
     if (event.type === "turn_started") {
       refreshAgentRunsRef.current?.();
       assistantBufRef.current = "";
+      provisionalToolCallIdsRef.current = new Set();
       setBusy(true);
       setActiveTurnId(event.turn_id);
       setCancelPendingTurnId(null);
@@ -343,8 +353,10 @@ export default function App() {
 
     if (event.type === "stream_interrupted") {
       assistantBufRef.current = "";
+      const provisionalCallIds = provisionalToolCallIdsRef.current;
+      provisionalToolCallIdsRef.current = new Set();
       setMessages((prev) => {
-        const copy = [...prev];
+        const copy = discardToolCalls(prev, provisionalCallIds);
         if (copy[copy.length - 1]?.role === "assistant") {
           copy.pop();
         }
@@ -358,18 +370,33 @@ export default function App() {
       if (event.name === "request_folder_access") {
         refreshFolderAccessRef.current?.();
       }
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextId(),
-          role: "system",
-          text: `tool ${event.name}`,
-        },
-      ]);
+      provisionalToolCallIdsRef.current.add(event.call_id);
+      setMessages((prev) =>
+        upsertToolCall(prev, event.call_id, event.name, "running"),
+      );
+      return;
+    }
+
+    if (event.type === "tool_call_args_delta") {
+      // Arguments are intentionally not retained in renderer state. They can
+      // contain paths, file content, credentials, or provider-specific data.
+      setMessages((prev) =>
+        updateToolCall(prev, event.call_id, (tool) => ({
+          ...tool,
+          status: tool.status === "waiting_approval" ? tool.status : "running",
+        })),
+      );
       return;
     }
 
     if (event.type === "approval_required") {
+      provisionalToolCallIdsRef.current.delete(event.call_id);
+      setMessages((prev) =>
+        updateToolCall(prev, event.call_id, (tool) => ({
+          ...tool,
+          status: "waiting_approval",
+        })),
+      );
       setMessages((prev) => [
         ...prev,
         {
@@ -382,6 +409,29 @@ export default function App() {
       return;
     }
 
+    if (event.type === "approval_decided") {
+      setMessages((prev) =>
+        updateApprovalAndToolCall(prev, event.call_id, event.approved),
+      );
+      return;
+    }
+
+    if (event.type === "tool_call_completed") {
+      provisionalToolCallIdsRef.current.delete(event.call_id);
+      setMessages((prev) =>
+        updateToolCall(prev, event.call_id, (tool) => ({
+          ...tool,
+          status:
+            tool.status === "cancelled"
+              ? "cancelled"
+              : toolOutputFailed(event.output)
+                ? "failed"
+                : "completed",
+        })),
+      );
+      return;
+    }
+
     if (event.type === "user_steered") {
       setMessages((prev) => [
         ...prev,
@@ -391,26 +441,29 @@ export default function App() {
     }
 
     if (event.type === "turn_completed") {
+      provisionalToolCallIdsRef.current = new Set();
       resolveActiveTurn();
       refreshAgentRunsRef.current?.();
       return;
     }
 
     if (event.type === "turn_cancelled") {
+      provisionalToolCallIdsRef.current = new Set();
       resolveActiveTurn();
       refreshAgentRunsRef.current?.();
       setMessages((prev) => [
-        ...prev,
+        ...settleActiveToolCalls(prev, "cancelled"),
         { id: nextId(), role: "system", text: "turn cancelled" },
       ]);
       return;
     }
 
     if (event.type === "turn_failed") {
+      provisionalToolCallIdsRef.current = new Set();
       resolveActiveTurn();
       refreshAgentRunsRef.current?.();
       setMessages((prev) => [
-        ...prev,
+        ...settleActiveToolCalls(prev, "failed"),
         {
           id: nextId(),
           role: "error",
@@ -495,6 +548,7 @@ export default function App() {
       socketRef.current?.close();
       socketRef.current = null;
       assistantBufRef.current = "";
+      provisionalToolCallIdsRef.current = new Set();
       lastSeqRef.current = 0;
       setMessages([]);
       setAgentRuns([]);
@@ -791,6 +845,9 @@ export default function App() {
               </div>
             )}
             {messages.map((m) => {
+              if (m.role === "tool") {
+                return <ToolCallCard key={m.id} name={m.name} status={m.status} />;
+              }
               if (m.role === "approval") {
                 return (
                   <div key={m.id} className="bubble system">
@@ -909,6 +966,87 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+function upsertToolCall(
+  messages: Msg[],
+  callId: string,
+  name: string,
+  status: ToolCallStatus,
+): Msg[] {
+  const existing = messages.findIndex(
+    (message) => message.role === "tool" && message.callId === callId,
+  );
+  if (existing >= 0) {
+    return messages.map((message, index) =>
+      index === existing && message.role === "tool" ? { ...message, status } : message,
+    );
+  }
+  return [...messages, { id: nextId(), role: "tool", callId, name, status }];
+}
+
+function updateToolCall(
+  messages: Msg[],
+  callId: string,
+  update: (tool: Extract<Msg, { role: "tool" }>) => Extract<Msg, { role: "tool" }>,
+): Msg[] {
+  return messages.map((message) =>
+    message.role === "tool" && message.callId === callId ? update(message) : message,
+  );
+}
+
+function updateApprovalAndToolCall(
+  messages: Msg[],
+  callId: string,
+  approved: boolean,
+): Msg[] {
+  return messages.map((message) => {
+    if (message.role === "approval" && message.callId === callId) {
+      return { ...message, resolved: true };
+    }
+    if (message.role === "tool" && message.callId === callId) {
+      return {
+        ...message,
+        status: approved ? "running" : "cancelled",
+      };
+    }
+    return message;
+  });
+}
+
+function settleActiveToolCalls(
+  messages: Msg[],
+  status: Extract<ToolCallStatus, "failed" | "cancelled">,
+): Msg[] {
+  const activeCallIds = new Set(
+    messages.flatMap((message) =>
+      message.role === "tool" &&
+      (message.status === "running" || message.status === "waiting_approval")
+        ? [message.callId]
+        : [],
+    ),
+  );
+  return messages.map((message) =>
+    message.role === "tool" &&
+    (message.status === "running" || message.status === "waiting_approval")
+      ? { ...message, status }
+      : message.role === "approval" &&
+          !message.resolved &&
+          activeCallIds.has(message.callId)
+        ? { ...message, resolved: true }
+      : message,
+  );
+}
+
+function discardToolCalls(messages: Msg[], callIds: Set<string>): Msg[] {
+  return messages.filter(
+    (message) => message.role !== "tool" || !callIds.has(message.callId),
+  );
+}
+
+function toolOutputFailed(output: unknown): boolean {
+  if (!output || typeof output !== "object") return false;
+  return (output as { is_error?: unknown }).is_error === true;
 }
 
 function withoutConnectionState(status: string): string {
