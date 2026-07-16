@@ -23,33 +23,14 @@ import {
   type ConnectedFolder,
   type FolderAccessDecision,
 } from "./host";
-import { FolderAccessCard } from "./FolderAccessCard";
 import { Logomark } from "./Logomark";
-import { MessageMarkdown } from "./MessageMarkdown";
-import { ToolCallCard, type ToolCallStatus } from "./ToolCallCard";
+import { MessageList, type ChatMessage } from "./MessageList";
+import type { ToolCallStatus } from "./ToolCallCard";
 import { hydrateTranscriptHistory } from "./TranscriptHistory";
 import { useChatEventStream } from "./ChatEventStream";
 import { isNearBottom, scrollToLatest } from "./ChatScroll";
 
-type Msg =
-  | { id: string; role: "user"; text: string }
-  | { id: string; role: "assistant"; text: string }
-  | { id: string; role: "system"; text: string }
-  | {
-      id: string;
-      role: "tool";
-      callId: string;
-      name: string;
-      status: ToolCallStatus;
-    }
-  | {
-      id: string;
-      role: "approval";
-      callId: string;
-      summary: string;
-      resolved?: boolean;
-    }
-  | { id: string; role: "error"; text: string };
+type Msg = ChatMessage;
 
 let msgSeq = 0;
 const MAX_RECENT_TERMINAL_SANDBOX_RUNS = 2;
@@ -1057,82 +1038,28 @@ export default function App() {
           </div>
 
           <div className="message-view">
-            <div
-              className="messages"
-              ref={scrollRef}
+            <MessageList
+              messages={messages}
+              folderAccessRequests={folderAccessRequests}
+              nativeHost={hasNativeHost()}
+              nativeBusy={resolvingFolderCalls.size > 0}
+              resolvingFolderCalls={resolvingFolderCalls}
+              folderAccessErrors={folderAccessErrors}
+              busy={busy}
+              scrollRef={scrollRef}
               onScroll={(event) => {
                 const followsLatest = isNearBottom(event.currentTarget);
                 followsLatestRef.current = followsLatest;
                 if (followsLatest) setHasUnreadActivity(false);
               }}
-            >
-              {messages.length === 0 && folderAccessRequests.length === 0 && (
-                <div className="bubble system">
-                  Configure a provider, pick a model, then send a message.
-                </div>
-              )}
-              {messages.map((m) => {
-                if (m.role === "tool") {
-                  return <ToolCallCard key={m.id} name={m.name} status={m.status} />;
-                }
-                if (m.role === "approval") {
-                  return (
-                    <div key={m.id} className="bubble system">
-                      <div>Approval needed: {m.summary}</div>
-                      {!m.resolved && (
-                        <div className="approval">
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            onClick={() => void onApproval(m.callId, "approve")}
-                          >
-                            Approve
-                          </button>
-                          <button
-                            type="button"
-                            className="btn"
-                            onClick={() => void onApproval(m.callId, "reject")}
-                          >
-                            Reject
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                }
-                return (
-                  <div key={m.id} className={`bubble ${m.role}`}>
-                    {m.text ? (
-                      m.role === "assistant" || m.role === "user" ? (
-                        <MessageMarkdown>{m.text}</MessageMarkdown>
-                      ) : (
-                        m.text
-                      )
-                    ) : m.role === "assistant" && busy ? (
-                      "…"
-                    ) : (
-                      ""
-                    )}
-                  </div>
-                );
-              })}
-              {folderAccessRequests.map((request) => (
-                <FolderAccessCard
-                  key={request.callId}
-                  request={request}
-                  nativeHost={hasNativeHost()}
-                  nativeBusy={resolvingFolderCalls.size > 0}
-                  working={resolvingFolderCalls.has(request.callId)}
-                  error={folderAccessErrors[request.callId]}
-                  onDecision={(decision) =>
-                    void onFolderAccessDecision(request.callId, decision)
-                  }
-                  onCancel={() =>
-                    void onFolderAccessCancel(request.callId, request.turnId)
-                  }
-                />
-              ))}
-            </div>
+              onApproval={(callId, decision) => void onApproval(callId, decision)}
+              onFolderAccessDecision={(callId, decision) =>
+                void onFolderAccessDecision(callId, decision)
+              }
+              onFolderAccessCancel={(callId, turnId) =>
+                void onFolderAccessCancel(callId, turnId)
+              }
+            />
             {hasUnreadActivity && (
               <button
                 type="button"
