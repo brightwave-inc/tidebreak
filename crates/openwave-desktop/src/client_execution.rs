@@ -23,12 +23,16 @@ use uuid::Uuid;
 use crate::host_access::{pick_folder, AuthoritativeContext, HostAccess};
 
 mod control_plane;
+pub(crate) mod folder_operations;
 mod receipt_store;
 
 pub(crate) use control_plane::ControlPlaneClient;
 use control_plane::ControlPlaneError;
 pub(crate) use receipt_store::ReceiptStore;
-use receipt_store::{FolderAccessIntent, FolderAccessReceipt, RegistrationPhase, StoredResolution};
+use receipt_store::{
+    FolderAccessIntent, FolderAccessReceipt, FolderOperationPhase, FolderOperationReceipt,
+    RegistrationPhase, StoredResolution,
+};
 
 const RECOVERY_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const RECOVERY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);

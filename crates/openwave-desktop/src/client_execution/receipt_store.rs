@@ -1,6 +1,7 @@
 //! App-private recovery receipts for native client execution.
 
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions, TryLockError},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -17,8 +18,9 @@ const RECEIPT_VERSION: u32 = 1;
 const RECEIPT_DIRECTORY: &str = "client-executions";
 const EXECUTOR_FILE: &str = "executor-id";
 const MAX_EXECUTOR_BYTES: usize = 128;
-const MAX_RECEIPT_BYTES: usize = 64 * 1024;
+const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 const MAX_RECEIPTS: usize = 1_024;
+const FOLDER_OPERATION_PREFIX: &str = "folder-operation-";
 
 pub(crate) struct ReceiptStore {
     directory: PathBuf,
@@ -38,6 +40,37 @@ pub(super) struct FolderAccessReceipt {
     pub(super) registration_phase: RegistrationPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) resolution: Option<StoredResolution>,
+}
+
+/// Durable receipt for one read-only foreground folder operation.
+///
+/// It intentionally stores no host path or authority. The canonical request is
+/// recovered from the server-owned tool call; this receipt preserves only the
+/// exact native lease and terminal model result across desktop restarts.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(super) struct FolderOperationReceipt {
+    version: u32,
+    pub(super) chat_id: ChatId,
+    pub(super) call_id: CallId,
+    pub(super) executor_id: Uuid,
+    pub(super) lease_token: Uuid,
+    #[serde(default)]
+    pub(super) phase: FolderOperationPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) resolution: Option<StoredResolution>,
+}
+
+/// Whether a read-only broker request may have been dispatched already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum FolderOperationPhase {
+    /// No host operation has been sent. Exact claim recovery may continue.
+    #[default]
+    NotStarted,
+    /// A final lease heartbeat succeeded and broker dispatch may have begun.
+    /// Recovery must terminalize rather than issue another read.
+    DispatchStarted,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +112,21 @@ impl std::fmt::Debug for FolderAccessReceipt {
             .field("lease_token", &"[redacted]")
             .field("intent", &self.intent)
             .field("registration_phase", &self.registration_phase)
+            .field("resolution", &self.resolution)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for FolderOperationReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FolderOperationReceipt")
+            .field("version", &self.version)
+            .field("chat_id", &self.chat_id)
+            .field("call_id", &self.call_id)
+            .field("executor_id", &self.executor_id)
+            .field("lease_token", &"[redacted]")
+            .field("phase", &self.phase)
             .field("resolution", &self.resolution)
             .finish()
     }
@@ -128,6 +176,32 @@ impl FolderAccessReceipt {
             )
         {
             return Err(invalid_data("invalid client-execution receipt"));
+        }
+        Ok(())
+    }
+}
+
+impl FolderOperationReceipt {
+    pub(super) fn new(chat_id: ChatId, call_id: CallId, executor_id: Uuid) -> Self {
+        Self {
+            version: RECEIPT_VERSION,
+            chat_id,
+            call_id,
+            executor_id,
+            lease_token: Uuid::new_v4(),
+            phase: FolderOperationPhase::NotStarted,
+            resolution: None,
+        }
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if self.version != RECEIPT_VERSION
+            || self.chat_id.0.is_nil()
+            || self.call_id.0.is_nil()
+            || self.executor_id.is_nil()
+            || self.lease_token.is_nil()
+        {
+            return Err(invalid_data("invalid folder-operation receipt"));
         }
         Ok(())
     }
@@ -191,8 +265,29 @@ impl ReceiptStore {
         write_atomically(&self.directory, &self.receipt_path(receipt.call_id), &bytes)
     }
 
+    pub(super) fn save_operation(&self, receipt: &FolderOperationReceipt) -> io::Result<()> {
+        receipt.validate()?;
+        let bytes = serde_json::to_vec(receipt).map_err(invalid_data)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(invalid_data("folder-operation receipt is too large"));
+        }
+        write_atomically(
+            &self.directory,
+            &self.operation_receipt_path(receipt.call_id),
+            &bytes,
+        )
+    }
+
     pub(super) fn remove(&self, call_id: CallId) -> io::Result<()> {
         match fs::remove_file(self.receipt_path(call_id)) {
+            Ok(()) => sync_directory(&self.directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn remove_operation(&self, call_id: CallId) -> io::Result<()> {
+        match fs::remove_file(self.operation_receipt_path(call_id)) {
             Ok(()) => sync_directory(&self.directory),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
@@ -208,6 +303,9 @@ impl ReceiptStore {
                 return Err(invalid_data("invalid client-execution receipt name"));
             };
             if matches!(file_name, EXECUTOR_FILE | "receipts.lock") {
+                continue;
+            }
+            if file_name.starts_with(FOLDER_OPERATION_PREFIX) {
                 continue;
             }
             if file_name.starts_with('.') && file_name.ends_with(".tmp") {
@@ -243,8 +341,58 @@ impl ReceiptStore {
         Ok(receipts)
     }
 
+    pub(super) fn load_operations(&self) -> io::Result<Vec<FolderOperationReceipt>> {
+        let mut receipts = Vec::new();
+        let mut call_ids = HashSet::new();
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                return Err(invalid_data("invalid client-execution receipt name"));
+            };
+            let Some(call_id) = file_name
+                .strip_prefix(FOLDER_OPERATION_PREFIX)
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if receipts.len() >= MAX_RECEIPTS {
+                return Err(invalid_data("too many pending client-execution receipts"));
+            }
+            let call_id = call_id
+                .parse::<Uuid>()
+                .map(CallId::from)
+                .map_err(invalid_data)?;
+            validate_private_file(&entry.path(), MAX_RECEIPT_BYTES)?;
+            let mut bytes = Vec::new();
+            File::open(entry.path())?
+                .take((MAX_RECEIPT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_RECEIPT_BYTES {
+                return Err(invalid_data("folder-operation receipt is too large"));
+            }
+            let receipt: FolderOperationReceipt =
+                serde_json::from_slice(&bytes).map_err(invalid_data)?;
+            receipt.validate()?;
+            if receipt.call_id != call_id {
+                return Err(invalid_data("folder-operation receipt identity mismatch"));
+            }
+            if !call_ids.insert(call_id) {
+                return Err(invalid_data("duplicate folder-operation receipt identity"));
+            }
+            receipts.push(receipt);
+        }
+        receipts.sort_by_key(|receipt| receipt.call_id.to_string());
+        Ok(receipts)
+    }
+
     fn receipt_path(&self, call_id: CallId) -> PathBuf {
         self.directory.join(format!("{call_id}.json"))
+    }
+
+    fn operation_receipt_path(&self, call_id: CallId) -> PathBuf {
+        self.directory
+            .join(format!("{FOLDER_OPERATION_PREFIX}{call_id}.json"))
     }
 }
 
@@ -408,6 +556,21 @@ mod tests {
 
         let reopened = ReceiptStore::open(temp.path()).unwrap();
         assert_eq!(reopened.executor_id(), executor_id);
+    }
+
+    #[test]
+    fn folder_operation_receipts_are_separate_and_keep_lease_tokens_private() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(temp.path()).unwrap();
+        let receipt =
+            FolderOperationReceipt::new(ChatId::new(), CallId::new(), store.executor_id());
+        store.save_operation(&receipt).unwrap();
+        assert_eq!(store.load_operations().unwrap(), vec![receipt.clone()]);
+        assert!(store.load_all().unwrap().is_empty());
+        let debug = format!("{receipt:?}");
+        assert!(!debug.contains(&receipt.lease_token.to_string()));
+        store.remove_operation(receipt.call_id).unwrap();
+        assert!(store.load_operations().unwrap().is_empty());
     }
 
     #[test]

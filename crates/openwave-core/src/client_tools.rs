@@ -12,6 +12,18 @@ use crate::ToolSpec;
 /// Stable tool name for asking the user to connect another folder.
 pub const REQUEST_FOLDER_ACCESS_TOOL: &str = "request_folder_access";
 
+/// Foreground-only tool names for inspecting folders the user already connected.
+///
+/// These contracts are model proposals, not host authority. The native executor
+/// resolves the conversation from durable state and reauthorizes every broker
+/// operation against that context.
+pub const LIST_CONNECTED_FOLDERS_TOOL: &str = "list_connected_folders";
+pub const LIST_FOLDER_TOOL: &str = "list_folder";
+pub const READ_CONNECTED_FILE_TOOL: &str = "read_connected_file";
+
+/// Maximum UTF-8 bytes in a root-relative path supplied by the model.
+pub const MAX_CONNECTED_FOLDER_PATH_BYTES: usize = 1_024;
+
 /// Maximum user-facing explanation length advertised to the model.
 pub const MAX_FOLDER_ACCESS_REASON_CHARS: usize = 500;
 
@@ -136,6 +148,133 @@ pub fn request_folder_access_tool_spec() -> ToolSpec {
     }
 }
 
+/// Canonical arguments for [`LIST_CONNECTED_FOLDERS_TOOL`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListConnectedFoldersArgs {}
+
+/// Canonical arguments for [`LIST_FOLDER_TOOL`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListFolderArgs {
+    /// Opaque id returned by `list_connected_folders` or folder consent.
+    pub root_id: uuid::Uuid,
+    /// Root-relative directory path; an empty path means the connected root.
+    pub path: String,
+}
+
+/// Canonical arguments for [`READ_CONNECTED_FILE_TOOL`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadConnectedFileArgs {
+    /// Opaque id returned by `list_connected_folders` or folder consent.
+    pub root_id: uuid::Uuid,
+    /// Nonempty root-relative file path.
+    pub path: String,
+}
+
+impl ListFolderArgs {
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.root_id.is_nil() && valid_connected_folder_path(&self.path, true)
+    }
+}
+
+impl ReadConnectedFileArgs {
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.root_id.is_nil() && valid_connected_folder_path(&self.path, false)
+    }
+}
+
+/// Validate a canonical model payload before it is durably checkpointed.
+#[must_use]
+pub fn validate_list_connected_folders_arguments(arguments: &Value) -> bool {
+    serde_json::from_value::<ListConnectedFoldersArgs>(arguments.clone()).is_ok()
+}
+
+/// Validate a canonical model payload before it is durably checkpointed.
+#[must_use]
+pub fn validate_list_folder_arguments(arguments: &Value) -> bool {
+    serde_json::from_value::<ListFolderArgs>(arguments.clone())
+        .is_ok_and(|arguments| arguments.is_well_formed())
+}
+
+/// Validate a canonical model payload before it is durably checkpointed.
+#[must_use]
+pub fn validate_read_connected_file_arguments(arguments: &Value) -> bool {
+    serde_json::from_value::<ReadConnectedFileArgs>(arguments.clone())
+        .is_ok_and(|arguments| arguments.is_well_formed())
+}
+
+#[must_use]
+pub fn list_connected_folders_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: LIST_CONNECTED_FOLDERS_TOOL.into(),
+        description: "List folders already connected to this conversation. Results contain opaque root IDs and display names only; use request_folder_access to ask the user to choose another folder.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    }
+}
+
+#[must_use]
+pub fn list_folder_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: LIST_FOLDER_TOOL.into(),
+        description: "List a directory below an already connected folder. Use only an opaque root_id and a root-relative path; never use an absolute path or parent traversal.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "root_id": { "type": "string", "format": "uuid" },
+                "path": { "type": "string", "maxLength": MAX_CONNECTED_FOLDER_PATH_BYTES, "description": "Root-relative directory path; empty means the folder root." }
+            },
+            "required": ["root_id", "path"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+#[must_use]
+pub fn read_connected_file_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: READ_CONNECTED_FILE_TOOL.into(),
+        description: "Read a UTF-8 text file below an already connected folder. Use only an opaque root_id and a nonempty root-relative path; never use an absolute path or parent traversal.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "root_id": { "type": "string", "format": "uuid" },
+                "path": { "type": "string", "minLength": 1, "maxLength": MAX_CONNECTED_FOLDER_PATH_BYTES, "description": "Root-relative text file path." }
+            },
+            "required": ["root_id", "path"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn valid_connected_folder_path(path: &str, allow_root: bool) -> bool {
+    if path.len() > MAX_CONNECTED_FOLDER_PATH_BYTES
+        || path.contains('\0')
+        || path.contains('\\')
+        || path.starts_with('/')
+        || path.ends_with('/')
+    {
+        return false;
+    }
+    if path.is_empty() {
+        return allow_root;
+    }
+    path.split('/').all(|part| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && !part.contains(':')
+            && !part.chars().any(char::is_control)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +357,61 @@ mod tests {
             serde_json::to_value(RequestFolderAccessResult::Declined).unwrap(),
             serde_json::json!({ "status": "declined" })
         );
+    }
+
+    #[test]
+    fn connected_folder_tools_are_pathless_and_conservatively_bounded() {
+        assert!(validate_list_connected_folders_arguments(
+            &serde_json::json!({})
+        ));
+        assert!(!validate_list_connected_folders_arguments(
+            &serde_json::json!({
+                "root_id": uuid::Uuid::new_v4()
+            })
+        ));
+
+        let root_id = uuid::Uuid::new_v4();
+        assert!(validate_list_folder_arguments(&serde_json::json!({
+            "root_id": root_id,
+            "path": ""
+        })));
+        assert!(validate_read_connected_file_arguments(&serde_json::json!({
+            "root_id": root_id,
+            "path": "notes/today.txt"
+        })));
+        for path in [
+            "/tmp/secret",
+            "../secret",
+            "notes/../secret",
+            "notes\\secret",
+            "C:secret",
+        ] {
+            assert!(!validate_read_connected_file_arguments(
+                &serde_json::json!({
+                    "root_id": root_id,
+                    "path": path
+                })
+            ));
+        }
+        assert!(!validate_read_connected_file_arguments(
+            &serde_json::json!({
+                "root_id": root_id,
+                "path": ""
+            })
+        ));
+    }
+
+    #[test]
+    fn connected_folder_specs_do_not_advertise_host_paths_or_authority() {
+        let list = list_connected_folders_tool_spec();
+        let directory = list_folder_tool_spec();
+        let file = read_connected_file_tool_spec();
+        assert_eq!(list.name, LIST_CONNECTED_FOLDERS_TOOL);
+        assert_eq!(directory.name, LIST_FOLDER_TOOL);
+        assert_eq!(file.name, READ_CONNECTED_FILE_TOOL);
+        assert_eq!(directory.input_schema["additionalProperties"], false);
+        assert_eq!(file.input_schema["additionalProperties"], false);
+        assert!(!directory.description.contains("project_id"));
+        assert!(!file.description.contains("grant"));
     }
 }
