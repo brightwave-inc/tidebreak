@@ -28,6 +28,8 @@ import { Logomark } from "./Logomark";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { ToolCallCard, type ToolCallStatus } from "./ToolCallCard";
 import { hydrateTranscriptHistory } from "./TranscriptHistory";
+import { useChatEventStream } from "./ChatEventStream";
+import { isNearBottom, scrollToLatest } from "./ChatScroll";
 
 type Msg =
   | { id: string; role: "user"; text: string }
@@ -96,6 +98,7 @@ export default function App() {
     "providers" | "web-search" | "folders" | null
   >(null);
   const [status, setStatus] = useState("starting…");
+  const [hasUnreadActivity, setHasUnreadActivity] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const socketGenerationRef = useRef(0);
   const chatSelectionRef = useRef(0);
@@ -103,6 +106,7 @@ export default function App() {
   const lastSeqRef = useRef(0);
   const assistantBufRef = useRef("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const followsLatestRef = useRef(true);
   const refreshFolderAccessRef = useRef<(() => void) | null>(null);
   const refreshAgentRunsRef = useRef<(() => void) | null>(null);
   const resolvingFolderCallsRef = useRef<Set<string>>(new Set());
@@ -215,71 +219,19 @@ export default function App() {
     };
   }, [client, chat?.id]);
 
-  useEffect(() => {
-    if (!client || !chat || hydratedChatId !== chat.id) return;
-    socketRef.current?.close();
-    const generation = ++socketGenerationRef.current;
-    let disposed = false;
-    let reconnectTimer: number | null = null;
-    let reconnectDelayMs = 250;
-
-    const scheduleReconnect = () => {
-      if (
-        disposed ||
-        socketGenerationRef.current !== generation ||
-        reconnectTimer !== null
-      ) {
-        return;
-      }
-      setStatus((s) => `${withoutConnectionState(s)} · reconnecting`);
-      const delay = reconnectDelayMs;
-      reconnectDelayMs = Math.min(reconnectDelayMs * 2, 5_000);
-      reconnectTimer = window.setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, delay);
-    };
-
-    const connect = () => {
-      if (disposed || socketGenerationRef.current !== generation) return;
-      let socket: WebSocket;
-      try {
-        socket = client.openEvents(chat.id, lastSeqRef.current, (event) => {
-          if (socketGenerationRef.current !== generation) return;
-          handleEvent(event);
-        });
-      } catch {
-        scheduleReconnect();
-        return;
-      }
-      socketRef.current = socket;
-      socket.onopen = () => {
-        if (disposed || socketGenerationRef.current !== generation) return;
-        reconnectDelayMs = 250;
-        setStatus((s) => `${withoutConnectionState(s)} · live`);
-      };
-      socket.onerror = () => {
-        if (!disposed && socketGenerationRef.current === generation) {
-          setStatus((s) => `${withoutConnectionState(s)} · reconnecting`);
-        }
-      };
-      socket.onclose = () => {
-        if (socketRef.current === socket) socketRef.current = null;
-        scheduleReconnect();
-      };
-    };
-
-    connect();
-    return () => {
-      disposed = true;
-      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-      socketRef.current?.close();
-      socketRef.current = null;
-      if (socketGenerationRef.current === generation) {
-        socketGenerationRef.current += 1;
-      }
-    };
-  }, [client, chat?.id, hydratedChatId]);
+  useChatEventStream({
+    client,
+    chatId: chat?.id ?? null,
+    ready: hydratedChatId === chat?.id,
+    afterRef: lastSeqRef,
+    socketRef,
+    generationRef: socketGenerationRef,
+    onEvent: handleEvent,
+    onConnectionState: (connectionState) =>
+      setStatus((current) =>
+        `${withoutConnectionState(current)} · ${connectionState}`,
+      ),
+  });
 
   useEffect(() => {
     if (!client || !chat) return;
@@ -371,7 +323,13 @@ export default function App() {
   }, [client, chat?.id]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    if (followsLatestRef.current) {
+      scrollToLatest(scroll);
+    } else {
+      setHasUnreadActivity(true);
+    }
   }, [messages]);
 
   useEffect(() => {
@@ -380,8 +338,13 @@ export default function App() {
       (callId) => !visibleFolderCallIdsRef.current.has(callId),
     );
     visibleFolderCallIdsRef.current = next;
-    if (gainedRequest) {
-      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    if (!gainedRequest) return;
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    if (followsLatestRef.current) {
+      scrollToLatest(scroll);
+    } else {
+      setHasUnreadActivity(true);
     }
   }, [folderAccessRequests]);
 
@@ -632,6 +595,8 @@ export default function App() {
       assistantBufRef.current = "";
       provisionalToolCallIdsRef.current = new Set();
       lastSeqRef.current = 0;
+      followsLatestRef.current = true;
+      setHasUnreadActivity(false);
       setMessages([]);
       hydratedMessageIdsRef.current = new Set();
       setAgentRuns([]);
@@ -711,6 +676,8 @@ export default function App() {
     socketRef.current = null;
     assistantBufRef.current = "";
     lastSeqRef.current = 0;
+    followsLatestRef.current = true;
+    setHasUnreadActivity(false);
     setMessages([]);
     hydratedMessageIdsRef.current = new Set();
     setAgentRuns([]);
@@ -1089,73 +1056,96 @@ export default function App() {
             />
           </div>
 
-          <div className="messages" ref={scrollRef}>
-            {messages.length === 0 && folderAccessRequests.length === 0 && (
-              <div className="bubble system">
-                Configure a provider, pick a model, then send a message.
-              </div>
-            )}
-            {messages.map((m) => {
-              if (m.role === "tool") {
-                return <ToolCallCard key={m.id} name={m.name} status={m.status} />;
-              }
-              if (m.role === "approval") {
+          <div className="message-view">
+            <div
+              className="messages"
+              ref={scrollRef}
+              onScroll={(event) => {
+                const followsLatest = isNearBottom(event.currentTarget);
+                followsLatestRef.current = followsLatest;
+                if (followsLatest) setHasUnreadActivity(false);
+              }}
+            >
+              {messages.length === 0 && folderAccessRequests.length === 0 && (
+                <div className="bubble system">
+                  Configure a provider, pick a model, then send a message.
+                </div>
+              )}
+              {messages.map((m) => {
+                if (m.role === "tool") {
+                  return <ToolCallCard key={m.id} name={m.name} status={m.status} />;
+                }
+                if (m.role === "approval") {
+                  return (
+                    <div key={m.id} className="bubble system">
+                      <div>Approval needed: {m.summary}</div>
+                      {!m.resolved && (
+                        <div className="approval">
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => void onApproval(m.callId, "approve")}
+                          >
+                            Approve
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => void onApproval(m.callId, "reject")}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
                 return (
-                  <div key={m.id} className="bubble system">
-                    <div>Approval needed: {m.summary}</div>
-                    {!m.resolved && (
-                      <div className="approval">
-                        <button
-                          type="button"
-                          className="btn btn-primary"
-                          onClick={() => void onApproval(m.callId, "approve")}
-                        >
-                          Approve
-                        </button>
-                        <button
-                          type="button"
-                          className="btn"
-                          onClick={() => void onApproval(m.callId, "reject")}
-                        >
-                          Reject
-                        </button>
-                      </div>
+                  <div key={m.id} className={`bubble ${m.role}`}>
+                    {m.text ? (
+                      m.role === "assistant" || m.role === "user" ? (
+                        <MessageMarkdown>{m.text}</MessageMarkdown>
+                      ) : (
+                        m.text
+                      )
+                    ) : m.role === "assistant" && busy ? (
+                      "…"
+                    ) : (
+                      ""
                     )}
                   </div>
                 );
-              }
-              return (
-                <div key={m.id} className={`bubble ${m.role}`}>
-                  {m.text ? (
-                    m.role === "assistant" || m.role === "user" ? (
-                      <MessageMarkdown>{m.text}</MessageMarkdown>
-                    ) : (
-                      m.text
-                    )
-                  ) : m.role === "assistant" && busy ? (
-                    "…"
-                  ) : (
-                    ""
-                  )}
-                </div>
-              );
-            })}
-            {folderAccessRequests.map((request) => (
-              <FolderAccessCard
-                key={request.callId}
-                request={request}
-                nativeHost={hasNativeHost()}
-                nativeBusy={resolvingFolderCalls.size > 0}
-                working={resolvingFolderCalls.has(request.callId)}
-                error={folderAccessErrors[request.callId]}
-                onDecision={(decision) =>
-                  void onFolderAccessDecision(request.callId, decision)
-                }
-                onCancel={() =>
-                  void onFolderAccessCancel(request.callId, request.turnId)
-                }
-              />
-            ))}
+              })}
+              {folderAccessRequests.map((request) => (
+                <FolderAccessCard
+                  key={request.callId}
+                  request={request}
+                  nativeHost={hasNativeHost()}
+                  nativeBusy={resolvingFolderCalls.size > 0}
+                  working={resolvingFolderCalls.has(request.callId)}
+                  error={folderAccessErrors[request.callId]}
+                  onDecision={(decision) =>
+                    void onFolderAccessDecision(request.callId, decision)
+                  }
+                  onCancel={() =>
+                    void onFolderAccessCancel(request.callId, request.turnId)
+                  }
+                />
+              ))}
+            </div>
+            {hasUnreadActivity && (
+              <button
+                type="button"
+                className="new-activity"
+                onClick={() => {
+                  followsLatestRef.current = true;
+                  setHasUnreadActivity(false);
+                  if (scrollRef.current) scrollToLatest(scrollRef.current);
+                }}
+              >
+                New activity ↓
+              </button>
+            )}
           </div>
 
           <form

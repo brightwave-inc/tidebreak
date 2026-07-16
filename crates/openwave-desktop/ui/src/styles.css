@@ -517,12 +517,37 @@ button {
   text-decoration: underline;
 }
 
+.message-view {
+  position: relative;
+  min-height: 0;
+}
+
 .messages {
+  height: 100%;
   overflow: auto;
   padding: 1.25rem clamp(1rem, 7vw, 7rem);
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+.new-activity {
+  position: absolute;
+  z-index: 1;
+  right: clamp(1rem, 7vw, 7rem);
+  bottom: 1rem;
+  border: 1px solid color-mix(in srgb, var(--ink) 26%, var(--line));
+  border-radius: 999px;
+  padding: 0.38rem 0.7rem;
+  color: var(--ink);
+  background: var(--bg-elevated);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--ink) 14%, transparent);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.new-activity:hover {
+  background: var(--sidebar-active);
 }
 
 .bubble {
@@ -1068,6 +1093,10 @@ button {
 
   .messages {
     padding-inline: 1rem;
+  }
+
+  .new-activity {
+    right: 1rem;
   }
 
   .conversation-header .status {
