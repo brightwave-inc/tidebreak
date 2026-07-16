@@ -989,7 +989,7 @@ function AgentActivityPanel({
 }
 
 function AgentActivityItem({ run, label }: { run: AgentRun; label: string }) {
-  const activity = sandboxActivityPresentation(run.activity);
+  const activity = agentActivityPresentation(run.activity);
   const status = activity?.status ?? readableAgentRunStatus(run.status);
   return (
     <li
@@ -1007,7 +1007,7 @@ function AgentActivityItem({ run, label }: { run: AgentRun; label: string }) {
   );
 }
 
-function sandboxActivityPresentation(
+function agentActivityPresentation(
   activity: AgentRun["activity"],
 ): { label: string; detail: string; status: string; sourceStatus: string } | null {
   if (!activity) return null;
@@ -1027,6 +1027,57 @@ function sandboxActivityPresentation(
             label: "Web search",
             detail: "Searching the web",
             status: "searching",
+            sourceStatus: "running",
+          };
+      }
+    case "list_connected_folders":
+      switch (activity.status) {
+        case "waiting":
+          return {
+            label: "Connected folders",
+            detail: "Waiting to check connected folders",
+            status: "waiting",
+            sourceStatus: "waiting",
+          };
+        case "running":
+          return {
+            label: "Connected folders",
+            detail: "Checking connected folders",
+            status: "checking",
+            sourceStatus: "running",
+          };
+      }
+    case "list_folder":
+      switch (activity.status) {
+        case "waiting":
+          return {
+            label: "Folder",
+            detail: "Waiting to list a folder",
+            status: "waiting",
+            sourceStatus: "waiting",
+          };
+        case "running":
+          return {
+            label: "Folder",
+            detail: "Listing a folder",
+            status: "listing",
+            sourceStatus: "running",
+          };
+      }
+    case "read_connected_file":
+      switch (activity.status) {
+        case "waiting":
+          return {
+            label: "File",
+            detail: "Waiting to read a file",
+            status: "waiting",
+            sourceStatus: "waiting",
+          };
+        case "running":
+          return {
+            label: "File",
+            detail: "Reading a file",
+            status: "reading",
             sourceStatus: "running",
           };
       }

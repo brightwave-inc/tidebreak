@@ -15,8 +15,8 @@ use tokio::sync::broadcast::error::RecvError;
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
     ApprovalDecision, CallId, Chat, ChatId, Project, ProjectId, RequestTurnCancellationOutcome,
-    SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store, TurnId,
-    TurnSteer, TurnSteerId,
+    SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store,
+    ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -505,18 +505,18 @@ pub struct AgentRunSnapshot {
     pub finished_at: Option<chrono::DateTime<Utc>>,
     /// Stable, bounded classification suitable for renderer display.
     pub last_error_code: Option<String>,
-    /// The currently checkpointed, renderer-safe sandbox activity, if any.
+    /// The currently checkpointed, renderer-safe activity, if any.
     ///
     /// This is intentionally a small fixed vocabulary. It never exposes tool
     /// arguments, results, provider call identities, executor leases, or raw
     /// executor diagnostics.
-    pub activity: Option<SandboxActivitySnapshot>,
+    pub activity: Option<AgentActivitySnapshot>,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
 }
 
 impl AgentRunSnapshot {
-    fn from_run(run: AgentRun, activity: Option<SandboxActivitySnapshot>) -> Self {
+    fn from_run(run: AgentRun, activity: Option<AgentActivitySnapshot>) -> Self {
         Self {
             id: run.id,
             parent_id: run.parent_id,
@@ -532,14 +532,17 @@ impl AgentRunSnapshot {
     }
 }
 
-/// Fixed, renderer-safe names for live sandbox work.
+/// Fixed, renderer-safe names for supported live work.
 ///
-/// Adding a new durable sandbox tool does not automatically expose it to a
-/// renderer: it must be deliberately admitted here with a safe label.
+/// Adding a durable tool does not automatically expose it to a renderer: it
+/// must be deliberately admitted here with a safe label.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SandboxActivityKind {
+pub enum AgentActivityKind {
     WebSearch,
+    ListConnectedFolders,
+    ListFolder,
+    ReadConnectedFile,
 }
 
 /// Coarse checkpoint lifecycle suitable for display.
@@ -548,37 +551,65 @@ pub enum SandboxActivityKind {
 /// work is represented, and terminal checkpoints produce no activity.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SandboxActivityStatus {
+pub enum AgentActivityStatus {
     Waiting,
     Running,
 }
 
-/// Renderer-safe projection of one live sandbox checkpoint.
+/// Renderer-safe projection of one live supported checkpoint.
 #[derive(Debug, Clone, Copy, Serialize)]
-pub struct SandboxActivitySnapshot {
-    pub kind: SandboxActivityKind,
-    pub status: SandboxActivityStatus,
+pub struct AgentActivitySnapshot {
+    pub kind: AgentActivityKind,
+    pub status: AgentActivityStatus,
 }
 
-fn sandbox_activity(calls: &[SandboxToolCall]) -> Option<SandboxActivitySnapshot> {
+fn sandbox_activity(calls: &[SandboxToolCall]) -> Option<AgentActivitySnapshot> {
     // A sandbox can have at most one live checkpoint. Inspecting the latest
     // durable live checkpoint also prevents an older, completed activity from
     // lingering in the UI after the run has advanced.
     let call = calls.iter().rev().find(|call| !call.status.is_terminal())?;
     let kind = match call.name.as_str() {
-        "web_search" => SandboxActivityKind::WebSearch,
+        "web_search" => AgentActivityKind::WebSearch,
         // Unknown tool names are executor data, not a renderer API contract.
         _ => return None,
     };
     let status = match call.status {
-        SandboxToolCallStatus::Accepted => SandboxActivityStatus::Waiting,
-        SandboxToolCallStatus::Claimed => SandboxActivityStatus::Running,
+        SandboxToolCallStatus::Accepted => AgentActivityStatus::Waiting,
+        SandboxToolCallStatus::Claimed => AgentActivityStatus::Running,
         SandboxToolCallStatus::Completed
         | SandboxToolCallStatus::Failed
         | SandboxToolCallStatus::Cancelled => return None,
         _ => return None,
     };
-    Some(SandboxActivitySnapshot { kind, status })
+    Some(AgentActivitySnapshot { kind, status })
+}
+
+fn foreground_activity(
+    calls: &[ToolCallRecord],
+    now: chrono::DateTime<Utc>,
+) -> Option<AgentActivitySnapshot> {
+    // A foreground turn can park on exactly one client tool call. Looking at
+    // the latest live supported call means a completed folder operation never
+    // lingers after its continuation advances.
+    let call = calls.iter().rev().find(|call| {
+        call.execution == ToolCallExecution::Client && call.status == ToolCallStatus::Pending
+    })?;
+    let kind = match call.name.as_str() {
+        "list_connected_folders" => AgentActivityKind::ListConnectedFolders,
+        "list_folder" => AgentActivityKind::ListFolder,
+        "read_connected_file" => AgentActivityKind::ReadConnectedFile,
+        // Unknown client tools are executor data, not a renderer API contract.
+        _ => return None,
+    };
+    let status = if call
+        .client_lease_expires_at
+        .is_some_and(|expires_at| expires_at > now)
+    {
+        AgentActivityStatus::Running
+    } else {
+        AgentActivityStatus::Waiting
+    };
+    Some(AgentActivitySnapshot { kind, status })
 }
 
 /// `GET /chats/{id}/agent-runs` — list renderer-safe execution state.
@@ -592,6 +623,11 @@ pub async fn list_agent_runs(
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
     let runs = state.store.list_agent_runs(id).await?;
+    // This read model needs only live client checkpoints. Loading the complete
+    // tool-call transcript here would needlessly deserialize historical model
+    // arguments, results, and local diagnostics just to render current work.
+    let client_calls = state.store.list_pending_client_tool_calls(id).await?;
+    let now = Utc::now();
     let mut snapshots = Vec::with_capacity(runs.len());
     for run in runs {
         let activity = if run.execution == AgentRunExecution::Sandbox {
@@ -600,12 +636,87 @@ pub async fn list_agent_runs(
                 .list_sandbox_tool_calls_for_agent_run(run.id)
                 .await?;
             sandbox_activity(&calls)
+        } else if run.execution == AgentRunExecution::Foreground {
+            foreground_activity(&client_calls, now)
         } else {
             None
         };
         snapshots.push(AgentRunSnapshot::from_run(run, activity));
     }
     Ok(Json(snapshots))
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    fn client_call(name: &str, lease_expires_at: Option<chrono::DateTime<Utc>>) -> ToolCallRecord {
+        ToolCallRecord {
+            id: CallId::new(),
+            chat_id: ChatId::new(),
+            turn_id: TurnId::new(),
+            provider_id: "provider-call-identity".into(),
+            name: name.into(),
+            arguments: serde_json::json!({
+                "root_id": "5b3e9987-5ebf-4bb0-bc6f-0c041b156027",
+                "path": "taxes/2026/private-return.txt",
+                "grant": "private-grant"
+            }),
+            execution: ToolCallExecution::Client,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: Some("private-error-code".into()),
+            error_detail: Some("private error detail".into()),
+            client_executor_id: Some(uuid::Uuid::new_v4()),
+            client_lease_expires_at: lease_expires_at,
+            created_at: Utc::now(),
+            resolved_at: None,
+        }
+    }
+
+    #[test]
+    fn foreground_folder_activity_has_a_closed_safe_vocabulary() {
+        let now = Utc::now();
+        for (name, kind) in [
+            ("list_connected_folders", "list_connected_folders"),
+            ("list_folder", "list_folder"),
+            ("read_connected_file", "read_connected_file"),
+        ] {
+            let activity = foreground_activity(
+                &[client_call(name, Some(now + chrono::Duration::minutes(1)))],
+                now,
+            )
+            .expect("supported foreground folder work is visible");
+            assert_eq!(
+                serde_json::to_value(activity).unwrap(),
+                serde_json::json!({"kind": kind, "status": "running"})
+            );
+        }
+
+        let waiting = foreground_activity(&[client_call("list_folder", None)], now)
+            .expect("an unclaimed folder operation is visible");
+        assert_eq!(
+            serde_json::to_value(waiting).unwrap(),
+            serde_json::json!({"kind": "list_folder", "status": "waiting"})
+        );
+
+        assert!(foreground_activity(&[client_call("unknown_client_tool", None)], now).is_none());
+
+        let rendered = serde_json::to_string(
+            &foreground_activity(&[client_call("read_connected_file", None)], now).unwrap(),
+        )
+        .unwrap();
+        for forbidden in [
+            "5b3e9987-5ebf-4bb0-bc6f-0c041b156027",
+            "taxes/2026/private-return.txt",
+            "private-grant",
+            "provider-call-identity",
+            "private-error-code",
+            "private error detail",
+        ] {
+            assert!(!rendered.contains(forbidden), "activity leaked {forbidden}");
+        }
+    }
 }
 
 /// Body of `POST /chats/{id}/messages`.

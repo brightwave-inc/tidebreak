@@ -198,13 +198,15 @@ boundary. A bounded failure code may be included for display and recovery
 guidance; detailed provider, transport, or executor diagnostics remain
 server-side.
 
-When a sandbox has a live, supported tool checkpoint, the snapshot may also
+When an agent has a live, supported tool checkpoint, the snapshot may also
 contain a small `activity` object. Its values are a deliberately admitted,
-fixed display vocabulary—for example, `web_search` with `waiting` or
-`running` status. It is not a tool trace: queries, tool arguments, results,
+fixed display vocabulary—for example, sandbox `web_search` or foreground
+`list_connected_folders`, `list_folder`, and `read_connected_file`, each with
+`waiting` or `running` status. It is not a tool trace: queries, tool arguments,
+results, folder/root identities, relative paths, filenames, host paths, grants,
 provider identifiers, executor leases, and raw failures remain server-side.
-New sandbox tools are invisible to the renderer until they receive their own
-safe activity projection.
+New tools are invisible to the renderer until they receive their own safe
+activity projection.
 
 ## Reliability contract
 

@@ -65,18 +65,23 @@ export type AgentRun = {
   started_at: string | null;
   finished_at: string | null;
   last_error_code: string | null;
-  /** A fixed, renderer-safe description of the currently live sandbox task. */
-  activity: SandboxActivity | null;
+  /** A fixed, renderer-safe description of the currently live agent task. */
+  activity: AgentActivity | null;
   created_at: string;
   updated_at: string;
 };
 
 /**
- * Live sandbox activity is intentionally a closed vocabulary. The server never
- * sends search inputs, results, provider identities, or executor diagnostics.
+ * Live agent activity is intentionally a closed vocabulary. The server never
+ * sends tool inputs, results, host paths, grants, executor identities, leases,
+ * provider identities, or diagnostics.
  */
-export type SandboxActivity = {
-  kind: "web_search";
+export type AgentActivity = {
+  kind:
+    | "web_search"
+    | "list_connected_folders"
+    | "list_folder"
+    | "read_connected_file";
   status: "waiting" | "running";
 };
 
