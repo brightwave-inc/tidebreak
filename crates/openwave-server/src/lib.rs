@@ -179,6 +179,7 @@ pub fn app(state: AppState) -> Router {
             "/chats/{id}",
             get(routes::get_chat).patch(routes::patch_chat),
         )
+        .route("/chats/{id}/messages", get(routes::list_chat_messages))
         .route("/chats/{id}/agent-runs", get(routes::list_agent_runs))
         .route(
             "/settings/api-key",

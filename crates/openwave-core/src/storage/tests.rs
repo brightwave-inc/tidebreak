@@ -1337,11 +1337,56 @@ impl Store for MemStore {
     async fn list_chats(&self) -> Result<Vec<Chat>> {
         Ok(self.chats.lock().unwrap().values().cloned().collect())
     }
+    async fn get_chat_transcript(
+        &self,
+        id: ChatId,
+    ) -> Result<Option<ChatTranscriptSnapshot>> {
+        if !self.chats.lock().unwrap().contains_key(&id) {
+            return Ok(None);
+        }
+        let last_event_seq = self
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(chat_id, _)| *chat_id == id)
+            .map(|(_, event)| event.seq)
+            .max()
+            .unwrap_or(0);
+        Ok(Some(ChatTranscriptSnapshot {
+            messages: Vec::new(),
+            last_event_seq,
+        }))
+    }
     async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
         if let Some(chat) = self.chats.lock().unwrap().get_mut(&id) {
             chat.model = model;
         }
         Ok(())
+    }
+    async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()> {
+        if let Some(chat) = self.chats.lock().unwrap().get_mut(&id) {
+            chat.title = title;
+        }
+        Ok(())
+    }
+    async fn update_chat_metadata(
+        &self,
+        id: ChatId,
+        title: Option<Option<String>>,
+        model: Option<Option<String>>,
+    ) -> Result<bool> {
+        let mut chats = self.chats.lock().unwrap();
+        let Some(chat) = chats.get_mut(&id) else {
+            return Ok(false);
+        };
+        if let Some(title) = title {
+            chat.title = title;
+        }
+        if let Some(model) = model {
+            chat.model = model;
+        }
+        Ok(true)
     }
     async fn begin_root_attachment_change(
         &self,

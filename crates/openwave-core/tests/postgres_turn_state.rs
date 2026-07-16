@@ -1239,6 +1239,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     assert_eq!(
         applied.event.event,
         AgentEvent::UserSteered {
+            message_id: MessageId(steer_id.0),
             content: "postgres steer".into(),
         }
     );

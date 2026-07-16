@@ -110,6 +110,14 @@ button {
 .sidebar-section {
   display: grid;
   gap: 0.45rem;
+  min-height: 0;
+}
+
+.conversation-list {
+  display: grid;
+  max-height: min(46vh, 32rem);
+  gap: 0.12rem;
+  overflow-y: auto;
 }
 
 .sidebar-label {
@@ -137,6 +145,11 @@ button {
   text-align: left;
 }
 
+.conversation-item:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--sidebar-active) 72%, transparent);
+}
+
 .conversation-item.is-active,
 .sidebar-action.is-active,
 .sidebar-action:hover {
@@ -156,6 +169,13 @@ button {
   flex: 0 0 auto;
   border-radius: 999px;
   background: var(--accent);
+}
+
+.sidebar-error {
+  margin: 0;
+  padding: 0 0.4rem;
+  color: var(--danger);
+  font-size: 0.75rem;
 }
 
 .sidebar-footer {
@@ -239,6 +259,36 @@ button {
   font-size: 1rem;
   font-weight: 620;
   letter-spacing: -0.015em;
+}
+
+.conversation-title-row,
+.conversation-title-editor {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.conversation-title-editor input {
+  width: min(22rem, 48vw);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0.36rem 0.5rem;
+  background: var(--bg-elevated);
+  font-size: 1rem;
+  font-weight: 620;
+}
+
+.title-action {
+  border: 0;
+  padding: 0.15rem 0.25rem;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.76rem;
+}
+
+.title-action:hover {
+  color: var(--ink);
+  text-decoration: underline;
 }
 
 .conversation-header-actions,

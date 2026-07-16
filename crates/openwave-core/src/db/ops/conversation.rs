@@ -13,6 +13,7 @@ use crate::model::{
     ChatRootAttachment, Message, Role, RootAttachmentOrigin, ToolCallRecord, TurnRunStatus,
     MAX_ROOT_ATTACHMENTS,
 };
+use crate::storage::ChatTranscriptSnapshot;
 
 use super::super::{entities, project_from_models, store_err, DbStore};
 use super::turn::canonical_db_timestamp;
@@ -201,6 +202,58 @@ pub(in crate::db) async fn set_chat_model(
     Ok(())
 }
 
+pub(in crate::db) async fn set_chat_title(
+    store: &DbStore,
+    id: ChatId,
+    title: Option<String>,
+) -> Result<()> {
+    entities::chat::Entity::update_many()
+        .col_expr(
+            entities::chat::Column::Title,
+            sea_orm::sea_query::Expr::value(title),
+        )
+        .filter(entities::chat::Column::Id.eq(id.0))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+pub(in crate::db) async fn update_chat_metadata(
+    store: &DbStore,
+    id: ChatId,
+    title: Option<Option<String>>,
+    model: Option<Option<String>>,
+) -> Result<bool> {
+    if title.is_none() && model.is_none() {
+        return Ok(entities::chat::Entity::find_by_id(id.0)
+            .one(&store.conn)
+            .await
+            .map_err(store_err)?
+            .is_some());
+    }
+
+    let mut update = entities::chat::Entity::update_many();
+    if let Some(title) = title {
+        update = update.col_expr(
+            entities::chat::Column::Title,
+            sea_orm::sea_query::Expr::value(title),
+        );
+    }
+    if let Some(model) = model {
+        update = update.col_expr(
+            entities::chat::Column::Model,
+            sea_orm::sea_query::Expr::value(model),
+        );
+    }
+    let result = update
+        .filter(entities::chat::Column::Id.eq(id.0))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 pub(in crate::db) async fn get_chat(store: &DbStore, id: ChatId) -> Result<Option<Chat>> {
     let mut rows = entities::chat::Entity::find_by_id(id.0)
         .find_with_related(entities::chat_root_attachment::Entity)
@@ -230,6 +283,36 @@ pub(in crate::db) async fn list_chats(store: &DbStore) -> Result<Vec<Chat>> {
             .then_with(|| right.id.0.cmp(&left.id.0))
     });
     Ok(chats)
+}
+
+/// Read the visible transcript and cursor for future journal replay under the
+/// same per-chat fence. Every message/event writer takes this fence, so no turn
+/// can commit between the two reads. Only a terminal event is represented by
+/// the durable assistant transcript; a later active turn's streamed deltas
+/// must remain after the cursor for the renderer to reconstruct it on replay.
+pub(in crate::db) async fn get_chat_transcript(
+    store: &DbStore,
+    chat_id: ChatId,
+) -> Result<Option<ChatTranscriptSnapshot>> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let messages = list_messages_on(&transaction, chat_id).await?;
+    let last_event_seq = entities::event::Entity::find()
+        .filter(entities::event::Column::ChatId.eq(chat_id.0))
+        .filter(entities::event::Column::Terminal.eq(true))
+        .order_by_desc(entities::event::Column::Seq)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .map_or(0, |event| event.seq);
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(ChatTranscriptSnapshot {
+        messages,
+        last_event_seq,
+    }))
 }
 
 pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) -> Result<()> {
@@ -275,10 +358,17 @@ pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) ->
 }
 
 pub(in crate::db) async fn list_messages(store: &DbStore, chat_id: ChatId) -> Result<Vec<Message>> {
+    list_messages_on(&store.conn, chat_id).await
+}
+
+async fn list_messages_on<C>(conn: &C, chat_id: ChatId) -> Result<Vec<Message>>
+where
+    C: ConnectionTrait,
+{
     entities::message::Entity::find()
         .filter(entities::message::Column::ChatId.eq(chat_id.0))
         .order_by_asc(entities::message::Column::Seq)
-        .all(&store.conn)
+        .all(conn)
         .await
         .map_err(store_err)?
         .into_iter()

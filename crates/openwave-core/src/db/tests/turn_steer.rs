@@ -238,6 +238,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     assert_eq!(
         applied.event.event,
         AgentEvent::UserSteered {
+            message_id: MessageId(steer_id.0),
             content: "change course".into(),
         }
     );
@@ -333,6 +334,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     assert_eq!(
         second.event.event,
         AgentEvent::UserSteered {
+            message_id: MessageId(second_id.0),
             content: "one more thing".into(),
         }
     );

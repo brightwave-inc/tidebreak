@@ -1218,7 +1218,8 @@ impl Agent {
             }
         }
         for msg in msgs {
-            self.persist(chat.id, turn_id, Role::User, &msg.content)
+            let message_id = self
+                .persist(chat.id, turn_id, Role::User, &msg.content)
                 .await?;
             transcript.push(ChatMessage {
                 role: Role::User,
@@ -1227,6 +1228,7 @@ impl Agent {
                 }],
             });
             events.send(AgentEvent::UserSteered {
+                message_id,
                 content: msg.content,
             });
         }
@@ -1478,17 +1480,19 @@ impl Agent {
         turn_id: TurnId,
         role: Role,
         content: &str,
-    ) -> Result<()> {
+    ) -> Result<MessageId> {
+        let id = MessageId::new();
         self.store
             .append_message(&Message {
-                id: MessageId::new(),
+                id,
                 chat_id,
                 turn_id,
                 role,
                 content: content.to_string(),
                 created_at: Utc::now(),
             })
-            .await
+            .await?;
+        Ok(id)
     }
 
     async fn load_transcript(&self, chat_id: crate::id::ChatId) -> Result<Vec<ChatMessage>> {
@@ -3389,7 +3393,7 @@ mod tests {
                 AgentEvent::StreamInterrupted => {
                     interrupted = true;
                 }
-                AgentEvent::UserSteered { content } => {
+                AgentEvent::UserSteered { content, .. } => {
                     assert_eq!(content, "please change course");
                     steered = true;
                 }

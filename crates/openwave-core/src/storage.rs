@@ -38,6 +38,17 @@ use crate::provider::{StopReason, Usage};
 /// Largest pending attachment-reconciliation page accepted by [`Store`].
 pub const MAX_PENDING_ROOT_ATTACHMENT_CHANGES: u64 = 256;
 
+/// A mutually consistent conversation transcript and event-journal cursor.
+///
+/// The cursor is captured under the same per-chat fence as `messages`, so a
+/// renderer can hydrate durable text and then subscribe after this cursor
+/// without dropping an event committed during the handoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatTranscriptSnapshot {
+    pub messages: Vec<Message>,
+    pub last_event_seq: i64,
+}
+
 /// Why maintenance determined that a document needs an index job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentIndexJobReason {
@@ -1005,9 +1016,27 @@ pub trait Store: Send + Sync {
     /// List chats, most-recently-created first.
     async fn list_chats(&self) -> Result<Vec<Chat>>;
 
+    /// Atomically load a chat's durable messages and its event-journal
+    /// watermark. Returns `None` when the chat does not exist.
+    async fn get_chat_transcript(&self, id: ChatId) -> Result<Option<ChatTranscriptSnapshot>>;
+
     /// Set (or clear, with `None`) a chat's model override. A no-op if the chat
     /// doesn't exist.
     async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()>;
+
+    /// Set (or clear, with `None`) a chat's human-facing title. A no-op if the
+    /// chat doesn't exist.
+    async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()>;
+
+    /// Atomically update whichever user-editable chat metadata fields are
+    /// present. An outer `None` leaves that field alone; an inner `None`
+    /// clears it. Returns `false` if the chat does not exist.
+    async fn update_chat_metadata(
+        &self,
+        id: ChatId,
+        title: Option<Option<String>>,
+        model: Option<Option<String>>,
+    ) -> Result<bool>;
 
     /// Atomically begin one exact broker-backed attachment change.
     ///

@@ -47,6 +47,19 @@ export type Chat = {
   created_at: string;
 };
 
+/** One visible, durable transcript entry in conversation order. */
+export type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+};
+
+export type ChatTranscript = {
+  messages: ChatMessage[];
+  last_event_seq: number;
+};
+
 /** A durable foreground coordinator or sandboxed background run. */
 export type AgentRun = {
   id: string;
@@ -108,7 +121,7 @@ export type AgentEvent =
   | { type: "turn_completed"; usage: unknown; stop_reason: string }
   | { type: "turn_failed"; error: { kind: string; message: string } }
   | { type: "turn_cancelled"; usage: unknown }
-  | { type: "user_steered"; content: string };
+  | { type: "user_steered"; message_id: string; content: string };
 
 export type FolderAccessHint = "documents" | "downloads";
 
@@ -232,6 +245,24 @@ export class ApiClient {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ model: model || undefined }),
+    });
+  }
+
+  listChats(): Promise<Chat[]> {
+    return this.json("/chats", { headers: this.headers() });
+  }
+
+  listChatMessages(chatId: string): Promise<ChatTranscript> {
+    return this.json(`/chats/${chatId}/messages`, {
+      headers: this.headers(),
+    });
+  }
+
+  patchChatTitle(chatId: string, title: string | null): Promise<Chat> {
+    return this.json(`/chats/${chatId}`, {
+      method: "PATCH",
+      headers: this.headers(true),
+      body: JSON.stringify({ title }),
     });
   }
 

@@ -488,6 +488,7 @@ pub(in crate::db) async fn apply_turn_steer(
         .ok_or_else(|| AgentError::Store(format!("applied steer {steer_id} disappeared")))?;
     ensure_exact_applied_message_on(&transaction, &applied).await?;
     let event = AgentEvent::UserSteered {
+        message_id: MessageId(applied.id),
         content: applied.content.clone(),
     };
     let seq = append_event_on(
@@ -640,6 +641,7 @@ where
         })?;
     let payload = serde_json::from_value::<AgentEvent>(event.payload.clone())?;
     let expected = AgentEvent::UserSteered {
+        message_id: MessageId(steer.id),
         content: steer.content.clone(),
     };
     if event.chat_id != steer.chat_id
