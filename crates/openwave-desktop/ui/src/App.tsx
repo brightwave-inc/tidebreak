@@ -24,6 +24,7 @@ import {
   type FolderAccessDecision,
 } from "./host";
 import { Logomark } from "./Logomark";
+import { Composer } from "./Composer";
 import { MessageList, type ChatMessage } from "./MessageList";
 import type { ToolCallStatus } from "./ToolCallCard";
 import { hydrateTranscriptHistory } from "./TranscriptHistory";
@@ -1075,52 +1076,20 @@ export default function App() {
             )}
           </div>
 
-          <form
-            className="composer"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void onSend();
-            }}
-          >
-            <textarea
-              value={draft}
-              placeholder="Message OpenWave…"
-              disabled={deletingChatId !== null}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void onSend();
-                }
-              }}
-            />
-            {busy && activeTurnId && (
-              <div className="composer-turn-control" aria-live="polite">
-                <button
-                  type="button"
-                  className="btn btn-stop"
-                  disabled={cancelPendingTurnId === activeTurnId}
-                  onClick={() => void onCancelActiveTurn()}
-                >
-                  {cancelPendingTurnId === activeTurnId
-                    ? "Stopping…"
-                    : "Stop"}
-                </button>
-                {cancelError && (
-                  <span className="composer-turn-error" role="status">
-                    Couldn’t stop turn: {cancelError}
-                  </span>
-                )}
-              </div>
-            )}
-            <button
-              type="submit"
-              className="btn btn-primary"
-              disabled={busy || !draft.trim() || deletingChatId !== null}
-            >
-              Send
-            </button>
-          </form>
+          <Composer
+            activeTurnId={activeTurnId}
+            busy={busy}
+            cancelError={cancelError}
+            cancelPending={
+              activeTurnId !== null && cancelPendingTurnId === activeTurnId
+            }
+            disabled={deletingChatId !== null}
+            draft={draft}
+            onDraftChange={setDraft}
+            onSend={onSend}
+            onStop={onCancelActiveTurn}
+            resetKey={chat?.id ?? "no-chat"}
+          />
         </section>
 
         {settingsPanel === "providers" && (
