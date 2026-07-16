@@ -15,7 +15,8 @@ use tokio::sync::broadcast::error::RecvError;
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
     ApprovalDecision, CallId, Chat, ChatId, Project, ProjectId, RequestTurnCancellationOutcome,
-    SecretProvider, SequencedEvent, Store, TurnId, TurnSteer, TurnSteerId,
+    SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store, TurnId,
+    TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -502,14 +503,20 @@ pub struct AgentRunSnapshot {
     pub status: AgentRunStatus,
     pub started_at: Option<chrono::DateTime<Utc>>,
     pub finished_at: Option<chrono::DateTime<Utc>>,
+    /// Stable, bounded classification suitable for renderer display.
     pub last_error_code: Option<String>,
-    pub last_error_detail: Option<String>,
+    /// The currently checkpointed, renderer-safe sandbox activity, if any.
+    ///
+    /// This is intentionally a small fixed vocabulary. It never exposes tool
+    /// arguments, results, provider call identities, executor leases, or raw
+    /// executor diagnostics.
+    pub activity: Option<SandboxActivitySnapshot>,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
 }
 
-impl From<AgentRun> for AgentRunSnapshot {
-    fn from(run: AgentRun) -> Self {
+impl AgentRunSnapshot {
+    fn from_run(run: AgentRun, activity: Option<SandboxActivitySnapshot>) -> Self {
         Self {
             id: run.id,
             parent_id: run.parent_id,
@@ -518,11 +525,60 @@ impl From<AgentRun> for AgentRunSnapshot {
             started_at: run.started_at,
             finished_at: run.finished_at,
             last_error_code: run.last_error_code,
-            last_error_detail: run.last_error_detail,
+            activity,
             created_at: run.created_at,
             updated_at: run.updated_at,
         }
     }
+}
+
+/// Fixed, renderer-safe names for live sandbox work.
+///
+/// Adding a new durable sandbox tool does not automatically expose it to a
+/// renderer: it must be deliberately admitted here with a safe label.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxActivityKind {
+    WebSearch,
+}
+
+/// Coarse checkpoint lifecycle suitable for display.
+///
+/// This intentionally does not mirror all durable executor states; only live
+/// work is represented, and terminal checkpoints produce no activity.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxActivityStatus {
+    Waiting,
+    Running,
+}
+
+/// Renderer-safe projection of one live sandbox checkpoint.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SandboxActivitySnapshot {
+    pub kind: SandboxActivityKind,
+    pub status: SandboxActivityStatus,
+}
+
+fn sandbox_activity(calls: &[SandboxToolCall]) -> Option<SandboxActivitySnapshot> {
+    // A sandbox can have at most one live checkpoint. Inspecting the latest
+    // durable live checkpoint also prevents an older, completed activity from
+    // lingering in the UI after the run has advanced.
+    let call = calls.iter().rev().find(|call| !call.status.is_terminal())?;
+    let kind = match call.name.as_str() {
+        "web_search" => SandboxActivityKind::WebSearch,
+        // Unknown tool names are executor data, not a renderer API contract.
+        _ => return None,
+    };
+    let status = match call.status {
+        SandboxToolCallStatus::Accepted => SandboxActivityStatus::Waiting,
+        SandboxToolCallStatus::Claimed => SandboxActivityStatus::Running,
+        SandboxToolCallStatus::Completed
+        | SandboxToolCallStatus::Failed
+        | SandboxToolCallStatus::Cancelled => return None,
+        _ => return None,
+    };
+    Some(SandboxActivitySnapshot { kind, status })
 }
 
 /// `GET /chats/{id}/agent-runs` — list renderer-safe execution state.
@@ -535,15 +591,21 @@ pub async fn list_agent_runs(
         .get_chat(id)
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
-    Ok(Json(
-        state
-            .store
-            .list_agent_runs(id)
-            .await?
-            .into_iter()
-            .map(AgentRunSnapshot::from)
-            .collect(),
-    ))
+    let runs = state.store.list_agent_runs(id).await?;
+    let mut snapshots = Vec::with_capacity(runs.len());
+    for run in runs {
+        let activity = if run.execution == AgentRunExecution::Sandbox {
+            let calls = state
+                .store
+                .list_sandbox_tool_calls_for_agent_run(run.id)
+                .await?;
+            sandbox_activity(&calls)
+        } else {
+            None
+        };
+        snapshots.push(AgentRunSnapshot::from_run(run, activity));
+    }
+    Ok(Json(snapshots))
 }
 
 /// Body of `POST /chats/{id}/messages`.
