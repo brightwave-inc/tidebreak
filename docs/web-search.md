@@ -62,8 +62,10 @@ immutable receipt.
 
 Malformed arguments, disabled selection, missing credentials, provider failure,
 timeout, and invalid output resolve a bounded redacted
-failure receipt rather than leaving a sandbox waiting. There is still no
-model-visible `web_search` tool or sandbox tool loop: without a durable
-checkpoint the executor does not construct a provider or make an outbound
-request. A later slice must add model-loop checkpoint emission and an explicit
-outbound-domain policy before search is model-usable.
+failure receipt rather than leaving a sandbox waiting. The depth-one sandbox
+model loop may advertise only this fixed `web_search` schema, at most once and
+only when two model steps remain. It parks the immutable call before any
+egress; when the receipt resolves, its next claim rebuilds the same
+`ToolUse`/`ToolResult` pair and may finalize. No foreground or recursive agent
+receives the schema. An explicit outbound-domain policy remains the next
+hardening slice before broadening this search surface.

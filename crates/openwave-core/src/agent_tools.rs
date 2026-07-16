@@ -14,6 +14,8 @@ use crate::tool::ToolSpec;
 
 /// Stable name for the foreground-only sandbox delegation tool.
 pub const SPAWN_SANDBOX_AGENT_TOOL: &str = "spawn_sandbox_agent";
+/// The only tool a depth-one sandbox may receive.
+pub const SANDBOX_WEB_SEARCH_TOOL: &str = "web_search";
 
 /// Maximum task length in Unicode scalar values advertised to a model.
 ///
@@ -68,6 +70,31 @@ pub fn spawn_sandbox_agent_tool_spec() -> ToolSpec {
                 }
             },
             "required": ["task"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+/// Narrow, host-executed web-search contract for an isolated sandbox run.
+///
+/// This is deliberately not registered in the foreground tool registry. The
+/// sandbox worker checkpoints it under its own durable lease, and the host
+/// decides whether any configured provider may execute it.
+#[must_use]
+pub fn sandbox_web_search_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: SANDBOX_WEB_SEARCH_TOOL.into(),
+        description: "Search the public web for current information. Use at most once, with a focused query. Results may be unavailable when the host has not configured web search.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                "max_results": { "type": "integer", "minimum": 1, "maximum": 10 },
+                "domains": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
+                "start_published_at": { "type": "string", "format": "date-time" },
+                "end_published_at": { "type": "string", "format": "date-time" }
+            },
+            "required": ["query"],
             "additionalProperties": false
         }),
     }

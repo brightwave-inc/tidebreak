@@ -1879,6 +1879,13 @@ impl Store for DbStore {
         ops::sandbox_tool::get_sandbox_tool_call_receipt(self, id).await
     }
 
+    async fn list_sandbox_tool_calls_for_agent_run(
+        &self,
+        agent_run_id: AgentRunId,
+    ) -> Result<Vec<SandboxToolCall>> {
+        ops::sandbox_tool::list_sandbox_tool_calls_for_agent_run(self, agent_run_id).await
+    }
+
     async fn list_sandbox_tool_call_candidates(&self, limit: u64) -> Result<Vec<SandboxToolCall>> {
         ops::sandbox_tool::list_sandbox_tool_call_candidates(self, limit).await
     }

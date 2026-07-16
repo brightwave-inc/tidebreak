@@ -1226,6 +1226,16 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// List immutable sandbox tool checkpoints for one isolated run in creation
+    /// order. A resumed sandbox rebuilds only its own tool transcript from
+    /// these durable records and their terminal receipts.
+    async fn list_sandbox_tool_calls_for_agent_run(
+        &self,
+        _agent_run_id: AgentRunId,
+    ) -> Result<Vec<crate::model::SandboxToolCall>> {
+        agent_run_storage_unavailable()
+    }
+
     /// List bounded oldest-first accepted work and expired claims for durable
     /// executor recovery. Claiming remains the authority for ownership.
     async fn list_sandbox_tool_call_candidates(

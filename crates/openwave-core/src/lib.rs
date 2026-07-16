@@ -41,8 +41,9 @@ pub use agent::{
     Agent, AgentConfig, AgentTurnOutcome, ClaimedAgentEvent, SandboxAgentSpawnRequest, ToolRegistry,
 };
 pub use agent_tools::{
-    spawn_sandbox_agent_tool_spec, validate_spawn_sandbox_agent_arguments, SpawnSandboxAgentArgs,
-    MAX_SANDBOX_AGENT_TASK_CHARS, SPAWN_SANDBOX_AGENT_TOOL,
+    sandbox_web_search_tool_spec, spawn_sandbox_agent_tool_spec,
+    validate_spawn_sandbox_agent_arguments, SpawnSandboxAgentArgs, MAX_SANDBOX_AGENT_TASK_CHARS,
+    SANDBOX_WEB_SEARCH_TOOL, SPAWN_SANDBOX_AGENT_TOOL,
 };
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalRequest, AutoApproveGate, RefuseGate,
