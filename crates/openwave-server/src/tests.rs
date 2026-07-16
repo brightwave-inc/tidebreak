@@ -5486,6 +5486,182 @@ async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
 }
 
 #[tokio::test]
+async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let historical_argument = "historical-private-argument".repeat(4_000);
+    let historical_result = "historical-private-result".repeat(16_000);
+    let historical = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "historical-provider-call-identity".into(),
+        name: "read_connected_file".into(),
+        arguments: serde_json::json!({"path": historical_argument}),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+    };
+    let historical = match store.accept_tool_call(&historical).await.unwrap() {
+        openwave_core::AcceptToolCallOutcome::Accepted(call) => call,
+        outcome => panic!("unexpected historical-call admission: {outcome:?}"),
+    };
+    let historical_lease = uuid::Uuid::new_v4();
+    let historical_now = chrono::Utc::now();
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                historical.id,
+                chat.id,
+                uuid::Uuid::new_v4(),
+                historical_lease,
+                historical_now,
+                historical_now + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        openwave_core::ClaimClientToolCallOutcome::Claimed(_)
+    ));
+    assert!(matches!(
+        store
+            .resolve_client_tool_call_and_append_event(
+                historical.id,
+                chat.id,
+                historical_lease,
+                chrono::Utc::now(),
+                &ToolCallResolution::Completed {
+                    result: historical_result.clone(),
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap()
+            .outcome,
+        openwave_core::ResolveToolCallOutcome::Resolved
+    ));
+
+    let root_id = "5b3e9987-5ebf-4bb0-bc6f-0c041b156027";
+    let relative_path = "taxes/2026/private-return.txt";
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "provider-call-identity".into(),
+        name: "read_connected_file".into(),
+        arguments: serde_json::json!({
+            "root_id": root_id,
+            "path": relative_path,
+            "grant": "private-grant"
+        }),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+    };
+    let call = match store.accept_tool_call(&call).await.unwrap() {
+        openwave_core::AcceptToolCallOutcome::Accepted(call) => call,
+        outcome => panic!("unexpected client-call admission: {outcome:?}"),
+    };
+
+    let snapshot = |router: Router| async {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/chats/{}/agent-runs", chat.id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshots: Vec<serde_json::Value> = json_body(response).await;
+        snapshots
+            .into_iter()
+            .find(|snapshot| snapshot.get("execution") == Some(&serde_json::json!("foreground")))
+            .expect("foreground snapshot is returned")
+    };
+
+    let waiting = snapshot(router.clone()).await;
+    assert_eq!(
+        waiting.get("activity"),
+        Some(&serde_json::json!({
+            "kind": "read_connected_file",
+            "status": "waiting"
+        }))
+    );
+    let encoded = serde_json::to_string(&waiting).unwrap();
+    for forbidden in [
+        root_id,
+        relative_path,
+        "private-grant",
+        "provider-call-identity",
+        &historical_argument,
+        &historical_result,
+    ] {
+        assert!(!encoded.contains(forbidden), "snapshot leaked {forbidden}");
+    }
+
+    let lease = uuid::Uuid::new_v4();
+    let now = chrono::Utc::now();
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                uuid::Uuid::new_v4(),
+                lease,
+                now,
+                now + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        openwave_core::ClaimClientToolCallOutcome::Claimed(_)
+    ));
+    assert_eq!(
+        snapshot(router.clone()).await.get("activity"),
+        Some(&serde_json::json!({
+            "kind": "read_connected_file",
+            "status": "running"
+        }))
+    );
+
+    assert!(matches!(
+        store
+            .resolve_client_tool_call_and_append_event(
+                call.id,
+                chat.id,
+                lease,
+                chrono::Utc::now(),
+                &ToolCallResolution::Completed {
+                    result: "private result".into(),
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap()
+            .outcome,
+        openwave_core::ResolveToolCallOutcome::Resolved
+    ));
+    assert_eq!(
+        snapshot(router).await.get("activity"),
+        Some(&serde_json::Value::Null)
+    );
+}
+
+#[tokio::test]
 async fn agent_run_snapshots_omit_persisted_raw_failure_detail() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
