@@ -25,6 +25,7 @@ import {
 } from "./host";
 import { FolderAccessCard } from "./FolderAccessCard";
 import { Logomark } from "./Logomark";
+import { MessageMarkdown } from "./MessageMarkdown";
 
 type Msg =
   | { id: string; role: "user"; text: string }
@@ -817,7 +818,17 @@ export default function App() {
               }
               return (
                 <div key={m.id} className={`bubble ${m.role}`}>
-                  {m.text || (m.role === "assistant" && busy ? "…" : "")}
+                  {m.text ? (
+                    m.role === "assistant" || m.role === "user" ? (
+                      <MessageMarkdown>{m.text}</MessageMarkdown>
+                    ) : (
+                      m.text
+                    )
+                  ) : m.role === "assistant" && busy ? (
+                    "…"
+                  ) : (
+                    ""
+                  )}
                 </div>
               );
             })}
