@@ -9,11 +9,12 @@ use axum::http::{header, Request, StatusCode};
 use futures::stream::{self, BoxStream, StreamExt};
 // Tests use the in-memory store; production wires LanceDB in `bind`.
 use openwave_core::{
-    AgentErrorInfo, AgentEvent, AgentRunInboxStatus, AgentRunStatus, ApprovalClass,
-    BeginRootAttachmentChange, BlobStore, CallId, Chat, ChatId, ChatRequest, ChatRootAttachment,
-    ClientToolCallRequest, ContentBlock, HostRootId, Message, ModelProvider,
-    ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent, ProviderId, Role,
-    RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentOrigin, SecretProvider,
+    AcceptAgentRunOutcome, AgentErrorInfo, AgentEvent, AgentRunExecution, AgentRunId,
+    AgentRunInboxStatus, AgentRunStatus, ApprovalClass, BeginRootAttachmentChange, BlobStore,
+    CallId, Chat, ChatId, ChatRequest, ChatRootAttachment, ClientToolCallRequest, ContentBlock,
+    HostRootId, Message, ModelProvider, ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome,
+    Project, ProjectId, ProviderEvent, ProviderId, Role, RootAttachmentChangeAction,
+    RootAttachmentChangeId, RootAttachmentOrigin, SandboxToolCallRequest, SecretProvider,
     SequencedEvent, StopReason, Tool, ToolCallExecution, ToolCallRecord, ToolCallResolution,
     ToolCallStatus, ToolCtx, ToolOutput, ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus,
     TurnSteerId, Usage,
@@ -5350,6 +5351,232 @@ async fn create_then_get_and_list() {
         json_body(response).await
     };
     assert_eq!(listed, vec![created]);
+}
+
+#[tokio::test]
+async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat: Chat = {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chats")
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        json_body(response).await
+    };
+
+    let run = match store
+        .accept_agent_run(
+            AgentRunId::new(),
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("research"),
+        )
+        .await
+        .unwrap()
+    {
+        AcceptAgentRunOutcome::Accepted(run) => run,
+        outcome => panic!("unexpected sandbox admission: {outcome:?}"),
+    };
+    let worker_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(worker_lease, chrono::Duration::minutes(5), 1, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        run.id
+    );
+    let checkpoint = SandboxToolCallRequest {
+        id: CallId::new(),
+        agent_run_id: run.id,
+        chat_id: chat.id,
+        provider_id: "provider-call-identity".into(),
+        name: "web_search".into(),
+        arguments: serde_json::json!({
+            "query": "private query that must not reach the renderer",
+            "api_key": "secret-value"
+        }),
+    };
+    assert!(matches!(
+        store
+            .park_agent_run_for_sandbox_tool_call(run.id, worker_lease, &checkpoint)
+            .await
+            .unwrap(),
+        ParkSandboxToolCallOutcome::Parked { .. }
+    ));
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/agent-runs", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshots: Vec<serde_json::Value> = json_body(response).await;
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.get("id") == Some(&serde_json::json!(run.id)))
+        .expect("sandbox snapshot is returned");
+    assert_eq!(
+        snapshot.get("activity"),
+        Some(&serde_json::json!({"kind": "web_search", "status": "waiting"}))
+    );
+
+    // The projection is intentionally independent of the durable checkpoint's
+    // sensitive executor data.
+    let encoded = serde_json::to_string(snapshot).unwrap();
+    for forbidden in [
+        "private query that must not reach the renderer",
+        "secret-value",
+        "provider-call-identity",
+        "arguments",
+        "lease_token",
+        "result",
+    ] {
+        assert!(!encoded.contains(forbidden), "snapshot leaked {forbidden}");
+    }
+
+    let executor_lease = uuid::Uuid::new_v4();
+    assert!(matches!(
+        store
+            .claim_sandbox_tool_call(checkpoint.id, executor_lease, chrono::Duration::minutes(5))
+            .await
+            .unwrap(),
+        openwave_core::ClaimSandboxToolCallOutcome::Claimed(_)
+    ));
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/agent-runs", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshots: Vec<serde_json::Value> = json_body(response).await;
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.get("id") == Some(&serde_json::json!(run.id)))
+        .expect("sandbox snapshot is returned");
+    assert_eq!(
+        snapshot.get("activity"),
+        Some(&serde_json::json!({"kind": "web_search", "status": "running"}))
+    );
+}
+
+#[tokio::test]
+async fn agent_run_snapshots_omit_persisted_raw_failure_detail() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let chat: Chat = json_body(response).await;
+
+    let run = match store
+        .accept_agent_run(
+            AgentRunId::new(),
+            chat.id,
+            Some(AgentRunId::foreground_for_chat(chat.id)),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("research"),
+        )
+        .await
+        .unwrap()
+    {
+        AcceptAgentRunOutcome::Accepted(run) => run,
+        outcome => panic!("unexpected sandbox admission: {outcome:?}"),
+    };
+    let lease_token = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(lease_token, chrono::Duration::minutes(5), 1, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        run.id
+    );
+    let raw_detail = "upstream request failed: Authorization: Bearer private-token";
+    assert!(store
+        .fail_agent_run(
+            run.id,
+            lease_token,
+            "sandbox_transport_failed",
+            raw_detail,
+            chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        store
+            .get_agent_run(run.id)
+            .await
+            .unwrap()
+            .expect("failed run remains persisted")
+            .last_error_detail
+            .as_deref(),
+        Some(raw_detail)
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/agent-runs", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshots: Vec<serde_json::Value> = json_body(response).await;
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.get("id") == Some(&serde_json::json!(run.id)))
+        .expect("sandbox snapshot is returned");
+    assert_eq!(
+        snapshot.get("last_error_code"),
+        Some(&serde_json::json!("sandbox_transport_failed"))
+    );
+    assert!(snapshot.get("last_error_detail").is_none());
+    assert!(!serde_json::to_string(snapshot)
+        .unwrap()
+        .contains(raw_detail));
 }
 
 /// Create a project and return it.
