@@ -12,7 +12,7 @@ use openwave_core::{
     AcceptAgentRunOutcome, AgentErrorInfo, AgentEvent, AgentRunExecution, AgentRunId,
     AgentRunInboxStatus, AgentRunStatus, ApprovalClass, BeginRootAttachmentChange, BlobStore,
     CallId, Chat, ChatId, ChatRequest, ChatRootAttachment, ClientToolCallRequest, ContentBlock,
-    HostRootId, Message, ModelProvider, ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome,
+    HostRootId, Message, MessageId, ModelProvider, ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome,
     Project, ProjectId, ProviderEvent, ProviderId, Role, RootAttachmentChangeAction,
     RootAttachmentChangeId, RootAttachmentOrigin, SandboxToolCallRequest, SecretProvider,
     SequencedEvent, StopReason, Tool, ToolCallExecution, ToolCallRecord, ToolCallResolution,
@@ -152,6 +152,44 @@ impl ModelProvider for GatedProvider {
                 reason: StopReason::EndTurn,
             }
         })
+        .boxed())
+    }
+}
+
+/// Completes one turn, then leaves the next turn live after one text delta.
+/// This models reopening a conversation while a response is still streaming.
+struct ReplayBoundaryProvider {
+    calls: AtomicUsize,
+    active_delta_entered: Arc<Notify>,
+}
+
+#[async_trait]
+impl ModelProvider for ReplayBoundaryProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("replay-boundary")
+    }
+
+    async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "durable answer".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed());
+        }
+
+        let entered = self.active_delta_entered.clone();
+        Ok(stream::once(async move {
+            entered.notify_one();
+            ProviderEvent::TextDelta {
+                text: "still streaming".into(),
+            }
+        })
+        .chain(stream::pending())
         .boxed())
     }
 }
@@ -711,8 +749,25 @@ impl Store for PauseTerminalStore {
     async fn list_chats(&self) -> Result<Vec<Chat>> {
         self.inner.list_chats().await
     }
+    async fn get_chat_transcript(
+        &self,
+        id: ChatId,
+    ) -> Result<Option<openwave_core::ChatTranscriptSnapshot>> {
+        self.inner.get_chat_transcript(id).await
+    }
     async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
         self.inner.set_chat_model(id, model).await
+    }
+    async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()> {
+        self.inner.set_chat_title(id, title).await
+    }
+    async fn update_chat_metadata(
+        &self,
+        id: ChatId,
+        title: Option<Option<String>>,
+        model: Option<Option<String>>,
+    ) -> Result<bool> {
+        self.inner.update_chat_metadata(id, title, model).await
     }
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<openwave_core::TurnRun>> {
         self.inner.get_turn_run(id).await
@@ -1921,7 +1976,7 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
     let user_steered_at = events.iter().position(|e| {
         matches!(
             &e.event,
-            AgentEvent::UserSteered { content } if content == "change course"
+            AgentEvent::UserSteered { content, .. } if content == "change course"
         )
     });
     assert!(
@@ -1930,7 +1985,7 @@ async fn interrupt_steer_preempts_a_running_turn_and_continues() {
     );
     assert!(events.iter().any(|e| matches!(
         &e.event,
-        AgentEvent::UserSteered { content } if content == "change course"
+        AgentEvent::UserSteered { content, .. } if content == "change course"
     )));
     assert!(matches!(
         events.last().map(|e| &e.event),
@@ -2067,7 +2122,7 @@ async fn boundary_steer_commits_the_candidate_and_instruction_atomically() {
             .iter()
             .filter(|event| matches!(
                 &event.event,
-                AgentEvent::UserSteered { content } if content == "continue with this"
+                AgentEvent::UserSteered { content, .. } if content == "continue with this"
             ))
             .count(),
         1,
@@ -2161,7 +2216,7 @@ async fn durable_steer_poll_recovers_a_missing_local_notification() {
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        AgentEvent::UserSteered { content } if content == "recover from the database"
+        AgentEvent::UserSteered { content, .. } if content == "recover from the database"
     )));
     assert!(matches!(
         events.last().map(|event| &event.event),
@@ -2297,7 +2352,7 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
             .iter()
             .filter(|event| matches!(
                 &event.event,
-                AgentEvent::UserSteered { content } if content == "recover exactly"
+                AgentEvent::UserSteered { content, .. } if content == "recover exactly"
             ))
             .count(),
         1,
@@ -2425,7 +2480,7 @@ async fn committed_steer_event_recovers_when_cancellation_wins_ambiguous_respons
             .iter()
             .filter(|event| matches!(
                 &event.event,
-                AgentEvent::UserSteered { content } if content == "apply before cancellation"
+                AgentEvent::UserSteered { content, .. } if content == "apply before cancellation"
             ))
             .count(),
         1,
@@ -2508,7 +2563,7 @@ async fn queued_steer_is_applied_when_the_worker_claims_the_turn() {
     let events = wait_for_turn(&store, chat.id).await;
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        AgentEvent::UserSteered { content } if content == "queued direction"
+        AgentEvent::UserSteered { content, .. } if content == "queued direction"
     )));
     let messages = store.list_messages(chat.id).await.unwrap();
     assert_eq!(
@@ -6028,6 +6083,261 @@ async fn patch_chat_sets_and_clears_the_model() {
 }
 
 #[tokio::test]
+async fn patch_chat_sets_and_clears_a_trimmed_title() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    let renamed = patch_chat(
+        &router,
+        &bearer,
+        chat.id,
+        serde_json::json!({"title": "  Project notes  "}),
+    )
+    .await;
+    assert_eq!(renamed.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<Chat>(renamed).await.title.as_deref(),
+        Some("Project notes")
+    );
+
+    let rejected = patch_chat(
+        &router,
+        &bearer,
+        chat.id,
+        serde_json::json!({"title": "must not persist", "model": ""}),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let fetched: Chat = json_body(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/chats/{}", chat.id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(fetched.title.as_deref(), Some("Project notes"));
+
+    let cleared = patch_chat(&router, &bearer, chat.id, serde_json::json!({"title": null})).await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    assert_eq!(json_body::<Chat>(cleared).await.title, None);
+}
+
+#[tokio::test]
+async fn chat_transcript_replays_only_visible_durable_messages() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    store
+        .append_message(&Message {
+            id: MessageId::new(),
+            chat_id: chat.id,
+            turn_id: TurnId::new(),
+            role: Role::User,
+            content: "remember this".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .append_event(chat.id, &AgentEvent::TextDelta { text: "live".into() })
+            .await
+            .unwrap(),
+        1
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let transcript: serde_json::Value = json_body(response).await;
+    assert_eq!(transcript["messages"][0]["role"], "user");
+    assert_eq!(transcript["messages"][0]["content"], "remember this");
+    assert_eq!(
+        transcript["last_event_seq"], 0,
+        "a nonterminal delta must replay after a durable transcript snapshot"
+    );
+}
+
+#[tokio::test]
+async fn transcript_cursor_replays_an_active_turn_after_the_durable_boundary() {
+    let active_delta_entered = Arc::new(Notify::new());
+    let (router, token, store, _dir) = test_app_with(Arc::new(ReplayBoundaryProvider {
+        calls: AtomicUsize::new(0),
+        active_delta_entered: active_delta_entered.clone(),
+    }))
+    .await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "first turn").await,
+        StatusCode::ACCEPTED
+    );
+    let first_events = wait_for_turn(&store, chat.id).await;
+    let terminal_seq = first_events
+        .iter()
+        .find_map(|event| {
+            matches!(event.event, AgentEvent::TurnCompleted { .. }).then_some(event.seq)
+        })
+        .expect("the completed first turn has a terminal journal event");
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "second turn").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), active_delta_entered.notified())
+        .await
+        .expect("second turn entered the live provider stream");
+    for _ in 0..100 {
+        if store
+            .list_events(chat.id, terminal_seq)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| {
+                matches!(&event.event, AgentEvent::TextDelta { text } if text == "still streaming")
+            })
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let transcript: serde_json::Value = json_body(response).await;
+    assert_eq!(transcript["last_event_seq"], terminal_seq);
+    assert!(transcript["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["content"] == "durable answer"));
+
+    let replay = store
+        .list_events(chat.id, transcript["last_event_seq"].as_i64().unwrap())
+        .await
+        .unwrap();
+    assert!(replay
+        .iter()
+        .any(|event| matches!(event.event, AgentEvent::TurnStarted { .. })));
+    assert!(replay.iter().any(
+        |event| matches!(&event.event, AgentEvent::TextDelta { text } if text == "still streaming")
+    ));
+}
+
+#[tokio::test]
+async fn transcript_hydration_reconciles_an_active_steer_by_message_identity() {
+    let gate = Arc::new(Notify::new());
+    let (router, token, store, _dir) =
+        test_app_with(Arc::new(GatedProvider { gate })).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "start").await,
+        StatusCode::ACCEPTED
+    );
+    for _ in 0..100 {
+        if store
+            .get_turn_run(turn_id)
+            .await
+            .unwrap()
+            .is_some_and(|turn| turn.status == TurnRunStatus::Running)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        steer_turn(&router, &bearer, chat.id, turn_id, "remember this", true).await,
+        StatusCode::ACCEPTED
+    );
+
+    let mut steered = None;
+    for _ in 0..200 {
+        if let Some(event) = store
+            .list_events(chat.id, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|event| matches!(&event.event, AgentEvent::UserSteered { content, .. } if content == "remember this"))
+        {
+            steered = Some(event);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let steered = steered.expect("active steer was journaled");
+    let message_id = match steered.event {
+        AgentEvent::UserSteered { message_id, .. } => message_id.to_string(),
+        _ => unreachable!("filtered steer event"),
+    };
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let transcript: serde_json::Value = json_body(response).await;
+    assert!(transcript["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == message_id && message["content"] == "remember this"));
+
+    let replay = store
+        .list_events(chat.id, transcript["last_event_seq"].as_i64().unwrap())
+        .await
+        .unwrap();
+    let replayed_message_id = replay.into_iter().find_map(|event| match event.event {
+        AgentEvent::UserSteered { message_id, .. } => Some(message_id.to_string()),
+        _ => None,
+    });
+    assert_eq!(replayed_message_id.as_deref(), Some(message_id.as_str()));
+
+    // This is the renderer's reconciliation rule: the exact durable identity,
+    // not matching text, suppresses a replayed steer already in the snapshot.
+    let mut hydrated_ids = transcript["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["id"].as_str().map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
+    assert!(!hydrated_ids.insert(message_id));
+}
+
+#[tokio::test]
 async fn patch_chat_rejects_empty_model_and_unknown_chat() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
@@ -7887,7 +8197,7 @@ async fn steer_wins_a_completion_race_and_restarts_generation() {
         .position(|event| {
             matches!(
                 &event.event,
-                AgentEvent::UserSteered { content } if content == "replace the answer"
+                AgentEvent::UserSteered { content, .. } if content == "replace the answer"
             )
         })
         .expect("the next generation applies the durable steer");

@@ -1908,6 +1908,7 @@ mod committed_event_drain_tests {
         let committed = SequencedEvent {
             seq: 7,
             event: AgentEvent::UserSteered {
+                message_id: MessageId::new(),
                 content: "already durable".into(),
             },
         };

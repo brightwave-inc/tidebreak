@@ -1682,12 +1682,32 @@ impl Store for DbStore {
         ops::conversation::set_chat_model(self, id, model).await
     }
 
+    async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()> {
+        ops::conversation::set_chat_title(self, id, title).await
+    }
+
+    async fn update_chat_metadata(
+        &self,
+        id: ChatId,
+        title: Option<Option<String>>,
+        model: Option<Option<String>>,
+    ) -> Result<bool> {
+        ops::conversation::update_chat_metadata(self, id, title, model).await
+    }
+
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
         ops::conversation::get_chat(self, id).await
     }
 
     async fn list_chats(&self) -> Result<Vec<Chat>> {
         ops::conversation::list_chats(self).await
+    }
+
+    async fn get_chat_transcript(
+        &self,
+        id: ChatId,
+    ) -> Result<Option<crate::storage::ChatTranscriptSnapshot>> {
+        ops::conversation::get_chat_transcript(self, id).await
     }
 
     async fn begin_root_attachment_change(

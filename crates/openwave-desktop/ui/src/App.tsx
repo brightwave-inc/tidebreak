@@ -3,6 +3,7 @@ import {
   ApiClient,
   type AgentRun,
   type Chat,
+  type ChatMessage,
   type ModelInfo,
   type PendingFolderAccessRequest,
   type ProviderInfo,
@@ -56,11 +57,22 @@ function nextId(): string {
   return `m${msgSeq}`;
 }
 
+function messageFromSnapshot(message: ChatMessage): Msg {
+  return {
+    id: message.id,
+    role: message.role,
+    text: message.content,
+  };
+}
+
 export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [info, setInfo] = useState<ServerInfo | null>(null);
   const [client, setClient] = useState<ApiClient | null>(null);
   const [chat, setChat] = useState<Chat | null>(null);
+  const [hydratedChatId, setHydratedChatId] = useState<string | null>(null);
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [chatsError, setChatsError] = useState<string | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -84,12 +96,17 @@ export default function App() {
   );
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [creatingChat, setCreatingChat] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const [settingsPanel, setSettingsPanel] = useState<
     "providers" | "web-search" | "folders" | null
   >(null);
   const [status, setStatus] = useState("starting…");
   const socketRef = useRef<WebSocket | null>(null);
   const socketGenerationRef = useRef(0);
+  const chatSelectionRef = useRef(0);
+  const hydratedMessageIdsRef = useRef<Set<string>>(new Set());
   const lastSeqRef = useRef(0);
   const assistantBufRef = useRef("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -123,16 +140,21 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const [catalog, providerList] = await Promise.all([
+        const [catalog, providerList, existingChats] = await Promise.all([
           client.listModels(),
           client.listProviders(),
+          client.listChats(),
         ]);
         if (cancelled) return;
         setModels(catalog.models);
         setProviders(providerList.providers);
-        const created = await client.createChat(catalog.models[0]?.id);
+        setChats(existingChats);
+        const created =
+          existingChats[0] ??
+          (await client.createChat(catalog.models[0]?.id));
         if (cancelled) return;
-        setChat(created);
+        if (existingChats.length === 0) setChats([created]);
+        activateChat(created);
         setStatus(`chat ${created.id.slice(0, 8)}…`);
       } catch (err) {
         if (!cancelled) setBootError(String(err));
@@ -145,8 +167,41 @@ export default function App() {
 
   useEffect(() => {
     if (!client || !chat) return;
+    let cancelled = false;
+    setHydratedChatId(null);
+    setMessages([]);
+    hydratedMessageIdsRef.current = new Set();
+    (async () => {
+      try {
+        const transcript = await client.listChatMessages(chat.id);
+        if (cancelled) return;
+        lastSeqRef.current = transcript.last_event_seq;
+        hydratedMessageIdsRef.current = new Set(
+          transcript.messages.map((message) => message.id),
+        );
+        setMessages(transcript.messages.map(messageFromSnapshot));
+        setHydratedChatId(chat.id);
+      } catch (err) {
+        if (!cancelled) {
+          setMessages([
+            {
+              id: nextId(),
+              role: "error",
+              text: `Could not load this conversation: ${String(err)}`,
+            },
+          ]);
+          setHydratedChatId(chat.id);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, chat?.id]);
+
+  useEffect(() => {
+    if (!client || !chat || hydratedChatId !== chat.id) return;
     socketRef.current?.close();
-    lastSeqRef.current = 0;
     const generation = ++socketGenerationRef.current;
     let disposed = false;
     let reconnectTimer: number | null = null;
@@ -208,7 +263,7 @@ export default function App() {
         socketGenerationRef.current += 1;
       }
     };
-  }, [client, chat?.id]);
+  }, [client, chat?.id, hydratedChatId]);
 
   useEffect(() => {
     if (!client || !chat) return;
@@ -433,9 +488,11 @@ export default function App() {
     }
 
     if (event.type === "user_steered") {
+      if (hydratedMessageIdsRef.current.has(event.message_id)) return;
+      hydratedMessageIdsRef.current.add(event.message_id);
       setMessages((prev) => [
         ...prev,
-        { id: nextId(), role: "user", text: event.content },
+        { id: event.message_id, role: "user", text: event.content },
       ]);
       return;
     }
@@ -493,6 +550,8 @@ export default function App() {
 
   async function onSend() {
     if (!client || !chat || !draft.trim() || busy) return;
+    const chatId = chat.id;
+    const selection = chatSelectionRef.current;
     const content = draft.trim();
     const turnId = crypto.randomUUID();
     setDraft("");
@@ -502,9 +561,11 @@ export default function App() {
     setCancelPendingTurnId(null);
     setCancelError(null);
     try {
-      await client.postMessage(chat.id, turnId, content);
+      await client.postMessage(chatId, turnId, content);
+      if (chatSelectionRef.current !== selection) return;
       refreshAgentRunsRef.current?.();
     } catch (err) {
+      if (chatSelectionRef.current !== selection) return;
       resolveActiveTurn();
       setMessages((prev) => [
         ...prev,
@@ -524,14 +585,19 @@ export default function App() {
     ) {
       return;
     }
+    const selection = chatSelectionRef.current;
+    const chatId = chat.id;
 
     cancelRequestTurnRef.current = turnId;
     setCancelPendingTurnId(turnId);
     setCancelError(null);
     try {
-      await client.cancel(chat.id, turnId);
+      await client.cancel(chatId, turnId);
     } catch (err) {
-      if (cancelRequestTurnRef.current === turnId) {
+      if (
+        chatSelectionRef.current === selection &&
+        cancelRequestTurnRef.current === turnId
+      ) {
         cancelRequestTurnRef.current = null;
         setCancelPendingTurnId(null);
         setCancelError(String(err));
@@ -540,7 +606,7 @@ export default function App() {
   }
 
   async function onNewChat() {
-    if (!client || creatingChat || busy) return;
+    if (!client || creatingChat) return;
     setCreatingChat(true);
     try {
       const created = await client.createChat(chat?.model ?? models[0]?.id);
@@ -551,16 +617,20 @@ export default function App() {
       provisionalToolCallIdsRef.current = new Set();
       lastSeqRef.current = 0;
       setMessages([]);
+      hydratedMessageIdsRef.current = new Set();
       setAgentRuns([]);
       setAgentRunsError(null);
       setFolderAccessRequests([]);
       setFolderAccessErrors({});
       setDraft("");
+      setBusy(false);
       setActiveTurnId(null);
       setCancelPendingTurnId(null);
       setCancelError(null);
       cancelRequestTurnRef.current = null;
-      setChat(created);
+      activateChat(created);
+      setChats((current) => [created, ...current]);
+      setChatsError(null);
       setStatus(`chat ${created.id.slice(0, 8)}…`);
     } catch (err) {
       setMessages((prev) => [
@@ -576,10 +646,71 @@ export default function App() {
     }
   }
 
+  function activateChat(next: Chat) {
+    chatSelectionRef.current += 1;
+    setChat(next);
+  }
+
+  function selectChat(next: Chat) {
+    if (next.id === chat?.id || creatingChat) return;
+    socketGenerationRef.current += 1;
+    socketRef.current?.close();
+    socketRef.current = null;
+    assistantBufRef.current = "";
+    lastSeqRef.current = 0;
+    setMessages([]);
+    hydratedMessageIdsRef.current = new Set();
+    setAgentRuns([]);
+    setAgentRunsError(null);
+    setFolderAccessRequests([]);
+    setFolderAccessErrors({});
+    setDraft("");
+    setBusy(false);
+    setActiveTurnId(null);
+    setCancelPendingTurnId(null);
+    setCancelError(null);
+    cancelRequestTurnRef.current = null;
+    setEditingTitle(false);
+    activateChat(next);
+    setStatus(`chat ${next.id.slice(0, 8)}…`);
+  }
+
+  async function onRenameChat() {
+    if (!client || !chat || savingTitle) return;
+    const chatId = chat.id;
+    const selection = chatSelectionRef.current;
+    setSavingTitle(true);
+    try {
+      const updated = await client.patchChatTitle(chatId, titleDraft.trim() || null);
+      setChats((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      if (chatSelectionRef.current !== selection) return;
+      setChat(updated);
+      setEditingTitle(false);
+    } catch (err) {
+      if (chatSelectionRef.current !== selection) return;
+      setChatsError(`Could not rename conversation: ${String(err)}`);
+    } finally {
+      setSavingTitle(false);
+    }
+  }
+
   async function onModelChange(modelId: string) {
     if (!client || !chat) return;
-    const updated = await client.patchChatModel(chat.id, modelId || null);
+    const chatId = chat.id;
+    const selection = chatSelectionRef.current;
+    const updated = await client.patchChatModel(chatId, modelId || null);
+    if (chatSelectionRef.current !== selection) {
+      setChats((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      return;
+    }
     setChat(updated);
+    setChats((current) =>
+      current.map((item) => (item.id === updated.id ? updated : item)),
+    );
   }
 
   async function onApproval(callId: string, decision: "approve" | "reject") {
@@ -688,18 +819,29 @@ export default function App() {
           type="button"
           className="new-chat"
           onClick={() => void onNewChat()}
-          disabled={busy || creatingChat}
+          disabled={creatingChat}
         >
           <span aria-hidden="true">+</span>
           {creatingChat ? "Starting…" : "New chat"}
         </button>
 
         <div className="sidebar-section">
-          <span className="sidebar-label">Workspace</span>
-          <div className="conversation-item is-active">
-            <span className="conversation-dot" aria-hidden="true" />
-            <span>{chat.title?.trim() || "New conversation"}</span>
+          <span className="sidebar-label">Conversations</span>
+          <div className="conversation-list" aria-label="Conversations">
+            {chats.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`conversation-item${item.id === chat.id ? " is-active" : ""}`}
+                aria-current={item.id === chat.id ? "page" : undefined}
+                onClick={() => selectChat(item)}
+              >
+                <span className="conversation-dot" aria-hidden="true" />
+                <span>{item.title?.trim() || "New conversation"}</span>
+              </button>
+            ))}
           </div>
+          {chatsError && <p className="sidebar-error">{chatsError}</p>}
         </div>
 
         <div className="sidebar-footer">
@@ -746,7 +888,42 @@ export default function App() {
           <header className="conversation-header">
             <div>
               <p className="eyebrow">Conversation</p>
-              <h1>{chat.title?.trim() || "New conversation"}</h1>
+              {editingTitle ? (
+                <form
+                  className="conversation-title-editor"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void onRenameChat();
+                  }}
+                >
+                  <input
+                    autoFocus
+                    value={titleDraft}
+                    aria-label="Conversation title"
+                    onChange={(event) => setTitleDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setEditingTitle(false);
+                    }}
+                  />
+                  <button type="submit" className="btn" disabled={savingTitle}>
+                    {savingTitle ? "Saving…" : "Save"}
+                  </button>
+                </form>
+              ) : (
+                <div className="conversation-title-row">
+                  <h1>{chat.title?.trim() || "New conversation"}</h1>
+                  <button
+                    type="button"
+                    className="title-action"
+                    onClick={() => {
+                      setTitleDraft(chat.title ?? "");
+                      setEditingTitle(true);
+                    }}
+                  >
+                    Rename
+                  </button>
+                </div>
+              )}
             </div>
             <div className="conversation-header-actions">
               <div className="mobile-settings-actions">

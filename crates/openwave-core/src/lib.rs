@@ -107,7 +107,7 @@ pub use storage::{
     ParkTurnForAgentRunInboxOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
     RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
     ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, SecretProvider, Store,
-    SubmitAgentRunResultOutcome, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    SubmitAgentRunResultOutcome, ChatTranscriptSnapshot, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
 #[cfg(feature = "tools")]

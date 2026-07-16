@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::AgentErrorInfo;
-use crate::id::{CallId, TurnId};
+use crate::id::{CallId, MessageId, TurnId};
 use crate::provider::{StopReason, Usage};
 use crate::tool::{ApprovalClass, ToolOutput};
 
@@ -103,8 +103,11 @@ pub enum AgentEvent {
     },
     /// A mid-turn steer message was injected into the running turn. The turn
     /// continues (unlike `TurnCancelled`); the content is also persisted as a
-    /// user message.
+    /// user message. `message_id` lets reconnecting renderers reconcile the
+    /// event with that durable message without lossy content matching.
     UserSteered {
+        /// Stable id of the persisted user message.
+        message_id: MessageId,
         /// The steered user text.
         content: String,
     },
@@ -164,5 +167,19 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
+    }
+
+    #[test]
+    fn user_steer_roundtrips_with_its_durable_message_id() {
+        let message_id = MessageId::new();
+        let ev = AgentEvent::UserSteered {
+            message_id,
+            content: "remember this".into(),
+        };
+
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["type"], "user_steered");
+        assert_eq!(json["message_id"], message_id.to_string());
+        assert_eq!(serde_json::from_value::<AgentEvent>(json).unwrap(), ev);
     }
 }

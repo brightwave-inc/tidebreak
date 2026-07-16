@@ -14,8 +14,10 @@ use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
-    ApprovalDecision, CallId, Chat, ChatId, Project, ProjectId, RequestTurnCancellationOutcome,
-    SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store,
+    ApprovalDecision, CallId, Chat, ChatId, Message as StoredMessage, MessageId, Project,
+    ProjectId,
+    RequestTurnCancellationOutcome, Role, SandboxToolCall, SandboxToolCallStatus,
+    SecretProvider, SequencedEvent, Store,
     ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
 };
 
@@ -446,31 +448,107 @@ pub async fn create_chat(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatUpdate {
+    /// An explicit `null` clears the title. Non-empty titles are trimmed before
+    /// persistence so sidebar labels remain stable across clients.
+    #[serde(default, deserialize_with = "double_option")]
+    pub title: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     pub model: Option<Option<String>>,
 }
 
-/// `PATCH /chats/{id}` — update a chat's model selection; returns the chat. This
-/// is what a chat UI's model selector writes to.
+/// `PATCH /chats/{id}` — update the human-facing title and/or model selection.
 pub async fn patch_chat(
     State(state): State<AppState>,
     Path(id): Path<ChatId>,
     Json(body): Json<ChatUpdate>,
 ) -> Result<Json<Chat>, ServerError> {
+    // Validate every supplied field before touching durable state. This keeps a
+    // mixed request all-or-nothing from the user's point of view.
+    if body.model.as_ref().is_some_and(|model| {
+        model.as_deref().is_some_and(str::is_empty)
+    }) {
+        return Err(ServerError::bad_request("model must not be empty"));
+    }
+    let title = body.title.map(|title| {
+        title
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    });
+
     let mut chat = state
         .store
         .get_chat(id)
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
 
+    if !state
+        .store
+        .update_chat_metadata(id, title.clone(), body.model.clone())
+        .await?
+    {
+        return Err(ServerError::not_found(format!("chat {id} not found")));
+    }
+    if let Some(title) = title {
+        chat.title = title;
+    }
     if let Some(model) = body.model {
-        if model.as_deref().is_some_and(str::is_empty) {
-            return Err(ServerError::bad_request("model must not be empty"));
-        }
-        state.store.set_chat_model(id, model.clone()).await?;
         chat.model = model;
     }
     Ok(Json(chat))
+}
+
+/// A renderer-safe durable transcript entry. Internal routing and tool state
+/// deliberately remain behind the server boundary.
+#[derive(Debug, Serialize)]
+pub struct ChatMessageSnapshot {
+    pub id: MessageId,
+    pub role: Role,
+    pub content: String,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
+/// One visible transcript plus the durable journal watermark that produced it.
+/// The renderer uses the watermark to subscribe only to future events, avoiding
+/// duplicate text when reopening a completed conversation.
+#[derive(Debug, Serialize)]
+pub struct ChatTranscript {
+    pub messages: Vec<ChatMessageSnapshot>,
+    pub last_event_seq: i64,
+}
+
+impl From<StoredMessage> for ChatMessageSnapshot {
+    fn from(message: StoredMessage) -> Self {
+        Self {
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            created_at: message.created_at,
+        }
+    }
+}
+
+/// `GET /chats/{id}/messages` — replay the visible durable transcript in
+/// commit order. The existence check prevents a missing chat from looking like
+/// an empty conversation.
+pub async fn list_chat_messages(
+    State(state): State<AppState>,
+    Path(id): Path<ChatId>,
+) -> Result<Json<ChatTranscript>, ServerError> {
+    let transcript = state
+        .store
+        .get_chat_transcript(id)
+        .await?
+        .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
+    let messages = transcript
+        .messages
+        .into_iter()
+        .filter(|message| matches!(message.role, Role::User | Role::Assistant))
+        .map(ChatMessageSnapshot::from)
+        .collect();
+    Ok(Json(ChatTranscript {
+        messages,
+        last_event_seq: transcript.last_event_seq,
+    }))
 }
 
 /// `GET /chats` — list chats, most-recently-created first.
