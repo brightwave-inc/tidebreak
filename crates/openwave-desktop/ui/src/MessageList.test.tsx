@@ -57,4 +57,103 @@ describe("MessageBubble", () => {
     expect(markup).toContain("message-approval");
     expect(markup).toContain('aria-label="Thinking"');
   });
+
+  it("collapses only contiguous terminal tool activity using safe card copy", () => {
+    const messages: ChatMessage[] = [
+      { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "completed" },
+      { id: "tool-2", role: "tool", callId: "call-2", name: "read_file", status: "failed" },
+      { id: "assistant-1", role: "assistant", text: "Done" },
+      { id: "tool-3", role: "tool", callId: "call-3", name: "list_dir", status: "cancelled" },
+    ];
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={messages}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup).toContain('class="tool-activity-group"');
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).toContain('aria-controls="tool-activity-group-0"');
+    expect(markup).toContain('id="tool-activity-group-0" hidden=""');
+    expect(markup).toContain("2 tool activities");
+    expect(markup).toContain("Search the web: Web search complete");
+    expect(markup).toContain("Read a file: Tool could not complete");
+    expect(markup.indexOf("Web search complete")).toBeLessThan(
+      markup.indexOf("Done"),
+    );
+    expect(markup.indexOf("Done")).toBeLessThan(markup.indexOf("Not run"));
+  });
+
+  it("leaves active and folder-access activity individually visible", () => {
+    const messages: ChatMessage[] = [
+      { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "completed" },
+      { id: "tool-2", role: "tool", callId: "call-2", name: "list_dir", status: "running" },
+      { id: "tool-3", role: "tool", callId: "call-3", name: "request_folder_access", status: "completed" },
+      { id: "tool-4", role: "tool", callId: "call-4", name: "read_file", status: "completed" },
+    ];
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={messages}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup).not.toContain("tool-activity-group");
+    expect(markup).toContain("Browsing files");
+    expect(markup).toContain("Folder access request complete");
+  });
+
+  it("does not expose provider tool names in an activity summary", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "tool-1",
+        role: "tool",
+        callId: "call-1",
+        name: "mcp__private_server__read_a_sensitive_path",
+        status: "completed",
+      },
+      { id: "tool-2", role: "tool", callId: "call-2", name: "web_search", status: "completed" },
+    ];
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={messages}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup).toContain("Use a tool: Tool complete");
+    expect(markup).not.toContain("private_server");
+    expect(markup).not.toContain("sensitive_path");
+  });
 });

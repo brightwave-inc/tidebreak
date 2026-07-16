@@ -16,6 +16,11 @@ type ToolPresentation = {
   complete: string;
 };
 
+export type ToolCallPresentation = {
+  label: string;
+  statusLabel: string;
+};
+
 // This is deliberately an allowlist rather than a display transformation of a
 // tool name. Tool events come from providers, and a card should never become a
 // side channel for an unexpected tool name, arguments, output, file path, or
@@ -75,13 +80,12 @@ const FALLBACK_TOOL: ToolPresentation = {
 };
 
 export function ToolCallCard({ name, status }: ToolCallCardProps) {
-  const tool = TOOL_PRESENTATIONS[name] ?? FALLBACK_TOOL;
-  const presentation = statusPresentation(tool, status);
+  const presentation = toolCallPresentation(name, status);
 
   return (
     <section
       className={`tool-call-card is-${status}`}
-      aria-label={`${tool.label}: ${presentation.label}`}
+      aria-label={`${presentation.label}: ${presentation.statusLabel}`}
       role="status"
       aria-live="polite"
       aria-atomic="true"
@@ -90,14 +94,31 @@ export function ToolCallCard({ name, status }: ToolCallCardProps) {
         {presentation.icon}
       </span>
       <div className="tool-call-copy">
-        <strong>{tool.label}</strong>
-        <span>{presentation.label}</span>
+        <strong>{presentation.label}</strong>
+        <span>{presentation.statusLabel}</span>
       </div>
       {status === "running" && (
         <span className="tool-call-spinner" aria-hidden="true" />
       )}
     </section>
   );
+}
+
+// Callers that summarize activity must use the same allowlisted presentation
+// as the card. In particular, do not transform provider-supplied tool names
+// into text for a summary.
+export function toolCallPresentation(
+  name: string,
+  status: ToolCallStatus,
+): ToolCallPresentation & { icon: string } {
+  const tool = TOOL_PRESENTATIONS[name] ?? FALLBACK_TOOL;
+  const statusPresentationResult = statusPresentation(tool, status);
+
+  return {
+    label: tool.label,
+    statusLabel: statusPresentationResult.label,
+    icon: statusPresentationResult.icon,
+  };
 }
 
 function statusPresentation(tool: ToolPresentation, status: ToolCallStatus) {

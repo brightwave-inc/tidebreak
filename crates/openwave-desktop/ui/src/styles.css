@@ -817,6 +817,74 @@ button {
   opacity: 0.7;
 }
 
+.tool-activity-group {
+  width: min(100%, 31rem);
+  align-self: flex-start;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--bg-elevated) 88%, var(--sidebar));
+}
+
+.tool-activity-group-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.55rem;
+  border: 0;
+  border-radius: 8px;
+  padding: 0.6rem 0.65rem;
+  color: var(--muted);
+  background: transparent;
+  text-align: left;
+}
+
+.tool-activity-group-toggle:hover,
+.tool-activity-group-toggle:focus-visible {
+  background: color-mix(in srgb, var(--sidebar-active) 65%, transparent);
+}
+
+.tool-activity-group-icon {
+  width: 1.15rem;
+  flex: 0 0 auto;
+  color: var(--ink);
+  font-size: 1.3rem;
+  line-height: 1;
+  text-align: center;
+}
+
+.tool-activity-group-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.04rem;
+}
+
+.tool-activity-group-copy strong,
+.tool-activity-group-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-activity-group-copy strong {
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.tool-activity-group-copy span {
+  font-size: 0.75rem;
+}
+
+.tool-activity-group-list {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0 0.65rem 0.65rem;
+}
+
+.tool-activity-group-list .tool-call-card {
+  width: 100%;
+}
+
 @keyframes tool-call-spin {
   to {
     transform: rotate(360deg);
