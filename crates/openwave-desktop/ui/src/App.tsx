@@ -3,7 +3,6 @@ import {
   ApiClient,
   type AgentRun,
   type Chat,
-  type ChatMessage,
   type ModelInfo,
   type PendingFolderAccessRequest,
   type ProviderInfo,
@@ -28,6 +27,7 @@ import { FolderAccessCard } from "./FolderAccessCard";
 import { Logomark } from "./Logomark";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { ToolCallCard, type ToolCallStatus } from "./ToolCallCard";
+import { hydrateTranscriptHistory } from "./TranscriptHistory";
 
 type Msg =
   | { id: string; role: "user"; text: string }
@@ -55,14 +55,6 @@ const MAX_RECENT_TERMINAL_SANDBOX_RUNS = 2;
 function nextId(): string {
   msgSeq += 1;
   return `m${msgSeq}`;
-}
-
-function messageFromSnapshot(message: ChatMessage): Msg {
-  return {
-    id: message.id,
-    role: message.role,
-    text: message.content,
-  };
 }
 
 export default function App() {
@@ -178,10 +170,32 @@ export default function App() {
         const transcript = await client.listChatMessages(chat.id);
         if (cancelled) return;
         lastSeqRef.current = transcript.last_event_seq;
-        hydratedMessageIdsRef.current = new Set(
-          transcript.messages.map((message) => message.id),
+        const hydrated = hydrateTranscriptHistory(
+          transcript.messages,
+          transcript.tool_activity,
         );
-        setMessages(transcript.messages.map(messageFromSnapshot));
+        hydratedMessageIdsRef.current = new Set(
+          hydrated
+            .filter((entry) => entry.kind === "message")
+            .map((entry) => entry.id),
+        );
+        setMessages(
+          hydrated.map((entry) =>
+            entry.kind === "tool"
+              ? {
+                  id: entry.id,
+                  role: "tool",
+                  callId: entry.id,
+                  name: entry.name,
+                  status: entry.status,
+                }
+              : {
+                  id: entry.id,
+                  role: entry.role,
+                  text: entry.text,
+                },
+          ),
+        );
         setHydratedChatId(chat.id);
       } catch (err) {
         if (!cancelled) {

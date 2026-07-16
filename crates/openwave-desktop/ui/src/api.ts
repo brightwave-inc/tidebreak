@@ -55,8 +55,26 @@ export type ChatMessage = {
   created_at: string;
 };
 
+/** A fixed, terminal tool-card projection with no canonical tool data. */
+export type ChatToolActivity = {
+  title:
+    | "Search the web"
+    | "Read a file"
+    | "Browse files"
+    | "Update a file"
+    | "Request folder access"
+    | "Connect a folder"
+    | "Check connected folders"
+    | "Delegate a task"
+    | "Use a tool";
+  status: "completed" | "failed" | "cancelled";
+  started_at: string;
+  finished_at: string | null;
+};
+
 export type ChatTranscript = {
   messages: ChatMessage[];
+  tool_activity: ChatToolActivity[];
   last_event_seq: number;
 };
 
