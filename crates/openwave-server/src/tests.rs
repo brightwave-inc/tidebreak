@@ -12,12 +12,12 @@ use openwave_core::{
     AcceptAgentRunOutcome, AgentErrorInfo, AgentEvent, AgentRunExecution, AgentRunId,
     AgentRunInboxStatus, AgentRunStatus, ApprovalClass, BeginRootAttachmentChange, BlobStore,
     CallId, Chat, ChatId, ChatRequest, ChatRootAttachment, ClientToolCallRequest, ContentBlock,
-    HostRootId, Message, MessageId, ModelProvider, ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome,
-    Project, ProjectId, ProviderEvent, ProviderId, Role, RootAttachmentChangeAction,
-    RootAttachmentChangeId, RootAttachmentOrigin, SandboxToolCallRequest, SecretProvider,
-    SequencedEvent, StopReason, Tool, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, ToolCtx, ToolOutput, ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus,
-    TurnSteerId, Usage,
+    HostRootId, Message, MessageId, ModelProvider, ParkSandboxToolCallOutcome,
+    ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent, ProviderId, Role,
+    RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentOrigin,
+    SandboxToolCallRequest, SecretProvider, SequencedEvent, StopReason, Tool, ToolCallExecution,
+    ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput, ToolSpec,
+    TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -6125,7 +6125,13 @@ async fn patch_chat_sets_and_clears_a_trimmed_title() {
     .await;
     assert_eq!(fetched.title.as_deref(), Some("Project notes"));
 
-    let cleared = patch_chat(&router, &bearer, chat.id, serde_json::json!({"title": null})).await;
+    let cleared = patch_chat(
+        &router,
+        &bearer,
+        chat.id,
+        serde_json::json!({"title": null}),
+    )
+    .await;
     assert_eq!(cleared.status(), StatusCode::OK);
     assert_eq!(json_body::<Chat>(cleared).await.title, None);
 }
@@ -6148,7 +6154,12 @@ async fn chat_transcript_replays_only_visible_durable_messages() {
         .unwrap();
     assert_eq!(
         store
-            .append_event(chat.id, &AgentEvent::TextDelta { text: "live".into() })
+            .append_event(
+                chat.id,
+                &AgentEvent::TextDelta {
+                    text: "live".into()
+                }
+            )
             .await
             .unwrap(),
         1
@@ -6253,8 +6264,7 @@ async fn transcript_cursor_replays_an_active_turn_after_the_durable_boundary() {
 #[tokio::test]
 async fn transcript_hydration_reconciles_an_active_steer_by_message_identity() {
     let gate = Arc::new(Notify::new());
-    let (router, token, store, _dir) =
-        test_app_with(Arc::new(GatedProvider { gate })).await;
+    let (router, token, store, _dir) = test_app_with(Arc::new(GatedProvider { gate })).await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
     let turn_id = TurnId::new();

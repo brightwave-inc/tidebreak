@@ -15,10 +15,9 @@ use tokio::sync::broadcast::error::RecvError;
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
     ApprovalDecision, CallId, Chat, ChatId, Message as StoredMessage, MessageId, Project,
-    ProjectId,
-    RequestTurnCancellationOutcome, Role, SandboxToolCall, SandboxToolCallStatus,
-    SecretProvider, SequencedEvent, Store,
-    ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
+    ProjectId, RequestTurnCancellationOutcome, Role, SandboxToolCall, SandboxToolCallStatus,
+    SecretProvider, SequencedEvent, Store, ToolCallExecution, ToolCallRecord, ToolCallStatus,
+    TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -464,9 +463,11 @@ pub async fn patch_chat(
 ) -> Result<Json<Chat>, ServerError> {
     // Validate every supplied field before touching durable state. This keeps a
     // mixed request all-or-nothing from the user's point of view.
-    if body.model.as_ref().is_some_and(|model| {
-        model.as_deref().is_some_and(str::is_empty)
-    }) {
+    if body
+        .model
+        .as_ref()
+        .is_some_and(|model| model.as_deref().is_some_and(str::is_empty))
+    {
         return Err(ServerError::bad_request("model must not be empty"));
     }
     let title = body.title.map(|title| {
