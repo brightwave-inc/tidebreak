@@ -430,7 +430,6 @@ button {
   max-width: 46rem;
   padding: 0.7rem 0.85rem;
   border-radius: 8px;
-  white-space: pre-wrap;
   word-break: break-word;
 }
 
@@ -458,6 +457,144 @@ button {
   border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
   color: var(--danger);
   background: oklch(0.97 0.01 25);
+}
+
+.message-markdown {
+  line-height: 1.55;
+  /* A streamed plain-text response keeps its line breaks before it forms
+     complete Markdown blocks. */
+  white-space: pre-wrap;
+}
+
+.message-markdown > :first-child {
+  margin-top: 0;
+}
+
+.message-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.message-markdown p,
+.message-markdown ul,
+.message-markdown ol,
+.message-markdown pre,
+.message-markdown blockquote,
+.message-markdown .markdown-table-wrap {
+  margin: 0 0 0.7rem;
+}
+
+.message-markdown h1,
+.message-markdown h2,
+.message-markdown h3,
+.message-markdown h4,
+.message-markdown h5,
+.message-markdown h6 {
+  margin: 1rem 0 0.45rem;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+}
+
+.message-markdown h1 {
+  font-size: 1.2rem;
+}
+
+.message-markdown h2 {
+  font-size: 1.08rem;
+}
+
+.message-markdown h3,
+.message-markdown h4,
+.message-markdown h5,
+.message-markdown h6 {
+  font-size: 0.96rem;
+}
+
+.message-markdown ul,
+.message-markdown ol {
+  padding-left: 1.35rem;
+}
+
+.message-markdown li + li {
+  margin-top: 0.2rem;
+}
+
+.message-markdown a {
+  color: inherit;
+  font-weight: 550;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 0.16em;
+}
+
+.message-markdown a:hover {
+  text-decoration-color: currentColor;
+}
+
+.message-markdown :not(pre) > code {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.08em 0.3em;
+  background: color-mix(in srgb, var(--sidebar) 70%, var(--bg-elevated));
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+.message-markdown pre {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0.7rem 0.8rem;
+  background: oklch(0.19 0.01 285);
+  color: oklch(0.94 0.008 95);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.message-markdown pre code {
+  font-family: inherit;
+}
+
+.message-markdown blockquote {
+  border-left: 2px solid var(--accent);
+  padding-left: 0.75rem;
+  color: var(--muted);
+}
+
+.message-markdown hr {
+  margin: 1rem 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.markdown-table-wrap {
+  overflow-x: auto;
+}
+
+.message-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92em;
+}
+
+.message-markdown th,
+.message-markdown td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.35rem 0.45rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.message-markdown th {
+  font-weight: 650;
+}
+
+.markdown-image-omitted {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.12rem 0.35rem;
+  color: var(--muted);
+  font-size: 0.82em;
 }
 
 .folder-consent {
