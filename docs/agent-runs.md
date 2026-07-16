@@ -109,9 +109,11 @@ notification may reduce latency, but it is never the source of truth.
 
 A background agent has private runtime scratch, but the initial executor has no
 tools and cannot access that scratch, projects, host folders, the network, or
-the parent conversation. Broker-mediated folder access is a future capability;
-when introduced it must use the consent and durable-receipt protocol described
-in [Host access and connected folders](host-access.md), never absolute paths.
+the parent conversation. Foreground chats may inspect already attached roots,
+but sandbox agents do not receive the broker transport or these tool contracts.
+Future sandbox folder access must use the parent-mediated consent and
+durable-receipt protocol described in [Host access and connected folders](host-access.md),
+never absolute paths.
 
 The sandbox boundary should remain useful outside the desktop product. A local
 process sandbox is the first execution adapter; self-hosted and managed profiles

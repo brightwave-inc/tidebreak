@@ -47,6 +47,10 @@ impl HostAccess {
             .map_err(|_| "host access store was initialized more than once".to_owned())
     }
 
+    pub(crate) fn store(&self) -> Option<&std::sync::Arc<dyn Store>> {
+        self.store.get()
+    }
+
     /// Stable private identity shared by native receipts and server recovery.
     pub(crate) const fn client_executor_id(&self) -> Uuid {
         self.receipts.executor_id()

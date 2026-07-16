@@ -141,5 +141,12 @@ async fn boot_server(
     tauri::async_runtime::spawn(async move {
         client_execution::recover_folder_access_receipts(recovery_app).await;
     });
+    let folder_operation_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        client_execution::folder_operations::recover_connected_folder_operations(
+            folder_operation_app,
+        )
+        .await;
+    });
     server.serve().await.map_err(|e| e.to_string())
 }

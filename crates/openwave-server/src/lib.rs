@@ -46,9 +46,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 use openwave_core::{
-    request_folder_access_tool_spec, validate_request_folder_access_arguments, AgentConfig,
-    AgentError, Config, DbStore, KeychainSecretProvider, ListDir, Profile, ReadFile, Result,
-    SecretProvider, Store, ToolRegistry, WriteFile,
+    list_connected_folders_tool_spec, list_folder_tool_spec, read_connected_file_tool_spec,
+    request_folder_access_tool_spec, validate_list_connected_folders_arguments,
+    validate_list_folder_arguments, validate_read_connected_file_arguments,
+    validate_request_folder_access_arguments, AgentConfig, AgentError, Config, DbStore,
+    KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store,
+    ToolRegistry, WriteFile,
 };
 use openwave_retrieval::{
     Embedder, HashEmbedder, LanceVectorStore, OpenAiEmbedder, ParserRegistry, PlainTextParser,
@@ -492,6 +495,15 @@ fn agent_deps(
     tools.register_validated_client(
         request_folder_access_tool_spec(),
         validate_request_folder_access_arguments,
+    );
+    tools.register_validated_client(
+        list_connected_folders_tool_spec(),
+        validate_list_connected_folders_arguments,
+    );
+    tools.register_validated_client(list_folder_tool_spec(), validate_list_folder_arguments);
+    tools.register_validated_client(
+        read_connected_file_tool_spec(),
+        validate_read_connected_file_arguments,
     );
     // The foreground worker parks atomically with child acceptance, and the
     // bounded sandbox worker is started from the same state below. Sandboxed

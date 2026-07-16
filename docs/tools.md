@@ -7,7 +7,7 @@ identity.
 
 ## What exists today
 
-The current foreground agent surface contains six tools:
+The current foreground agent surface contains nine tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
@@ -16,11 +16,16 @@ The current foreground agent surface contains six tools:
 | `write_file` | Atomically write private-scratch text | Server, workspace |
 | `search` | Search locally indexed project/chat documents | Server, read-only |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
+| `list_connected_folders` | List roots already attached to this chat | Native client continuation |
+| `list_folder` | List one directory below an attached root | Native client continuation |
+| `read_connected_file` | Read bounded UTF-8 text below an attached root | Native client continuation |
 | `spawn_sandbox_agent` | Delegate one bounded task and wait for its durable result | Foreground-only durable continuation |
 
-The host broker already supports listing connected roots, listing directories,
-and reading files, but those operations are not yet advertised directly to the
-model. Requesting access and using an approved root remain separate operations.
+The connected-folder calls are foreground-only. Their arguments contain only
+an opaque root ID and a bounded root-relative path; native code recovers the
+stored chat context, reauthorizes with the broker, and persists the exact
+model-facing result before resolving the parked turn. Requesting access and
+using an approved root remain separate operations.
 
 ## Core module layout
 

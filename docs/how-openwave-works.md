@@ -163,15 +163,19 @@ The built-in server registry currently contains:
   user-facing reason, one read capability proposal, and an optional well-known
   picker hint for Documents or Downloads. It has no server executor and grants
   nothing.
+- `list_connected_folders`, `list_folder`, and `read_connected_file`,
+  foreground-only client continuations that can inspect only roots already
+  attached to the authoritative chat. The native executor derives that context
+  from stored state, persists its bounded result, and never exposes host paths
+  or broker diagnostics to the renderer or model.
 
 Today these file tools still operate inside a server-derived, pinned per-chat
 scratch capability. Its path is neither persisted on the chat nor returned by
 the product API. The desktop can connect, list, and revoke multiple folders
 through a native picker and capability-gated host-broker sidecar; it exposes only
-opaque root IDs and display names to the renderer. The next native slice will
-synchronize broker connections through core's durable attachment-change state
-machine, and the following tool-routing slice will resolve operations through
-those roots.
+opaque root IDs and display names to the renderer. Foreground tool calls can now
+list/read roots already attached to their stored chat context; broader root
+attachment synchronization remains a separate durable state-machine slice.
 See [Host access and connected folders](host-access.md). The agent loop can now
 produce a durable client-wait checkpoint for the registered folder-request
 contract. The desktop discovers those pending requests from durable state and
