@@ -14,10 +14,10 @@ use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
-    ApprovalDecision, CallId, Chat, ChatId, Message as StoredMessage, MessageId, Project,
-    ProjectId, RequestTurnCancellationOutcome, Role, SandboxToolCall, SandboxToolCallStatus,
-    SecretProvider, SequencedEvent, Store, ToolCallExecution, ToolCallRecord, ToolCallStatus,
-    TurnId, TurnSteer, TurnSteerId,
+    ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome, Message as StoredMessage, MessageId,
+    Project, ProjectId, RequestTurnCancellationOutcome, Role, SandboxToolCall,
+    SandboxToolCallStatus, SecretProvider, SequencedEvent, Store, ToolCallExecution,
+    ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -568,6 +568,31 @@ pub async fn get_chat(
         .await?
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))
+}
+
+/// `DELETE /chats/{id}` — remove a quiesced conversation and its product
+/// history. Rooted or active conversations deliberately return a conflict: the
+/// caller must first finish cancellation and durable broker detachment.
+pub async fn delete_chat(
+    State(state): State<AppState>,
+    Path(id): Path<ChatId>,
+) -> Result<StatusCode, ServerError> {
+    match state.store.delete_chat(id).await? {
+        DeleteChatOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteChatOutcome::NotFound => Err(ServerError::not_found(format!("chat {id} not found"))),
+        DeleteChatOutcome::ActiveWork => Err(ServerError::conflict_kind(
+            "chat_active",
+            "finish or cancel the active work before deleting this conversation",
+        )),
+        DeleteChatOutcome::RootsAttached => Err(ServerError::conflict_kind(
+            "chat_roots_attached",
+            "detach connected folders before deleting this conversation",
+        )),
+        DeleteChatOutcome::RootAttachmentStateUnresolved => Err(ServerError::conflict_kind(
+            "chat_root_attachment_unresolved",
+            "reconcile connected-folder changes before deleting this conversation",
+        )),
+    }
 }
 
 /// Renderer-safe state for one agent run.

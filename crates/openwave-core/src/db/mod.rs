@@ -43,14 +43,14 @@ use crate::storage::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, BeginRootAttachmentChangeOutcome,
     ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome, ClaimSandboxToolCallOutcome,
     ClaimTurnRunOutcome, CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
-    ConsumeAgentRunInboxOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
-    EnsureDocumentParseJobOutcome, FailAgentRunOutcome, FinishAgentRunCancellationOutcome,
-    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledTurnOutcome,
-    JournaledTurnSteerOutcome, ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome,
-    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
-    RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, Store,
-    SubmitAgentRunResultOutcome,
+    ConsumeAgentRunInboxOutcome, DeleteChatOutcome, DocumentIndexJobReason,
+    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FailAgentRunOutcome,
+    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkSandboxToolCallOutcome,
+    ParkTurnForAgentRunInboxOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
+    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
+    ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, Store, SubmitAgentRunResultOutcome,
 };
 
 mod ops;
@@ -1701,6 +1701,10 @@ impl Store for DbStore {
 
     async fn list_chats(&self) -> Result<Vec<Chat>> {
         ops::conversation::list_chats(self).await
+    }
+
+    async fn delete_chat(&self, id: ChatId) -> Result<DeleteChatOutcome> {
+        ops::conversation::delete_chat(self, id).await
     }
 
     async fn get_chat_transcript(

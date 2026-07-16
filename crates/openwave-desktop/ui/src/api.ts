@@ -252,6 +252,13 @@ export class ApiClient {
     return this.json("/chats", { headers: this.headers() });
   }
 
+  deleteChat(chatId: string): Promise<void> {
+    return this.json(`/chats/${chatId}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
   listChatMessages(chatId: string): Promise<ChatTranscript> {
     return this.json(`/chats/${chatId}/messages`, {
       headers: this.headers(),

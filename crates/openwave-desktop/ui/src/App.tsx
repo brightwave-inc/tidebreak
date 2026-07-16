@@ -96,6 +96,7 @@ export default function App() {
   );
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [creatingChat, setCreatingChat] = useState(false);
+  const [deletingChatId, setDeletingChatId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
@@ -116,6 +117,7 @@ export default function App() {
   const visibleFolderCallIdsRef = useRef<Set<string>>(new Set());
   const cancelRequestTurnRef = useRef<string | null>(null);
   const provisionalToolCallIdsRef = useRef<Set<string>>(new Set());
+  const deletionInFlightRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -549,7 +551,7 @@ export default function App() {
   }
 
   async function onSend() {
-    if (!client || !chat || !draft.trim() || busy) return;
+    if (!client || !chat || !draft.trim() || busy || deletionInFlightRef.current) return;
     const chatId = chat.id;
     const selection = chatSelectionRef.current;
     const content = draft.trim();
@@ -606,7 +608,7 @@ export default function App() {
   }
 
   async function onNewChat() {
-    if (!client || creatingChat) return;
+    if (!client || creatingChat || deletionInFlightRef.current) return;
     setCreatingChat(true);
     try {
       const created = await client.createChat(chat?.model ?? models[0]?.id);
@@ -646,13 +648,50 @@ export default function App() {
     }
   }
 
+  async function onDeleteChat(target: Chat) {
+    if (!client || deletionInFlightRef.current || creatingChat) return;
+    const label = target.title?.trim() || "this conversation";
+    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+
+    deletionInFlightRef.current = true;
+    setDeletingChatId(target.id);
+    setChatsError(null);
+    const deletingSelectedChat = chat?.id === target.id;
+    if (deletingSelectedChat) {
+      // This invalidates callbacks that captured the deleted selection. The
+      // ref update also gates sends before the disabled composer renders.
+      chatSelectionRef.current += 1;
+    }
+    try {
+      await client.deleteChat(target.id);
+      let refreshed = await client.listChats();
+      if (!deletingSelectedChat) {
+        setChats(refreshed);
+        return;
+      }
+
+      let next = refreshed[0];
+      if (!next) {
+        next = await client.createChat(models[0]?.id);
+        refreshed = await client.listChats();
+      }
+      setChats(refreshed);
+      selectChat(next, true);
+    } catch (err) {
+      setChatsError(`Could not delete conversation: ${String(err)}`);
+    } finally {
+      deletionInFlightRef.current = false;
+      setDeletingChatId(null);
+    }
+  }
+
   function activateChat(next: Chat) {
     chatSelectionRef.current += 1;
     setChat(next);
   }
 
-  function selectChat(next: Chat) {
-    if (next.id === chat?.id || creatingChat) return;
+  function selectChat(next: Chat, force = false) {
+    if (next.id === chat?.id || creatingChat || (!force && deletionInFlightRef.current)) return;
     socketGenerationRef.current += 1;
     socketRef.current?.close();
     socketRef.current = null;
@@ -676,7 +715,7 @@ export default function App() {
   }
 
   async function onRenameChat() {
-    if (!client || !chat || savingTitle) return;
+    if (!client || !chat || savingTitle || deletionInFlightRef.current) return;
     const chatId = chat.id;
     const selection = chatSelectionRef.current;
     setSavingTitle(true);
@@ -697,7 +736,7 @@ export default function App() {
   }
 
   async function onModelChange(modelId: string) {
-    if (!client || !chat) return;
+    if (!client || !chat || deletionInFlightRef.current) return;
     const chatId = chat.id;
     const selection = chatSelectionRef.current;
     const updated = await client.patchChatModel(chatId, modelId || null);
@@ -819,26 +858,41 @@ export default function App() {
           type="button"
           className="new-chat"
           onClick={() => void onNewChat()}
-          disabled={creatingChat}
+          disabled={creatingChat || deletingChatId !== null}
         >
           <span aria-hidden="true">+</span>
-          {creatingChat ? "Starting…" : "New chat"}
+          {creatingChat ? "Starting…" : deletingChatId ? "Deleting…" : "New chat"}
         </button>
 
         <div className="sidebar-section">
           <span className="sidebar-label">Conversations</span>
           <div className="conversation-list" aria-label="Conversations">
             {chats.map((item) => (
-              <button
+              <div
                 key={item.id}
-                type="button"
-                className={`conversation-item${item.id === chat.id ? " is-active" : ""}`}
-                aria-current={item.id === chat.id ? "page" : undefined}
-                onClick={() => selectChat(item)}
+                className={`conversation-row${item.id === chat.id ? " is-active" : ""}`}
               >
-                <span className="conversation-dot" aria-hidden="true" />
-                <span>{item.title?.trim() || "New conversation"}</span>
-              </button>
+                <button
+                  type="button"
+                  className="conversation-item"
+                  aria-current={item.id === chat.id ? "page" : undefined}
+                  disabled={deletingChatId !== null || creatingChat}
+                  onClick={() => selectChat(item)}
+                >
+                  <span className="conversation-dot" aria-hidden="true" />
+                  <span>{item.title?.trim() || "New conversation"}</span>
+                </button>
+                <button
+                  type="button"
+                  className="conversation-delete"
+                  aria-label={`Delete ${item.title?.trim() || "conversation"}`}
+                  title="Delete conversation"
+                  disabled={deletingChatId !== null || creatingChat}
+                  onClick={() => void onDeleteChat(item)}
+                >
+                  ×
+                </button>
+              </div>
             ))}
           </div>
           {chatsError && <p className="sidebar-error">{chatsError}</p>}
@@ -905,7 +959,11 @@ export default function App() {
                       if (event.key === "Escape") setEditingTitle(false);
                     }}
                   />
-                  <button type="submit" className="btn" disabled={savingTitle}>
+                  <button
+                    type="submit"
+                    className="btn"
+                    disabled={savingTitle || deletingChatId !== null}
+                  >
                     {savingTitle ? "Saving…" : "Save"}
                   </button>
                 </form>
@@ -915,6 +973,7 @@ export default function App() {
                   <button
                     type="button"
                     className="title-action"
+                    disabled={deletingChatId !== null}
                     onClick={() => {
                       setTitleDraft(chat.title ?? "");
                       setEditingTitle(true);
@@ -974,6 +1033,7 @@ export default function App() {
               Model{" "}
               <select
                 value={chat.model ?? ""}
+                disabled={deletingChatId !== null}
                 onChange={(e) => void onModelChange(e.target.value)}
               >
                 <option value="">default</option>
@@ -1094,6 +1154,7 @@ export default function App() {
             <textarea
               value={draft}
               placeholder="Message OpenWave…"
+              disabled={deletingChatId !== null}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -1124,7 +1185,7 @@ export default function App() {
             <button
               type="submit"
               className="btn btn-primary"
-              disabled={busy || !draft.trim()}
+              disabled={busy || !draft.trim() || deletingChatId !== null}
             >
               Send
             </button>
