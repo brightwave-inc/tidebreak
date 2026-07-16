@@ -96,7 +96,7 @@ pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptToolCallOutcome,
     AcceptTurnOutcome, AcceptTurnSteerOutcome, ApplyTurnSteerOutcome,
-    BeginRootAttachmentChangeOutcome, BlobStore, ClaimAgentRunInboxOutcome,
+    BeginRootAttachmentChangeOutcome, BlobStore, ChatTranscriptSnapshot, ClaimAgentRunInboxOutcome,
     ClaimClientToolCallOutcome, ClaimSandboxToolCallOutcome, ClaimScanTerminalEvent,
     ClaimTurnRunOutcome, ClientToolCallClaim, CompleteTurnRunOutcome,
     ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome, DocumentIndexJobReason,
@@ -107,7 +107,7 @@ pub use storage::{
     ParkTurnForAgentRunInboxOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
     RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
     ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, SecretProvider, Store,
-    SubmitAgentRunResultOutcome, ChatTranscriptSnapshot, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    SubmitAgentRunResultOutcome, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
 #[cfg(feature = "tools")]

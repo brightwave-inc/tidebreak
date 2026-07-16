@@ -1337,10 +1337,7 @@ impl Store for MemStore {
     async fn list_chats(&self) -> Result<Vec<Chat>> {
         Ok(self.chats.lock().unwrap().values().cloned().collect())
     }
-    async fn get_chat_transcript(
-        &self,
-        id: ChatId,
-    ) -> Result<Option<ChatTranscriptSnapshot>> {
+    async fn get_chat_transcript(&self, id: ChatId) -> Result<Option<ChatTranscriptSnapshot>> {
         if !self.chats.lock().unwrap().contains_key(&id) {
             return Ok(None);
         }
