@@ -63,8 +63,8 @@ pub(in crate::db) async fn park_agent_run_for_sandbox_tool_call(
         || run.execution != AgentRunExecution::Sandbox.as_str()
         || run.status != AgentRunStatus::Running.as_str()
         || run.lease_token != Some(lease_token)
-        || !run.lease_expires_at.is_some_and(|expiry| expiry > now)
-        || !run.deadline_at.is_some_and(|deadline| deadline > now)
+        || run.lease_expires_at.is_none_or(|expiry| expiry <= now)
+        || run.deadline_at.is_none_or(|deadline| deadline <= now)
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ParkSandboxToolCallOutcome::LeaseLost);
@@ -276,9 +276,9 @@ pub(in crate::db) async fn heartbeat_sandbox_tool_call(
     };
     if call.status != SandboxToolCallStatus::Claimed.as_str()
         || call.executor_lease_token != Some(lease_token)
-        || !call
+        || call
             .executor_lease_expires_at
-            .is_some_and(|expiry| expiry > now)
+            .is_none_or(|expiry| expiry <= now)
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
@@ -349,9 +349,9 @@ pub(in crate::db) async fn resolve_sandbox_tool_call(
     };
     if call.status != SandboxToolCallStatus::Claimed.as_str()
         || call.executor_lease_token != Some(lease_token)
-        || !call
+        || call
             .executor_lease_expires_at
-            .is_some_and(|expiry| expiry > now)
+            .is_none_or(|expiry| expiry <= now)
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ResolveSandboxToolCallOutcome::LeaseLost);

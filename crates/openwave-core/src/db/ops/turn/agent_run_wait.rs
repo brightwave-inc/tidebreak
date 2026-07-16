@@ -58,6 +58,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
 
 /// Checkpoint one foreground turn using a caller-owned transaction with the
 /// chat and turn write locks already held.
+#[allow(clippy::too_many_arguments)] // The caller-held transaction and receipt fields must stay explicit.
 pub(in crate::db) async fn park_turn_for_agent_run_inbox_on<C>(
     conn: &C,
     turn_id: TurnId,

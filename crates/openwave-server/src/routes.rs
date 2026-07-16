@@ -168,7 +168,7 @@ pub async fn put_web_search_credential(
     Json(body): Json<WebSearchCredentialUpdate>,
 ) -> Result<Json<WebSearchCredentialReadiness>, ServerError> {
     let provider = parse_web_search_provider(&provider)?;
-    if body.api_key.as_bytes().len() > MAX_WEB_SEARCH_CREDENTIAL_BYTES {
+    if body.api_key.len() > MAX_WEB_SEARCH_CREDENTIAL_BYTES {
         return Err(ServerError::bad_request(format!(
             "web search api_key must be at most {MAX_WEB_SEARCH_CREDENTIAL_BYTES} bytes"
         )));

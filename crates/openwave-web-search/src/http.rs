@@ -167,6 +167,36 @@ impl ReqwestHttpClient {
     }
 }
 
+#[cfg(feature = "http")]
+#[async_trait]
+impl HttpClient for ReqwestHttpClient {
+    async fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, WebSearchError> {
+        use futures::StreamExt;
+
+        let mut builder = self.client.post(request.url).json(&request.body);
+        for (name, value) in request.headers {
+            builder = builder.header(name, value);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|error| WebSearchError::Transport(error.to_string()))?;
+        let status = response.status().as_u16();
+        let mut stream = response.bytes_stream();
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| WebSearchError::Transport(error.to_string()))?;
+            if body.len().saturating_add(chunk.len()) > MAX_HTTP_RESPONSE_BYTES {
+                return Err(WebSearchError::Transport(
+                    "web search response exceeded byte limit".into(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(HttpResponse { status, body })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,7 +253,8 @@ mod tests {
         let source_task = tokio::spawn(async move {
             let (mut stream, _) = source.accept().await.unwrap();
             let mut buffer = [0_u8; 2048];
-            stream.read(&mut buffer).await.unwrap();
+            let bytes_read = stream.read(&mut buffer).await.unwrap();
+            assert!(bytes_read > 0);
             stream
                 .write_all(
                     format!(
@@ -252,35 +283,5 @@ mod tests {
                 .await
                 .is_err()
         );
-    }
-}
-
-#[cfg(feature = "http")]
-#[async_trait]
-impl HttpClient for ReqwestHttpClient {
-    async fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, WebSearchError> {
-        use futures::StreamExt;
-
-        let mut builder = self.client.post(request.url).json(&request.body);
-        for (name, value) in request.headers {
-            builder = builder.header(name, value);
-        }
-        let response = builder
-            .send()
-            .await
-            .map_err(|error| WebSearchError::Transport(error.to_string()))?;
-        let status = response.status().as_u16();
-        let mut stream = response.bytes_stream();
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| WebSearchError::Transport(error.to_string()))?;
-            if body.len().saturating_add(chunk.len()) > MAX_HTTP_RESPONSE_BYTES {
-                return Err(WebSearchError::Transport(
-                    "web search response exceeded byte limit".into(),
-                ));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(HttpResponse { status, body })
     }
 }

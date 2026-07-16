@@ -239,6 +239,7 @@ pub(in crate::db) async fn accept_agent_run(
 /// transaction. The sandbox parent comes from the locked turn, which binds
 /// child hierarchy and checkpoint scope without trusting a caller-supplied
 /// parent id.
+#[allow(clippy::too_many_arguments)] // Atomic checkpoint inputs form the durable receipt identity.
 pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
     store: &DbStore,
     child_run_id: AgentRunId,
@@ -763,8 +764,8 @@ pub(in crate::db) async fn request_agent_run_cancellation(
     }
 
     let immediate = status != AgentRunStatus::Running
-        || !run.lease_expires_at.is_some_and(|expiry| expiry > now)
-        || !run.deadline_at.is_some_and(|deadline| deadline > now);
+        || run.lease_expires_at.is_none_or(|expiry| expiry <= now)
+        || run.deadline_at.is_none_or(|deadline| deadline <= now);
     let next_status = if immediate {
         AgentRunStatus::Cancelled
     } else {
@@ -928,8 +929,8 @@ where
         return Ok(false);
     }
     let immediate = status != AgentRunStatus::Running
-        || !child.lease_expires_at.is_some_and(|expiry| expiry > now)
-        || !child.deadline_at.is_some_and(|deadline| deadline > now);
+        || child.lease_expires_at.is_none_or(|expiry| expiry <= now)
+        || child.deadline_at.is_none_or(|deadline| deadline <= now);
     let next = if immediate {
         AgentRunStatus::Cancelled
     } else {
@@ -1037,8 +1038,8 @@ pub(in crate::db) async fn finish_agent_run_cancellation(
     }
     if run.status != AgentRunStatus::Cancelling.as_str()
         || run.lease_token != Some(lease_token)
-        || !run.lease_expires_at.is_some_and(|expiry| expiry > now)
-        || !run.deadline_at.is_some_and(|deadline| deadline > now)
+        || run.lease_expires_at.is_none_or(|expiry| expiry <= now)
+        || run.deadline_at.is_none_or(|deadline| deadline <= now)
         || run.updated_at > now
     {
         transaction.commit().await.map_err(store_err)?;
@@ -1308,8 +1309,8 @@ pub(in crate::db) async fn submit_agent_run_result(
     if run.execution != AgentRunExecution::Sandbox.as_str()
         || run.status != AgentRunStatus::Running.as_str()
         || run.lease_token != Some(lease_token)
-        || !run.lease_expires_at.is_some_and(|expiry| expiry > now)
-        || !run.deadline_at.is_some_and(|deadline| deadline > now)
+        || run.lease_expires_at.is_none_or(|expiry| expiry <= now)
+        || run.deadline_at.is_none_or(|deadline| deadline <= now)
         || run.updated_at > now
     {
         transaction.commit().await.map_err(store_err)?;
@@ -1857,9 +1858,9 @@ pub(in crate::db) async fn consume_agent_run_inbox_entry_and_resume_turn(
     }
     if entry.status != AgentRunInboxStatus::Claimed
         || entry.lease_token != Some(lease_token)
-        || !entry
+        || entry
             .lease_expires_at
-            .is_some_and(|expires_at| expires_at > now)
+            .is_none_or(|expires_at| expires_at <= now)
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
