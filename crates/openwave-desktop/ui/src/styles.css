@@ -883,7 +883,7 @@ button {
 
 .composer {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.55rem;
   padding: 0.85rem clamp(1rem, 3vw, 2rem) 1rem;
   border-top: 1px solid var(--line);
@@ -892,19 +892,23 @@ button {
 
 .composer textarea {
   resize: none;
-  min-height: 3rem;
-  max-height: 10rem;
+  min-height: calc(1.45rem + 1.2rem + 2px);
+  max-height: calc(8.7rem + 1.2rem + 2px);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 0.6rem 0.7rem;
   background: var(--bg);
+  line-height: 1.45rem;
+  overflow-y: hidden;
 }
 
-.composer-turn-control {
+.composer-actions {
   display: flex;
-  min-width: 0;
   align-items: center;
-  gap: 0.45rem;
+}
+
+.composer-actions .btn {
+  min-width: 5.5rem;
 }
 
 .btn-stop {
@@ -918,10 +922,23 @@ button {
 }
 
 .composer-turn-error {
+  grid-column: 1 / -1;
   max-width: min(22rem, 32vw);
   color: var(--danger);
   font-size: 0.78rem;
   overflow-wrap: anywhere;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .settings {
