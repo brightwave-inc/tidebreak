@@ -373,7 +373,8 @@ button {
 }
 
 .agent-activity-item.is-active .agent-activity-indicator,
-.agent-activity-item.is-running .agent-activity-indicator {
+.agent-activity-item.is-running .agent-activity-indicator,
+.agent-activity-item.is-activity-running .agent-activity-indicator {
   border-color: var(--accent);
   background: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);

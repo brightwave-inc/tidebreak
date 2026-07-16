@@ -65,8 +65,19 @@ export type AgentRun = {
   started_at: string | null;
   finished_at: string | null;
   last_error_code: string | null;
+  /** A fixed, renderer-safe description of the currently live sandbox task. */
+  activity: SandboxActivity | null;
   created_at: string;
   updated_at: string;
+};
+
+/**
+ * Live sandbox activity is intentionally a closed vocabulary. The server never
+ * sends search inputs, results, provider identities, or executor diagnostics.
+ */
+export type SandboxActivity = {
+  kind: "web_search";
+  status: "waiting" | "running";
 };
 
 export type SequencedEvent = {
