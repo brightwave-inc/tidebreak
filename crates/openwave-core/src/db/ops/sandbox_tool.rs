@@ -444,6 +444,24 @@ pub(in crate::db) async fn get_sandbox_tool_call_receipt(
         .transpose()
 }
 
+pub(in crate::db) async fn list_sandbox_tool_calls_for_agent_run(
+    store: &DbStore,
+    agent_run_id: AgentRunId,
+) -> Result<Vec<SandboxToolCall>> {
+    entities::sandbox_tool_call::Entity::find()
+        .filter(entities::sandbox_tool_call::Column::AgentRunId.eq(agent_run_id.0))
+        // The worker claim count is monotonic within the isolated run, unlike
+        // SQLite timestamps and random IDs, so it is the replay order.
+        .order_by_asc(entities::sandbox_tool_call::Column::ParkAttemptCount)
+        .order_by_asc(entities::sandbox_tool_call::Column::ParkClaimCount)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(call_from_model)
+        .collect()
+}
+
 pub(in crate::db) async fn list_sandbox_tool_call_candidates(
     store: &DbStore,
     limit: u64,

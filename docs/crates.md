@@ -127,9 +127,11 @@ provides a timeout- and response-size-bounded `reqwest` client; hosts may supply
 their own proxy, allow-list, audit, or test client through the same seam.
 
 `openwave-server` owns an explicit disabled-by-default Exa/Tavily selection
-and bounded request timeout, but has not connected it to a model-visible tool
-or worker. The follow-on slice must attach that host policy to the sandbox
-execution boundary and define its outbound-domain policy.
+and bounded request timeout. Its depth-one sandbox loop may durably checkpoint
+the one fixed `web_search` contract, and the server worker resolves that exact
+checkpoint under a fenced lease. The foreground registry and recursive
+sandboxes never receive this contract. The follow-on slice defines the
+outbound-domain policy before expanding the search surface.
 
 **Depends on:** `openwave-core`.
 

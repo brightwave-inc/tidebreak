@@ -229,13 +229,15 @@ The implementation is intentionally incremental:
 6. Persist shared model/tool step boundaries and side-effect receipts.
 7. Atomically join durable inbox consumption with a parent turn checkpoint and
    durable `resuming` wake signal. *(Shipped.)*
-8. Run isolated one-shot sandbox tasks with no tools or shared conversation
-   context, over the durable lease/result boundary. *(Shipped.)*
+8. Run isolated sandbox tasks with no shared conversation context, over the
+   durable lease/result boundary. *(Shipped.)*
 9. Enable the bounded foreground-only `spawn_sandbox_agent` contract, wake the
    sandbox worker after its atomic checkpoint, and resume the parked turn from
    the already-delivered inbox receipt. *(Shipped.)*
-10. Route sandbox folder access through the host broker.
-11. Add desktop surfaces for queued, running, waiting, failed, and completed
+10. Add the one-call sandbox `web_search` checkpoint, host executor, and
+    receipt-backed model resume. *(Shipped.)*
+11. Route sandbox folder access through the host broker.
+12. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work.
-12. Add richer context lifecycle, parallel-safe tool groups, and further
+13. Add richer context lifecycle, parallel-safe tool groups, and further
    orchestration only after these recovery boundaries are proven.

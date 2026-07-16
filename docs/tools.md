@@ -62,14 +62,18 @@ atomically admits a depth-one child and parks that turn; the child result is
 persisted as a system transcript message before the parent can resume. Sandbox
 agents never receive this tool.
 
-A background sandbox currently has **no tool surface and no shared
-conversation, filesystem, network, or host-folder access**. It receives one
-bounded task and its final text becomes the fenced result receipt. Sandboxes
-do not receive `spawn_sandbox_agent` and cannot create further agents.
+A background sandbox has no shared conversation, filesystem, network, or
+host-folder access. It receives one bounded task and may be offered exactly
+one fixed `web_search` contract when its remaining model-step budget can also
+consume the result. The worker atomically parks the sandbox under its exact
+lease; a separate host-owned executor performs the bounded search and writes
+an immutable receipt. On a later claim, the sandbox reconstructs the matching
+`ToolUse`/`ToolResult` from that receipt before it can finalize. Sandboxes do
+not receive `spawn_sandbox_agent` and cannot create further agents.
 
-Future sandbox-safe capabilities (for example web search or broker-mediated
-folder reads) must be added one at a time behind the same durable continuation
-and consent boundaries.
+Future sandbox-safe capabilities, such as broker-mediated folder reads, must
+be added one at a time behind the same durable continuation and consent
+boundaries.
 
 Later additions may include a scratchpad, pinned context, plan/execution modes,
 deliverable export, clipboard operations, generated images, and connected apps.
@@ -110,9 +114,11 @@ any worker network access. Constructing an adapter is inert; only an explicit
 attaches the host policy only after claiming and revalidating an exact durable
 `web_search` checkpoint. Its strict argument contract rejects unknown fields,
 and unavailable/error cases resolve a bounded immutable failure receipt. The
-sandbox model loop still advertises no tools, so no model-generated request can
-reach this executor yet. A later slice must add model-loop checkpoint emission
-and an explicit outbound-domain policy before search is model-usable.
+sandbox model loop may now emit the one fixed checkpoint, with a bounded
+argument collector and deterministic rejection of unknown, partial, or
+multiple calls. The foreground loop remains separate and does not receive this
+tool. Outbound-domain policy is the next hardening slice before broadening the
+search surface.
 
 The normalized contract should cover query text, optional date/domain filters,
 bounded result count, canonical URL, title, snippet or extracted text, rank or
