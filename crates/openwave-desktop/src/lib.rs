@@ -68,24 +68,6 @@ async fn wait_server_info(state: &Arc<AppState>) -> Result<NativeServerInfo, Str
     }
 }
 
-#[cfg(test)]
-mod server_info_tests {
-    use super::*;
-
-    #[test]
-    fn renderer_server_info_never_contains_native_credential() {
-        let native = NativeServerInfo {
-            base_url: "http://127.0.0.1:1234".to_owned(),
-            token: "renderer-bearer".to_owned(),
-            executor_token: "native-credential-sentinel".to_owned(),
-        };
-        let serialized = serde_json::to_string(&native.renderer_info()).unwrap();
-        assert!(serialized.contains("renderer-bearer"));
-        assert!(!serialized.contains("native-credential-sentinel"));
-        assert!(!serialized.contains("executor"));
-    }
-}
-
 /// Absolute data directory for the desktop profile (platform app-data).
 fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -195,4 +177,22 @@ async fn boot_server(
         .await;
     });
     server.serve().await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod server_info_tests {
+    use super::*;
+
+    #[test]
+    fn renderer_server_info_never_contains_native_credential() {
+        let native = NativeServerInfo {
+            base_url: "http://127.0.0.1:1234".to_owned(),
+            token: "renderer-bearer".to_owned(),
+            executor_token: "native-credential-sentinel".to_owned(),
+        };
+        let serialized = serde_json::to_string(&native.renderer_info()).unwrap();
+        assert!(serialized.contains("renderer-bearer"));
+        assert!(!serialized.contains("native-credential-sentinel"));
+        assert!(!serialized.contains("executor"));
+    }
 }
