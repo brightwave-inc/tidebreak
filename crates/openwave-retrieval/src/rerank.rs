@@ -124,6 +124,8 @@ mod tests {
                     ByteSpan::new(ordinal * 10, ordinal * 10 + 5),
                     ordinal.to_string(),
                 ),
+                source: crate::DocumentSource::Inline,
+                generation: None,
                 score: 10.0 - ordinal as f32,
             })
             .collect()

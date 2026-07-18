@@ -1,11 +1,13 @@
 use super::*;
 use crate::model::{
     ByteSpan, ChatRootAttachment, DocumentParseOutput, DocumentSourceBlob, DocumentSourceUpsert,
-    RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangeTerminal,
-    RootAttachmentOrigin, SourceLocation, ToolCallExecution, ToolCallResolution, ToolCallStatus,
-    MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
+    RetrievalEvidenceInput, RetrievalEvidenceSource, RootAttachmentChangeAction,
+    RootAttachmentChangeFailure, RootAttachmentChangeTerminal, RootAttachmentOrigin,
+    SourceLocation, ToolCallExecution, ToolCallResolution, ToolCallStatus, MAX_ATTACHMENT_REVISION,
+    MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::ApplyTurnSteerOutcome;
+use crate::ChunkId;
 use chrono::{DateTime, Utc};
 
 mod agent_run;
@@ -9503,6 +9505,270 @@ async fn server_tool_call_lifecycle_is_atomic_and_idempotent() {
     assert_eq!(listed[0].status, ToolCallStatus::Completed);
     assert_eq!(listed[0].result.as_deref(), Some("hello"));
     assert_eq!(listed[0].arguments, serde_json::json!({"path": "note.txt"}));
+}
+
+#[tokio::test]
+async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_changes() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let updated_at = DateTime::<Utc>::from_timestamp(1_700_001_000, 0).unwrap();
+    let source = DocumentUpsert {
+        id: DocumentId::new(),
+        project_id: None,
+        source_uri: Some("file:///facts.txt".into()),
+        media_type: "text/plain".into(),
+        title: Some("Facts".into()),
+        canonical_text: "old text".into(),
+        source_regions: Vec::new(),
+        updated_at,
+    };
+    let (document, _) = store
+        .upsert_document_and_enqueue_index(&source, "pipeline-v1", 3)
+        .await
+        .unwrap();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "search_1".into(),
+        name: "search".into(),
+        arguments: serde_json::json!({"query": "old"}),
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: updated_at,
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    let span = ByteSpan::new(0, source.canonical_text.len());
+    let evidence = RetrievalEvidenceInput {
+        rank: 1,
+        document_id: source.id,
+        generation: document.generation(),
+        chunk_id: ChunkId::derive(source.id, span.start, span.end),
+        span,
+        snippet: source.canonical_text.clone(),
+        heading_path: vec!["Archive".into()],
+        source_regions: Vec::new(),
+        source: RetrievalEvidenceSource::Uri {
+            uri: source.source_uri.clone().unwrap(),
+        },
+    };
+    let resolution = ToolCallResolution::Completed {
+        result: "Found 1 passage".into(),
+    };
+    let resolved_at = updated_at + chrono::Duration::seconds(1);
+    assert_eq!(
+        store
+            .resolve_server_tool_call_with_evidence(
+                call.id,
+                &resolution,
+                resolved_at,
+                std::slice::from_ref(&evidence),
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Resolved
+    );
+    assert_eq!(
+        store
+            .resolve_server_tool_call_with_evidence(
+                call.id,
+                &resolution,
+                resolved_at,
+                std::slice::from_ref(&evidence),
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Existing
+    );
+    let stored = store.list_retrieval_evidence(call.id).await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].call_id, call.id);
+    assert_eq!(stored[0].chat_id, call.chat_id);
+    assert_eq!(stored[0].turn_id, call.turn_id);
+    assert_eq!(stored[0].evidence, evidence);
+
+    let mut conflicting = evidence.clone();
+    conflicting.generation.revision_token = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .resolve_server_tool_call_with_evidence(
+                call.id,
+                &resolution,
+                resolved_at,
+                &[conflicting],
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::AlreadyTerminal
+    );
+
+    let replacement = DocumentUpsert {
+        canonical_text: "new text".into(),
+        updated_at: updated_at + chrono::Duration::seconds(2),
+        ..source.clone()
+    };
+    let (replacement, _) = store
+        .upsert_document_and_enqueue_index(&replacement, "pipeline-v1", 3)
+        .await
+        .unwrap();
+    assert_ne!(replacement.generation(), document.generation());
+    assert_eq!(
+        store.list_retrieval_evidence(call.id).await.unwrap(),
+        stored
+    );
+    store.delete_document(source.id).await.unwrap();
+    assert_eq!(
+        store.list_retrieval_evidence(call.id).await.unwrap(),
+        stored
+    );
+}
+
+#[tokio::test]
+async fn invalid_retrieval_identity_rolls_back_tool_completion() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let created_at = Utc::now();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "search_invalid".into(),
+        name: "search".into(),
+        arguments: serde_json::json!({"query": "facts"}),
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at,
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    let document_id = DocumentId::new();
+    let invalid = RetrievalEvidenceInput {
+        rank: 1,
+        document_id,
+        generation: DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+        },
+        chunk_id: ChunkId::derive(DocumentId::new(), 0, 4),
+        span: ByteSpan::new(0, 4),
+        snippet: "fact".into(),
+        heading_path: Vec::new(),
+        source_regions: Vec::new(),
+        source: RetrievalEvidenceSource::Inline,
+    };
+    let resolution = ToolCallResolution::Completed {
+        result: "Found 1 passage".into(),
+    };
+    assert!(store
+        .resolve_server_tool_call_with_evidence(
+            call.id,
+            &resolution,
+            created_at + chrono::Duration::seconds(1),
+            &[invalid],
+        )
+        .await
+        .is_err());
+    assert!(store
+        .list_retrieval_evidence(call.id)
+        .await
+        .unwrap()
+        .is_empty());
+    let pending = store.list_tool_calls(chat.id).await.unwrap();
+    assert_eq!(pending[0].status, ToolCallStatus::Pending);
+
+    let oversized_snippet = "x".repeat(RetrievalEvidenceInput::MAX_SNIPPET_BYTES + 1);
+    let oversized_span = ByteSpan::new(0, oversized_snippet.len());
+    let oversized = RetrievalEvidenceInput {
+        rank: 1,
+        document_id,
+        generation: DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+        },
+        chunk_id: ChunkId::derive(document_id, oversized_span.start, oversized_span.end),
+        span: oversized_span,
+        snippet: oversized_snippet,
+        heading_path: Vec::new(),
+        source_regions: Vec::new(),
+        source: RetrievalEvidenceSource::Inline,
+    };
+    assert!(store
+        .resolve_server_tool_call_with_evidence(
+            call.id,
+            &resolution,
+            created_at + chrono::Duration::seconds(1),
+            &[oversized],
+        )
+        .await
+        .is_err());
+    let nul_span = ByteSpan::new(0, 4);
+    let nul = RetrievalEvidenceInput {
+        rank: 1,
+        document_id,
+        generation: DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+        },
+        chunk_id: ChunkId::derive(document_id, nul_span.start, nul_span.end),
+        span: nul_span,
+        snippet: "a\0bc".into(),
+        heading_path: Vec::new(),
+        source_regions: Vec::new(),
+        source: RetrievalEvidenceSource::Inline,
+    };
+    assert!(store
+        .resolve_server_tool_call_with_evidence(
+            call.id,
+            &resolution,
+            created_at + chrono::Duration::seconds(1),
+            &[nul],
+        )
+        .await
+        .is_err());
+    if usize::BITS > 63 {
+        let start = (i64::MAX as usize) + 1;
+        let span = ByteSpan::new(start, start + 4);
+        let outside_storage_range = RetrievalEvidenceInput {
+            rank: 1,
+            document_id,
+            generation: DocumentGeneration {
+                content_revision: 1,
+                revision_token: uuid::Uuid::new_v4(),
+            },
+            chunk_id: ChunkId::derive(document_id, span.start, span.end),
+            span,
+            snippet: "fact".into(),
+            heading_path: Vec::new(),
+            source_regions: Vec::new(),
+            source: RetrievalEvidenceSource::Inline,
+        };
+        assert!(store
+            .resolve_server_tool_call_with_evidence(
+                call.id,
+                &resolution,
+                created_at + chrono::Duration::seconds(1),
+                &[outside_storage_range],
+            )
+            .await
+            .is_err());
+    }
+    assert_eq!(
+        store.list_tool_calls(chat.id).await.unwrap()[0].status,
+        ToolCallStatus::Pending
+    );
 }
 
 #[tokio::test]

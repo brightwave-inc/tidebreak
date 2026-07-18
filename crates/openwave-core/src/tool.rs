@@ -96,6 +96,9 @@ pub struct ToolOutput {
     /// Whether the tool reported a failure.
     #[serde(default)]
     pub is_error: bool,
+    /// Server-private durable sidecar committed with the canonical tool result.
+    #[serde(skip)]
+    pub private_evidence: Vec<crate::RetrievalEvidenceInput>,
 }
 
 impl ToolOutput {
@@ -105,6 +108,7 @@ impl ToolOutput {
             content: content.into(),
             data: None,
             is_error: false,
+            private_evidence: Vec::new(),
         }
     }
 
@@ -114,6 +118,7 @@ impl ToolOutput {
             content: content.into(),
             data: None,
             is_error: true,
+            private_evidence: Vec::new(),
         }
     }
 
@@ -121,6 +126,13 @@ impl ToolOutput {
     #[must_use]
     pub fn with_data(mut self, data: Value) -> Self {
         self.data = Some(data);
+        self
+    }
+
+    /// Attach bounded evidence that never serializes into events or renderer DTOs.
+    #[must_use]
+    pub fn with_private_evidence(mut self, evidence: Vec<crate::RetrievalEvidenceInput>) -> Self {
+        self.private_evidence = evidence;
         self
     }
 }
@@ -278,6 +290,30 @@ mod tests {
 
         let with = ToolOutput::text("ok").with_data(serde_json::json!({"k": 1}));
         assert_eq!(with.data, Some(serde_json::json!({"k": 1})));
+    }
+
+    #[test]
+    fn private_evidence_never_serializes() {
+        let document_id = crate::DocumentId::new();
+        let output =
+            ToolOutput::text("ok").with_private_evidence(vec![crate::RetrievalEvidenceInput {
+                rank: 1,
+                document_id,
+                generation: crate::DocumentGeneration {
+                    content_revision: 1,
+                    revision_token: uuid::Uuid::new_v4(),
+                },
+                chunk_id: crate::ChunkId::derive(document_id, 0, 6),
+                span: crate::ByteSpan::new(0, 6),
+                snippet: "secret".into(),
+                heading_path: Vec::new(),
+                source_regions: Vec::new(),
+                source: crate::RetrievalEvidenceSource::Inline,
+            }]);
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(!json.contains("secret"));
+        assert!(!json.contains("private_evidence"));
+        assert_eq!(output.private_evidence.len(), 1);
     }
 
     #[test]

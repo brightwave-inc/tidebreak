@@ -3981,6 +3981,107 @@ async fn ingest_then_search_finds_the_passage() {
         .unwrap()
         .contains("Jupiter"));
     assert_eq!(citations[0]["document_id"], ingest["document_id"]);
+    let response_json = serde_json::to_string(&results).unwrap();
+    assert!(!response_json.contains("file:///solar.txt"));
+    assert!(!response_json.contains(&record.revision_token.to_string()));
+    assert!(!response_json.contains("revision_token"));
+    assert!(!response_json.contains("content_revision"));
+    assert!(citations[0].get("source").is_none());
+    assert!(citations[0].get("generation").is_none());
+}
+
+#[tokio::test]
+async fn maximum_search_output_and_private_evidence_commit_together() {
+    let (router, token, store, dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let embedder = Arc::new(HashEmbedder::default());
+    let vectors = Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS));
+    for ordinal in 0..openwave_retrieval::MAX_SEARCH_RESULTS {
+        let document_id = openwave_core::DocumentId::new();
+        let generation = openwave_core::DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+        };
+        let mut snippet = format!("fact {ordinal} ");
+        snippet.push_str(&"x".repeat(1_024 - snippet.len()));
+        let embedding = embedder.embed_query(&snippet).await.unwrap();
+        vectors
+            .stage_document_generation(
+                document_id,
+                generation,
+                vec![VectorRecord {
+                    project_id: None,
+                    source: openwave_retrieval::DocumentSource::Inline,
+                    generation: Some(generation),
+                    chunk: openwave_retrieval::Chunk::new(
+                        document_id,
+                        0,
+                        openwave_core::ByteSpan::new(0, snippet.len()),
+                        snippet,
+                    ),
+                    embedding,
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(vectors
+            .activate_document_generation(document_id, generation)
+            .await
+            .unwrap());
+    }
+    let tool = openwave_retrieval::SearchTool::new(embedder, vectors);
+    let output = tool
+        .execute(
+            &ToolCtx::new_legacy_workspace(chat.id, None, dir.path().to_path_buf()),
+            serde_json::json!({"query": "fact", "k": 9999}),
+        )
+        .await
+        .unwrap();
+    assert!(!output.is_error);
+    assert_eq!(
+        output.private_evidence.len(),
+        openwave_retrieval::MAX_SEARCH_RESULTS
+    );
+    assert!(output.content.len() <= ToolCallRecord::MAX_RESULT_BYTES);
+
+    let created_at = chrono::Utc::now();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "max_search".into(),
+        name: "search".into(),
+        arguments: serde_json::json!({"query": "fact", "k": 9999}),
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at,
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    assert_eq!(
+        store
+            .resolve_server_tool_call_with_evidence(
+                call.id,
+                &ToolCallResolution::Completed {
+                    result: output.content.clone(),
+                },
+                created_at + chrono::Duration::seconds(1),
+                &output.private_evidence,
+            )
+            .await
+            .unwrap(),
+        openwave_core::ResolveToolCallOutcome::Resolved
+    );
+    assert_eq!(
+        store.list_retrieval_evidence(call.id).await.unwrap().len(),
+        output.private_evidence.len()
+    );
 }
 
 #[tokio::test]
@@ -5234,6 +5335,8 @@ async fn root_search_never_returns_project_owned_vectors() {
     vectors
         .upsert(vec![VectorRecord {
             project_id: Some(ProjectId::new()),
+            source: openwave_retrieval::DocumentSource::Inline,
+            generation: None,
             chunk: openwave_retrieval::Chunk::new(
                 openwave_core::DocumentId::new(),
                 0,
@@ -5473,6 +5576,8 @@ async fn connect_vector_store_opens_a_durable_lance_index_under_data_dir() {
         store
             .upsert(vec![openwave_retrieval::VectorRecord {
                 project_id: None,
+                source: openwave_retrieval::DocumentSource::Inline,
+                generation: None,
                 chunk,
                 embedding: openwave_retrieval::Embedding(vec![1.0, 0.0]),
             }])

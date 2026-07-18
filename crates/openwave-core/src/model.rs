@@ -94,8 +94,8 @@ pub fn validate_source_regions(
 }
 
 use crate::id::{
-    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, HostRootId, MessageId, ProjectId,
-    RootAttachmentChangeId, TurnId,
+    AgentRunId, CallId, ChatId, ChunkId, DocumentId, DocumentJobId, HostRootId, MessageId,
+    ProjectId, RootAttachmentChangeId, TurnId,
 };
 
 /// Maximum number of host roots projected onto one project or conversation.
@@ -659,6 +659,45 @@ pub struct DocumentGeneration {
     pub content_revision: i64,
     /// Opaque identity for this exact generation.
     pub revision_token: Uuid,
+}
+
+/// Immutable provenance captured at retrieval time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetrievalEvidenceSource {
+    Uri { uri: String },
+    Inline,
+}
+
+/// One bounded, generation-fenced passage produced by a search tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalEvidenceInput {
+    pub rank: u16,
+    pub document_id: DocumentId,
+    pub generation: DocumentGeneration,
+    pub chunk_id: ChunkId,
+    pub span: ByteSpan,
+    pub snippet: String,
+    pub heading_path: Vec<String>,
+    pub source_regions: Vec<SourceRegion>,
+    pub source: RetrievalEvidenceSource,
+}
+
+impl RetrievalEvidenceInput {
+    pub const MAX_RESULTS: usize = 20;
+    pub const MAX_SNIPPET_BYTES: usize = 32 * 1024;
+    pub const MAX_HEADING_SEGMENTS: usize = 32;
+    pub const MAX_HEADING_BYTES: usize = 4 * 1024;
+    pub const MAX_SOURCE_REGIONS: usize = 128;
+    pub const MAX_SOURCE_URI_BYTES: usize = 8 * 1024;
+}
+
+/// A private evidence snapshot durably tied to one canonical tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalEvidence {
+    pub call_id: CallId,
+    pub chat_id: ChatId,
+    pub turn_id: TurnId,
+    pub evidence: RetrievalEvidenceInput,
 }
 
 /// An authoritative source document whose derived chunks live in the retrieval

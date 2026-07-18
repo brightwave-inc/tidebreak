@@ -992,6 +992,7 @@ impl Agent {
                                 content,
                                 data: None,
                                 is_error: existing.status != ToolCallStatus::Completed,
+                                private_evidence: Vec::new(),
                             },
                         );
                     }
@@ -1122,7 +1123,12 @@ impl Agent {
                     };
                     let outcome = self
                         .store
-                        .resolve_server_tool_call(call.call_id, &resolution, Utc::now())
+                        .resolve_server_tool_call_with_evidence(
+                            call.call_id,
+                            &resolution,
+                            Utc::now(),
+                            &output.private_evidence,
+                        )
                         .await?;
                     if !matches!(
                         outcome,

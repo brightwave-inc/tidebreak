@@ -933,7 +933,6 @@ impl MigrationTrait for Init {
                     .to_owned(),
             )
             .await?;
-
         manager
             .create_table(
                 Table::create()
@@ -1040,6 +1039,7 @@ impl MigrationTrait for Init {
                     .to_owned(),
             )
             .await?;
+
         manager
             .create_index(
                 Index::create()
@@ -2662,6 +2662,100 @@ impl MigrationTrait for AddChatModel {
 /// Structured tool-call rows (args + result), distinct from text messages.
 struct AddToolCalls;
 
+async fn create_retrieval_evidence_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .create_table(
+            Table::create()
+                .table(RetrievalEvidence::Table)
+                .col(ColumnDef::new(RetrievalEvidence::CallId).uuid().not_null())
+                .col(ColumnDef::new(RetrievalEvidence::Rank).integer().not_null())
+                .col(ColumnDef::new(RetrievalEvidence::ChatId).uuid().not_null())
+                .col(ColumnDef::new(RetrievalEvidence::TurnId).uuid().not_null())
+                .col(
+                    ColumnDef::new(RetrievalEvidence::DocumentId)
+                        .uuid()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(RetrievalEvidence::ContentRevision)
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(RetrievalEvidence::RevisionToken)
+                        .uuid()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(RetrievalEvidence::ChunkId).uuid().not_null())
+                .col(
+                    ColumnDef::new(RetrievalEvidence::SpanStart)
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(RetrievalEvidence::SpanEnd)
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(RetrievalEvidence::Snippet).text().not_null())
+                .col(
+                    ColumnDef::new(RetrievalEvidence::HeadingPath)
+                        .json_binary()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(RetrievalEvidence::SourceRegions)
+                        .json_binary()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(RetrievalEvidence::SourceKind)
+                        .text()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(RetrievalEvidence::SourceUri).text())
+                .primary_key(
+                    Index::create()
+                        .col(RetrievalEvidence::CallId)
+                        .col(RetrievalEvidence::Rank),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_retrieval_evidence_tool_call")
+                        .from_tbl(RetrievalEvidence::Table)
+                        .from_col(RetrievalEvidence::CallId)
+                        .from_col(RetrievalEvidence::ChatId)
+                        .from_col(RetrievalEvidence::TurnId)
+                        .to_tbl(ToolCall::Table)
+                        .to_col(ToolCall::Id)
+                        .to_col(ToolCall::ChatId)
+                        .to_col(ToolCall::TurnId)
+                        .on_delete(ForeignKeyAction::Cascade),
+                )
+                .check(
+                    Expr::col(RetrievalEvidence::Rank)
+                        .between(1, crate::model::RetrievalEvidenceInput::MAX_RESULTS as i32),
+                )
+                .check(Expr::col(RetrievalEvidence::ContentRevision).gte(1))
+                .check(Expr::col(RetrievalEvidence::SpanStart).gte(0))
+                .check(
+                    Expr::col(RetrievalEvidence::SpanEnd)
+                        .gt(Expr::col(RetrievalEvidence::SpanStart)),
+                )
+                .check(Expr::col(RetrievalEvidence::SourceKind).is_in(["uri", "inline"]))
+                .check(
+                    Expr::col(RetrievalEvidence::SourceKind)
+                        .eq("uri")
+                        .and(Expr::col(RetrievalEvidence::SourceUri).is_not_null())
+                        .or(Expr::col(RetrievalEvidence::SourceKind)
+                            .eq("inline")
+                            .and(Expr::col(RetrievalEvidence::SourceUri).is_null())),
+                )
+                .to_owned(),
+        )
+        .await
+}
+
 impl MigrationName for AddToolCalls {
     fn name(&self) -> &str {
         "m0005_tool_calls"
@@ -2855,6 +2949,8 @@ impl MigrationTrait for AddToolCalls {
             )
             .await?;
 
+        create_retrieval_evidence_table(manager).await?;
+
         manager
             .create_table(
                 Table::create()
@@ -3012,6 +3108,9 @@ impl MigrationTrait for AddToolCalls {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(RetrievalEvidence::Table).to_owned())
+            .await?;
         manager
             .drop_table(Table::drop().table(TurnClientWait::Table).to_owned())
             .await?;
@@ -3825,6 +3924,26 @@ enum DocumentGeneration {
     RetirementPending,
     RetirementContentRevision,
     RetirementRevisionToken,
+}
+
+#[derive(DeriveIden)]
+enum RetrievalEvidence {
+    Table,
+    CallId,
+    Rank,
+    ChatId,
+    TurnId,
+    DocumentId,
+    ContentRevision,
+    RevisionToken,
+    ChunkId,
+    SpanStart,
+    SpanEnd,
+    Snippet,
+    HeadingPath,
+    SourceRegions,
+    SourceKind,
+    SourceUri,
 }
 
 #[derive(DeriveIden)]

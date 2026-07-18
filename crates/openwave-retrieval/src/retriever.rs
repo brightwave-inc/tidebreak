@@ -235,6 +235,8 @@ impl Retriever {
                 .zip(embeddings)
                 .map(|(chunk, embedding)| VectorRecord {
                     project_id: document.project_id,
+                    source: document.source.clone(),
+                    generation: None,
                     chunk,
                     embedding,
                 })
@@ -409,6 +411,8 @@ mod tests {
     ) -> ScoredChunk {
         ScoredChunk {
             chunk: Chunk::new(document_id, ordinal, ByteSpan::new(start, end), text),
+            source: DocumentSource::Inline,
+            generation: None,
             score: 1.0 - ordinal as f32 / 10.0,
         }
     }
@@ -697,7 +701,7 @@ The Great Barrier Reef is the world's largest coral reef system.";
             .await
             .unwrap();
 
-        assert_eq!(store.limits.lock().unwrap().as_slice(), &[200, 0]);
+        assert_eq!(store.limits.lock().unwrap().as_slice(), &[80, 0]);
         assert_eq!(citations.len(), crate::MAX_SEARCH_RESULTS);
         assert!(empty.is_empty());
     }
@@ -978,6 +982,8 @@ The Great Barrier Reef is the world's largest coral reef system.";
             .zip(embeddings)
             .map(|(chunk, embedding)| VectorRecord {
                 project_id: None,
+                source: doc.source.clone(),
+                generation: None,
                 chunk,
                 embedding,
             })

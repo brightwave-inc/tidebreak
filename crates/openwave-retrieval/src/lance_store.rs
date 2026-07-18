@@ -386,6 +386,7 @@ impl LanceVectorStore {
 
     fn validate_record(&self, record: &VectorRecord) -> Result<()> {
         self.check_dims(&record.embedding)?;
+        record.source.validate()?;
         record.chunk.validate_source_regions()
     }
 
@@ -577,6 +578,22 @@ impl LanceVectorStore {
             .collect::<Result<Vec<_>>>()?;
         let source_regions =
             StringArray::from_iter_values(source_region_values.iter().map(String::as_str));
+        let source_values = rows
+            .iter()
+            .map(|row| {
+                serde_json::to_string(
+                    &row.record
+                        .as_ref()
+                        .map_or(crate::DocumentSource::Inline, |record| {
+                            record.source.clone()
+                        }),
+                )
+                .map_err(|error| {
+                    RetrievalError::vector_store(format!("failed to encode source: {error}"))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let sources = StringArray::from_iter_values(source_values.iter().map(String::as_str));
         let starts = UInt64Array::from_iter_values(rows.iter().map(|row| {
             row.record
                 .as_ref()
@@ -625,6 +642,7 @@ impl LanceVectorStore {
             Arc::new(texts),
             Arc::new(heading_paths),
             Arc::new(source_regions),
+            Arc::new(sources),
             Arc::new(retrieval_texts),
             Arc::new(starts),
             Arc::new(ends),
@@ -696,13 +714,19 @@ impl LanceVectorStore {
                         "document {document_id} has an invalid generation revision {content_revision}"
                     )));
                 }
+                let revision_token: uuid::Uuid = tokens.value(index).parse().map_err(|error| {
+                    RetrievalError::vector_store(format!(
+                        "document {document_id} has an invalid generation token: {error}"
+                    ))
+                })?;
+                if revision_token.is_nil() {
+                    return Err(RetrievalError::vector_store(format!(
+                        "document {document_id} has a nil generation token"
+                    )));
+                }
                 found = Some(DocumentGeneration {
                     content_revision,
-                    revision_token: tokens.value(index).parse().map_err(|error| {
-                        RetrievalError::vector_store(format!(
-                            "document {document_id} has an invalid generation token: {error}"
-                        ))
-                    })?,
+                    revision_token,
                 });
             }
         }
@@ -732,9 +756,12 @@ impl LanceVectorStore {
                 "text",
                 "heading_path",
                 "source_regions",
+                "source",
                 "retrieval_text",
                 "span_start",
                 "span_end",
+                "content_revision",
+                "revision_token",
                 VECTOR_COL,
             ]))
             .execute()
@@ -829,6 +856,11 @@ impl VectorStore for LanceVectorStore {
     }
 
     async fn upsert(&self, records: Vec<VectorRecord>) -> Result<()> {
+        if records.iter().any(|record| record.generation.is_some()) {
+            return Err(RetrievalError::vector_store(
+                "legacy upsert cannot accept generation-stamped records",
+            ));
+        }
         self.validate_upsert_records(&records)?;
         let records = dedupe_by_chunk_id(records);
         if records.is_empty() {
@@ -927,6 +959,11 @@ impl VectorStore for LanceVectorStore {
         document_id: DocumentId,
         records: Vec<VectorRecord>,
     ) -> Result<()> {
+        if records.iter().any(|record| record.generation.is_some()) {
+            return Err(RetrievalError::vector_store(
+                "legacy replacement cannot accept generation-stamped records",
+            ));
+        }
         self.validate_document_records(document_id, &records)?;
         let records = dedupe_by_chunk_id(records);
         let _write = self.publication_lock.write().await;
@@ -948,9 +985,17 @@ impl VectorStore for LanceVectorStore {
         generation: DocumentGeneration,
         records: Vec<VectorRecord>,
     ) -> Result<GenerationStageOutcome> {
-        if generation.content_revision < 1 {
+        if generation.content_revision < 1 || generation.revision_token.is_nil() {
             return Err(RetrievalError::vector_store(
-                "document generation revision must be at least one",
+                "document generation must have a positive revision and non-nil token",
+            ));
+        }
+        if records
+            .iter()
+            .any(|record| record.generation.is_some_and(|found| found != generation))
+        {
+            return Err(RetrievalError::vector_store(
+                "vector record generation does not match its publication fence",
             ));
         }
         self.validate_document_records(document_id, &records)?;
@@ -1004,6 +1049,11 @@ impl VectorStore for LanceVectorStore {
         document_id: DocumentId,
         generation: DocumentGeneration,
     ) -> Result<bool> {
+        if generation.content_revision < 1 || generation.revision_token.is_nil() {
+            return Err(RetrievalError::vector_store(
+                "document generation must have a positive revision and non-nil token",
+            ));
+        }
         let _write = self.publication_lock.write().await;
         let staged = self.generation_marker(document_id, STAGED_MARKER).await?;
         if let Some(staged) = staged {
@@ -1113,6 +1163,7 @@ fn build_schema(dims: usize) -> SchemaRef {
             false,
         ),
         Field::new("source_regions", DataType::Utf8, false),
+        Field::new("source", DataType::Utf8, false),
         Field::new("retrieval_text", DataType::Utf8, false),
         Field::new("span_start", DataType::UInt64, false),
         Field::new("span_end", DataType::UInt64, false),
@@ -1137,6 +1188,9 @@ fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Resu
     let texts = str_col(batch, "text")?;
     let heading_paths = list_str_col(batch, "heading_path")?;
     let source_regions = str_col(batch, "source_regions")?;
+    let sources = str_col(batch, "source")?;
+    let revisions = i64_col(batch, "content_revision")?;
+    let revision_tokens = str_col(batch, "revision_token")?;
     let starts = u64_col(batch, "span_start")?;
     let ends = u64_col(batch, "span_end")?;
     let vectors = batch
@@ -1171,18 +1225,28 @@ fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Resu
             .downcast_ref::<Float32Array>()
             .ok_or_else(|| RetrievalError::vector_store("vector values are not float32"))?;
         let text = texts.value(index).to_string();
-        let span = ByteSpan::new(starts.value(index) as usize, ends.value(index) as usize);
+        let span = decode_span(starts.value(index), ends.value(index))?;
+        validate_chunk_identity(chunk_id, document_id, span)?;
+        let source: crate::DocumentSource =
+            serde_json::from_str(sources.value(index)).map_err(|error| {
+                RetrievalError::vector_store(format!("invalid stored document source: {error}"))
+            })?;
+        source.validate()?;
+        let chunk = Chunk {
+            id: chunk_id,
+            document_id,
+            ordinal: ordinals.value(index) as usize,
+            text: text.clone(),
+            heading_path: list_str_value(heading_paths, index)?,
+            source_regions: decode_source_regions(source_regions.value(index), &text, span)?,
+            span,
+        };
+        chunk.validate_source_regions()?;
         out.push(VectorRecord {
             project_id,
-            chunk: Chunk {
-                id: chunk_id,
-                document_id,
-                ordinal: ordinals.value(index) as usize,
-                text: text.clone(),
-                heading_path: list_str_value(heading_paths, index)?,
-                source_regions: decode_source_regions(source_regions.value(index), &text, span)?,
-                span,
-            },
+            source,
+            generation: decode_generation(revisions.value(index), revision_tokens.value(index))?,
+            chunk,
             embedding: Embedding(values.values().to_vec()),
         });
     }
@@ -1211,6 +1275,9 @@ fn read_scored_batch(
     let texts = str_col(batch, "text")?;
     let heading_paths = list_str_col(batch, "heading_path")?;
     let source_regions = str_col(batch, "source_regions")?;
+    let sources = str_col(batch, "source")?;
+    let revisions = i64_col(batch, "content_revision")?;
+    let revision_tokens = str_col(batch, "revision_token")?;
     let starts = u64_col(batch, "span_start")?;
     let ends = u64_col(batch, "span_end")?;
     let scores = batch
@@ -1231,22 +1298,81 @@ fn read_scored_batch(
             .value(i)
             .parse()
             .map_err(|e| RetrievalError::vector_store(format!("bad document_id: {e}")))?;
-        let span = ByteSpan::new(starts.value(i) as usize, ends.value(i) as usize);
+        let span = decode_span(starts.value(i), ends.value(i))?;
+        validate_chunk_identity(chunk_id, document_id, span)?;
         let text = texts.value(i).to_string();
+        let source: crate::DocumentSource =
+            serde_json::from_str(sources.value(i)).map_err(|error| {
+                RetrievalError::vector_store(format!("invalid stored document source: {error}"))
+            })?;
+        source.validate()?;
+        let chunk = Chunk {
+            id: chunk_id,
+            document_id,
+            ordinal: ordinals.value(i) as usize,
+            text: text.clone(),
+            heading_path: list_str_value(heading_paths, i)?,
+            source_regions: decode_source_regions(source_regions.value(i), &text, span)?,
+            span,
+        };
+        chunk.validate_source_regions()?;
         out.push(ScoredChunk {
-            chunk: Chunk {
-                id: chunk_id,
-                document_id,
-                ordinal: ordinals.value(i) as usize,
-                text: text.clone(),
-                heading_path: list_str_value(heading_paths, i)?,
-                source_regions: decode_source_regions(source_regions.value(i), &text, span)?,
-                span,
-            },
+            chunk,
+            source,
+            generation: decode_generation(revisions.value(i), revision_tokens.value(i))?,
             score: convert_score(scores.value(i)),
         });
     }
     Ok(())
+}
+
+fn decode_generation(revision: i64, token: &str) -> Result<Option<DocumentGeneration>> {
+    if revision == 0 && token.is_empty() {
+        return Ok(None);
+    }
+    if revision < 1 {
+        return Err(RetrievalError::vector_store(
+            "invalid stored document generation revision",
+        ));
+    }
+    let revision_token: uuid::Uuid = token.parse().map_err(|error| {
+        RetrievalError::vector_store(format!("invalid stored revision token: {error}"))
+    })?;
+    if revision_token.is_nil() {
+        return Err(RetrievalError::vector_store(
+            "invalid stored nil revision token",
+        ));
+    }
+    Ok(Some(DocumentGeneration {
+        content_revision: revision,
+        revision_token,
+    }))
+}
+
+fn validate_chunk_identity(
+    chunk_id: ChunkId,
+    document_id: DocumentId,
+    span: ByteSpan,
+) -> Result<()> {
+    if chunk_id != ChunkId::derive(document_id, span.start, span.end) {
+        return Err(RetrievalError::vector_store(
+            "stored chunk identity does not match document and span",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_span(start: u64, end: u64) -> Result<ByteSpan> {
+    let start = usize::try_from(start)
+        .map_err(|_| RetrievalError::vector_store("stored chunk span exceeds platform range"))?;
+    let end = usize::try_from(end)
+        .map_err(|_| RetrievalError::vector_store("stored chunk span exceeds platform range"))?;
+    if start > end || i64::try_from(start).is_err() || i64::try_from(end).is_err() {
+        return Err(RetrievalError::vector_store(
+            "stored chunk span exceeds durable evidence range",
+        ));
+    }
+    Ok(ByteSpan::new(start, end))
 }
 
 fn decode_source_regions(
@@ -1330,6 +1456,8 @@ mod tests {
         let span = ByteSpan::new(ordinal * 100, ordinal * 100 + text.len());
         VectorRecord {
             project_id: None,
+            source: crate::DocumentSource::Inline,
+            generation: None,
             chunk: Chunk::new(doc, ordinal, span, text),
             embedding: Embedding(vector),
         }
@@ -2089,6 +2217,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn rejects_malformed_chunk_ids_and_nil_generations_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
+            .await
+            .unwrap();
+        let doc = DocumentId::new();
+        let version = store.table.version().await.unwrap();
+        let mut invalid = record(doc, 0, "fact", vec![1.0, 0.0]);
+        invalid.chunk.id = ChunkId::new();
+        assert!(store.upsert(vec![invalid.clone()]).await.is_err());
+        assert!(store
+            .stage_document_generation(doc, generation(1), vec![invalid])
+            .await
+            .is_err());
+        let nil = DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::nil(),
+        };
+        assert!(store
+            .stage_document_generation(doc, nil, vec![record(doc, 0, "fact", vec![1.0, 0.0])])
+            .await
+            .is_err());
+        assert!(store.activate_document_generation(doc, nil).await.is_err());
+        assert!(decode_generation(1, &uuid::Uuid::nil().to_string()).is_err());
+        assert!(store
+            .upsert(vec![record(doc, 0, "nul\0text", vec![1.0, 0.0])])
+            .await
+            .is_err());
+        if usize::BITS > 63 {
+            let start = (i64::MAX as usize) + 1;
+            let mut outside = record(doc, 0, "fact", vec![1.0, 0.0]);
+            outside.chunk = Chunk::new(doc, 0, ByteSpan::new(start, start + 4), "fact");
+            assert!(store.upsert(vec![outside]).await.is_err());
+            assert!(decode_span(start as u64, (start + 4) as u64).is_err());
+        }
+        assert_eq!(store.table.version().await.unwrap(), version);
+        assert_eq!(store.table.count_rows(None).await.unwrap(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn empty_index_and_k_zero_return_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let store = LanceVectorStore::connect(dir.path().to_str().unwrap(), 2)
@@ -2575,7 +2743,12 @@ mod tests {
             .query("", &Embedding(vec![1.0, 0.0]), 10, SearchScope::Unscoped)
             .await
             .unwrap();
-        assert!(hits.iter().any(|hit| hit.chunk.text == "first"));
+        let first_hit = hits
+            .iter()
+            .find(|hit| hit.chunk.text == "first")
+            .expect("active generation hit");
+        assert_eq!(first_hit.generation, Some(first));
+        assert_eq!(first_hit.source, crate::DocumentSource::Inline);
         assert!(hits.iter().all(|hit| hit.chunk.text != "other"));
         assert_eq!(
             reopened.active_document_generation(doc).await.unwrap(),

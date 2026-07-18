@@ -6,8 +6,8 @@
 //! from the vector index (offsets in the store, text rehydrated from the source),
 //! and it gives every answer a precise, verifiable pointer back into the source.
 
-use openwave_core::ProjectId;
 pub use openwave_core::{ByteSpan, SourceLocation, SourceRegion};
+use openwave_core::{DocumentGeneration, ProjectId};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -28,10 +28,30 @@ pub enum DocumentSource {
     Inline,
 }
 
+impl Default for DocumentSource {
+    fn default() -> Self {
+        Self::Inline
+    }
+}
+
 impl DocumentSource {
     /// Convenience constructor for a URI source.
     pub fn uri(uri: impl Into<String>) -> Self {
         Self::Uri { uri: uri.into() }
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        if let Self::Uri { uri } = self {
+            if uri.is_empty()
+                || uri.len() > openwave_core::RetrievalEvidenceInput::MAX_SOURCE_URI_BYTES
+                || uri.contains('\0')
+            {
+                return Err(RetrievalError::vector_store(
+                    "document source URI exceeds retrieval evidence bounds",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -225,6 +245,30 @@ impl Chunk {
     }
 
     pub(crate) fn validate_source_regions(&self) -> Result<()> {
+        let heading_bytes = self
+            .heading_path
+            .iter()
+            .try_fold(0_usize, |total, heading| total.checked_add(heading.len()));
+        if self.id != ChunkId::derive(self.document_id, self.span.start, self.span.end)
+            || self.span.len() != self.text.len()
+            || self.text.contains('\0')
+            || i64::try_from(self.span.start).is_err()
+            || i64::try_from(self.span.end).is_err()
+            || self.text.len() > openwave_core::RetrievalEvidenceInput::MAX_SNIPPET_BYTES
+            || self.heading_path.len() > openwave_core::RetrievalEvidenceInput::MAX_HEADING_SEGMENTS
+            || heading_bytes.is_none_or(|bytes| {
+                bytes > openwave_core::RetrievalEvidenceInput::MAX_HEADING_BYTES
+            })
+            || self
+                .heading_path
+                .iter()
+                .any(|heading| heading.contains('\0'))
+            || self.source_regions.len() > openwave_core::RetrievalEvidenceInput::MAX_SOURCE_REGIONS
+        {
+            return Err(RetrievalError::vector_store(
+                "chunk exceeds retrieval evidence bounds",
+            ));
+        }
         let mut previous_end = self.span.start;
         for region in &self.source_regions {
             if region.span.is_empty()
@@ -254,6 +298,12 @@ impl Chunk {
 pub struct ScoredChunk {
     /// The matched chunk.
     pub chunk: Chunk,
+    /// Source provenance captured in the same indexed row as this chunk.
+    #[serde(skip)]
+    pub source: DocumentSource,
+    /// Exact searchable generation, absent only for legacy unversioned stores.
+    #[serde(skip)]
+    pub generation: Option<DocumentGeneration>,
     /// Relevance score; initially assigned by the backend and overwritten by an
     /// optional reranker before final selection. Higher is more relevant within
     /// one result set; reranker scores are not comparable across queries or
@@ -269,6 +319,12 @@ pub struct ScoredChunk {
 pub struct Citation {
     /// The cited document.
     pub document_id: DocumentId,
+    /// Source provenance captured when this generation was indexed.
+    #[serde(skip)]
+    pub source: DocumentSource,
+    /// Exact indexed generation; agent search rejects unversioned results.
+    #[serde(skip)]
+    pub generation: Option<DocumentGeneration>,
     /// The cited chunk.
     pub chunk_id: ChunkId,
     /// The exact byte range cited within the document text.
@@ -288,6 +344,8 @@ impl From<ScoredChunk> for Citation {
     fn from(scored: ScoredChunk) -> Self {
         Self {
             document_id: scored.chunk.document_id,
+            source: scored.source,
+            generation: scored.generation,
             chunk_id: scored.chunk.id,
             span: scored.chunk.span,
             snippet: scored.chunk.text,
@@ -353,6 +411,8 @@ mod tests {
         let chunk = Chunk::new(doc, 2, ByteSpan::new(0, 3), "abc");
         let citation: Citation = ScoredChunk {
             chunk: chunk.clone(),
+            source: DocumentSource::Inline,
+            generation: None,
             score: 0.9,
         }
         .into();

@@ -11,7 +11,7 @@ use crate::document::{ByteSpan, ScoredChunk};
 use crate::id::DocumentId;
 
 /// Maximum number of passages any public search surface returns.
-pub const MAX_SEARCH_RESULTS: usize = 50;
+pub const MAX_SEARCH_RESULTS: usize = openwave_core::RetrievalEvidenceInput::MAX_RESULTS;
 
 const CANDIDATE_MULTIPLIER: usize = 4;
 const MAX_SEARCH_CANDIDATES: usize = MAX_SEARCH_RESULTS * CANDIDATE_MULTIPLIER;
@@ -104,6 +104,8 @@ mod tests {
                 ByteSpan::new(start, end),
                 format!("chunk {ordinal}"),
             ),
+            source: crate::DocumentSource::Inline,
+            generation: None,
             score: 1.0 - ordinal as f32 / 100.0,
         }
     }
@@ -116,8 +118,8 @@ mod tests {
         assert_eq!(candidate_limit(0), 0);
         assert_eq!(candidate_limit(1), 4);
         assert_eq!(candidate_limit(17), 68);
-        assert_eq!(candidate_limit(MAX_SEARCH_RESULTS), 200);
-        assert_eq!(candidate_limit(usize::MAX), 200);
+        assert_eq!(candidate_limit(MAX_SEARCH_RESULTS), 80);
+        assert_eq!(candidate_limit(usize::MAX), 80);
     }
 
     #[test]
