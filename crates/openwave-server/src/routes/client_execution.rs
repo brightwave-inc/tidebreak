@@ -3,8 +3,9 @@
 //! Polling is authoritative; event streams are only a latency hint. A client
 //! generates a fresh secret lease token before claiming, then retains it across
 //! ambiguous HTTP responses and presents it for every heartbeat or resolution.
-//! Claim, heartbeat, and resolve also require the server's native-only executor
-//! credential; pending polling uses ordinary API authentication.
+//! Raw polling, claim, heartbeat, and resolve require the server's native-only
+//! executor credential. The renderer-facing pending route returns a closed,
+//! presentation-only projection of folder-access requests.
 
 use axum::extract::State;
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use chrono::{Duration, Utc};
 use openwave_core::{
     CallId, ChatId, ClaimClientToolCallOutcome, HeartbeatClientToolCallOutcome,
-    ResolveToolCallOutcome, ToolCallRecord, ToolCallResolution, TurnRunStatus,
+    RequestFolderAccessArgs, RequestedFolderHint, ResolveToolCallOutcome, ToolCallExecution,
+    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnId, TurnRunStatus,
+    REQUEST_FOLDER_ACCESS_TOOL,
 };
 
 use crate::error::ServerError;
@@ -20,6 +23,8 @@ use crate::extract::{Json, Path};
 use crate::state::AppState;
 
 const CLIENT_EXECUTION_LEASE: Duration = Duration::seconds(60);
+const RENDERER_FOLDER_ACCESS_REASON: &str =
+    "The assistant needs read access to files outside the folders connected to this conversation.";
 
 /// Caller-owned claim identity. The lease token is a secret capability and
 /// must be generated freshly for a new claim attempt.
@@ -121,16 +126,65 @@ pub struct ResolvedClientExecution {
     pub disposition: ResolutionDisposition,
 }
 
-/// `GET /chats/{id}/client-executions/pending` — authoritative pending work.
+/// One folder-access request that is safe for an untrusted renderer to present.
 ///
-/// Includes visible executor and expiry metadata for recovery, but never the
-/// secret lease token. Unknown chats return `404` rather than an empty list.
-pub async fn list_pending_client_executions(
+/// This intentionally omits the canonical tool name and arguments, chat and
+/// executor identities, provider metadata, lifecycle details, and diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingFolderAccessRequest {
+    pub call_id: CallId,
+    pub turn_id: TurnId,
+    pub reason: String,
+    pub folder_hint: Option<RequestedFolderHint>,
+    pub claimed: bool,
+}
+
+/// `GET /chats/{id}/client-executions/pending` — renderer-safe consent prompts.
+///
+/// Unknown, malformed, or non-folder-access client calls are omitted rather
+/// than exposing their canonical records across the renderer boundary.
+pub async fn list_pending_folder_access_requests(
+    State(state): State<AppState>,
+    Path(id): Path<ChatId>,
+) -> Result<Json<Vec<PendingFolderAccessRequest>>, ServerError> {
+    ensure_chat(&state, id).await?;
+    let requests = state
+        .store
+        .list_pending_client_tool_calls(id)
+        .await?
+        .into_iter()
+        .filter_map(renderer_folder_access_request)
+        .collect();
+    Ok(Json(requests))
+}
+
+/// Native-only authoritative pending work used by the trusted executor.
+pub async fn list_pending_client_executions_raw(
     State(state): State<AppState>,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<ToolCallRecord>>, ServerError> {
     ensure_chat(&state, id).await?;
     Ok(Json(state.store.list_pending_client_tool_calls(id).await?))
+}
+
+fn renderer_folder_access_request(call: ToolCallRecord) -> Option<PendingFolderAccessRequest> {
+    if call.name != REQUEST_FOLDER_ACCESS_TOOL
+        || call.execution != ToolCallExecution::Client
+        || call.status != ToolCallStatus::Pending
+    {
+        return None;
+    }
+    let arguments: RequestFolderAccessArgs = serde_json::from_value(call.arguments).ok()?;
+    if !arguments.is_well_formed() {
+        return None;
+    }
+    Some(PendingFolderAccessRequest {
+        call_id: call.id,
+        turn_id: call.turn_id,
+        reason: RENDERER_FOLDER_ACCESS_REASON.to_owned(),
+        folder_hint: arguments.folder_hint,
+        claimed: call.client_executor_id.is_some(),
+    })
 }
 
 /// `POST .../{call_id}/claim` — atomically acquire or recover one exact claim.

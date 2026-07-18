@@ -152,6 +152,9 @@ export type PendingFolderAccessRequest = {
   claimedByDesktop: boolean;
 };
 
+const RENDERER_FOLDER_ACCESS_REASON =
+  "The assistant needs read access to files outside the folders connected to this conversation.";
+
 const WS_HANDSHAKE = "openwave-v1";
 const WS_TOKEN_PREFIX = "openwave-token.";
 
@@ -358,7 +361,7 @@ export class ApiClient {
 
     const requests = new Map<string, PendingFolderAccessRequest>();
     for (const item of body) {
-      const request = parseFolderAccessRequest(item, chatId);
+      const request = parseFolderAccessRequest(item);
       if (request && !requests.has(request.callId)) {
         requests.set(request.callId, request);
       }
@@ -382,50 +385,33 @@ export class ApiClient {
   }
 }
 
-function parseFolderAccessRequest(
+export function parseFolderAccessRequest(
   value: unknown,
-  chatId: string,
 ): PendingFolderAccessRequest | null {
   if (!isRecord(value)) return null;
-  if (
-    typeof value.id !== "string" ||
-    value.id.length === 0 ||
-    typeof value.turn_id !== "string" ||
-    value.turn_id.length === 0 ||
-    value.chat_id !== chatId ||
-    value.name !== "request_folder_access" ||
-    value.execution !== "client" ||
-    value.status !== "pending" ||
-    !(value.client_executor_id === null ||
-      typeof value.client_executor_id === "string")
-  ) {
-    return null;
-  }
-
-  const args = value.arguments;
-  if (!isRecord(args)) return null;
-  const keys = Object.keys(args);
+  const keys = Object.keys(value);
   if (
     keys.some(
       (key) =>
+        key !== "call_id" &&
+        key !== "turn_id" &&
         key !== "reason" &&
-        key !== "requested_capabilities" &&
-        key !== "folder_hint",
+        key !== "folder_hint" &&
+        key !== "claimed",
     ) ||
-    typeof args.reason !== "string" ||
-    args.reason.trim().length === 0 ||
-    [...args.reason].length > 500 ||
-    args.reason.includes("\0") ||
-    !Array.isArray(args.requested_capabilities) ||
-    args.requested_capabilities.length !== 1 ||
-    args.requested_capabilities[0] !== "read_files"
+    typeof value.call_id !== "string" ||
+    value.call_id.length === 0 ||
+    typeof value.turn_id !== "string" ||
+    value.turn_id.length === 0 ||
+    typeof value.reason !== "string" ||
+    value.reason !== RENDERER_FOLDER_ACCESS_REASON ||
+    typeof value.claimed !== "boolean"
   ) {
     return null;
   }
-
-  const folderHint = args.folder_hint;
+  const folderHint = value.folder_hint;
   if (
-    folderHint !== undefined &&
+    folderHint !== null &&
     folderHint !== "documents" &&
     folderHint !== "downloads"
   ) {
@@ -433,11 +419,11 @@ function parseFolderAccessRequest(
   }
 
   return {
-    callId: value.id,
+    callId: value.call_id,
     turnId: value.turn_id,
-    reason: args.reason,
-    folderHint: folderHint ?? null,
-    claimedByDesktop: value.client_executor_id !== null,
+    reason: value.reason,
+    folderHint,
+    claimedByDesktop: value.claimed,
   };
 }
 
