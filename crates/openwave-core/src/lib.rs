@@ -67,8 +67,9 @@ pub use db::DbStore;
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{
-    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, HostRootId, HostRootIdError, MessageId,
-    ProjectId, RootAttachmentChangeId, RootAttachmentChangeIdError, StepId, TurnId, TurnSteerId,
+    AgentRunId, CallId, ChatId, ChunkId, DocumentId, DocumentJobId, HostRootId, HostRootIdError,
+    MessageId, ProjectId, RootAttachmentChangeId, RootAttachmentChangeIdError, StepId, TurnId,
+    TurnSteerId,
 };
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
@@ -79,11 +80,12 @@ pub use model::{
     ClientToolCallRequest, DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus,
     DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus, DocumentRecord,
     DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
-    Message, Project, Role, RootAttachmentChange, RootAttachmentChangeAction,
-    RootAttachmentChangeFailure, RootAttachmentChangePhase, RootAttachmentChangeTerminal,
-    RootAttachmentOrigin, RootAttachmentSubjectKind, SandboxToolCall, SandboxToolCallReceipt,
-    SandboxToolCallRequest, SandboxToolCallStatus, SourceLocation, SourceRegion, ToolCallExecution,
-    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitStatus,
+    Message, Project, RetrievalEvidence, RetrievalEvidenceInput, RetrievalEvidenceSource, Role,
+    RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
+    RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentOrigin,
+    RootAttachmentSubjectKind, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
+    SandboxToolCallStatus, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
+    ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitStatus,
     TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
     TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus, MAX_ATTACHMENT_REVISION,
     MAX_ROOT_ATTACHMENTS,

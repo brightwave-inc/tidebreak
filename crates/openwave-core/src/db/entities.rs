@@ -771,6 +771,39 @@ pub mod tool_call {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod retrieval_evidence {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "retrieval_evidence")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub call_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub rank: i32,
+        pub chat_id: Uuid,
+        pub turn_id: Uuid,
+        pub document_id: Uuid,
+        pub content_revision: i64,
+        pub revision_token: Uuid,
+        pub chunk_id: Uuid,
+        pub span_start: i64,
+        pub span_end: i64,
+        pub snippet: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub heading_path: Json,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub source_regions: Json,
+        pub source_kind: String,
+        pub source_uri: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod setting {
     use sea_orm::entity::prelude::*;
 

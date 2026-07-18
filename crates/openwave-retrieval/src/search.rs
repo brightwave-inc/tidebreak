@@ -19,7 +19,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use openwave_core::{ApprovalClass, Result, Tool, ToolCtx, ToolOutput, ToolSpec};
+use openwave_core::{
+    ApprovalClass, Result, RetrievalEvidenceInput, RetrievalEvidenceSource, Tool, ToolCtx,
+    ToolOutput, ToolSpec,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -201,13 +204,53 @@ impl Tool for SearchTool {
         };
         let hits = select(candidates, k);
 
-        let citations: Vec<Citation> = hits.into_iter().map(Citation::from).collect();
+        let mut citations: Vec<Citation> = hits.into_iter().map(Citation::from).collect();
         if citations.is_empty() {
             return Ok(ToolOutput::text("No matching passages found."));
         }
-        let content = render(&citations);
-        let data = serde_json::to_value(&citations)?;
-        Ok(ToolOutput::text(content).with_data(data))
+        let content = loop {
+            let content = render(&citations);
+            if content.len() <= openwave_core::ToolCallRecord::MAX_RESULT_BYTES {
+                break content;
+            }
+            citations.pop();
+            if citations.is_empty() {
+                return Ok(ToolOutput::error(
+                    "search results exceed the tool result budget",
+                ));
+            }
+        };
+        let evidence = citations
+            .iter()
+            .enumerate()
+            .map(|(index, citation)| {
+                let Some(generation) = citation.generation else {
+                    return Err(ToolOutput::error(
+                        "search result is missing an exact document generation",
+                    ));
+                };
+                Ok(RetrievalEvidenceInput {
+                    rank: u16::try_from(index + 1).expect("search result limit fits u16"),
+                    document_id: citation.document_id,
+                    generation,
+                    chunk_id: citation.chunk_id,
+                    span: citation.span,
+                    snippet: citation.snippet.clone(),
+                    heading_path: citation.heading_path.clone(),
+                    source_regions: citation.source_regions.clone(),
+                    source: match &citation.source {
+                        crate::DocumentSource::Uri { uri } => {
+                            RetrievalEvidenceSource::Uri { uri: uri.clone() }
+                        }
+                        crate::DocumentSource::Inline => RetrievalEvidenceSource::Inline,
+                    },
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>();
+        match evidence {
+            Ok(evidence) => Ok(ToolOutput::text(content).with_private_evidence(evidence)),
+            Err(output) => Ok(output),
+        }
     }
 }
 
@@ -217,7 +260,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use openwave_core::{ChatId, ProjectId};
+    use openwave_core::{ChatId, DocumentGeneration, ProjectId};
 
     use crate::chunk::{Chunker, TextChunker};
     use crate::document::{
@@ -242,16 +285,30 @@ mod tests {
         let chunks = TextChunker::new(90, 0).chunk(&doc).unwrap();
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
         let embeddings = embedder.embed_documents(&texts).await.unwrap();
+        let generation = DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+        };
+        let source = doc.source.clone();
         let records: Vec<VectorRecord> = chunks
             .into_iter()
             .zip(embeddings)
             .map(|(chunk, embedding)| VectorRecord {
                 project_id: None,
+                source: source.clone(),
+                generation: Some(generation),
                 chunk,
                 embedding,
             })
             .collect();
-        store.upsert(records).await.unwrap();
+        store
+            .stage_document_generation(doc.id, generation, records)
+            .await
+            .unwrap();
+        assert!(store
+            .activate_document_generation(doc.id, generation)
+            .await
+            .unwrap());
 
         SearchTool::new(embedder, store)
     }
@@ -347,6 +404,11 @@ mod tests {
     ) -> ScoredChunk {
         ScoredChunk {
             chunk: Chunk::new(document_id, ordinal, ByteSpan::new(start, end), text),
+            source: DocumentSource::Inline,
+            generation: Some(DocumentGeneration {
+                content_revision: 1,
+                revision_token: uuid::Uuid::from_u128(1),
+            }),
             score: 1.0 - ordinal as f32 / 10.0,
         }
     }
@@ -395,7 +457,12 @@ mod tests {
             "body",
             vec!["Guide".into(), "Setup".into()],
         );
-        let citation = Citation::from(ScoredChunk { chunk, score: 0.5 });
+        let citation = Citation::from(ScoredChunk {
+            chunk,
+            source: DocumentSource::Inline,
+            generation: None,
+            score: 0.5,
+        });
 
         let output = render(std::slice::from_ref(&citation));
 
@@ -418,6 +485,8 @@ mod tests {
         single.source_regions = vec![page(0, 4, 7)];
         let single = Citation::from(ScoredChunk {
             chunk: single,
+            source: DocumentSource::Inline,
+            generation: None,
             score: 0.5,
         });
         assert!(render(&[single]).contains("\nPage: 7\nbody"));
@@ -426,6 +495,8 @@ mod tests {
         multi.source_regions = vec![page(0, 2, 7), page(2, 4, 8)];
         let multi = Citation::from(ScoredChunk {
             chunk: multi,
+            source: DocumentSource::Inline,
+            generation: None,
             score: 0.5,
         });
         assert!(render(&[multi]).contains("\nPages: 7, 8\nbody"));
@@ -435,6 +506,8 @@ mod tests {
     fn render_omits_section_line_for_an_empty_breadcrumb() {
         let citation = Citation::from(ScoredChunk {
             chunk: Chunk::new(DocumentId::new(), 0, ByteSpan::new(0, 4), "body"),
+            source: DocumentSource::Inline,
+            generation: None,
             score: 0.5,
         });
 
@@ -445,7 +518,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returns_ranked_citations_as_text_and_structured_data() {
+    async fn returns_ranked_citations_as_text_and_private_evidence() {
         let tool = tool_with(
             "Mars is the fourth planet from the Sun, the Red Planet.\n\
              Jupiter is the largest planet in the Solar System, a gas giant.\n\
@@ -467,13 +540,11 @@ mod tests {
             out.content
         );
 
-        // Structured payload is an array of citations the client can render.
-        let data = out.data.expect("expected structured citations");
-        let arr = data.as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        assert!(arr[0]["snippet"].as_str().unwrap().contains("Jupiter"));
-        assert!(arr[0]["document_id"].is_string());
-        assert!(arr[0]["span"]["start"].is_number());
+        assert!(out.data.is_none());
+        assert_eq!(out.private_evidence.len(), 1);
+        assert!(out.private_evidence[0].snippet.contains("Jupiter"));
+        assert_eq!(out.private_evidence[0].rank, 1);
+        assert_eq!(out.private_evidence[0].generation.content_revision, 1);
     }
 
     #[tokio::test]
@@ -502,16 +573,24 @@ mod tests {
             ),
         ];
         for document in documents {
+            let generation = DocumentGeneration {
+                content_revision: 1,
+                revision_token: uuid::Uuid::new_v4(),
+            };
             let chunks = TextChunker::new(90, 0).chunk(&document).unwrap();
             let texts: Vec<_> = chunks.iter().map(|chunk| chunk.text.clone()).collect();
             let embeddings = embedder.embed_documents(&texts).await.unwrap();
             store
-                .upsert(
+                .stage_document_generation(
+                    document.id,
+                    generation,
                     chunks
                         .into_iter()
                         .zip(embeddings)
                         .map(|(chunk, embedding)| VectorRecord {
                             project_id: document.project_id,
+                            source: document.source.clone(),
+                            generation: Some(generation),
                             chunk,
                             embedding,
                         })
@@ -519,6 +598,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            assert!(store
+                .activate_document_generation(document.id, generation)
+                .await
+                .unwrap());
         }
         let tool = SearchTool::new(embedder, store);
 
@@ -620,11 +703,10 @@ mod tests {
             .unwrap();
 
         assert!(!output.is_error);
-        let citations: Vec<Citation> = serde_json::from_value(output.data.unwrap()).unwrap();
-        assert_eq!(citations[0].snippet, "reranked first");
-        assert_eq!(citations[0].score, 0.9);
-        assert_eq!(citations[1].snippet, "backend first");
-        assert_eq!(citations[1].score, 0.1);
+        assert_eq!(output.private_evidence[0].snippet, "reranked first");
+        assert_eq!(output.private_evidence[1].snippet, "backend first");
+        assert!(output.content.contains("[score 0.900]"));
+        assert!(output.content.contains("[score 0.100]"));
     }
 
     #[tokio::test]
@@ -636,7 +718,7 @@ mod tests {
             .execute(&ctx(), json!({ "query": "alpha" }))
             .await
             .unwrap();
-        let n = out.data.unwrap().as_array().unwrap().len();
+        let n = out.private_evidence.len();
         assert!((1..=SearchTool::DEFAULT_K).contains(&n));
 
         // An over-large k is clamped, never rejected.
@@ -652,7 +734,53 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.is_error);
-        assert_eq!(out.data.unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(out.private_evidence.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn maximum_results_fit_durable_count_and_result_budgets() {
+        let candidates = (0..crate::MAX_SEARCH_RESULTS)
+            .map(|ordinal| {
+                let document_id = DocumentId::new();
+                let snippet = char::from(b'a' + (ordinal % 26) as u8)
+                    .to_string()
+                    .repeat(openwave_core::RetrievalEvidenceInput::MAX_SNIPPET_BYTES);
+                ScoredChunk {
+                    chunk: Chunk::new(
+                        document_id,
+                        ordinal,
+                        ByteSpan::new(0, snippet.len()),
+                        snippet,
+                    ),
+                    source: DocumentSource::Inline,
+                    generation: Some(DocumentGeneration {
+                        content_revision: 1,
+                        revision_token: uuid::Uuid::new_v4(),
+                    }),
+                    score: 1.0 - ordinal as f32 / 100.0,
+                }
+            })
+            .collect();
+        let tool = SearchTool::new(
+            Arc::new(HashEmbedder::new(DIMS)),
+            Arc::new(SpyVectorStore {
+                candidates,
+                calls: Mutex::new(Vec::new()),
+            }),
+        );
+
+        let output = tool
+            .execute(&ctx(), json!({"query": "fact", "k": 9999}))
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert!(!output.private_evidence.is_empty());
+        assert!(output.private_evidence.len() <= crate::MAX_SEARCH_RESULTS);
+        assert!(output.content.len() <= openwave_core::ToolCallRecord::MAX_RESULT_BYTES);
+        for (index, evidence) in output.private_evidence.iter().enumerate() {
+            assert_eq!(usize::from(evidence.rank), index + 1);
+        }
     }
 
     #[tokio::test]

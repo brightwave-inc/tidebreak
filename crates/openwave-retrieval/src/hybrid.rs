@@ -19,15 +19,32 @@ pub(crate) fn rank(
     let lexical = bm25(records, query_text, k);
     let mut fused = HashMap::new();
     for (position, hit) in dense.into_iter().enumerate() {
-        add_rank(&mut fused, &hit.chunk, position);
+        add_rank(
+            &mut fused,
+            &hit.chunk,
+            &hit.source,
+            hit.generation,
+            position,
+        );
     }
     for (position, (record, _)) in lexical.into_iter().enumerate() {
-        add_rank(&mut fused, &record.chunk, position);
+        add_rank(
+            &mut fused,
+            &record.chunk,
+            &record.source,
+            record.generation,
+            position,
+        );
     }
 
     let mut hits = fused
         .into_values()
-        .map(|(chunk, score)| ScoredChunk { chunk, score })
+        .map(|(chunk, source, generation, score)| ScoredChunk {
+            chunk,
+            source,
+            generation,
+            score,
+        })
         .collect::<Vec<_>>();
     sort_hits(&mut hits);
     hits.truncate(k);
@@ -44,6 +61,8 @@ pub(crate) fn dense(
         .iter()
         .map(|record| ScoredChunk {
             chunk: record.chunk.clone(),
+            source: record.source.clone(),
+            generation: record.generation,
             score: query_embedding.cosine_similarity(&record.embedding),
         })
         .filter(|hit| hit.score >= min_similarity)
@@ -54,14 +73,24 @@ pub(crate) fn dense(
 }
 
 fn add_rank(
-    fused: &mut HashMap<ChunkId, (crate::Chunk, f32)>,
+    fused: &mut HashMap<
+        ChunkId,
+        (
+            crate::Chunk,
+            crate::DocumentSource,
+            Option<openwave_core::DocumentGeneration>,
+            f32,
+        ),
+    >,
     chunk: &crate::Chunk,
+    source: &crate::DocumentSource,
+    generation: Option<openwave_core::DocumentGeneration>,
     position: usize,
 ) {
     let entry = fused
         .entry(chunk.id)
-        .or_insert_with(|| (chunk.clone(), 0.0));
-    entry.1 += 1.0 / (RRF_K + position as f32 + 1.0);
+        .or_insert_with(|| (chunk.clone(), source.clone(), generation, 0.0));
+    entry.3 += 1.0 / (RRF_K + position as f32 + 1.0);
 }
 
 fn bm25<'a>(records: &[&'a VectorRecord], query: &str, k: usize) -> Vec<(&'a VectorRecord, f32)> {
@@ -157,6 +186,8 @@ mod tests {
         let document_id = DocumentId::new();
         VectorRecord {
             project_id: None,
+            source: crate::DocumentSource::Inline,
+            generation: None,
             chunk: Chunk::new(document_id, 0, ByteSpan::new(0, text.len()), text),
             embedding: Embedding(vector),
         }

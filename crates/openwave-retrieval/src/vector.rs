@@ -11,7 +11,7 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 
-use crate::document::{Chunk, ScoredChunk};
+use crate::document::{Chunk, DocumentSource, ScoredChunk};
 use crate::embed::Embedding;
 use crate::error::{Result, RetrievalError};
 use crate::id::DocumentId;
@@ -83,6 +83,10 @@ impl SearchScope {
 pub struct VectorRecord {
     /// Project corpus this vector belongs to, or `None` for the unscoped corpus.
     pub project_id: Option<ProjectId>,
+    /// Immutable source provenance captured with this indexed generation.
+    pub source: DocumentSource,
+    /// Exact generation owning this record, absent only on the legacy unversioned path.
+    pub generation: Option<DocumentGeneration>,
     /// The chunk being indexed.
     pub chunk: Chunk,
     /// Its embedding. Must match the store's dimensionality.
@@ -323,6 +327,7 @@ impl InMemoryVectorStore {
 
     fn validate_record(&self, record: &VectorRecord) -> Result<()> {
         self.check_dims(&record.embedding)?;
+        record.source.validate()?;
         record.chunk.validate_source_regions()
     }
 
@@ -376,6 +381,11 @@ impl VectorStore for InMemoryVectorStore {
     }
 
     async fn upsert(&self, records: Vec<VectorRecord>) -> Result<()> {
+        if records.iter().any(|record| record.generation.is_some()) {
+            return Err(RetrievalError::vector_store(
+                "legacy upsert cannot accept generation-stamped records",
+            ));
+        }
         let mut scopes = HashMap::new();
         for record in &records {
             self.validate_record(record)?;
@@ -469,6 +479,11 @@ impl VectorStore for InMemoryVectorStore {
         document_id: DocumentId,
         records: Vec<VectorRecord>,
     ) -> Result<()> {
+        if records.iter().any(|record| record.generation.is_some()) {
+            return Err(RetrievalError::vector_store(
+                "legacy replacement cannot accept generation-stamped records",
+            ));
+        }
         let project_id = self.validate_document_records(document_id, &records)?;
         // Delete + insert under a single write lock, so a concurrent ingest can't
         // observe or race a half-applied replacement.
@@ -507,12 +522,22 @@ impl VectorStore for InMemoryVectorStore {
         &self,
         document_id: DocumentId,
         generation: DocumentGeneration,
-        records: Vec<VectorRecord>,
+        mut records: Vec<VectorRecord>,
     ) -> Result<GenerationStageOutcome> {
-        if generation.content_revision < 1 {
+        if generation.content_revision < 1 || generation.revision_token.is_nil() {
             return Err(RetrievalError::vector_store(
-                "document generation revision must be at least one",
+                "document generation must have a positive revision and non-nil token",
             ));
+        }
+        for record in &mut records {
+            match record.generation {
+                Some(found) if found != generation => {
+                    return Err(RetrievalError::vector_store(
+                        "vector record generation does not match its publication fence",
+                    ));
+                }
+                _ => record.generation = Some(generation),
+            }
         }
         let project_id = self.validate_document_records(document_id, &records)?;
         let records = dedupe_records(records);
@@ -585,6 +610,11 @@ impl VectorStore for InMemoryVectorStore {
         document_id: DocumentId,
         generation: DocumentGeneration,
     ) -> Result<bool> {
+        if generation.content_revision < 1 || generation.revision_token.is_nil() {
+            return Err(RetrievalError::vector_store(
+                "document generation must have a positive revision and non-nil token",
+            ));
+        }
         let mut state = self
             .state
             .write()
@@ -731,6 +761,8 @@ mod tests {
         let span = ByteSpan::new(ordinal * 100, ordinal * 100 + text.len());
         VectorRecord {
             project_id: None,
+            source: DocumentSource::Inline,
+            generation: None,
             chunk: Chunk::new(doc, ordinal, span, text),
             embedding: Embedding(vector),
         }
@@ -791,6 +823,39 @@ mod tests {
 
         assert!(invalid.chunk.validate_source_regions().is_err());
         assert!(store.upsert(vec![invalid]).await.is_err());
+        assert!(store.is_empty().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_chunk_ids_and_nil_generations_before_mutation() {
+        let store = InMemoryVectorStore::new(2);
+        let doc = DocumentId::new();
+        let mut invalid = record(doc, 0, "fact", vec![1.0, 0.0]);
+        invalid.chunk.id = crate::ChunkId::new();
+        assert!(store.upsert(vec![invalid.clone()]).await.is_err());
+        assert!(store
+            .stage_document_generation(doc, generation(1), vec![invalid])
+            .await
+            .is_err());
+        let nil = DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::nil(),
+        };
+        assert!(store
+            .stage_document_generation(doc, nil, vec![record(doc, 0, "fact", vec![1.0, 0.0])])
+            .await
+            .is_err());
+        assert!(store.activate_document_generation(doc, nil).await.is_err());
+        assert!(store
+            .upsert(vec![record(doc, 0, "nul\0text", vec![1.0, 0.0])])
+            .await
+            .is_err());
+        if usize::BITS > 63 {
+            let start = (i64::MAX as usize) + 1;
+            let mut outside = record(doc, 0, "fact", vec![1.0, 0.0]);
+            outside.chunk = Chunk::new(doc, 0, ByteSpan::new(start, start + 4), "fact");
+            assert!(store.upsert(vec![outside]).await.is_err());
+        }
         assert!(store.is_empty().await.unwrap());
     }
 
@@ -1461,14 +1526,14 @@ mod tests {
         let doc = DocumentId::new();
         let first = generation(1);
         let third = generation(3);
+        let mut first_record = record(doc, 0, "first", vec![1.0, 0.0]);
+        first_record.source = DocumentSource::uri("file:///first.txt");
+        let mut third_record = record(doc, 0, "third", vec![0.0, 1.0]);
+        third_record.source = DocumentSource::uri("file:///third.txt");
 
         assert_eq!(
             store
-                .stage_document_generation(
-                    doc,
-                    first,
-                    vec![record(doc, 0, "first", vec![1.0, 0.0])],
-                )
+                .stage_document_generation(doc, first, vec![first_record],)
                 .await
                 .unwrap(),
             GenerationStageOutcome::Staged
@@ -1497,11 +1562,7 @@ mod tests {
 
         assert_eq!(
             store
-                .stage_document_generation(
-                    doc,
-                    third,
-                    vec![record(doc, 0, "third", vec![0.0, 1.0])],
-                )
+                .stage_document_generation(doc, third, vec![third_record],)
                 .await
                 .unwrap(),
             GenerationStageOutcome::Staged
@@ -1512,6 +1573,11 @@ mod tests {
             .unwrap();
         assert_eq!(before_activation.len(), 1);
         assert_eq!(before_activation[0].chunk.text, "first");
+        assert_eq!(before_activation[0].generation, Some(first));
+        assert_eq!(
+            before_activation[0].source,
+            DocumentSource::uri("file:///first.txt")
+        );
         assert!(!store
             .activate_document_generation(doc, first)
             .await
@@ -1531,6 +1597,11 @@ mod tests {
             .unwrap();
         assert_eq!(after_activation.len(), 1);
         assert_eq!(after_activation[0].chunk.text, "third");
+        assert_eq!(after_activation[0].generation, Some(third));
+        assert_eq!(
+            after_activation[0].source,
+            DocumentSource::uri("file:///third.txt")
+        );
         assert_eq!(
             store.active_document_generation(doc).await.unwrap(),
             Some(third)

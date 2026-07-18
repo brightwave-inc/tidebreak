@@ -2329,6 +2329,27 @@ impl Store for DbStore {
         ops::client_execution::resolve_server_tool_call(self, id, resolution, resolved_at).await
     }
 
+    async fn resolve_server_tool_call_with_evidence(
+        &self,
+        id: CallId,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+        evidence: &[crate::RetrievalEvidenceInput],
+    ) -> Result<ResolveToolCallOutcome> {
+        ops::client_execution::resolve_server_tool_call_with_evidence(
+            self,
+            id,
+            resolution,
+            resolved_at,
+            evidence,
+        )
+        .await
+    }
+
+    async fn list_retrieval_evidence(&self, id: CallId) -> Result<Vec<crate::RetrievalEvidence>> {
+        ops::client_execution::list_retrieval_evidence(self, id).await
+    }
+
     async fn resolve_client_tool_call_and_append_event(
         &self,
         id: CallId,

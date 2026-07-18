@@ -64,6 +64,25 @@ id_type!(
     ProjectId
 );
 
+id_type!(
+    /// Identifies one exact document chunk span.
+    ChunkId
+);
+
+impl ChunkId {
+    const NAMESPACE: Uuid = Uuid::from_u128(0x9f8d_2c31_5b47_4e6a_a1c2_d3e4_f506_1728);
+
+    /// Derive the stable chunk identity for one document byte span.
+    #[must_use]
+    pub fn derive(document_id: DocumentId, start: usize, end: usize) -> Self {
+        let per_document = Uuid::new_v5(&Self::NAMESPACE, document_id.as_uuid().as_bytes());
+        Self(Uuid::new_v5(
+            &per_document,
+            format!("{start}:{end}").as_bytes(),
+        ))
+    }
+}
+
 /// Opaque identifier for a folder registered with a host broker.
 ///
 /// This is product projection data, not authority: possession of an id never

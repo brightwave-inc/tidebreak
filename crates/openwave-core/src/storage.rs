@@ -1794,6 +1794,30 @@ pub trait Store: Send + Sync {
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ResolveToolCallOutcome>;
 
+    /// Resolve one server search call and atomically retain its private evidence.
+    async fn resolve_server_tool_call_with_evidence(
+        &self,
+        id: CallId,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        evidence: &[crate::RetrievalEvidenceInput],
+    ) -> Result<ResolveToolCallOutcome> {
+        if !evidence.is_empty() {
+            return Err(AgentError::Store(
+                "retrieval evidence persistence is unavailable".into(),
+            ));
+        }
+        self.resolve_server_tool_call(id, resolution, resolved_at)
+            .await
+    }
+
+    /// Read private evidence for trusted server-side citation assembly.
+    async fn list_retrieval_evidence(&self, _id: CallId) -> Result<Vec<crate::RetrievalEvidence>> {
+        Err(AgentError::Store(
+            "retrieval evidence persistence is unavailable".into(),
+        ))
+    }
+
     /// Resolve a pending client call under its exact unexpired executor lease.
     /// Once committed, the token and terminal payload are the stable retry
     /// identity; `resolved_at` records the first commit and is not compared on
