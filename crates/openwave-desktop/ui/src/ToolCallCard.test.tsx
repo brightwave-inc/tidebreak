@@ -1,6 +1,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ToolCallCard } from "./ToolCallCard";
+import {
+  ToolCallCard,
+  toolApprovalPresentation,
+} from "./ToolCallCard";
 
 describe("ToolCallCard", () => {
   it("uses an allowlisted presentation and a polite live status", () => {
@@ -27,5 +30,25 @@ describe("ToolCallCard", () => {
     expect(markup).toContain("Tool complete");
     expect(markup).not.toContain("private_server");
     expect(markup).not.toContain("sensitive_path");
+  });
+
+  it("renders the fixed local-search presentation", () => {
+    const markup = renderToStaticMarkup(
+      <ToolCallCard name="search" status="completed" />,
+    );
+
+    expect(markup).toContain("Search documents");
+    expect(markup).toContain("Document search complete");
+  });
+
+  it("allows approval only for a fixed action description", () => {
+    expect(toolApprovalPresentation("web_search")).toEqual({
+      summary: "Allow this action: Search the web?",
+      canApprove: true,
+    });
+    expect(toolApprovalPresentation("mcp__private__upload")).toEqual({
+      summary: "The exact action cannot be safely described.",
+      canApprove: false,
+    });
   });
 });

@@ -22,6 +22,7 @@ use openwave_core::{
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::error::ServerError;
+use crate::event_projection::RendererSequencedEvent;
 use crate::extract::{Json, Path, Query};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
 use crate::state::AppState;
@@ -1121,6 +1122,10 @@ pub async fn post_approval(
         Err(crate::approvals::DecideError::WrongChat) => Err(ServerError::not_found(format!(
             "no pending approval for call {call_id}"
         ))),
+        Err(crate::approvals::DecideError::NotApprovable) => Err(ServerError::conflict_kind(
+            "approval_action_not_presentable",
+            "this action cannot be approved from the renderer",
+        )),
     }
 }
 
@@ -1246,7 +1251,7 @@ async fn replay_after(
 /// Send one event as a JSON text frame. An event that fails to serialize is
 /// skipped rather than sent as an empty frame (which a client couldn't decode).
 async fn send_event(socket: &mut WebSocket, event: &SequencedEvent) -> Result<(), axum::Error> {
-    let Ok(json) = serde_json::to_string(event) else {
+    let Ok(json) = serde_json::to_string(&RendererSequencedEvent::from(event)) else {
         return Ok(());
     };
     socket.send(Message::Text(json.into())).await

@@ -31,7 +31,13 @@ describe("MessageBubble", () => {
   it("keeps tool cards, approvals, and active streaming placeholders in sequence", () => {
     const messages: ChatMessage[] = [
       { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "running" },
-      { id: "approval-1", role: "approval", callId: "call-1", summary: "Search a site" },
+      {
+        id: "approval-1",
+        role: "approval",
+        callId: "call-1",
+        summary: "Search a site",
+        canApprove: true,
+      },
       { id: "assistant-2", role: "assistant", text: "" },
     ];
     const markup = renderToStaticMarkup(
@@ -56,6 +62,26 @@ describe("MessageBubble", () => {
     );
     expect(markup).toContain("message-approval");
     expect(markup).toContain('aria-label="Thinking"');
+  });
+
+  it("does not offer approval for an action without a safe description", () => {
+    const markup = renderToStaticMarkup(
+      <MessageBubble
+        message={{
+          id: "approval-unknown",
+          role: "approval",
+          callId: "call-unknown",
+          summary: "The exact action cannot be safely described.",
+          canApprove: false,
+        }}
+        busy
+        onApproval={noop}
+      />,
+    );
+
+    expect(markup).toContain("The exact action cannot be safely described.");
+    expect(markup).not.toContain(">Approve<");
+    expect(markup).toContain(">Reject<");
   });
 
   it("collapses only contiguous terminal tool activity using safe card copy", () => {
