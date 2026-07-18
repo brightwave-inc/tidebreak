@@ -13,8 +13,8 @@ use openwave_core::{
     ToolCallRecord, ToolCallStatus, REQUEST_FOLDER_ACCESS_TOOL,
 };
 use openwave_host_broker::{
-    ConsentMethod, ControlRequest, ControlResult, LookupRegisterRootReceiptRequest, OperationId,
-    RegisterRootReceipt, RegisterRootRequest,
+    ConsentMethod, ControlRequest, ControlResult, LookupRegisterRootReceiptRequest,
+    RegisterRootReceipt, RegisterRootRequest, RootSummary,
 };
 use serde::Deserialize;
 use tauri::{AppHandle, Manager, State};
@@ -24,6 +24,7 @@ use crate::host_access::{pick_folder, AuthoritativeContext, HostAccess};
 
 mod control_plane;
 pub(crate) mod folder_operations;
+mod product_sync;
 mod receipt_store;
 
 pub(crate) use control_plane::ControlPlaneClient;
@@ -193,27 +194,7 @@ async fn execute_receipt(
     let resolution = match receipt.intent.clone() {
         FolderAccessIntent::Decline => declined_resolution()?,
         FolderAccessIntent::Selected { path } => {
-            if should_start_registration(mode, receipt.registration_phase) {
-                match client
-                    .heartbeat(receipt.chat_id, receipt.call_id, receipt.lease_token)
-                    .await
-                {
-                    Ok(()) => {
-                        let dispatch_deadline =
-                            tokio::time::Instant::now() + crate::broker::MUTATION_DISPATCH_WINDOW;
-                        receipt.registration_phase = RegistrationPhase::Attempted;
-                        state
-                            .receipts
-                            .save(&receipt)
-                            .map_err(private_receipt_error)?;
-                        register_selected_folder(state, &receipt, context, path, dispatch_deadline)
-                            .await?
-                    }
-                    Err(_) => recover_broker_outcome(state, &receipt, context).await?,
-                }
-            } else {
-                recover_broker_outcome(state, &receipt, context).await?
-            }
+            drive_selected_folder(state, &mut receipt, context, path, mode).await?
         }
     };
     receipt.resolution = Some(resolution.clone());
@@ -222,10 +203,6 @@ async fn execute_receipt(
         .save(&receipt)
         .map_err(private_receipt_error)?;
     publish_resolution(state, &receipt, &resolution).await
-}
-
-fn should_start_registration(mode: ExecutionMode, phase: RegistrationPhase) -> bool {
-    mode == ExecutionMode::Interactive && phase == RegistrationPhase::NotStarted
 }
 
 async fn recover_after_claim_conflict(
@@ -257,10 +234,11 @@ async fn recover_after_claim_conflict(
         return Err("folder-access request is owned by another desktop".to_owned());
     }
 
-    let resolution = match receipt.intent {
+    let resolution = match receipt.intent.clone() {
         FolderAccessIntent::Decline => declined_resolution()?,
-        FolderAccessIntent::Selected { .. } => {
-            recover_broker_outcome(state, &receipt, context).await?
+        FolderAccessIntent::Selected { path } => {
+            drive_selected_folder(state, &mut receipt, context, path, ExecutionMode::Recovery)
+                .await?
         }
     };
     receipt.resolution = Some(resolution.clone());
@@ -271,15 +249,91 @@ async fn recover_after_claim_conflict(
     publish_resolution(state, &receipt, &resolution).await
 }
 
-async fn register_selected_folder(
+enum RegistrationOutcome {
+    Unknown,
+    Registered(RootSummary),
+    Terminal(StoredResolution),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrationAction {
+    ResumeProduct,
+    Dispatch,
+    LookupOnly,
+}
+
+async fn drive_selected_folder(
+    state: &HostAccess,
+    receipt: &mut FolderAccessReceipt,
+    context: AuthoritativeContext,
+    path: PathBuf,
+    mode: ExecutionMode,
+) -> Result<StoredResolution, String> {
+    let action = registration_action(
+        mode,
+        receipt.registration_phase,
+        receipt.product_sync.is_some(),
+    );
+    if action == RegistrationAction::ResumeProduct {
+        return product_sync::resume_product_attachment(state, receipt, context).await;
+    }
+
+    let mut outcome = if action == RegistrationAction::LookupOnly {
+        recover_registration_outcome(state, receipt, context).await?
+    } else {
+        RegistrationOutcome::Unknown
+    };
+
+    if action == RegistrationAction::Dispatch {
+        let client = control_plane(state)?;
+        client
+            .heartbeat(receipt.chat_id, receipt.call_id, receipt.lease_token)
+            .await
+            .map_err(control_plane_error)?;
+        receipt.registration_phase = RegistrationPhase::Attempted;
+        state
+            .receipts
+            .save(receipt)
+            .map_err(private_receipt_error)?;
+        let dispatch_deadline =
+            tokio::time::Instant::now() + crate::broker::MUTATION_DISPATCH_WINDOW;
+        dispatch_registration(state, receipt, context, path, dispatch_deadline).await?;
+        outcome = recover_registration_outcome(state, receipt, context).await?;
+    }
+
+    match outcome {
+        RegistrationOutcome::Registered(root) => {
+            product_sync::synchronize_product_attachment(state, receipt, context, root).await
+        }
+        RegistrationOutcome::Terminal(resolution) => Ok(resolution),
+        RegistrationOutcome::Unknown => Err(
+            "folder registration has no durable broker outcome yet; recovery will retry".to_owned(),
+        ),
+    }
+}
+
+fn registration_action(
+    mode: ExecutionMode,
+    phase: RegistrationPhase,
+    has_product_sync: bool,
+) -> RegistrationAction {
+    if has_product_sync {
+        RegistrationAction::ResumeProduct
+    } else if mode == ExecutionMode::Interactive && phase == RegistrationPhase::NotStarted {
+        RegistrationAction::Dispatch
+    } else {
+        RegistrationAction::LookupOnly
+    }
+}
+
+async fn dispatch_registration(
     state: &HostAccess,
     receipt: &FolderAccessReceipt,
     context: AuthoritativeContext,
     path: PathBuf,
     dispatch_deadline: tokio::time::Instant,
-) -> Result<StoredResolution, String> {
-    let operation_id = OperationId::from_uuid(receipt.call_id.0)
-        .map_err(|_| "invalid folder-access operation identity".to_owned())?;
+) -> Result<(), String> {
+    let operation_id = receipt.registration_operation_id;
     let first = state
         .broker
         .control_without_retry(
@@ -300,16 +354,15 @@ async fn register_selected_folder(
         }
         Ok(_) => return Err("host broker returned an unexpected response".to_owned()),
     }
-    recover_broker_outcome(state, receipt, context).await
+    Ok(())
 }
 
-async fn recover_broker_outcome(
+async fn recover_registration_outcome(
     state: &HostAccess,
     receipt: &FolderAccessReceipt,
     context: AuthoritativeContext,
-) -> Result<StoredResolution, String> {
-    let operation_id = OperationId::from_uuid(receipt.call_id.0)
-        .map_err(|_| "invalid folder-access operation identity".to_owned())?;
+) -> Result<RegistrationOutcome, String> {
+    let operation_id = receipt.registration_operation_id;
     let result = state
         .broker
         .control(ControlRequest::LookupRegisterRootReceipt(
@@ -327,28 +380,42 @@ async fn recover_broker_outcome(
     if result.operation_id != operation_id {
         return Err("host broker returned a mismatched recovery receipt".to_owned());
     }
-    match result.receipt {
-        RegisterRootReceipt::Completed { root } => connected_resolution(root),
-        RegisterRootReceipt::Disconnected { .. } => Ok(failed_resolution(
-            "folder_access_disconnected",
-            "The selected folder is no longer connected.",
-            None,
-        )),
-        RegisterRootReceipt::Failed { error } => Ok(failed_resolution(
-            "folder_access_registration_failed",
-            "The selected folder could not be connected.",
-            Some(error.message),
-        )),
-        RegisterRootReceipt::Unknown | RegisterRootReceipt::Pending => Ok(failed_resolution(
+    registration_receipt_outcome(result.receipt)
+}
+
+fn registration_receipt_outcome(
+    receipt: RegisterRootReceipt,
+) -> Result<RegistrationOutcome, String> {
+    match receipt {
+        RegisterRootReceipt::Completed { root } => Ok(RegistrationOutcome::Registered(root)),
+        RegisterRootReceipt::Disconnected { .. } => {
+            Ok(RegistrationOutcome::Terminal(failed_resolution(
+                "folder_access_disconnected",
+                "The selected folder is no longer connected.",
+                None,
+            )))
+        }
+        RegisterRootReceipt::Failed { error } => {
+            Ok(RegistrationOutcome::Terminal(failed_resolution(
+                "folder_access_registration_failed",
+                "The selected folder could not be connected.",
+                Some(error.message),
+            )))
+        }
+        RegisterRootReceipt::Unknown => Ok(RegistrationOutcome::Terminal(failed_resolution(
             "folder_access_outcome_unknown",
             "Folder access was not granted because the native outcome could not be confirmed.",
             None,
-        )),
-        _ => Ok(failed_resolution(
+        ))),
+        RegisterRootReceipt::Pending => Err(
+            "folder registration is still pending in the host broker; recovery will retry"
+                .to_owned(),
+        ),
+        _ => Ok(RegistrationOutcome::Terminal(failed_resolution(
             "folder_access_receipt_unsupported",
             "Folder access was not granted because the native receipt was not understood.",
             None,
-        )),
+        ))),
     }
 }
 
@@ -476,6 +543,13 @@ fn private_receipt_error(_error: std::io::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use openwave_core::{
+        HostRootId, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentChangePhase,
+        RootAttachmentSubjectKind,
+    };
+
+    use super::product_sync::{attachment_operation_id, validate_product_change};
+    use super::receipt_store::{AttachmentPhase, CleanupPhase, ProductRootAttachmentSync};
     use super::*;
 
     #[test]
@@ -552,22 +626,111 @@ mod tests {
     }
 
     #[test]
-    fn recovery_never_starts_or_replays_registration() {
-        assert!(should_start_registration(
-            ExecutionMode::Interactive,
-            RegistrationPhase::NotStarted
+    fn product_attachment_validation_fences_identity_authority_and_broker_state() {
+        let chat_id = ChatId::new();
+        let call_id = CallId::new();
+        let mut receipt = FolderAccessReceipt::new(
+            chat_id,
+            call_id,
+            Uuid::new_v4(),
+            FolderAccessIntent::Selected {
+                path: PathBuf::from("/tmp/Documents"),
+            },
+        );
+        receipt.registration_phase = RegistrationPhase::Attempted;
+        let sync = ProductRootAttachmentSync {
+            change_id: RootAttachmentChangeId::new(),
+            root_id: HostRootId::from_uuid(Uuid::new_v4()).unwrap(),
+            display_name: "Documents".to_owned(),
+            expected_attachment_revision: 4,
+            created_at: chrono::Utc::now(),
+            cleanup_operation_id: openwave_host_broker::OperationId::new(),
+            cleanup_phase: CleanupPhase::NotStarted,
+            attachment_phase: AttachmentPhase::DispatchAttempted,
+        };
+        receipt.product_sync = Some(sync.clone());
+        let context = AuthoritativeContext {
+            chat_id: chat_id.0,
+            execution: openwave_host_broker::ExecutionContext::standalone(chat_id.0).unwrap(),
+            subject: openwave_host_broker::GrantSubject::conversation(chat_id.0).unwrap(),
+        };
+        let mut change = control_plane::RootAttachmentChangeView {
+            id: sync.change_id,
+            chat_id,
+            root_id: sync.root_id,
+            action: RootAttachmentChangeAction::Attach,
+            subject_kind: RootAttachmentSubjectKind::Conversation,
+            subject_id: chat_id.0,
+            expected_revision: 4,
+            before_revision: 4,
+            intent_revision: 5,
+            phase: RootAttachmentChangePhase::Completed,
+            result_revision: Some(5),
+            broker_currently_attached: Some(true),
+            failure: None,
+        };
+        assert!(validate_product_change(&change, &receipt, &sync, context).is_ok());
+
+        change.subject_id = Uuid::new_v4();
+        assert!(validate_product_change(&change, &receipt, &sync, context).is_err());
+        change.subject_id = chat_id.0;
+        change.broker_currently_attached = Some(false);
+        assert!(validate_product_change(&change, &receipt, &sync, context).is_err());
+    }
+
+    #[test]
+    fn attempted_registration_is_lookup_only_and_attachment_reuses_exact_identity() {
+        assert_eq!(
+            registration_action(
+                ExecutionMode::Interactive,
+                RegistrationPhase::NotStarted,
+                false,
+            ),
+            RegistrationAction::Dispatch
+        );
+        assert_eq!(
+            registration_action(
+                ExecutionMode::Interactive,
+                RegistrationPhase::Attempted,
+                false,
+            ),
+            RegistrationAction::LookupOnly
+        );
+        assert_eq!(
+            registration_action(
+                ExecutionMode::Recovery,
+                RegistrationPhase::NotStarted,
+                false,
+            ),
+            RegistrationAction::LookupOnly
+        );
+        assert_eq!(
+            registration_action(ExecutionMode::Recovery, RegistrationPhase::Attempted, false,),
+            RegistrationAction::LookupOnly
+        );
+        assert_eq!(
+            registration_action(ExecutionMode::Recovery, RegistrationPhase::Attempted, true,),
+            RegistrationAction::ResumeProduct
+        );
+        assert!(matches!(
+            registration_receipt_outcome(RegisterRootReceipt::Unknown).unwrap(),
+            RegistrationOutcome::Terminal(StoredResolution::Failed { error_code, .. })
+                if error_code == "folder_access_outcome_unknown"
         ));
-        assert!(!should_start_registration(
-            ExecutionMode::Interactive,
-            RegistrationPhase::Attempted
-        ));
-        assert!(!should_start_registration(
-            ExecutionMode::Recovery,
-            RegistrationPhase::NotStarted
-        ));
-        assert!(!should_start_registration(
-            ExecutionMode::Recovery,
-            RegistrationPhase::Attempted
-        ));
+
+        let sync = ProductRootAttachmentSync {
+            change_id: RootAttachmentChangeId::new(),
+            root_id: HostRootId::from_uuid(Uuid::new_v4()).unwrap(),
+            display_name: "Documents".to_owned(),
+            expected_attachment_revision: 0,
+            created_at: chrono::Utc::now(),
+            cleanup_operation_id: openwave_host_broker::OperationId::new(),
+            cleanup_phase: CleanupPhase::NotStarted,
+            attachment_phase: AttachmentPhase::DispatchAttempted,
+        };
+        let first = attachment_operation_id(&sync).unwrap();
+        let recovered = attachment_operation_id(&sync).unwrap();
+        assert_eq!(first, recovered);
+        assert_eq!(first.as_uuid(), *sync.change_id.as_uuid());
     }
 }

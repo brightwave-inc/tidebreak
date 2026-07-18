@@ -174,8 +174,10 @@ scratch capability. Its path is neither persisted on the chat nor returned by
 the product API. The desktop can connect, list, and revoke multiple folders
 through a native picker and capability-gated host-broker sidecar; it exposes only
 opaque root IDs and display names to the renderer. Foreground tool calls can now
-list/read roots already attached to their stored chat context; broader root
-attachment synchronization remains a separate durable state-machine slice.
+list/read roots already attached to their stored chat context. An approved
+agent folder request now converges through the durable product root-attachment
+state machine before it can report `connected`; manual connect/disconnect
+synchronization remains a separate slice.
 See [Host access and connected folders](host-access.md). The agent loop can now
 produce a durable client-wait checkpoint for the registered folder-request
 contract. The desktop discovers those pending requests from durable state and
@@ -261,7 +263,8 @@ query and periodic polling of pending work remain authoritative after a restart
 or missed notification. The picker opens before the claim, so the client does
 not hold a lease while the user is deciding. Once a choice exists, an app-private
 receipt binds the conversation, call, stable executor, fresh claim token, and
-intent. The call ID is also the broker registration operation ID.
+intent. It also owns a separately generated broker registration operation ID;
+the tool call identity is never reused as a broker mutation identity.
 
 The native executor retries only exact, idempotent control-plane operations.
 Claim, heartbeat, and resolve also require a second per-launch native credential
@@ -270,10 +273,25 @@ executor syncs a durable pre-effect phase. The broker registration is then
 queued once with a short dispatch deadline inside the renewed lease. After a
 response, disconnect, or crash, the executor asks the broker for the registration
 receipt and records the de-sensitized terminal payload before resolving the
-client call. A background reconciler retries read-only lookup and exact result
-publication with bounded backoff. On restart it can publish a stored payload or
-reconcile a known broker outcome; it never starts registration from a recovery
-receipt. Declining or closing the picker completes the call with a typed
+client call. A confirmed registration then receives a second durable identity:
+a root-attachment change ID paired with the exact observed attachment revision,
+creation time, safe root summary, and a separate same-conversation cleanup ID.
+That private product-sync receipt becomes authoritative on restart, so recovery
+does not depend on the earlier registration still being connected. Native
+control begins that product change through the
+separately credentialed executor API, queries or dispatches the same-ID broker
+`AttachRoot`, finishes from its exact receipt, and verifies the final chat
+projection. Only then can the tool publish `connected`. A background reconciler
+retries read-only lookup and exact result publication with bounded backoff. On
+restart it can publish stored payloads or reconcile known registration and
+attachment outcomes; an `attempted` registration receipt is lookup-only and
+never starts or replays registration. If a permanent revision, capacity, or
+identity fence rejects product begin, native recovery first drives the distinct
+exact `DetachRoot` cleanup to a confirmed conversation-local terminal state;
+if detach reports failure after a concurrent revoke, the original registration
+receipt must independently confirm that exact root is disconnected. Only then
+may it publish a bounded tool failure. Declining or closing the picker completes
+the call with a typed
 `declined` result rather than treating consent as an execution error.
 
 For crash recovery, the broker exposes a de-sensitized registration-receipt
@@ -548,9 +566,10 @@ routed through connected roots; that scratch path is neither persisted nor
 returned to the renderer. The UI does not yet provide projects, document
 ingestion/search/catalog views, structured citations, or steer controls, even
 though much of that backend API already exists. Connected-folder consent and
-reads work, but live picker paths still need to reconcile broker mutations
-through the durable product root-attachment state machine before those
-projections can be treated as one source of truth.
+reads work. Agent-approved picker results now reconcile broker registration,
+exact attachment, and the durable product projection before reporting success.
+The manual connect/disconnect controls still need the same convergence path
+before every folder UI action shares one source of truth.
 
 Because that chat is projectless, its `search` tool can see only the unscoped
 document corpus. Project-scoped documents are not reachable through the current
@@ -648,8 +667,8 @@ The main next steps are:
   waits, and child-agent waits as durable continuations that release workers;
 - persist model/tool step boundaries and side-effect receipts so sandbox and
   foreground runs can resume safely after process loss;
-- synchronize native picker connections into the pathless project/conversation
-  root projection with exact CAS and broker reconciliation;
+- synchronize manual native connect/disconnect controls into the same pathless
+  project/conversation root projection used by agent-approved folder requests;
 - route built-in file tools through explicit broker roots while keeping private
   per-chat scratch separate;
 - add resumable checkpoints and explicit idempotency policy around remaining

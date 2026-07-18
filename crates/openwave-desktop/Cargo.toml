@@ -23,6 +23,7 @@ tauri-build = { version = "2", features = [] }
 serde_json = { workspace = true }
 
 [dependencies]
+chrono = { workspace = true }
 openwave-core = { path = "../openwave-core", default-features = false }
 openwave-host-broker = { path = "../openwave-host-broker" }
 openwave-server = { path = "../openwave-server" }

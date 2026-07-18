@@ -339,7 +339,9 @@ async fn root_attachment_finish_is_exact_scoped_and_keeps_contradictions_pending
     let terminal = serde_json::json!({
         "terminal": {
             "status": "completed",
-            "broker_changed": true,
+            // Picker registration already attaches the root, so the exact
+            // follow-up AttachRoot receipt legitimately reports no mutation.
+            "broker_changed": false,
             "broker_currently_attached": true
         }
     });
@@ -360,7 +362,7 @@ async fn root_attachment_finish_is_exact_scoped_and_keeps_contradictions_pending
         serde_json::json!({
             "terminal": {
                 "status": "completed",
-                "broker_changed": false,
+                "broker_changed": true,
                 "broker_currently_attached": true
             }
         }),
@@ -464,6 +466,70 @@ async fn root_attachment_finish_is_exact_scoped_and_keeps_contradictions_pending
     )
     .await;
     assert_eq!(nil.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn disconnected_attach_receipt_rolls_back_product_intent_and_clears_pending() {
+    let executor_id = uuid::Uuid::new_v4();
+    let (router, token, store, _dir) = test_app_with_executor_id(executor_id).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let root_id = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let change_id = RootAttachmentChangeId::new();
+    let response = post_native_json(
+        &router,
+        &bearer,
+        &format!(
+            "/chats/{}/root-attachment-changes/{change_id}/begin",
+            chat.id
+        ),
+        root_attachment_begin_body(
+            root_id,
+            RootAttachmentChangeAction::Attach,
+            0,
+            chrono::Utc::now(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(store
+        .get_chat(chat.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .root_attachments
+        .iter()
+        .any(|attachment| attachment.root_id == root_id));
+
+    let response = post_native_json(
+        &router,
+        &bearer,
+        &format!("/root-attachment-changes/{change_id}/finish"),
+        serde_json::json!({
+            "terminal": {
+                "status": "failed",
+                "broker_changed": true,
+                "broker_currently_attached": false,
+                "failure": {
+                    "code": "broker_attachment_disconnected",
+                    "message": "The selected folder was disconnected before synchronization completed.",
+                    "retryable": false
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let projected = store.get_chat(chat.id).await.unwrap().unwrap();
+    assert!(!projected
+        .root_attachments
+        .iter()
+        .any(|attachment| attachment.root_id == root_id));
+    assert!(store
+        .list_pending_root_attachment_changes(executor_id, 64)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

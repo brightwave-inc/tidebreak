@@ -225,7 +225,13 @@ two-step product workflow, not a privileged broker operation:
    policy, and records only those capabilities. Command execution, destructive
    writes, and other high-risk access require their own explicit permission
    dialogs.
-4. The original operation can retry against the returned opaque root identity.
+4. After broker registration is confirmed, the desktop durably records a fresh
+   root-attachment change identity, the observed conversation attachment
+   revision, and the immutable creation time before beginning product work. It
+   then reconciles the same-ID broker `AttachRoot`, finishes the product change,
+   and verifies that the final chat projection contains the root. Only that
+   converged state resolves the agent request as connected.
+5. The original operation can retry against the returned opaque root identity.
    Cancelling or rejecting the picker resolves the request without any grant.
 
 The control plane should persist the request and its resolution so a restart or
@@ -363,18 +369,35 @@ This will land in independently reviewable pieces:
    grant. The desktop now polls that authoritative pending-work boundary, shows
    a bounded consent card, and keeps the picker, claim token, selected path, and
    broker mutation inside the native process. App-private receipts preserve the
-   exact operation ID, claim token, intent, and terminal payload across a crash.
+   exact registration operation ID, claim token, intent, product change ID,
+   attachment-revision fence, and terminal payload across a crash. These
+   identities are separate from the tool call and from each other. The private
+   receipt also keeps the bounded root display summary and a distinct exact
+   cleanup operation, so product recovery no longer depends on registration
+   remaining connected.
    A pre-effect phase is synced before the one registration dispatch, and the
    dispatch must begin inside a short post-heartbeat deadline. Recovery runs in
    the background with bounded backoff; it may query the broker receipt and
-   publish a known result, but it never starts or replays registration.
+   publish a known result, but an attempted receipt never starts or replays
+   registration. A confirmed registration now begins and finishes the durable
+   product root-attachment state machine through the private native routes;
+   exact broker attachment recovery is lookup-first, and `connected` is held
+   until a final product projection read matches the terminal receipt. A
+   permanent product begin rejection drives a same-conversation `DetachRoot`
+   cleanup before resolving failure; it never broadens that cleanup into
+   project-wide revocation. If that detach itself reports a durable failure
+   because another trusted action already revoked the root, recovery accepts
+   cleanup only after the original registration receipt authoritatively reports
+   the same root disconnected. A historical attach receipt whose live state is now
+   detached finishes product work as failed and rolls back its provisional root.
 8. **Pathless baseline complete:** project/chat `workspace_dir` is gone. The
    pre-v1 schema stores bounded ordered opaque root projections and revisions,
    while runtime-only legacy scratch is derived under private server data and
    never returned by the product API. The broker now supports exact,
    idempotent per-conversation attach/detach plus read-only recovery receipts.
-   The durable product-side attachment operation is now implemented in core.
-   Native routes and the reconciliation loop remain separate slices.
+   The durable product-side attachment operation is implemented in core and
+   used by the agent-approved folder-consent path. Manual connect/disconnect
+   controls and startup-wide reconciliation remain separate slices.
 9. Route built-in file tools through the operation interface and remove direct
    ambient host-directory opening from `ToolCtx`.
 10. Port bounded imports, writes, approvals, and confined command execution as
