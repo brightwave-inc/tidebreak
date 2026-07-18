@@ -528,13 +528,15 @@ mints a fresh bearer token, and gives its React webview the address and token.
 The browser-facing API is not exposed on a public network interface.
 
 The current UI is a workspace-style conversation shell, not the complete
-product. It creates a new loose chat on each launch and supports provider setup,
-model selection, basic chat streaming, a foreground-turn stop control, approval
-prompts, native connected-folder pick/list/revoke, and a concise
-foreground/background agent-status surface. The stop control sends cancellation
-for the exact active turn, prevents duplicate requests, and stays in a pending
-state until an authoritative terminal event arrives; it never treats a request
-as a locally completed cancellation.
+product. It reopens durable chats and supports conversation create/list/switch/
+rename/delete, transcript hydration, Markdown messages, live and historical
+tool activity, reconnectable streaming, provider and web-search setup, model
+selection, a foreground-turn stop control, approval prompts, native
+connected-folder pick/list/revoke, and a concise foreground/background
+agent-status surface. The stop control sends cancellation for the exact active
+turn, prevents duplicate requests, and stays in a pending state until an
+authoritative terminal event arrives; it never treats a request as a locally
+completed cancellation.
 That surface reads a redacted durable snapshot and is only an observer: worker
 leases, delegated inputs, and scheduler control remain server-private.
 OpenWave's operational scratch stays in private app storage; user-selected paths
@@ -543,19 +545,21 @@ opaque folder summaries. Projects and chats store only ordered opaque root IDs
 and attachment revisions—never host paths or grants. Built-in agent file tools
 still use a server-derived per-chat private scratch directory and are not yet
 routed through connected roots; that scratch path is neither persisted nor
-returned to the renderer. The
-UI does not yet provide a chat picker, history reconstruction, projects,
-document ingestion, document search, or steer controls, even though much of
-that backend API already exists.
+returned to the renderer. The UI does not yet provide projects, document
+ingestion/search/catalog views, structured citations, or steer controls, even
+though much of that backend API already exists. Connected-folder consent and
+reads work, but live picker paths still need to reconcile broker mutations
+through the durable product root-attachment state machine before those
+projections can be treated as one source of truth.
 
 Because that chat is projectless, its `search` tool can see only the unscoped
 document corpus. Project-scoped documents are not reachable through the current
 desktop journey.
 
-There is also no public message-history endpoint yet. Initial user messages are
-persisted but are not journal events, so the event stream alone cannot rebuild a
-complete old conversation. A real reopen/history experience needs an explicit
-snapshot API in addition to journal replay.
+Conversation reopen uses an atomic transcript snapshot plus a terminal event
+cursor. The desktop then replays and follows later events, so durable history
+and the live stream meet at an explicit sequence boundary instead of relying on
+transient renderer state.
 
 ### Headless server
 
@@ -594,8 +598,8 @@ object storage, and multi-process ownership remain future integration work.
 | Turn execution | `crates/openwave-server/src/turn_worker.rs` | Claiming, heartbeats, event journaling, terminal resolution |
 | Documents | `crates/openwave-server/src/routes/document.rs`, `document_worker.rs` | Upload API and Parse/Index worker orchestration |
 | Retrieval | `crates/openwave-retrieval/src/` | Parsing, chunks, embeddings, Lance, ranking, citations |
-| Desktop | `crates/openwave-desktop/src/`, `crates/openwave-desktop/ui/src/App.tsx` | Tauri host and current React shell |
-| Host access (planned) | `docs/host-access.md` | Broker trust boundary, connected-root model, and delivery slices |
+| Desktop | `crates/openwave-desktop/src/`, `crates/openwave-desktop/ui/src/` | Tauri host and current React shell |
+| Host access | `crates/openwave-host-broker/src/`, `docs/host-access.md` | Broker trust boundary, connected-root model, and reconciliation plan |
 | MCP | `crates/openwave-mcp/src/`, `crates/openwave-cli/src/main.rs` | MCP protocol server and stdio command |
 | Connectors and Slack | `crates/openwave-connectors`, `crates/openwave-slack` | Placeholders, not working product surfaces yet |
 
@@ -651,8 +655,8 @@ The main next steps are:
 - add resumable checkpoints and explicit idempotency policy around remaining
   server-side tool effects;
 - make approvals resumable rather than process-local;
-- expose existing backend capabilities through a real desktop information
-  architecture: chat history, projects, documents, search, cancel, and steer;
+- expose the remaining backend capabilities through the desktop information
+  architecture: projects, documents, search, structured citations, and steer;
 - add richer parsers and wire indexed search into MCP;
 - build the MCP client and connector surfaces;
 - finish the self-host profile rather than only testing Postgres state logic;
