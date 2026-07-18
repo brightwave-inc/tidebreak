@@ -176,6 +176,13 @@ async fn boot_server(
         )
         .await;
     });
+    let root_attachment_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        client_execution::root_attachment_reconciliation::recover_root_attachment_changes(
+            root_attachment_app,
+        )
+        .await;
+    });
     server.serve().await.map_err(|e| e.to_string())
 }
 

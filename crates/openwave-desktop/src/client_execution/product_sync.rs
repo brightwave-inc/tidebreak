@@ -121,6 +121,7 @@ async fn drive_product_attachment(
             receipt.chat_id,
             sync.change_id,
             sync.root_id,
+            RootAttachmentChangeAction::Attach,
             sync.expected_attachment_revision,
             sync.created_at,
         )

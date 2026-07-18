@@ -26,13 +26,14 @@ mod control_plane;
 pub(crate) mod folder_operations;
 mod product_sync;
 mod receipt_store;
+pub(crate) mod root_attachment_reconciliation;
 
 pub(crate) use control_plane::ControlPlaneClient;
 use control_plane::ControlPlaneError;
 pub(crate) use receipt_store::ReceiptStore;
 use receipt_store::{
     FolderAccessIntent, FolderAccessReceipt, FolderOperationPhase, FolderOperationReceipt,
-    RegistrationPhase, StoredResolution,
+    ManualFolderConnectReceipt, ProductRootAttachmentSync, RegistrationPhase, StoredResolution,
 };
 
 const RECOVERY_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -194,6 +195,7 @@ async fn execute_receipt(
     let resolution = match receipt.intent.clone() {
         FolderAccessIntent::Decline => declined_resolution()?,
         FolderAccessIntent::Selected { path } => {
+            let _root_change = state.root_changes.lock().await;
             drive_selected_folder(state, &mut receipt, context, path, mode).await?
         }
     };
@@ -237,6 +239,7 @@ async fn recover_after_claim_conflict(
     let resolution = match receipt.intent.clone() {
         FolderAccessIntent::Decline => declined_resolution()?,
         FolderAccessIntent::Selected { path } => {
+            let _root_change = state.root_changes.lock().await;
             drive_selected_folder(state, &mut receipt, context, path, ExecutionMode::Recovery)
                 .await?
         }
@@ -664,10 +667,12 @@ mod tests {
             expected_revision: 4,
             before_revision: 4,
             intent_revision: 5,
+            projection_existed_before: false,
             phase: RootAttachmentChangePhase::Completed,
             result_revision: Some(5),
             broker_currently_attached: Some(true),
             failure: None,
+            created_at: sync.created_at,
         };
         assert!(validate_product_change(&change, &receipt, &sync, context).is_ok());
 

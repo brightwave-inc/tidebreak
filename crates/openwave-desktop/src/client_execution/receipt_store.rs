@@ -12,6 +12,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use chrono::{DateTime, Utc};
 use openwave_core::{CallId, ChatId, HostRootId, RootAttachmentChangeId, MAX_ATTACHMENT_REVISION};
+use openwave_host_broker::GrantSubject;
 use openwave_host_broker::OperationId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -23,6 +24,7 @@ const MAX_EXECUTOR_BYTES: usize = 128;
 const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 const MAX_RECEIPTS: usize = 1_024;
 const FOLDER_OPERATION_PREFIX: &str = "folder-operation-";
+const MANUAL_FOLDER_CONNECT_PREFIX: &str = "manual-folder-connect-";
 const MAX_SAFE_ROOT_DISPLAY_BYTES: usize = 1_024;
 
 pub(crate) struct ReceiptStore {
@@ -65,6 +67,23 @@ pub(super) struct FolderOperationReceipt {
     pub(super) phase: FolderOperationPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) resolution: Option<StoredResolution>,
+}
+
+/// App-private recovery state for a folder selected from the manual connected
+/// folders UI. Absolute paths and broker authority never leave native storage.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(super) struct ManualFolderConnectReceipt {
+    version: u32,
+    pub(super) chat_id: ChatId,
+    pub(super) subject: GrantSubject,
+    pub(super) path: PathBuf,
+    pub(super) registration_operation_id: OperationId,
+    pub(super) change_id: RootAttachmentChangeId,
+    pub(super) cleanup_operation_id: OperationId,
+    pub(super) registration_phase: RegistrationPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) product_sync: Option<ProductRootAttachmentSync>,
 }
 
 /// Whether a read-only broker request may have been dispatched already.
@@ -180,6 +199,23 @@ impl std::fmt::Debug for FolderOperationReceipt {
     }
 }
 
+impl std::fmt::Debug for ManualFolderConnectReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManualFolderConnectReceipt")
+            .field("version", &self.version)
+            .field("chat_id", &self.chat_id)
+            .field("subject", &self.subject)
+            .field("path", &"[redacted]")
+            .field("registration_operation_id", &self.registration_operation_id)
+            .field("change_id", &self.change_id)
+            .field("cleanup_operation_id", &self.cleanup_operation_id)
+            .field("registration_phase", &self.registration_phase)
+            .field("product_sync", &self.product_sync)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for FolderAccessIntent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -246,6 +282,67 @@ impl FolderAccessReceipt {
             })
         {
             return Err(invalid_data("invalid client-execution receipt"));
+        }
+        Ok(())
+    }
+}
+
+impl ManualFolderConnectReceipt {
+    pub(super) fn new(chat_id: ChatId, subject: GrantSubject, path: PathBuf) -> Self {
+        let registration_operation_id = OperationId::new();
+        let mut change_id = RootAttachmentChangeId::new();
+        while *change_id.as_uuid() == registration_operation_id.as_uuid() {
+            change_id = RootAttachmentChangeId::new();
+        }
+        let cleanup_operation_id = loop {
+            let id = OperationId::new();
+            if id.as_uuid() != registration_operation_id.as_uuid()
+                && id.as_uuid() != *change_id.as_uuid()
+            {
+                break id;
+            }
+        };
+        Self {
+            version: RECEIPT_VERSION,
+            chat_id,
+            subject,
+            path,
+            registration_operation_id,
+            change_id,
+            cleanup_operation_id,
+            registration_phase: RegistrationPhase::NotStarted,
+            product_sync: None,
+        }
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if self.version != RECEIPT_VERSION
+            || self.chat_id.as_uuid().is_nil()
+            || !self.path.is_absolute()
+            || self.registration_operation_id.as_uuid() == *self.change_id.as_uuid()
+            || self.registration_operation_id == self.cleanup_operation_id
+            || self.cleanup_operation_id.as_uuid() == *self.change_id.as_uuid()
+            || (self.registration_phase == RegistrationPhase::NotStarted
+                && self.product_sync.is_some())
+        {
+            return Err(invalid_data("invalid manual folder-connect receipt"));
+        }
+        if self.subject.kind() == openwave_host_broker::SubjectKind::Conversation
+            && self.subject.id() != *self.chat_id.as_uuid()
+        {
+            return Err(invalid_data("manual folder-connect subject mismatch"));
+        }
+        if let Some(sync) = &self.product_sync {
+            if sync.change_id.as_uuid().is_nil()
+                || sync.display_name.is_empty()
+                || sync.display_name.len() > MAX_SAFE_ROOT_DISPLAY_BYTES
+                || sync.display_name.contains('\0')
+                || !(0..=MAX_ATTACHMENT_REVISION).contains(&sync.expected_attachment_revision)
+                || sync.change_id != self.change_id
+                || sync.cleanup_operation_id != self.cleanup_operation_id
+            {
+                return Err(invalid_data("manual folder-connect identity mismatch"));
+            }
         }
         Ok(())
     }
@@ -348,6 +445,22 @@ impl ReceiptStore {
         )
     }
 
+    pub(super) fn save_manual_connect(
+        &self,
+        receipt: &ManualFolderConnectReceipt,
+    ) -> io::Result<()> {
+        receipt.validate()?;
+        let bytes = serde_json::to_vec(receipt).map_err(invalid_data)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(invalid_data("manual folder-connect receipt is too large"));
+        }
+        write_atomically(
+            &self.directory,
+            &self.manual_connect_receipt_path(receipt.change_id),
+            &bytes,
+        )
+    }
+
     pub(super) fn remove(&self, call_id: CallId) -> io::Result<()> {
         match fs::remove_file(self.receipt_path(call_id)) {
             Ok(()) => sync_directory(&self.directory),
@@ -358,6 +471,17 @@ impl ReceiptStore {
 
     pub(super) fn remove_operation(&self, call_id: CallId) -> io::Result<()> {
         match fs::remove_file(self.operation_receipt_path(call_id)) {
+            Ok(()) => sync_directory(&self.directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn remove_manual_connect(
+        &self,
+        change_id: RootAttachmentChangeId,
+    ) -> io::Result<()> {
+        match fs::remove_file(self.manual_connect_receipt_path(change_id)) {
             Ok(()) => sync_directory(&self.directory),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
@@ -376,6 +500,9 @@ impl ReceiptStore {
                 continue;
             }
             if file_name.starts_with(FOLDER_OPERATION_PREFIX) {
+                continue;
+            }
+            if file_name.starts_with(MANUAL_FOLDER_CONNECT_PREFIX) {
                 continue;
             }
             if file_name.starts_with('.') && file_name.ends_with(".tmp") {
@@ -456,6 +583,50 @@ impl ReceiptStore {
         Ok(receipts)
     }
 
+    pub(super) fn load_manual_connects(&self) -> io::Result<Vec<ManualFolderConnectReceipt>> {
+        let mut receipts = Vec::new();
+        let mut change_ids = HashSet::new();
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                return Err(invalid_data("invalid client-execution receipt name"));
+            };
+            let Some(change_id) = file_name
+                .strip_prefix(MANUAL_FOLDER_CONNECT_PREFIX)
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if receipts.len() >= MAX_RECEIPTS {
+                return Err(invalid_data("too many pending manual folder connects"));
+            }
+            let change_id = change_id
+                .parse::<Uuid>()
+                .map_err(invalid_data)
+                .and_then(|id| RootAttachmentChangeId::from_uuid(id).map_err(invalid_data))?;
+            validate_private_file(&entry.path(), MAX_RECEIPT_BYTES)?;
+            let mut bytes = Vec::new();
+            File::open(entry.path())?
+                .take((MAX_RECEIPT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_RECEIPT_BYTES {
+                return Err(invalid_data("manual folder-connect receipt is too large"));
+            }
+            let receipt: ManualFolderConnectReceipt =
+                serde_json::from_slice(&bytes).map_err(invalid_data)?;
+            receipt.validate()?;
+            if receipt.change_id != change_id || !change_ids.insert(change_id) {
+                return Err(invalid_data(
+                    "manual folder-connect receipt identity mismatch",
+                ));
+            }
+            receipts.push(receipt);
+        }
+        receipts.sort_by_key(|receipt| receipt.change_id.to_string());
+        Ok(receipts)
+    }
+
     fn receipt_path(&self, call_id: CallId) -> PathBuf {
         self.directory.join(format!("{call_id}.json"))
     }
@@ -463,6 +634,11 @@ impl ReceiptStore {
     fn operation_receipt_path(&self, call_id: CallId) -> PathBuf {
         self.directory
             .join(format!("{FOLDER_OPERATION_PREFIX}{call_id}.json"))
+    }
+
+    fn manual_connect_receipt_path(&self, change_id: RootAttachmentChangeId) -> PathBuf {
+        self.directory
+            .join(format!("{MANUAL_FOLDER_CONNECT_PREFIX}{change_id}.json"))
     }
 }
 
@@ -708,6 +884,44 @@ mod tests {
         assert!(!debug.contains(&receipt.lease_token.to_string()));
         store.remove_operation(receipt.call_id).unwrap();
         assert!(store.load_operations().unwrap().is_empty());
+    }
+
+    #[test]
+    fn manual_connect_receipts_keep_paths_private_and_identities_distinct() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(temp.path()).unwrap();
+        let chat_id = ChatId::new();
+        let subject = GrantSubject::conversation(chat_id.0).unwrap();
+        let path = temp.path().join("Documents");
+        let mut receipt = ManualFolderConnectReceipt::new(chat_id, subject, path.clone());
+        store.save_manual_connect(&receipt).unwrap();
+        assert_eq!(store.load_manual_connects().unwrap(), vec![receipt.clone()]);
+        assert!(store.load_all().unwrap().is_empty());
+        assert!(!format!("{receipt:?}").contains(path.to_str().unwrap()));
+        assert_ne!(
+            receipt.registration_operation_id.as_uuid(),
+            *receipt.change_id.as_uuid()
+        );
+        assert_ne!(
+            receipt.cleanup_operation_id.as_uuid(),
+            *receipt.change_id.as_uuid()
+        );
+
+        receipt.registration_phase = RegistrationPhase::Attempted;
+        receipt.product_sync = Some(ProductRootAttachmentSync {
+            change_id: receipt.change_id,
+            root_id: HostRootId::from_uuid(Uuid::new_v4()).unwrap(),
+            display_name: "Documents".to_owned(),
+            expected_attachment_revision: 3,
+            created_at: Utc::now(),
+            cleanup_operation_id: receipt.cleanup_operation_id,
+            cleanup_phase: CleanupPhase::NotStarted,
+            attachment_phase: AttachmentPhase::Prepared,
+        });
+        store.save_manual_connect(&receipt).unwrap();
+        assert_eq!(store.load_manual_connects().unwrap(), vec![receipt.clone()]);
+        store.remove_manual_connect(receipt.change_id).unwrap();
+        assert!(store.load_manual_connects().unwrap().is_empty());
     }
 
     #[test]

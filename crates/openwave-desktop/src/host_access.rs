@@ -4,8 +4,7 @@ use std::path::PathBuf;
 
 use openwave_core::{ChatId, Store};
 use openwave_host_broker::{
-    ConsentMethod, ControlRequest, ExecutionContext, GrantSubject, OperationEnvelope, OperationId,
-    OperationRequest, OperationResult, RegisterRootRequest, RevokeRootRequest, RootId,
+    ExecutionContext, GrantSubject, OperationEnvelope, OperationRequest, OperationResult, RootId,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -19,6 +18,7 @@ use crate::client_execution::{ControlPlaneClient, ReceiptStore};
 pub(crate) struct HostAccess {
     pub(super) broker: BrokerClient,
     pub(super) picker: Mutex<()>,
+    pub(super) root_changes: Mutex<()>,
     store: OnceCell<std::sync::Arc<dyn Store>>,
     pub(super) control_plane: OnceCell<ControlPlaneClient>,
     pub(super) receipts: ReceiptStore,
@@ -35,6 +35,7 @@ impl HostAccess {
         Ok(Self {
             broker: BrokerClient::new(app, data_dir, home_dir),
             picker: Mutex::const_new(()),
+            root_changes: Mutex::const_new(()),
             store: OnceCell::new(),
             control_plane: OnceCell::new(),
             receipts,
@@ -135,8 +136,8 @@ pub(crate) struct DisconnectFolderRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConnectedFolder {
-    root_id: RootId,
-    display_name: String,
+    pub(crate) root_id: RootId,
+    pub(crate) display_name: String,
 }
 
 #[tauri::command]
@@ -158,24 +159,12 @@ pub(crate) async fn connect_folder(
         return Err("the folder picker returned an invalid path".to_owned());
     }
 
-    let result = state
-        .broker
-        .control(ControlRequest::RegisterRoot(RegisterRootRequest {
-            operation_id: OperationId::new(),
-            subject: context.subject,
-            conversation_id: context.chat_id,
-            path,
-            consent_method: ConsentMethod::FolderPicker,
-        }))
-        .await
-        .map_err(|error| error.to_string())?;
-    let openwave_host_broker::ControlResult::RegisterRoot(result) = result else {
-        return Err("host broker returned an unexpected response".to_owned());
-    };
-    Ok(Some(ConnectedFolder {
-        root_id: result.root.root_id,
-        display_name: result.root.display_name,
-    }))
+    let _root_change = state.root_changes.lock().await;
+    crate::client_execution::root_attachment_reconciliation::connect_selected_folder(
+        &state, context, path,
+    )
+    .await
+    .map(Some)
 }
 
 #[tauri::command]
@@ -184,6 +173,14 @@ pub(crate) async fn list_connected_folders(
     chat_id: Uuid,
 ) -> Result<Vec<ConnectedFolder>, String> {
     let context = state.context(chat_id).await?;
+    let store = state
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let chat = store
+        .get_chat(ChatId::from(chat_id))
+        .await
+        .map_err(|_| "could not load connected folders".to_owned())?
+        .ok_or_else(|| "conversation not found".to_owned())?;
     let request_id = openwave_host_broker::RequestId::new();
     let result = state
         .broker
@@ -198,8 +195,14 @@ pub(crate) async fn list_connected_folders(
     let OperationResult::ListRoots { roots } = result else {
         return Err("host broker returned an unexpected response".to_owned());
     };
+    let product_roots = chat
+        .root_attachments
+        .iter()
+        .map(|attachment| *attachment.root_id.as_uuid())
+        .collect::<std::collections::HashSet<_>>();
     Ok(roots
         .into_iter()
+        .filter(|root| product_roots.contains(&root.root_id.as_uuid()))
         .map(|root| ConnectedFolder {
             root_id: root.root_id,
             display_name: root.display_name,
@@ -213,19 +216,13 @@ pub(crate) async fn disconnect_folder(
     request: DisconnectFolderRequest,
 ) -> Result<bool, String> {
     let context = state.context(request.chat_id).await?;
-    let result = state
-        .broker
-        .control(ControlRequest::RevokeRoot(RevokeRootRequest {
-            operation_id: OperationId::new(),
-            subject: context.subject,
-            root_id: request.root_id,
-        }))
-        .await
-        .map_err(|error| error.to_string())?;
-    let openwave_host_broker::ControlResult::RevokeRoot(result) = result else {
-        return Err("host broker returned an unexpected response".to_owned());
-    };
-    Ok(result.revoked)
+    let _root_change = state.root_changes.lock().await;
+    crate::client_execution::root_attachment_reconciliation::disconnect_root(
+        &state,
+        context,
+        request.root_id,
+    )
+    .await
 }
 
 pub(super) async fn pick_folder(
