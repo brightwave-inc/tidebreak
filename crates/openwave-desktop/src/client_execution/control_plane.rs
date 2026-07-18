@@ -124,7 +124,7 @@ impl ControlPlaneClient {
         &self,
         chat_id: ChatId,
     ) -> Result<Vec<ToolCallRecord>, ControlPlaneError> {
-        self.get(&format!("/chats/{chat_id}/client-executions/pending"))
+        self.get(&format!("/chats/{chat_id}/client-executions/pending/raw"))
             .await
     }
 
@@ -220,6 +220,7 @@ impl ControlPlaneClient {
                 .http
                 .get(format!("{}{path}", self.base_url))
                 .bearer_auth(&self.token)
+                .header(CLIENT_EXECUTOR_HEADER, self.executor_token.clone())
                 .send()
                 .await
             {

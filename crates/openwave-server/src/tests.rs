@@ -2769,8 +2769,12 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/chats/{}/client-executions/pending", chat.id))
+                .uri(format!("/chats/{}/client-executions/pending/raw", chat.id))
                 .header(header::AUTHORIZATION, &bearer)
+                .header(
+                    crate::auth::CLIENT_EXECUTOR_HEADER,
+                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+                )
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2927,6 +2931,193 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn renderer_pending_client_executions_are_a_closed_folder_consent_projection() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let request = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "provider-secret".into(),
+        name: openwave_core::REQUEST_FOLDER_ACCESS_TOOL.into(),
+        arguments: serde_json::json!({
+            "reason": "Read the project notes",
+            "requested_capabilities": ["read_files"],
+            "folder_hint": "documents",
+        }),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+    };
+    let request = match store.accept_tool_call(&request).await.unwrap() {
+        openwave_core::AcceptToolCallOutcome::Accepted(call)
+        | openwave_core::AcceptToolCallOutcome::Existing(call) => call,
+        openwave_core::AcceptToolCallOutcome::IdentityConflict => panic!("fresh call conflicted"),
+    };
+    let unrelated = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "other-provider-secret".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({"host_path": "/Users/private"}),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+    };
+    store.accept_tool_call(&unrelated).await.unwrap();
+    let malformed = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "malformed-provider-secret".into(),
+        name: openwave_core::REQUEST_FOLDER_ACCESS_TOOL.into(),
+        arguments: serde_json::json!({
+            "reason": "Read /Users/private",
+            "requested_capabilities": ["read_files"],
+        }),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+    };
+    store.accept_tool_call(&malformed).await.unwrap();
+    let dangerous_reasons = [
+        "Read `/Users/private/report.pdf` sentinel-backtick",
+        "Read [/Users/private/report.pdf] sentinel-markdown",
+        "Read file:///Users/private/report.pdf sentinel-file-uri",
+        r"Read `\\server\share\secret.txt` sentinel-unc",
+        r"Read `C:\Users\private\secret.txt` sentinel-drive",
+        "ordinary-secret-prose",
+    ];
+    for reason in dangerous_reasons {
+        let dangerous = ToolCallRecord {
+            id: CallId::new(),
+            chat_id: chat.id,
+            turn_id: TurnId::new(),
+            provider_id: "dangerous-provider-secret".into(),
+            name: openwave_core::REQUEST_FOLDER_ACCESS_TOOL.into(),
+            arguments: serde_json::json!({
+                "reason": reason,
+                "requested_capabilities": ["read_files"],
+            }),
+            execution: ToolCallExecution::Client,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+        store.accept_tool_call(&dangerous).await.unwrap();
+    }
+
+    let renderer = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/client-executions/pending", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renderer.status(), StatusCode::OK);
+    let renderer: serde_json::Value = json_body(renderer).await;
+    let renderer_requests = renderer.as_array().unwrap();
+    assert_eq!(renderer_requests.len(), dangerous_reasons.len() + 1);
+    assert!(renderer_requests.iter().any(|value| {
+        value["call_id"] == request.id.to_string()
+            && value["turn_id"] == request.turn_id.to_string()
+            && value["folder_hint"] == "documents"
+            && value["claimed"] == false
+    }));
+    assert!(renderer_requests.iter().all(|value| {
+        value["reason"]
+            == "The assistant needs read access to files outside the folders connected to this conversation."
+    }));
+    let serialized = renderer.to_string();
+    for forbidden in [
+        "provider-secret",
+        "other-provider-secret",
+        "malformed-provider-secret",
+        "dangerous-provider-secret",
+        "request_folder_access",
+        "connect_folder",
+        "arguments",
+        "chat_id",
+        "provider_id",
+        "client_executor_id",
+        "status",
+        "execution",
+        "/Users/private",
+        "sentinel-backtick",
+        "sentinel-markdown",
+        "sentinel-file-uri",
+        "sentinel-unc",
+        "sentinel-drive",
+        "ordinary-secret-prose",
+    ] {
+        assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+    }
+
+    let raw_uri = format!("/chats/{}/client-executions/pending/raw", chat.id);
+    let renderer_raw = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&raw_uri)
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renderer_raw.status(), StatusCode::UNAUTHORIZED);
+
+    let native_raw = router
+        .oneshot(
+            Request::builder()
+                .uri(raw_uri)
+                .header(header::AUTHORIZATION, &bearer)
+                .header(
+                    crate::auth::CLIENT_EXECUTOR_HEADER,
+                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(native_raw.status(), StatusCode::OK);
+    let native: Vec<ToolCallRecord> = json_body(native_raw).await;
+    assert_eq!(native.len(), dangerous_reasons.len() + 3);
+    assert!(native.iter().any(|call| call == &request));
+    assert!(native.iter().any(|call| call.name == "connect_folder"));
 }
 
 #[tokio::test]
