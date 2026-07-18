@@ -1,6 +1,11 @@
 //! Authenticated loopback client for the durable client-execution API.
 
-use openwave_core::{CallId, ChatId, ToolCallRecord};
+use chrono::{DateTime, Utc};
+use openwave_core::{
+    CallId, ChatId, HostRootId, RootAttachmentChangeAction, RootAttachmentChangeFailure,
+    RootAttachmentChangeId, RootAttachmentChangePhase, RootAttachmentChangeTerminal,
+    RootAttachmentSubjectKind, ToolCallRecord,
+};
 use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
@@ -23,8 +28,12 @@ pub(crate) struct ControlPlaneClient {
 pub(crate) enum ControlPlaneError {
     #[error("local control plane request failed")]
     Transport,
-    #[error("local control plane rejected the request ({status}): {message}")]
-    Http { status: u16, message: String },
+    #[error("local control plane rejected the request ({status}, {kind}): {message}")]
+    Http {
+        status: u16,
+        kind: String,
+        message: String,
+    },
     #[error("local control plane returned an invalid response")]
     Protocol,
 }
@@ -32,6 +41,10 @@ pub(crate) enum ControlPlaneError {
 impl ControlPlaneError {
     pub(super) fn is_conflict(&self) -> bool {
         matches!(self, Self::Http { status, .. } if *status == StatusCode::CONFLICT.as_u16())
+    }
+
+    pub(super) fn is_kind(&self, expected: &str) -> bool {
+        matches!(self, Self::Http { kind, .. } if kind == expected)
     }
 }
 
@@ -56,6 +69,43 @@ struct HeartbeatRequest {
 struct ResolveRequest<'a> {
     lease_token: Uuid,
     resolution: &'a StoredResolution,
+}
+
+#[derive(Serialize)]
+struct BeginRootAttachmentRequest {
+    root_id: HostRootId,
+    action: RootAttachmentChangeAction,
+    expected_attachment_revision: i64,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct FinishRootAttachmentRequest<'a> {
+    terminal: &'a RootAttachmentChangeTerminal,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct RootAttachmentChangeResponse {
+    pub(super) change: RootAttachmentChangeView,
+}
+
+/// Closed native view of the fields needed to fence exact product/broker
+/// reconciliation. Server-only executor metadata is intentionally absent.
+#[derive(Debug, Deserialize)]
+pub(super) struct RootAttachmentChangeView {
+    pub(super) id: RootAttachmentChangeId,
+    pub(super) chat_id: ChatId,
+    pub(super) root_id: HostRootId,
+    pub(super) action: RootAttachmentChangeAction,
+    pub(super) subject_kind: RootAttachmentSubjectKind,
+    pub(super) subject_id: Uuid,
+    pub(super) expected_revision: i64,
+    pub(super) before_revision: i64,
+    pub(super) intent_revision: i64,
+    pub(super) phase: RootAttachmentChangePhase,
+    pub(super) result_revision: Option<i64>,
+    pub(super) broker_currently_attached: Option<bool>,
+    pub(super) failure: Option<RootAttachmentChangeFailure>,
 }
 
 impl ControlPlaneClient {
@@ -162,6 +212,38 @@ impl ControlPlaneClient {
         Ok(())
     }
 
+    pub(super) async fn begin_root_attachment_change(
+        &self,
+        chat_id: ChatId,
+        change_id: RootAttachmentChangeId,
+        root_id: HostRootId,
+        expected_attachment_revision: i64,
+        created_at: DateTime<Utc>,
+    ) -> Result<RootAttachmentChangeResponse, ControlPlaneError> {
+        self.post(
+            &format!("/chats/{chat_id}/root-attachment-changes/{change_id}/begin"),
+            &BeginRootAttachmentRequest {
+                root_id,
+                action: RootAttachmentChangeAction::Attach,
+                expected_attachment_revision,
+                created_at,
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn finish_root_attachment_change(
+        &self,
+        change_id: RootAttachmentChangeId,
+        terminal: &RootAttachmentChangeTerminal,
+    ) -> Result<RootAttachmentChangeResponse, ControlPlaneError> {
+        self.post(
+            &format!("/root-attachment-changes/{change_id}/finish"),
+            &FinishRootAttachmentRequest { terminal },
+        )
+        .await
+    }
+
     async fn post<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -190,17 +272,24 @@ impl ControlPlaneClient {
                 if response.status().is_server_error() && attempt + 1 < MAX_EXACT_ATTEMPTS {
                     last_error = ControlPlaneError::Http {
                         status,
+                        kind: "internal".to_owned(),
                         message: "request failed".to_owned(),
                     };
                     retry_pause(attempt).await;
                     continue;
                 }
-                let message = response
+                let error = response
                     .json::<ErrorBody>()
                     .await
-                    .map(|body| body.message)
-                    .unwrap_or_else(|_| "request failed".to_owned());
-                return Err(ControlPlaneError::Http { status, message });
+                    .unwrap_or_else(|_| ErrorBody {
+                        kind: "protocol".to_owned(),
+                        message: "request failed".to_owned(),
+                    });
+                return Err(ControlPlaneError::Http {
+                    status,
+                    kind: error.kind,
+                    message: error.message,
+                });
             }
             match response.json().await {
                 Ok(body) => return Ok(body),
@@ -236,17 +325,24 @@ impl ControlPlaneClient {
                 if response.status().is_server_error() && attempt + 1 < MAX_EXACT_ATTEMPTS {
                     last_error = ControlPlaneError::Http {
                         status,
+                        kind: "internal".to_owned(),
                         message: "request failed".to_owned(),
                     };
                     retry_pause(attempt).await;
                     continue;
                 }
-                let message = response
+                let error = response
                     .json::<ErrorBody>()
                     .await
-                    .map(|body| body.message)
-                    .unwrap_or_else(|_| "request failed".to_owned());
-                return Err(ControlPlaneError::Http { status, message });
+                    .unwrap_or_else(|_| ErrorBody {
+                        kind: "protocol".to_owned(),
+                        message: "request failed".to_owned(),
+                    });
+                return Err(ControlPlaneError::Http {
+                    status,
+                    kind: error.kind,
+                    message: error.message,
+                });
             }
             match response.json().await {
                 Ok(body) => return Ok(body),
@@ -268,6 +364,7 @@ async fn retry_pause(attempt: usize) {
 
 #[derive(Deserialize)]
 struct ErrorBody {
+    kind: String,
     message: String,
 }
 

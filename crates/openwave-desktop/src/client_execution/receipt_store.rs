@@ -10,17 +10,20 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-use openwave_core::{CallId, ChatId};
+use chrono::{DateTime, Utc};
+use openwave_core::{CallId, ChatId, HostRootId, RootAttachmentChangeId, MAX_ATTACHMENT_REVISION};
+use openwave_host_broker::OperationId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const RECEIPT_VERSION: u32 = 1;
+const RECEIPT_VERSION: u32 = 3;
 const RECEIPT_DIRECTORY: &str = "client-executions";
 const EXECUTOR_FILE: &str = "executor-id";
 const MAX_EXECUTOR_BYTES: usize = 128;
 const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 const MAX_RECEIPTS: usize = 1_024;
 const FOLDER_OPERATION_PREFIX: &str = "folder-operation-";
+const MAX_SAFE_ROOT_DISPLAY_BYTES: usize = 1_024;
 
 pub(crate) struct ReceiptStore {
     directory: PathBuf,
@@ -37,7 +40,10 @@ pub(super) struct FolderAccessReceipt {
     pub(super) executor_id: Uuid,
     pub(super) lease_token: Uuid,
     pub(super) intent: FolderAccessIntent,
+    pub(super) registration_operation_id: OperationId,
     pub(super) registration_phase: RegistrationPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) product_sync: Option<ProductRootAttachmentSync>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) resolution: Option<StoredResolution>,
 }
@@ -87,6 +93,46 @@ pub(super) enum RegistrationPhase {
     Attempted,
 }
 
+/// Exact product-side attachment identity persisted before begin or broker
+/// attachment dispatch. The change id also identifies the broker's idempotent
+/// `AttachRoot` mutation, but is independent of both the tool call and the
+/// picker registration mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(super) struct ProductRootAttachmentSync {
+    pub(super) change_id: RootAttachmentChangeId,
+    pub(super) root_id: HostRootId,
+    pub(super) display_name: String,
+    pub(super) expected_attachment_revision: i64,
+    pub(super) created_at: DateTime<Utc>,
+    pub(super) cleanup_operation_id: OperationId,
+    #[serde(default)]
+    pub(super) cleanup_phase: CleanupPhase,
+    #[serde(default)]
+    pub(super) attachment_phase: AttachmentPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CleanupPhase {
+    #[default]
+    NotStarted,
+    DispatchAttempted,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AttachmentPhase {
+    /// Product begin has not necessarily committed and no broker attachment
+    /// dispatch has been admitted yet.
+    #[default]
+    Prepared,
+    /// The exact broker attachment id may have been dispatched. Recovery must
+    /// consult its durable receipt before sending the same id again.
+    DispatchAttempted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum StoredResolution {
@@ -111,7 +157,9 @@ impl std::fmt::Debug for FolderAccessReceipt {
             .field("executor_id", &self.executor_id)
             .field("lease_token", &"[redacted]")
             .field("intent", &self.intent)
+            .field("registration_operation_id", &self.registration_operation_id)
             .field("registration_phase", &self.registration_phase)
+            .field("product_sync", &self.product_sync)
             .field("resolution", &self.resolution)
             .finish()
     }
@@ -158,7 +206,9 @@ impl FolderAccessReceipt {
             executor_id,
             lease_token: Uuid::new_v4(),
             intent,
+            registration_operation_id: OperationId::new(),
             registration_phase: RegistrationPhase::NotStarted,
+            product_sync: None,
             resolution: None,
         }
     }
@@ -169,11 +219,31 @@ impl FolderAccessReceipt {
             || self.call_id.0.is_nil()
             || self.executor_id.is_nil()
             || self.lease_token.is_nil()
+            || self.registration_operation_id.as_uuid() == self.call_id.0
             || matches!(&self.intent, FolderAccessIntent::Selected { path } if !path.is_absolute())
             || matches!(
                 (&self.intent, self.registration_phase),
                 (FolderAccessIntent::Decline, RegistrationPhase::Attempted)
             )
+            || matches!(
+                (&self.intent, &self.product_sync),
+                (FolderAccessIntent::Decline, Some(_))
+            )
+            || (self.product_sync.is_some()
+                && self.registration_phase != RegistrationPhase::Attempted)
+            || self.product_sync.as_ref().is_some_and(|sync| {
+                sync.change_id.as_uuid().is_nil()
+                    || sync.change_id.as_uuid() == &self.call_id.0
+                    || *sync.change_id.as_uuid() == self.registration_operation_id.as_uuid()
+                    || sync.display_name.is_empty()
+                    || sync.display_name.len() > MAX_SAFE_ROOT_DISPLAY_BYTES
+                    || sync.display_name.contains('\0')
+                    || sync.cleanup_operation_id.as_uuid() == self.call_id.0
+                    || sync.cleanup_operation_id.as_uuid()
+                        == self.registration_operation_id.as_uuid()
+                    || sync.cleanup_operation_id.as_uuid() == *sync.change_id.as_uuid()
+                    || !(0..=MAX_ATTACHMENT_REVISION).contains(&sync.expected_attachment_revision)
+            })
         {
             return Err(invalid_data("invalid client-execution receipt"));
         }
@@ -541,6 +611,10 @@ mod tests {
         );
         store.save(&receipt).unwrap();
         assert_eq!(store.load_all().unwrap(), vec![receipt.clone()]);
+        assert_ne!(
+            receipt.registration_operation_id.as_uuid(),
+            receipt.call_id.0
+        );
         let debug = format!("{receipt:?}");
         assert!(!debug.contains(&receipt.lease_token.to_string()));
         assert!(!debug.contains(&temp.path().display().to_string()));
@@ -556,6 +630,69 @@ mod tests {
 
         let reopened = ReceiptStore::open(temp.path()).unwrap();
         assert_eq!(reopened.executor_id(), executor_id);
+    }
+
+    #[test]
+    fn product_attachment_identity_and_revision_are_durable_and_independent() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(temp.path()).unwrap();
+        let mut receipt = FolderAccessReceipt::new(
+            ChatId::new(),
+            CallId::new(),
+            store.executor_id(),
+            FolderAccessIntent::Selected {
+                path: temp.path().join("Documents"),
+            },
+        );
+        receipt.registration_phase = RegistrationPhase::Attempted;
+        let sync = ProductRootAttachmentSync {
+            change_id: RootAttachmentChangeId::new(),
+            root_id: HostRootId::from_uuid(Uuid::new_v4()).unwrap(),
+            display_name: "Documents".to_owned(),
+            expected_attachment_revision: 7,
+            created_at: Utc::now(),
+            cleanup_operation_id: OperationId::new(),
+            cleanup_phase: CleanupPhase::NotStarted,
+            attachment_phase: AttachmentPhase::Prepared,
+        };
+        assert_ne!(sync.change_id.as_uuid(), &receipt.call_id.0);
+        assert_ne!(
+            *sync.change_id.as_uuid(),
+            receipt.registration_operation_id.as_uuid()
+        );
+        assert_ne!(sync.cleanup_operation_id.as_uuid(), receipt.call_id.0);
+        assert_ne!(
+            sync.cleanup_operation_id.as_uuid(),
+            receipt.registration_operation_id.as_uuid()
+        );
+        assert_ne!(
+            sync.cleanup_operation_id.as_uuid(),
+            *sync.change_id.as_uuid()
+        );
+        receipt.product_sync = Some(sync.clone());
+        store.save(&receipt).unwrap();
+        let recovered = store.load_all().unwrap().pop().unwrap();
+        assert_eq!(recovered.product_sync, Some(sync));
+
+        receipt.product_sync.as_mut().unwrap().cleanup_phase = CleanupPhase::Completed;
+        receipt.resolution = Some(StoredResolution::Failed {
+            result: r#"{"status":"unavailable"}"#.to_owned(),
+            error_code: "folder_access_product_sync_rejected".to_owned(),
+            error_detail: None,
+        });
+        store.save(&receipt).unwrap();
+        assert!(matches!(
+            store.load_all().unwrap().pop().unwrap().resolution,
+            Some(StoredResolution::Failed { error_code, .. })
+                if error_code == "folder_access_product_sync_rejected"
+        ));
+        store.remove(receipt.call_id).unwrap();
+        assert!(store.load_all().unwrap().is_empty());
+
+        let mut reused = receipt.clone();
+        reused.product_sync.as_mut().unwrap().change_id =
+            RootAttachmentChangeId::from_uuid(receipt.call_id.0).unwrap();
+        assert!(store.save(&reused).is_err());
     }
 
     #[test]
