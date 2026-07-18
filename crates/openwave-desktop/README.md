@@ -6,6 +6,18 @@ webview. The UI talks to that local API over HTTP + WebSocket (subprotocol auth)
 The native host also owns the folder picker and a private host-broker sidecar;
 the renderer receives opaque folder IDs and display names, never absolute paths.
 
+The Documents surface derives its corpus from the authoritative current chat:
+project chats use that project's documents and loose chats use the unscoped
+corpus. A native file picker
+accepts text and Markdown files, opens the selected regular file once without
+following a final symlink, applies the upload bound to the open handle, and sends
+the bytes directly to the in-process API. The webview receives only a safe
+catalog/search projection: bounded display titles, processing states, and plain
+passages. Source paths, bytes, index metadata, and generation identities remain
+native/server-side.
+Canonical document routes also require the native executor credential in this
+embedding, so the renderer's ordinary bearer cannot bypass that projection.
+
 When an agent needs a folder outside the current context, the chat UI renders a
 bounded consent card from the local API's authoritative pending-work list. The
 user can decline or ask the native host to open a picker. Native code then owns

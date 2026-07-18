@@ -4,8 +4,8 @@
 //! one local API rather than linking the loop directly, so all surfaces share a
 //! single wiring of `Config`, `Store`, and (next slice) the agent. The server
 //! binds to an ephemeral **loopback** port and mints a per-launch **bearer
-//! token**. Trusted client-execution mutations require a second per-launch
-//! credential that renderer-facing clients are never given.
+//! token**. Trusted native operations require a second per-launch credential
+//! that renderer-facing clients are never given.
 //!
 //! The surface runs turns end to end: the chat CRUD routes, `POST
 //! /chats/{id}/messages` to start a turn (one per chat at a time), and
@@ -71,55 +71,7 @@ const MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
 pub fn app(state: AppState) -> Router {
     // `route_layer` applies the token check to matched API routes only, so an
     // unknown path still answers `404` (not `401`), and `/healthz` stays open.
-    let client_executor_api = Router::new()
-        .route(
-            "/chats/{id}/client-executions/pending/raw",
-            get(routes::list_pending_client_executions_raw),
-        )
-        .route(
-            "/chats/{id}/client-executions/{call_id}/claim",
-            post(routes::claim_client_execution),
-        )
-        .route(
-            "/chats/{id}/client-executions/{call_id}/heartbeat",
-            post(routes::heartbeat_client_execution),
-        )
-        .route(
-            "/chats/{id}/client-executions/{call_id}/resolve",
-            post(routes::resolve_client_execution),
-        );
-    let client_executor_api = if state.root_attachment_routes_enabled {
-        client_executor_api
-            .route(
-                "/chats/{chat_id}/root-attachment-changes/{change_id}/begin",
-                post(routes::begin_root_attachment_change),
-            )
-            .route(
-                "/root-attachment-changes/pending",
-                get(routes::list_pending_root_attachment_changes),
-            )
-            .route(
-                "/root-attachment-changes/{change_id}/finish",
-                post(routes::finish_root_attachment_change),
-            )
-    } else {
-        client_executor_api
-    }
-    .route_layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        auth::require_client_executor_token,
-    ));
-
-    let api = Router::new()
-        .route(
-            "/settings",
-            get(routes::get_settings).put(routes::put_settings),
-        )
-        .route(
-            "/projects",
-            post(routes::create_project).get(routes::list_projects),
-        )
-        .route("/projects/{id}", get(routes::get_project))
+    let document_api = Router::new()
         .route(
             "/projects/{project_id}/documents",
             post(routes::ingest_project_document).get(routes::list_project_documents),
@@ -141,6 +93,75 @@ pub fn app(state: AppState) -> Router {
             "/projects/{project_id}/search",
             post(routes::search_project_documents),
         )
+        .route(
+            "/documents",
+            post(routes::ingest_document).get(routes::list_documents),
+        )
+        .route(
+            "/documents/raw",
+            post(routes::ingest_raw_document).layer(DefaultBodyLimit::max(MAX_RAW_DOCUMENT_BYTES)),
+        )
+        .route(
+            "/documents/{id}",
+            get(routes::get_document).delete(routes::delete_document),
+        )
+        .route("/documents/{id}/retry", post(routes::retry_document))
+        .route("/search", post(routes::search_documents));
+
+    let client_executor_api = Router::new()
+        .route(
+            "/chats/{id}/client-executions/pending/raw",
+            get(routes::list_pending_client_executions_raw),
+        )
+        .route(
+            "/chats/{id}/client-executions/{call_id}/claim",
+            post(routes::claim_client_execution),
+        )
+        .route(
+            "/chats/{id}/client-executions/{call_id}/heartbeat",
+            post(routes::heartbeat_client_execution),
+        )
+        .route(
+            "/chats/{id}/client-executions/{call_id}/resolve",
+            post(routes::resolve_client_execution),
+        );
+    // A native embedding gives the renderer only the primary bearer, so its
+    // canonical document surface joins the native-only router. A headless
+    // embedding has no separate renderer trust boundary and deliberately keeps
+    // the same API on its primary bearer for CLI/API compatibility.
+    let (client_executor_api, public_document_api) = if state.root_attachment_routes_enabled {
+        let client_executor_api = client_executor_api
+            .route(
+                "/chats/{chat_id}/root-attachment-changes/{change_id}/begin",
+                post(routes::begin_root_attachment_change),
+            )
+            .route(
+                "/root-attachment-changes/pending",
+                get(routes::list_pending_root_attachment_changes),
+            )
+            .route(
+                "/root-attachment-changes/{change_id}/finish",
+                post(routes::finish_root_attachment_change),
+            )
+            .merge(document_api);
+        (client_executor_api, Router::new())
+    } else {
+        (client_executor_api, document_api)
+    };
+    let client_executor_api = client_executor_api.route_layer(
+        axum::middleware::from_fn_with_state(state.clone(), auth::require_client_executor_token),
+    );
+
+    let api = Router::new()
+        .route(
+            "/settings",
+            get(routes::get_settings).put(routes::put_settings),
+        )
+        .route(
+            "/projects",
+            post(routes::create_project).get(routes::list_projects),
+        )
+        .route("/projects/{id}", get(routes::get_project))
         .route("/models", get(routes::list_models))
         .route(
             "/web-search",
@@ -165,20 +186,7 @@ pub fn app(state: AppState) -> Router {
             "/providers/{kind}/credential",
             axum::routing::delete(routes::delete_provider_credential),
         )
-        .route(
-            "/documents",
-            post(routes::ingest_document).get(routes::list_documents),
-        )
-        .route(
-            "/documents/raw",
-            post(routes::ingest_raw_document).layer(DefaultBodyLimit::max(MAX_RAW_DOCUMENT_BYTES)),
-        )
-        .route(
-            "/documents/{id}",
-            get(routes::get_document).delete(routes::delete_document),
-        )
-        .route("/documents/{id}/retry", post(routes::retry_document))
-        .route("/search", post(routes::search_documents))
+        .merge(public_document_api)
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route(
             "/chats/{id}",
@@ -307,7 +315,7 @@ impl Server {
         &self.token
     }
 
-    /// The second per-launch credential for trusted client-execution mutations.
+    /// The second per-launch credential for trusted native-only operations.
     pub fn client_executor_token(&self) -> &str {
         &self.client_executor_token
     }

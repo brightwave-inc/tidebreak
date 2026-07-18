@@ -5,6 +5,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 use openwave_core::{
     DocumentJobId, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
@@ -38,6 +39,9 @@ pub struct IngestDocument {
 pub struct RawDocumentQuery {
     /// Optional source URI used for provenance and idempotent document identity.
     pub uri: Option<String>,
+    /// Optional human-facing title. This is metadata only and never used as a
+    /// source locator.
+    pub title: Option<String>,
 }
 
 /// Result of `POST /documents`.
@@ -225,6 +229,7 @@ async fn ingest_document_in_scope(
         state,
         project_id,
         body.uri,
+        None,
         body.media_type.unwrap_or_else(|| "text/plain".to_owned()),
         body.content.into_bytes(),
     )
@@ -280,6 +285,7 @@ async fn ingest_raw_document_in_scope(
         state,
         project_id,
         query.uri,
+        query.title,
         media_type.to_owned(),
         source_bytes,
     )
@@ -290,6 +296,7 @@ async fn publish_document_source(
     state: &AppState,
     project_id: Option<ProjectId>,
     source_uri: Option<String>,
+    title: Option<String>,
     media_type: String,
     source_bytes: Vec<u8>,
 ) -> Result<(StatusCode, Json<IngestResult>), ServerError> {
@@ -299,6 +306,7 @@ async fn publish_document_source(
         Some(uri) if !uri.is_empty() => Some(uri.to_owned()),
         _ => None,
     };
+    let title = normalize_document_title(title.as_deref())?;
     let parser_fingerprint = state
         .retrieval
         .canonical_fingerprint_for(&media_type)
@@ -329,7 +337,7 @@ async fn publish_document_source(
                 project_id,
                 source_uri,
                 media_type,
-                title: None,
+                title,
                 source_blob,
                 updated_at: Utc::now(),
             },
@@ -348,6 +356,61 @@ async fn publish_document_source(
             processing_status: revision.processing_status,
         }),
     ))
+}
+
+fn is_safe_document_title_char(character: char) -> bool {
+    !matches!(
+        get_general_category(character),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+    )
+}
+
+fn normalize_document_title(title: Option<&str>) -> Result<Option<String>, ServerError> {
+    let Some(raw_title) = title else {
+        return Ok(None);
+    };
+    if raw_title
+        .chars()
+        .any(|character| !is_safe_document_title_char(character))
+    {
+        return Err(ServerError::bad_request(
+            "document title contains unsupported control characters",
+        ));
+    }
+    let title = raw_title.trim();
+    if title.is_empty() {
+        return Ok(None);
+    }
+    if title.chars().count() > 255 {
+        return Err(ServerError::bad_request(
+            "document title must be at most 255 characters",
+        ));
+    }
+    Ok(Some(title.to_owned()))
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn renderer_titles_reject_all_visual_control_categories() {
+        for unsafe_character in [
+            '\u{0000}', '\u{200d}', '\u{206a}', '\u{206f}', '\u{2028}', '\u{2029}',
+        ] {
+            assert!(
+                normalize_document_title(Some(&format!("report{unsafe_character}.md"))).is_err()
+            );
+        }
+        let unicode_title = format!("{}.md", "😀".repeat(252));
+        assert_eq!(unicode_title.chars().count(), 255);
+        let normalized = normalize_document_title(Some(&unicode_title));
+        assert!(normalized.is_ok());
+        assert_eq!(normalized.ok().flatten(), Some(unicode_title));
+    }
 }
 
 /// `POST /documents/{id}/retry` — explicitly revive the current exact failed

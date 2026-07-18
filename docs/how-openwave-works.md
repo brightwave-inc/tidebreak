@@ -563,13 +563,25 @@ opaque folder summaries. Projects and chats store only ordered opaque root IDs
 and attachment revisions—never host paths or grants. Built-in agent file tools
 still use a server-derived per-chat private scratch directory and are not yet
 routed through connected roots; that scratch path is neither persisted nor
-returned to the renderer. The UI does not yet provide projects, document
-ingestion/search/catalog views, structured citations, or steer controls, even
-though much of that backend API already exists. Connected-folder consent and
-reads work. Agent-approved picker results now reconcile broker registration,
-exact attachment, and the durable product projection before reporting success.
-The manual connect/disconnect controls still need the same convergence path
-before every folder UI action shares one source of truth.
+returned to the renderer. The UI does not yet provide projects, structured
+citations, or steer controls. Its Documents surface derives scope from the
+authoritative current chat: project chats use that project's corpus and loose
+chats use the unscoped corpus. It lists the catalog, imports a user-picked text
+or Markdown file, polls durable processing status, and searches ready passages.
+Native code reads the selected file and calls the existing local document APIs;
+the renderer sees only bounded titles, lifecycle states, and plain-text search
+passages, never the source path, source bytes, generation identities, index
+metadata, or canonical search records. Connected-folder consent and reads work.
+Agent-approved picker results now reconcile broker registration, exact
+attachment, and the durable product projection before reporting success. The
+manual connect/disconnect controls still need the same convergence path before
+every folder UI action shares one source of truth.
+
+In the native embedding, canonical document routes require the second
+native-executor credential withheld from the renderer. Headless embeddings keep
+those routes on their primary bearer because they do not have a webview trust
+boundary. The native document bridge follows bounded catalog cursors and reports
+when it has intentionally stopped at the newest 1,000 records.
 
 Because that chat is projectless, its `search` tool can see only the unscoped
 document corpus. Project-scoped documents are not reachable through the current

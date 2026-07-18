@@ -3853,6 +3853,54 @@ async fn raw_ingest_enforces_media_type_body_and_project_scope() {
 }
 
 #[tokio::test]
+async fn raw_ingest_persists_a_safe_title_without_requiring_a_source_path() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let response = post_raw(
+        &router,
+        &bearer,
+        "/documents/raw?title=meeting%20notes.md",
+        Some("text/markdown"),
+        b"# Notes".to_vec(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let accepted: serde_json::Value = json_body(response).await;
+    let document_id = accepted["document_id"].as_str().unwrap().parse().unwrap();
+    let document = store.get_document(document_id).await.unwrap().unwrap();
+    assert_eq!(document.title.as_deref(), Some("meeting notes.md"));
+    assert_eq!(document.source_uri, None);
+
+    let spoofed = post_raw(
+        &router,
+        &bearer,
+        "/documents/raw?title=report%E2%80%AEtxt.md",
+        Some("text/markdown"),
+        b"# Notes".to_vec(),
+    )
+    .await;
+    assert_eq!(spoofed.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn headless_embedding_keeps_document_api_on_its_primary_bearer() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/documents")
+                .header(header::AUTHORIZATION, bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn raw_ingest_has_an_explicit_limit_and_preserves_payload_too_large() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
