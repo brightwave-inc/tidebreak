@@ -55,6 +55,112 @@ async fn assert_conflict_kind(response: axum::response::Response, expected: &str
     assert_eq!(body["kind"], expected);
 }
 
+#[tokio::test]
+async fn embedded_renderer_bearer_cannot_reach_canonical_document_routes() {
+    let (router, token, _store, _dir) = test_app_with_executor_id(uuid::Uuid::new_v4()).await;
+    let bearer = format!("Bearer {token}");
+    let ingest_body = serde_json::json!({
+        "uri": "file:///Users/private/review-sentinel.md",
+        "content": "private-content-sentinel",
+        "media_type": "text/markdown",
+    });
+    let accepted = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/documents")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(
+                    crate::auth::CLIENT_EXECUTOR_HEADER,
+                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(ingest_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    let accepted: serde_json::Value = json_body(accepted).await;
+    let document_id = accepted["document_id"].as_str().unwrap();
+    let project_id = ProjectId::new();
+
+    for (method, uri, body) in [
+        ("GET", "/documents".to_owned(), Body::empty()),
+        ("GET", format!("/documents/{document_id}"), Body::empty()),
+        (
+            "POST",
+            "/search".to_owned(),
+            Body::from(r#"{"query":"private-content-sentinel"}"#),
+        ),
+        (
+            "POST",
+            "/documents".to_owned(),
+            Body::from(ingest_body.to_string()),
+        ),
+        (
+            "POST",
+            "/documents/raw".to_owned(),
+            Body::from("private-content-sentinel"),
+        ),
+        ("DELETE", format!("/documents/{document_id}"), Body::empty()),
+        (
+            "GET",
+            format!("/projects/{project_id}/documents"),
+            Body::empty(),
+        ),
+        (
+            "GET",
+            format!("/projects/{project_id}/documents/{document_id}"),
+            Body::empty(),
+        ),
+        (
+            "POST",
+            format!("/projects/{project_id}/search"),
+            Body::from(r#"{"query":"private-content-sentinel"}"#),
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes);
+        for sentinel in [
+            "/Users/private",
+            "review-sentinel",
+            "private-content-sentinel",
+            "content_revision",
+            "index_fingerprint",
+        ] {
+            assert!(
+                !body.contains(sentinel),
+                "renderer denial leaked {sentinel}"
+            );
+        }
+    }
+
+    let native_detail = get_native(&router, &bearer, &format!("/documents/{document_id}")).await;
+    assert_eq!(native_detail.status(), StatusCode::OK);
+    let native_detail: serde_json::Value = json_body(native_detail).await;
+    assert_eq!(
+        native_detail["uri"],
+        "file:///Users/private/review-sentinel.md"
+    );
+    assert!(native_detail.get("content_revision").is_some());
+}
+
 fn root_attachment_begin_body(
     root_id: HostRootId,
     action: RootAttachmentChangeAction,

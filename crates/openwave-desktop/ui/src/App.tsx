@@ -33,6 +33,7 @@ import {
 import { hydrateTranscriptHistory } from "./TranscriptHistory";
 import { useChatEventStream } from "./ChatEventStream";
 import { isNearBottom, scrollToLatest } from "./ChatScroll";
+import { DocumentsView } from "./DocumentsView";
 
 type Msg = ChatMessage;
 
@@ -82,6 +83,7 @@ export default function App() {
   const [settingsPanel, setSettingsPanel] = useState<
     "providers" | "web-search" | "folders" | null
   >(null);
+  const [primaryView, setPrimaryView] = useState<"chat" | "documents">("chat");
   const [status, setStatus] = useState("starting…");
   const [hasUnreadActivity, setHasUnreadActivity] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
@@ -574,6 +576,7 @@ export default function App() {
   async function onNewChat() {
     if (!client || creatingChat || deletionInFlightRef.current) return;
     setCreatingChat(true);
+    setPrimaryView("chat");
     try {
       const created = await client.createChat(chat?.model ?? models[0]?.id);
       socketGenerationRef.current += 1;
@@ -657,6 +660,8 @@ export default function App() {
   }
 
   function selectChat(next: Chat, force = false) {
+    setPrimaryView("chat");
+    setSettingsPanel(null);
     if (next.id === chat?.id || creatingChat || (!force && deletionInFlightRef.current)) return;
     socketGenerationRef.current += 1;
     socketRef.current?.close();
@@ -832,18 +837,32 @@ export default function App() {
           {creatingChat ? "Starting…" : deletingChatId ? "Deleting…" : "New chat"}
         </button>
 
+        {hasNativeHost() && (
+          <button
+            type="button"
+            className={`sidebar-action sidebar-library${primaryView === "documents" ? " is-active" : ""}`}
+            onClick={() => {
+              setSettingsPanel(null);
+              setPrimaryView("documents");
+            }}
+          >
+            <span aria-hidden="true">▤</span>
+            Documents
+          </button>
+        )}
+
         <div className="sidebar-section">
           <span className="sidebar-label">Conversations</span>
           <div className="conversation-list" aria-label="Conversations">
             {chats.map((item) => (
               <div
                 key={item.id}
-                className={`conversation-row${item.id === chat.id ? " is-active" : ""}`}
+                className={`conversation-row${primaryView === "chat" && item.id === chat.id ? " is-active" : ""}`}
               >
                 <button
                   type="button"
                   className="conversation-item"
-                  aria-current={item.id === chat.id ? "page" : undefined}
+                  aria-current={primaryView === "chat" && item.id === chat.id ? "page" : undefined}
                   disabled={deletingChatId !== null || creatingChat}
                   onClick={() => selectChat(item)}
                 >
@@ -871,11 +890,12 @@ export default function App() {
             <button
               type="button"
               className={`sidebar-action${settingsPanel === "folders" ? " is-active" : ""}`}
-              onClick={() =>
+              onClick={() => {
+                setPrimaryView("chat");
                 setSettingsPanel((panel) =>
                   panel === "folders" ? null : "folders",
-                )
-              }
+                );
+              }}
             >
               Folders
             </button>
@@ -883,29 +903,37 @@ export default function App() {
           <button
             type="button"
             className={`sidebar-action${settingsPanel === "providers" ? " is-active" : ""}`}
-            onClick={() =>
+            onClick={() => {
+              setPrimaryView("chat");
               setSettingsPanel((panel) =>
                 panel === "providers" ? null : "providers",
-              )
-            }
+              );
+            }}
           >
             Providers
           </button>
           <button
             type="button"
             className={`sidebar-action${settingsPanel === "web-search" ? " is-active" : ""}`}
-            onClick={() =>
+            onClick={() => {
+              setPrimaryView("chat");
               setSettingsPanel((panel) =>
                 panel === "web-search" ? null : "web-search",
-              )
-            }
+              );
+            }}
           >
             Web search
           </button>
         </div>
       </aside>
 
-      <div className={`main${settingsPanel ? " with-settings" : ""}`}>
+      <div
+        className={`main${primaryView === "chat" && settingsPanel ? " with-settings" : ""}`}
+      >
+        {primaryView === "documents" ? (
+          <DocumentsView chatId={chat.id} onBack={() => setPrimaryView("chat")} />
+        ) : (
+          <>
         <section className="chat-pane">
           <header className="conversation-header">
             <div>
@@ -954,6 +982,18 @@ export default function App() {
             </div>
             <div className="conversation-header-actions">
               <div className="mobile-settings-actions">
+                {hasNativeHost() && (
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      setSettingsPanel(null);
+                      setPrimaryView("documents");
+                    }}
+                  >
+                    Documents
+                  </button>
+                )}
                 {hasNativeHost() && (
                   <button
                     type="button"
@@ -1106,6 +1146,8 @@ export default function App() {
         )}
         {settingsPanel === "web-search" && <WebSearchPanel client={client} />}
         {settingsPanel === "folders" && <FoldersPanel chat={chat} />}
+          </>
+        )}
       </div>
     </div>
   );

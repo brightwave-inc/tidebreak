@@ -16,6 +16,7 @@ use openwave_core::Config;
 
 mod broker;
 mod client_execution;
+mod documents;
 mod host_access;
 
 /// Connection details the webview needs to reach the in-process API.
@@ -28,14 +29,34 @@ pub struct ServerInfo {
     pub token: String,
 }
 
+#[derive(Clone)]
+struct NativeServerInfo {
+    base_url: String,
+    token: String,
+    executor_token: String,
+}
+
+impl NativeServerInfo {
+    fn renderer_info(&self) -> ServerInfo {
+        ServerInfo {
+            base_url: self.base_url.clone(),
+            token: self.token.clone(),
+        }
+    }
+}
+
 struct AppState {
     /// Filled once the accept loop is bound; awaited by `server_info`.
-    info_rx: watch::Receiver<Option<ServerInfo>>,
+    info_rx: watch::Receiver<Option<NativeServerInfo>>,
 }
 
 /// Return the bound server address and token (waits until bind completes).
 #[tauri::command]
 async fn server_info(state: tauri::State<'_, Arc<AppState>>) -> Result<ServerInfo, String> {
+    Ok(wait_server_info(state.inner()).await?.renderer_info())
+}
+
+async fn wait_server_info(state: &Arc<AppState>) -> Result<NativeServerInfo, String> {
     let mut rx = state.info_rx.clone();
     loop {
         if let Some(info) = rx.borrow().clone() {
@@ -44,6 +65,24 @@ async fn server_info(state: tauri::State<'_, Arc<AppState>>) -> Result<ServerInf
         rx.changed()
             .await
             .map_err(|_| "server failed to start".to_string())?;
+    }
+}
+
+#[cfg(test)]
+mod server_info_tests {
+    use super::*;
+
+    #[test]
+    fn renderer_server_info_never_contains_native_credential() {
+        let native = NativeServerInfo {
+            base_url: "http://127.0.0.1:1234".to_owned(),
+            token: "renderer-bearer".to_owned(),
+            executor_token: "native-credential-sentinel".to_owned(),
+        };
+        let serialized = serde_json::to_string(&native.renderer_info()).unwrap();
+        assert!(serialized.contains("renderer-bearer"));
+        assert!(!serialized.contains("native-credential-sentinel"));
+        assert!(!serialized.contains("executor"));
     }
 }
 
@@ -87,6 +126,9 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             server_info,
+            documents::import_library_document,
+            documents::list_library_documents,
+            documents::search_library_documents,
             client_execution::resolve_folder_access_request,
             host_access::connect_folder,
             host_access::list_connected_folders,
@@ -118,7 +160,7 @@ pub fn run() {
 /// Bind the local API and park the accept loop for the life of the process.
 async fn boot_server(
     app: tauri::AppHandle,
-    info_tx: watch::Sender<Option<ServerInfo>>,
+    info_tx: watch::Sender<Option<NativeServerInfo>>,
     data_dir: PathBuf,
 ) -> Result<(), String> {
     let client_executor_id = app.state::<host_access::HostAccess>().client_executor_id();
@@ -134,8 +176,12 @@ async fn boot_server(
     let token = server.token().to_string();
     let executor_token = server.client_executor_token().to_string();
     app.state::<host_access::HostAccess>()
-        .initialize_control_plane(base_url.clone(), token.clone(), executor_token)?;
-    let info = ServerInfo { base_url, token };
+        .initialize_control_plane(base_url.clone(), token.clone(), executor_token.clone())?;
+    let info = NativeServerInfo {
+        base_url,
+        token,
+        executor_token,
+    };
     let _ = info_tx.send(Some(info));
     let recovery_app = app.clone();
     tauri::async_runtime::spawn(async move {

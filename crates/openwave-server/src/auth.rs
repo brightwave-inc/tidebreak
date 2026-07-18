@@ -53,7 +53,7 @@ pub async fn require_token(
     }
 }
 
-/// Require the second credential held only by the trusted native executor.
+/// Require the second credential held only by the trusted native host.
 pub async fn require_client_executor_token(
     State(state): State<AppState>,
     request: Request,

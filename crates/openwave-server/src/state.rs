@@ -60,7 +60,7 @@ pub struct AppState {
     pub agent_config: AgentConfig,
     /// The secret every request must present as `Authorization: Bearer <token>`.
     pub token: Arc<str>,
-    /// A second per-launch secret required for client-execution mutations.
+    /// A second per-launch secret required for native-only operations.
     pub(crate) client_executor_token: Arc<str>,
     /// Stable private identity owning native attachment reconciliation work.
     pub(crate) client_executor_id: Uuid,
