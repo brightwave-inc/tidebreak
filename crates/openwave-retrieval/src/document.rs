@@ -15,7 +15,7 @@ use crate::error::{Result, RetrievalError};
 use crate::id::{ChunkId, DocumentId};
 
 /// Where an ingested document came from — its provenance for citations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DocumentSource {
@@ -25,13 +25,8 @@ pub enum DocumentSource {
         uri: String,
     },
     /// Content supplied inline with no external origin.
+    #[default]
     Inline,
-}
-
-impl Default for DocumentSource {
-    fn default() -> Self {
-        Self::Inline
-    }
 }
 
 impl DocumentSource {
