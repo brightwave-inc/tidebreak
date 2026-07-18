@@ -21,6 +21,7 @@ mod document_auditor;
 mod document_stage;
 mod document_worker;
 mod error;
+mod event_projection;
 mod extract;
 mod provider;
 mod providers;

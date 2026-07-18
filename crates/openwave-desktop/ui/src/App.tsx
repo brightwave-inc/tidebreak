@@ -26,7 +26,10 @@ import {
 import { Logomark } from "./Logomark";
 import { Composer } from "./Composer";
 import { MessageList, type ChatMessage } from "./MessageList";
-import type { ToolCallStatus } from "./ToolCallCard";
+import {
+  toolApprovalPresentation,
+  type ToolCallStatus,
+} from "./ToolCallCard";
 import { hydrateTranscriptHistory } from "./TranscriptHistory";
 import { useChatEventStream } from "./ChatEventStream";
 import { isNearBottom, scrollToLatest } from "./ChatScroll";
@@ -406,6 +409,7 @@ export default function App() {
     }
 
     if (event.type === "approval_required") {
+      const approval = toolApprovalPresentation(event.action);
       provisionalToolCallIdsRef.current.delete(event.call_id);
       setMessages((prev) =>
         updateToolCall(prev, event.call_id, (tool) => ({
@@ -419,7 +423,8 @@ export default function App() {
           id: nextId(),
           role: "approval",
           callId: event.call_id,
-          summary: event.summary,
+          summary: approval.summary,
+          canApprove: approval.canApprove,
         },
       ]);
       return;
@@ -440,7 +445,7 @@ export default function App() {
           status:
             tool.status === "cancelled"
               ? "cancelled"
-              : toolOutputFailed(event.output)
+              : event.status === "failed"
                 ? "failed"
                 : "completed",
         })),
@@ -453,7 +458,7 @@ export default function App() {
       hydratedMessageIdsRef.current.add(event.message_id);
       setMessages((prev) => [
         ...prev,
-        { id: event.message_id, role: "user", text: event.content },
+        { id: event.message_id, role: "user", text: event.text },
       ]);
       return;
     }
@@ -485,7 +490,7 @@ export default function App() {
         {
           id: nextId(),
           role: "error",
-          text: event.error.message,
+          text: "The turn could not be completed.",
         },
       ]);
     }
@@ -1180,11 +1185,6 @@ function discardToolCalls(messages: Msg[], callIds: Set<string>): Msg[] {
   return messages.filter(
     (message) => message.role !== "tool" || !callIds.has(message.callId),
   );
-}
-
-function toolOutputFailed(output: unknown): boolean {
-  if (!output || typeof output !== "object") return false;
-  return (output as { is_error?: unknown }).is_error === true;
 }
 
 function withoutConnectionState(status: string): string {

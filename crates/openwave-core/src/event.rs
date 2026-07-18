@@ -63,6 +63,9 @@ pub enum AgentEvent {
     ApprovalRequired {
         /// The call awaiting a decision.
         call_id: CallId,
+        /// Canonical registered tool identity. Renderer boundaries must map
+        /// this through a closed allowlist rather than serializing it directly.
+        tool_name: String,
         /// The approval class that triggered the prompt.
         class: ApprovalClass,
         /// A short, human-readable summary of what will happen.

@@ -124,22 +124,42 @@ export type SequencedEvent = {
 export type AgentEvent =
   | { type: "turn_started"; turn_id: string }
   | { type: "text_delta"; text: string }
-  | { type: "reasoning_delta"; text: string }
+  | { type: "reasoning_delta" }
   | { type: "stream_interrupted" }
-  | { type: "tool_call_started"; call_id: string; name: string }
-  | { type: "tool_call_args_delta"; call_id: string; fragment: string }
+  | { type: "tool_call_started"; call_id: string; name: RendererToolName }
+  | { type: "tool_call_args_delta"; call_id: string }
   | {
       type: "approval_required";
       call_id: string;
-      class: string;
-      summary: string;
+      action: RendererToolName;
+      class: "read_only" | "workspace" | "sensitive";
     }
   | { type: "approval_decided"; call_id: string; approved: boolean }
-  | { type: "tool_call_completed"; call_id: string; output: unknown }
-  | { type: "turn_completed"; usage: unknown; stop_reason: string }
-  | { type: "turn_failed"; error: { kind: string; message: string } }
-  | { type: "turn_cancelled"; usage: unknown }
-  | { type: "user_steered"; message_id: string; content: string };
+  | {
+      type: "tool_call_completed";
+      call_id: string;
+      status: "completed" | "failed";
+    }
+  | { type: "turn_completed" }
+  | { type: "turn_failed" }
+  | { type: "turn_cancelled" }
+  | { type: "user_steered"; message_id: string; text: string }
+  | { type: "context_truncated" }
+  | { type: "event_omitted" };
+
+export type RendererToolName =
+  | "search"
+  | "web_search"
+  | "read_file"
+  | "list_dir"
+  | "write_file"
+  | "request_folder_access"
+  | "connect_folder"
+  | "list_connected_folders"
+  | "list_folder"
+  | "read_connected_file"
+  | "spawn_sandbox_agent"
+  | "other";
 
 export type FolderAccessHint = "documents" | "downloads";
 

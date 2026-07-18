@@ -21,11 +21,21 @@ export type ToolCallPresentation = {
   statusLabel: string;
 };
 
+export type ToolApprovalPresentation = {
+  summary: string;
+  canApprove: boolean;
+};
+
 // This is deliberately an allowlist rather than a display transformation of a
 // tool name. Tool events come from providers, and a card should never become a
 // side channel for an unexpected tool name, arguments, output, file path, or
 // provider diagnostic.
 const TOOL_PRESENTATIONS: Record<string, ToolPresentation> = {
+  search: {
+    label: "Search documents",
+    active: "Searching documents",
+    complete: "Document search complete",
+  },
   web_search: {
     label: "Search the web",
     active: "Searching the web",
@@ -118,6 +128,22 @@ export function toolCallPresentation(
     label: tool.label,
     statusLabel: statusPresentationResult.label,
     icon: statusPresentationResult.icon,
+  };
+}
+
+export function toolApprovalPresentation(
+  name: string,
+): ToolApprovalPresentation {
+  const tool = TOOL_PRESENTATIONS[name];
+  if (!tool) {
+    return {
+      summary: "The exact action cannot be safely described.",
+      canApprove: false,
+    };
+  }
+  return {
+    summary: `Allow this action: ${tool.label}?`,
+    canApprove: true,
   };
 }
 

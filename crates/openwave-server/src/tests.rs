@@ -27,6 +27,8 @@ use serde::de::DeserializeOwned;
 use tokio::sync::Notify;
 use tower::ServiceExt;
 
+use crate::event_projection::{RendererAgentEvent, RendererSequencedEvent};
+
 mod root_attachment;
 
 /// A provider that answers with a one-line completion and no tool calls.
@@ -8794,13 +8796,14 @@ async fn turn_fails_closed_with_no_provider_configured() {
 /// Sensitive tool that records whether it ran.
 struct SensitiveProbe {
     ran: Arc<std::sync::atomic::AtomicUsize>,
+    name: &'static str,
 }
 
 #[async_trait]
 impl Tool for SensitiveProbe {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "probe".into(),
+            name: self.name.into(),
             description: "sensitive probe".into(),
             input_schema: serde_json::json!({"type": "object"}),
         }
@@ -8821,6 +8824,7 @@ impl Tool for SensitiveProbe {
 /// Provider that asks for `probe` once, then finishes.
 struct ProbeProvider {
     calls: Arc<std::sync::atomic::AtomicUsize>,
+    tool_name: &'static str,
 }
 
 #[async_trait]
@@ -8837,7 +8841,7 @@ impl ModelProvider for ProbeProvider {
                 ProviderEvent::ToolCallStarted {
                     index: 0,
                     id: "call_probe".into(),
-                    name: "probe".into(),
+                    name: self.tool_name.into(),
                 },
                 ProviderEvent::ToolCallArgsDelta {
                     index: 0,
@@ -8873,12 +8877,16 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
         .unwrap(),
     );
     let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let tools = Arc::new(ToolRegistry::new().with(Box::new(SensitiveProbe { ran: ran.clone() })));
+    let tools = Arc::new(ToolRegistry::new().with(Box::new(SensitiveProbe {
+        ran: ran.clone(),
+        name: "search",
+    })));
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
         Arc::new(FixedResolver(Arc::new(ProbeProvider {
             calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            tool_name: "search",
         }))),
         Arc::new(MemSecrets::default()),
         tools,
@@ -8965,6 +8973,115 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
         .await
         .unwrap();
     assert_eq!(again.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approval_endpoint_rejects_unpresentable_sensitive_tool_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tool_name = "third_party_sensitive";
+    let tools = Arc::new(ToolRegistry::new().with(Box::new(SensitiveProbe {
+        ran: ran.clone(),
+        name: tool_name,
+    })));
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(ProbeProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            tool_name,
+        }))),
+        Arc::new(MemSecrets::default()),
+        tools,
+        build_retrieval(
+            Arc::new(HashEmbedder::default()),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        )
+        .0,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "run it").await,
+        StatusCode::ACCEPTED
+    );
+    let call_id = {
+        let mut found = None;
+        for _ in 0..200 {
+            let events = store.list_events(chat.id, 0).await.unwrap();
+            if let Some(id) = events.iter().find_map(|event| match &event.event {
+                AgentEvent::ApprovalRequired { call_id, .. } => Some(*call_id),
+                _ => None,
+            }) {
+                found = Some(id);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        found.expect("turn should park on ApprovalRequired")
+    };
+
+    let approve = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/approvals/{call_id}", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"decision": "approve"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(approve.status(), StatusCode::CONFLICT);
+    let info: AgentErrorInfo = json_body(approve).await;
+    assert_eq!(info.kind, "approval_action_not_presentable");
+    assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let reject = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/approvals/{call_id}", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"decision": "reject"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reject.status(), StatusCode::NO_CONTENT);
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        AgentEvent::ApprovalDecided {
+            approved: false,
+            ..
+        }
+    )));
+    assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -9113,6 +9230,46 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+struct SensitiveEventProvider {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for SensitiveEventProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("provider-secret-id")
+    }
+
+    async fn stream(&self, _request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "provider-secret-call-id".into(),
+                    name: "provider_secret_tool".into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: r#"{"path":"/Users/private/file.txt","secret":"hunter2"}"#.into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ]
+        } else {
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "safe assistant response".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ]
+        };
+        Ok(stream::iter(events).boxed())
+    }
+}
+
 /// Serve a router (with the given provider) over a real loopback socket.
 async fn serve_app_with(
     provider: Arc<dyn ModelProvider>,
@@ -9159,7 +9316,7 @@ async fn read_until_turns_end(
     chat: ChatId,
     after: i64,
     want: usize,
-) -> Vec<SequencedEvent> {
+) -> Vec<RendererSequencedEvent> {
     let mut request = format!("ws://{addr}/chats/{chat}/events?after={after}")
         .into_client_request()
         .unwrap();
@@ -9175,10 +9332,10 @@ async fn read_until_turns_end(
             let WsMessage::Text(text) = frame.unwrap() else {
                 continue;
             };
-            let event: SequencedEvent = serde_json::from_str(text.as_str()).unwrap();
+            let event: RendererSequencedEvent = serde_json::from_str(text.as_str()).unwrap();
             if matches!(
                 event.event,
-                AgentEvent::TurnCompleted { .. } | AgentEvent::TurnFailed { .. }
+                RendererAgentEvent::TurnCompleted | RendererAgentEvent::TurnFailed
             ) {
                 completed += 1;
             }
@@ -9200,15 +9357,118 @@ async fn read_until_turn_end(
     token: &str,
     chat: ChatId,
     after: i64,
-) -> Vec<SequencedEvent> {
+) -> Vec<RendererSequencedEvent> {
     read_until_turns_end(addr, token, chat, after, 1).await
 }
 
-fn decode_ws_event(message: WsMessage) -> SequencedEvent {
+fn decode_ws_event(message: WsMessage) -> RendererSequencedEvent {
     let WsMessage::Text(text) = message else {
         panic!("expected a JSON text event frame");
     };
     serde_json::from_str(text.as_str()).unwrap()
+}
+
+async fn read_raw_until_terminal<S>(socket: &mut S) -> Vec<serde_json::Value>
+where
+    S: futures::Stream<
+            Item = std::result::Result<WsMessage, tokio_tungstenite::tungstenite::Error>,
+        > + Unpin,
+{
+    let mut events = Vec::new();
+    let read = async {
+        while let Some(frame) = socket.next().await {
+            let WsMessage::Text(text) = frame.unwrap() else {
+                continue;
+            };
+            let event: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+            let terminal = matches!(
+                event["event"]["type"].as_str(),
+                Some("turn_completed" | "turn_failed" | "turn_cancelled")
+            );
+            events.push(event);
+            if terminal {
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), read)
+        .await
+        .expect("turn did not terminate over the event socket");
+    events
+}
+
+fn assert_renderer_event_frames_are_redacted(events: &[serde_json::Value]) {
+    let serialized = serde_json::to_string(events).unwrap();
+    for forbidden in [
+        "provider-secret-id",
+        "provider-secret-call-id",
+        "provider_secret_tool",
+        "/Users/private",
+        "file.txt",
+        "hunter2",
+        "fragment",
+        "output",
+        "content",
+        "data",
+        "summary",
+        "usage",
+        "stop_reason",
+        "diagnostic",
+        "lease",
+        "checkpoint",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "event stream leaked {forbidden}"
+        );
+    }
+    assert!(events.iter().any(|event| event["event"]["name"] == "other"));
+    assert!(events.iter().any(|event| {
+        event["event"]["type"] == "tool_call_completed" && event["event"]["status"] == "failed"
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_live_and_replay_frames_use_the_renderer_safe_projection() {
+    let provider = Arc::new(SensitiveEventProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let (addr, token, store, _dir) = serve_app_with(provider).await;
+    let client = reqwest::Client::new();
+    let chat = make_chat_http(&client, addr, &token).await;
+
+    let mut request = format!("ws://{addr}/chats/{}/events?after=0", chat.id)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut live_socket, _) = connect_async(request).await.unwrap();
+
+    send_message_http(&client, addr, &token, chat.id).await;
+    let live = read_raw_until_terminal(&mut live_socket).await;
+    assert_renderer_event_frames_are_redacted(&live);
+
+    wait_for_turn(&store, chat.id).await;
+    let mut replay_request = format!("ws://{addr}/chats/{}/events?after=0", chat.id)
+        .into_client_request()
+        .unwrap();
+    replay_request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut replay_socket, _) = connect_async(replay_request).await.unwrap();
+    let replay = read_raw_until_terminal(&mut replay_socket).await;
+    assert_renderer_event_frames_are_redacted(&replay);
+
+    let live_sequences = live
+        .iter()
+        .map(|event| event["seq"].clone())
+        .collect::<Vec<_>>();
+    let replay_sequences = replay
+        .iter()
+        .map(|event| event["seq"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(replay_sequences, live_sequences);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -9289,7 +9549,10 @@ async fn ws_replays_a_journal_gap_before_accepting_a_later_live_event() {
         recovered.iter().map(|event| event.seq).collect::<Vec<_>>(),
         vec![2, 3]
     );
-    assert_eq!(recovered[0].event, second);
+    assert_eq!(
+        recovered[0].event,
+        RendererAgentEvent::TextDelta { text: "two".into() }
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(100), socket.next())
             .await
@@ -9310,13 +9573,16 @@ async fn ws_replays_a_finished_turn_from_the_journal() {
 
     let events = read_until_turn_end(addr, &token, chat.id, 0).await;
     assert_eq!(events.first().unwrap().seq, 1, "replay starts at seq 1");
-    assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
+    assert!(matches!(
+        events[0].event,
+        RendererAgentEvent::TurnStarted { .. }
+    ));
     assert!(events
         .iter()
-        .any(|e| matches!(&e.event, AgentEvent::TextDelta { text } if text == "hi")));
+        .any(|e| matches!(&e.event, RendererAgentEvent::TextDelta { text } if text == "hi")));
     assert!(matches!(
         events.last().unwrap().event,
-        AgentEvent::TurnCompleted { .. }
+        RendererAgentEvent::TurnCompleted
     ));
     // Sequence numbers are strictly increasing.
     assert!(events.windows(2).all(|w| w[0].seq < w[1].seq));
@@ -9336,10 +9602,13 @@ async fn ws_streams_a_turn_started_after_connecting() {
     send_message_http(&client, addr, &token, chat.id).await;
 
     let events = reader.await.unwrap();
-    assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
+    assert!(matches!(
+        events[0].event,
+        RendererAgentEvent::TurnStarted { .. }
+    ));
     assert!(matches!(
         events.last().unwrap().event,
-        AgentEvent::TurnCompleted { .. }
+        RendererAgentEvent::TurnCompleted
     ));
 }
 
@@ -9380,13 +9649,16 @@ async fn ws_replays_one_turn_then_streams_the_next_live() {
     send_message_http(&client, addr, &token, chat.id).await;
 
     let events = reader.await.unwrap();
-    assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
+    assert!(matches!(
+        events[0].event,
+        RendererAgentEvent::TurnStarted { .. }
+    ));
     assert_eq!(events[0].seq, 1);
     assert!(events.windows(2).all(|w| w[0].seq < w[1].seq));
     assert_eq!(
         events
             .iter()
-            .filter(|e| matches!(e.event, AgentEvent::TurnCompleted { .. }))
+            .filter(|e| matches!(e.event, RendererAgentEvent::TurnCompleted))
             .count(),
         2,
         "both turns completed over one connection"
@@ -9456,8 +9728,8 @@ async fn ws_subprotocol_auth_succeeds() {
             let WsMessage::Text(text) = frame.unwrap() else {
                 continue;
             };
-            let event: SequencedEvent = serde_json::from_str(text.as_str()).unwrap();
-            if matches!(event.event, AgentEvent::TurnCompleted { .. }) {
+            let event: RendererSequencedEvent = serde_json::from_str(text.as_str()).unwrap();
+            if matches!(event.event, RendererAgentEvent::TurnCompleted) {
                 saw_completed = true;
                 break;
             }

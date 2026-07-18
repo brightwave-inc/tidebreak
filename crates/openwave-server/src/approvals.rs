@@ -23,6 +23,7 @@ pub struct ApprovalBroker {
 
 struct Pending {
     chat_id: ChatId,
+    tool_name: String,
     registration_id: uuid::Uuid,
     tx: oneshot::Sender<ApprovalDecision>,
 }
@@ -60,12 +61,22 @@ impl ApprovalBroker {
         decision: ApprovalDecision,
     ) -> Result<(), DecideError> {
         let mut pending = self.pending.lock().unwrap();
-        let entry = pending.remove(&call_id).ok_or(DecideError::NotPending)?;
+        let entry = pending.get(&call_id).ok_or(DecideError::NotPending)?;
         if entry.chat_id != chat_id {
-            // Put it back — wrong chat shouldn't steal another chat's park.
-            pending.insert(call_id, entry);
             return Err(DecideError::WrongChat);
         }
+        if matches!(decision, ApprovalDecision::Approve)
+            && !crate::event_projection::RendererToolName::from(entry.tool_name.as_str())
+                .is_approvable()
+        {
+            // Keep the park intact so the same user can still reject it. The
+            // renderer cannot authorize an action the server cannot describe
+            // through its closed presentation allowlist.
+            return Err(DecideError::NotApprovable);
+        }
+        let entry = pending
+            .remove(&call_id)
+            .expect("pending approval checked above");
         // If the turn already dropped, the send fails; treat as not pending.
         entry
             .tx
@@ -82,6 +93,8 @@ pub enum DecideError {
     NotPending,
     /// The call is parked under a different chat.
     WrongChat,
+    /// The exact pending tool has no closed renderer approval presentation.
+    NotApprovable,
 }
 
 impl ApprovalGate for ApprovalBroker {
@@ -96,6 +109,7 @@ impl ApprovalGate for ApprovalBroker {
                 request.call_id,
                 Pending {
                     chat_id: request.chat_id,
+                    tool_name: request.tool_name,
                     registration_id,
                     tx,
                 },
@@ -137,7 +151,7 @@ mod tests {
             call_id,
             chat_id,
             turn_id: TurnId::new(),
-            tool_name: "shell".into(),
+            tool_name: "search".into(),
             class: ApprovalClass::Sensitive,
             summary: "run shell".into(),
         });
@@ -159,13 +173,48 @@ mod tests {
             call_id,
             chat_id,
             turn_id: TurnId::new(),
-            tool_name: "shell".into(),
+            tool_name: "search".into(),
             class: ApprovalClass::Sensitive,
             summary: "run".into(),
         });
         assert_eq!(
             broker.resolve(other, call_id, ApprovalDecision::Approve),
             Err(DecideError::WrongChat)
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_action_cannot_be_approved_but_can_be_rejected() {
+        let broker = ApprovalBroker::new();
+        let chat_id = ChatId::new();
+        let call_id = CallId::new();
+        let pending = broker.arm(ApprovalRequest {
+            call_id,
+            chat_id,
+            turn_id: TurnId::new(),
+            tool_name: "third_party_sensitive".into(),
+            class: ApprovalClass::Sensitive,
+            summary: "private model summary".into(),
+        });
+
+        assert_eq!(
+            broker.resolve(chat_id, call_id, ApprovalDecision::Approve),
+            Err(DecideError::NotApprovable)
+        );
+        broker
+            .resolve(
+                chat_id,
+                call_id,
+                ApprovalDecision::Reject {
+                    reason: "not allowed".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            pending.await,
+            ApprovalDecision::Reject {
+                reason: "not allowed".into()
+            }
         );
     }
 
@@ -201,7 +250,7 @@ mod tests {
             call_id,
             chat_id,
             turn_id: TurnId::new(),
-            tool_name: "shell".into(),
+            tool_name: "search".into(),
             class: ApprovalClass::Sensitive,
             summary: "run".into(),
         });

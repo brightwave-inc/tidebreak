@@ -22,6 +22,7 @@ export type ChatMessage =
       role: "approval";
       callId: string;
       summary: string;
+      canApprove: boolean;
       resolved?: boolean;
     }
   | { id: string; role: "error"; text: string };
@@ -182,13 +183,15 @@ export function MessageBubble({
         <p>Approval needed: {message.summary}</p>
         {!message.resolved && (
           <div className="approval">
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => onApproval(message.callId, "approve")}
-            >
-              Approve
-            </button>
+            {message.canApprove && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => onApproval(message.callId, "approve")}
+              >
+                Approve
+              </button>
+            )}
             <button
               type="button"
               className="btn"

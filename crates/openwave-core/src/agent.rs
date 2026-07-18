@@ -1422,6 +1422,7 @@ impl Agent {
             });
             events.send(AgentEvent::ApprovalRequired {
                 call_id: call.call_id,
+                tool_name: call.name.clone(),
                 class: ApprovalClass::Sensitive,
                 summary,
             });
