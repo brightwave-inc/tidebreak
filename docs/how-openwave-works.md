@@ -553,6 +553,36 @@ still a flat scan rather than an approximate nearest-neighbor (ANN) index. That
 is an intentional pre-scale baseline, not the final large-corpus performance
 design.
 
+## How grounded sources reach a chat answer
+
+Search results and assistant citations are related, but they are not the same
+record. When the `search` tool completes, OpenWave saves a private, bounded
+snapshot of the passages it returned. Each passage receives a random opaque
+reference that the model may place in its answer. That reference is an internal
+protocol token, not a URL and not Markdown.
+
+Before publishing assistant text, the agent loop removes those internal tokens,
+resolves only references produced by a search from the same chat and turn, and
+commits the clean message and its ordered citations together. The same rule
+applies to an assistant message that precedes another tool call, to a message
+accepted at a steering boundary, and to the final answer. Exact retries reuse
+the same message and citation identities, so an ambiguous database response
+cannot create a second historical answer.
+
+The transcript API exposes a deliberately smaller source card: a bounded
+excerpt, optional heading, and page numbers. It does not expose paths, source
+URIs, document revisions, chunk IDs, search arguments, tool results, or the
+opaque model token. Replacing or deleting the current document does not rewrite
+an older answer's source card because the card comes from the immutable evidence
+snapshot captured when the answer was produced.
+
+During generation, an incremental filter recognizes references even when a
+provider splits them across many streaming events. Valid internal references
+never enter the live or durable renderer event stream; malformed or incomplete
+marker-like prose remains ordinary text. After a terminal event, the desktop
+rehydrates the authoritative transcript and attaches the structured source cards
+to the completed assistant message.
+
 ## The different ways to run OpenWave
 
 ### Desktop
@@ -579,8 +609,9 @@ opaque folder summaries. Projects and chats store only ordered opaque root IDs
 and attachment revisions—never host paths or grants. Built-in agent file tools
 still use a server-derived per-chat private scratch directory and are not yet
 routed through connected roots; that scratch path is neither persisted nor
-returned to the renderer. The UI does not yet provide projects, structured
-citations, or steer controls. Its Documents surface derives scope from the
+returned to the renderer. The UI does not yet provide projects or steer
+controls. Completed assistant messages render the closed structured source cards
+described above. The Documents surface derives scope from the
 authoritative current chat: project chats use that project's corpus and loose
 chats use the unscoped corpus. It lists the catalog, imports a user-picked text
 or Markdown file, polls durable processing status, and searches ready passages.
@@ -588,10 +619,10 @@ Native code reads the selected file and calls the existing local document APIs;
 the renderer sees only bounded titles, lifecycle states, and plain-text search
 passages, never the source path, source bytes, generation identities, index
 metadata, or canonical search records. Connected-folder consent and reads work.
-Agent-approved picker results now reconcile broker registration, exact
-attachment, and the durable product projection before reporting success. The
-manual connect/disconnect controls still need the same convergence path before
-every folder UI action shares one source of truth.
+Agent-approved picker results, manual connect/disconnect, and bounded startup
+recovery all reconcile broker registration, exact attachment, and the durable
+product projection before reporting success. Every folder UI action therefore
+shares the same pathless source of truth.
 
 In the native embedding, canonical document routes require the second
 native-executor credential withheld from the renderer. Headless embeddings keep
@@ -689,21 +720,24 @@ leases and result delivery, and fail-closed provider routing.
 
 The main next steps are:
 
-- extend the connected durable agent-run hierarchy with carefully scoped
-  sandbox-safe capabilities and UI status surfaces;
+- split sandbox delegation into exact non-blocking child admission followed by
+  a durable multi-child wait, so one depth-zero coordinator can fan out bounded
+  parallel work without allowing recursive agents;
+- enforce transactional outstanding-child caps and origin-turn ownership in
+  addition to the existing global/per-chat running caps;
+- extend the resulting durable agent-run hierarchy with carefully scoped
+  sandbox-safe capabilities and small UI status/cancel surfaces;
 - unify client execution, folder consent, user questions, resource waits, and
   child-agent waits with the durable approval pattern as continuations that
   release workers;
 - persist model/tool step boundaries and side-effect receipts so sandbox and
   foreground runs can resume safely after process loss;
-- synchronize manual native connect/disconnect controls into the same pathless
-  project/conversation root projection used by agent-approved folder requests;
 - route built-in file tools through explicit broker roots while keeping private
   per-chat scratch separate;
 - add resumable checkpoints and explicit idempotency policy around remaining
   server-side tool effects;
 - expose the remaining backend capabilities through the desktop information
-  architecture: projects, documents, search, structured citations, and steer;
+  architecture, especially projects and steer controls;
 - add richer parsers and wire indexed search into MCP;
 - build the MCP client and connector surfaces;
 - finish the self-host profile rather than only testing Postgres state logic;
@@ -711,8 +745,8 @@ The main next steps are:
 - bound the agent-to-worker event channel and batch or page journal traffic so
   long, fast turns cannot create unbounded memory or replay work;
 - introduce ANN and maintenance policy when corpus measurements justify it;
-- add frontend typecheck/build coverage, platform CI, readiness/metrics, graceful
-  shutdown, and backup/repair documentation;
+- add platform CI, readiness/metrics, graceful shutdown, and backup/repair
+  documentation;
 - split remaining very large implementation and test modules along stable domain
   boundaries as those boundaries settle;
 - condense the pre-v1 migration history once the model stabilizes.
