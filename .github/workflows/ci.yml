@@ -3,9 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
-  # During active single-maintainer development, PRs run only the change
-  # detector, secret scan, rustfmt, and aggregate gate. The expensive Rust
-  # lanes run on the merged main tip (and on explicit manual dispatch).
+  # During active single-maintainer development, PRs run the change detector,
+  # secret scan, relevant lightweight checks, and aggregate gate. The expensive
+  # Rust lanes run on the merged main tip (and on explicit manual dispatch).
   pull_request:
   workflow_dispatch:
 
@@ -24,33 +24,68 @@ jobs:
     name: change scope
     runs-on: ubuntu-latest
     outputs:
-      rust: ${{ steps.rust.outputs.changed }}
+      rust: ${{ steps.scope.outputs.rust }}
+      ui: ${{ steps.scope.outputs.ui }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Detect changes that require Rust validation
-        id: rust
+      - name: Detect validation scope
+        id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.event.after }}
         run: |
-          if [[ "$EVENT_NAME" != pull_request ]]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
+          full_validation() {
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "ui=true" >> "$GITHUB_OUTPUT"
+          }
+
+          case "$EVENT_NAME" in
+            pull_request)
+              base_sha="$PR_BASE_SHA"
+              head_sha="$PR_HEAD_SHA"
+              diff_range="$base_sha...$head_sha"
+              ;;
+            push)
+              base_sha="$PUSH_BASE_SHA"
+              head_sha="$PUSH_HEAD_SHA"
+              diff_range="$base_sha..$head_sha"
+              ;;
+            workflow_dispatch)
+              full_validation
+              exit 0
+              ;;
+            *)
+              echo "unknown event $EVENT_NAME; requiring full validation" >&2
+              full_validation
+              exit 0
+              ;;
+          esac
+
+          if [[ -z "$base_sha" || -z "$head_sha" || "$base_sha" =~ ^0+$ || "$head_sha" =~ ^0+$ ]]; then
+            echo "missing comparison range; requiring full validation" >&2
+            full_validation
             exit 0
           fi
 
-          changed=false
-          git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" \
+          rust=false
+          ui=false
+          git diff --no-renames --name-only -z "$diff_range" \
             > "$RUNNER_TEMP/changed-files"
           while IFS= read -r -d '' file; do
             case "$file" in
               *.md|docs/*|assets/*|LICENSE|NOTICE) ;;
-              *) changed=true; break ;;
+              .github/workflows/ci.yml) rust=true; ui=true ;;
+              crates/openwave-desktop/ui/*) ui=true ;;
+              *) rust=true ;;
             esac
           done < "$RUNNER_TEMP/changed-files"
-          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "ui=$ui" >> "$GITHUB_OUTPUT"
 
   secrets:
     name: secret scan (gitleaks)
@@ -303,10 +338,36 @@ jobs:
           cargo test -p openwave-core --no-default-features --features postgres
           --test postgres_turn_state --locked
 
+  ui:
+    name: desktop UI test · build
+    needs: changes
+    if: ${{ needs.changes.outputs.ui == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: crates/openwave-desktop/ui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Test UI
+        run: pnpm test
+      - name: Build UI
+        run: pnpm build
+
   rust:
     name: fmt · clippy · build · test
     if: ${{ always() }}
-    needs: [changes, fmt, lint, build, desktop, test, postgres]
+    needs: [changes, fmt, lint, build, desktop, test, postgres, ui]
     runs-on: ubuntu-latest
     steps:
       - name: Require every Rust lane
@@ -317,11 +378,22 @@ jobs:
           DESKTOP_RESULT: ${{ needs.desktop.result }}
           TEST_RESULT: ${{ needs.test.result }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
+          UI_RESULT: ${{ needs.ui.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUST_CHANGED: ${{ needs.changes.outputs.rust }}
+          UI_CHANGED: ${{ needs.changes.outputs.ui }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           test "$CHANGES_RESULT" = success
+          case "$UI_CHANGED" in
+            true) test "$UI_RESULT" = success ;;
+            false) test "$UI_RESULT" = skipped ;;
+            *)
+              echo "invalid UI change detector output: $UI_CHANGED" >&2
+              exit 1
+              ;;
+          esac
+
           case "$RUST_CHANGED" in
             true)
               test "$FMT_RESULT" = success
