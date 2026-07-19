@@ -522,11 +522,13 @@ pub(in crate::db) async fn get_chat_transcript(
         return Ok(None);
     }
     let messages = list_messages_on(&transaction, chat_id).await?;
+    let citations = super::citation::list_snapshots_on(&transaction, chat_id).await?;
     let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id).await?;
     let last_event_seq = terminal_event_cursor_on(&transaction, chat_id).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(ChatTranscriptSnapshot {
         messages,
+        citations,
         tool_activity,
         last_event_seq,
     }))

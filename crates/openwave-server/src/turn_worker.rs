@@ -166,7 +166,8 @@ enum ResolutionState {
 
 enum TerminalIdentity<'a> {
     Completed {
-        output_message_id: MessageId,
+        output: &'a openwave_core::Message,
+        citations: &'a [openwave_core::AssistantCitationReference],
         event: &'a AgentEvent,
     },
     Failed {
@@ -198,9 +199,7 @@ impl TerminalIdentity<'_> {
 
     fn matches_turn(&self, turn: &TurnRun) -> bool {
         match self {
-            Self::Completed {
-                output_message_id, ..
-            } => turn.output_message_id == Some(*output_message_id),
+            Self::Completed { output, .. } => turn.output_message_id == Some(output.id),
             Self::Failed { code, detail, .. } => {
                 turn.last_error_code.as_deref() == Some(*code)
                     && turn.last_error_detail.as_deref() == Some(*detail)
@@ -649,6 +648,7 @@ impl TurnWorker {
             match drive_result {
                 Ok(AgentTurnOutcome::Completed {
                     output,
+                    citations,
                     usage,
                     stop_reason,
                     steer_revision,
@@ -724,12 +724,13 @@ impl TurnWorker {
                     let continue_after_steer = loop {
                         match self
                             .store
-                            .complete_turn_run_and_append_event(
+                            .complete_turn_run_with_citations_and_append_event(
                                 turn.id,
                                 lease_token,
                                 expected_steer_revision,
                                 Utc::now(),
                                 &output,
+                                &citations,
                                 total_usage,
                                 stop_reason,
                             )
@@ -772,7 +773,8 @@ impl TurnWorker {
                                         &turn,
                                         lease_token,
                                         TerminalIdentity::Completed {
-                                            output_message_id: output.id,
+                                            output: &output,
+                                            citations: &citations,
                                             event: &terminal_event,
                                         },
                                     )
@@ -1528,15 +1530,34 @@ impl TurnWorker {
                         if !terminal.matches_turn(&current) {
                             return ResolutionState::Lost;
                         }
-                        return match self
-                            .store
-                            .recover_exact_turn_terminal_event(
-                                turn.id,
-                                lease_token,
-                                terminal.event(),
-                            )
-                            .await
-                        {
+                        let recovered = match &terminal {
+                            TerminalIdentity::Completed {
+                                output,
+                                citations,
+                                event,
+                            } => {
+                                self.store
+                                    .recover_exact_completed_turn_event(
+                                        turn.id,
+                                        lease_token,
+                                        output,
+                                        citations,
+                                        event,
+                                    )
+                                    .await
+                            }
+                            TerminalIdentity::Failed { .. }
+                            | TerminalIdentity::Cancelled { .. } => {
+                                self.store
+                                    .recover_exact_turn_terminal_event(
+                                        turn.id,
+                                        lease_token,
+                                        terminal.event(),
+                                    )
+                                    .await
+                            }
+                        };
+                        return match recovered {
                             Ok(Some(event)) => ResolutionState::Resolved(event),
                             Ok(None) => ResolutionState::Lost,
                             Err(error) => {

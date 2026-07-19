@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    ApprovalClass, Result, RetrievalEvidenceInput, RetrievalEvidenceSource, Tool, ToolCtx,
-    ToolOutput, ToolSpec,
+    format_source_reference, ApprovalClass, AssistantCitationReference, Result,
+    RetrievalEvidenceInput, RetrievalEvidenceSource, Tool, ToolCtx, ToolOutput, ToolSpec,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -77,12 +77,19 @@ fn parse_args<T: for<'de> Deserialize<'de>>(args: Value) -> std::result::Result<
 }
 
 /// Render citations into a compact, model-readable listing.
-fn render(citations: &[Citation]) -> String {
+fn render(citations: &[Citation], source_tokens: &[uuid::Uuid]) -> String {
+    debug_assert_eq!(citations.len(), source_tokens.len());
     let plural = if citations.len() == 1 { "" } else { "s" };
-    let mut out = format!("Found {} passage{plural}:", citations.len());
+    let mut out = format!(
+        "Found {} passage{plural}. To cite a passage, copy its opaque source reference exactly into the answer:",
+        citations.len()
+    );
     for (i, c) in citations.iter().enumerate() {
+        let reference = format_source_reference(AssistantCitationReference {
+            source_token: source_tokens[i],
+        });
         out.push_str(&format!(
-            "\n\n{}. [score {:.3}] document {} (bytes {}..{}){}{}\n{}",
+            "\n\n{}. Source reference: {reference}\n[score {:.3}] document {} (bytes {}..{}){}{}\n{}",
             i + 1,
             c.score,
             c.document_id,
@@ -204,12 +211,17 @@ impl Tool for SearchTool {
         if citations.is_empty() {
             return Ok(ToolOutput::text("No matching passages found."));
         }
+        let mut source_tokens = citations
+            .iter()
+            .map(|_| uuid::Uuid::new_v4())
+            .collect::<Vec<_>>();
         let content = loop {
-            let content = render(&citations);
+            let content = render(&citations, &source_tokens);
             if content.len() <= openwave_core::ToolCallRecord::MAX_RESULT_BYTES {
                 break content;
             }
             citations.pop();
+            source_tokens.pop();
             if citations.is_empty() {
                 return Ok(ToolOutput::error(
                     "search results exceed the tool result budget",
@@ -227,6 +239,7 @@ impl Tool for SearchTool {
                 };
                 Ok(RetrievalEvidenceInput {
                     rank: u16::try_from(index + 1).expect("search result limit fits u16"),
+                    source_token: source_tokens[index],
                     document_id: citation.document_id,
                     generation,
                     chunk_id: citation.chunk_id,
@@ -460,7 +473,7 @@ mod tests {
             score: 0.5,
         });
 
-        let output = render(std::slice::from_ref(&citation));
+        let output = render(std::slice::from_ref(&citation), &[uuid::Uuid::new_v4()]);
 
         assert!(output.contains("Section: Guide > Setup"));
         assert!(output.ends_with("body"));
@@ -485,7 +498,7 @@ mod tests {
             generation: None,
             score: 0.5,
         });
-        assert!(render(&[single]).contains("\nPage: 7\nbody"));
+        assert!(render(&[single], &[uuid::Uuid::new_v4()]).contains("\nPage: 7\nbody"));
 
         let mut multi = Chunk::new(document_id, 0, ByteSpan::new(0, 4), "body");
         multi.source_regions = vec![page(0, 2, 7), page(2, 4, 8)];
@@ -495,7 +508,7 @@ mod tests {
             generation: None,
             score: 0.5,
         });
-        assert!(render(&[multi]).contains("\nPages: 7, 8\nbody"));
+        assert!(render(&[multi], &[uuid::Uuid::new_v4()]).contains("\nPages: 7, 8\nbody"));
     }
 
     #[test]
@@ -507,7 +520,7 @@ mod tests {
             score: 0.5,
         });
 
-        let output = render(&[citation]);
+        let output = render(&[citation], &[uuid::Uuid::new_v4()]);
 
         assert!(!output.contains("Section:"));
         assert!(output.ends_with("body"));
@@ -540,6 +553,11 @@ mod tests {
         assert_eq!(out.private_evidence.len(), 1);
         assert!(out.private_evidence[0].snippet.contains("Jupiter"));
         assert_eq!(out.private_evidence[0].rank, 1);
+        assert!(out
+            .content
+            .contains(&format_source_reference(AssistantCitationReference {
+                source_token: out.private_evidence[0].source_token,
+            })));
         assert_eq!(out.private_evidence[0].generation.content_revision, 1);
     }
 

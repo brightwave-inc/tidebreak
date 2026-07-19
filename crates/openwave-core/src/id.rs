@@ -69,6 +69,25 @@ id_type!(
     ChunkId
 );
 
+id_type!(
+    /// Opaque renderer identity for one assistant-message citation.
+    AssistantCitationId
+);
+
+impl AssistantCitationId {
+    const NAMESPACE: Uuid = Uuid::from_u128(0x2b74_9531_8d6e_4e11_a80b_8f50_413e_927c);
+
+    /// Derive one stable citation identity from its message and one-based ordinal.
+    #[must_use]
+    pub fn derive(message_id: MessageId, ordinal: u16) -> Self {
+        let message_namespace = Uuid::new_v5(&Self::NAMESPACE, message_id.as_uuid().as_bytes());
+        Self(Uuid::new_v5(
+            &message_namespace,
+            ordinal.to_string().as_bytes(),
+        ))
+    }
+}
+
 impl ChunkId {
     const NAMESPACE: Uuid = Uuid::from_u128(0x9f8d_2c31_5b47_4e6a_a1c2_d3e4_f506_1728);
 

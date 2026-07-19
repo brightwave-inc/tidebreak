@@ -672,6 +672,8 @@ pub enum RetrievalEvidenceSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalEvidenceInput {
     pub rank: u16,
+    /// Random opaque identity shown to the model instead of database keys.
+    pub source_token: Uuid,
     pub document_id: DocumentId,
     pub generation: DocumentGeneration,
     pub chunk_id: ChunkId,

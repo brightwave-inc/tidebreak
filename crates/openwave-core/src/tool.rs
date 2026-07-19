@@ -310,6 +310,7 @@ mod tests {
         let output =
             ToolOutput::text("ok").with_private_evidence(vec![crate::RetrievalEvidenceInput {
                 rank: 1,
+                source_token: uuid::Uuid::new_v4(),
                 document_id,
                 generation: crate::DocumentGeneration {
                     content_revision: 1,

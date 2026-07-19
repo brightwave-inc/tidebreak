@@ -470,10 +470,16 @@ fn validate_evidence_request(
     {
         return Err(AgentError::Store("invalid retrieval evidence owner".into()));
     }
+    let mut source_tokens = std::collections::HashSet::with_capacity(evidence.len());
     for (index, item) in evidence.iter().enumerate() {
         let expected_rank = u16::try_from(index + 1)
             .map_err(|_| AgentError::Store("retrieval evidence rank exhausted".into()))?;
         validate_evidence_item(item, expected_rank)?;
+        if !source_tokens.insert(item.source_token) {
+            return Err(AgentError::Store(
+                "retrieval evidence source tokens must be unique".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -494,6 +500,7 @@ fn validate_evidence_item(item: &RetrievalEvidenceInput, expected_rank: u16) -> 
     if item.rank != expected_rank
         || item.rank == 0
         || usize::from(item.rank) > RetrievalEvidenceInput::MAX_RESULTS
+        || item.source_token.is_nil()
         || item.generation.content_revision < 1
         || item.generation.revision_token.is_nil()
         || item.span.is_empty()
@@ -572,6 +579,7 @@ where
             Ok(entities::retrieval_evidence::ActiveModel {
                 call_id: Set(call.id),
                 rank: Set(i32::from(item.rank)),
+                source_token: Set(item.source_token),
                 chat_id: Set(call.chat_id),
                 turn_id: Set(call.turn_id),
                 document_id: Set(item.document_id.0),
@@ -599,7 +607,9 @@ where
     Ok(())
 }
 
-fn evidence_from_model(model: entities::retrieval_evidence::Model) -> Result<RetrievalEvidence> {
+pub(in crate::db) fn evidence_from_model(
+    model: entities::retrieval_evidence::Model,
+) -> Result<RetrievalEvidence> {
     let span_start = usize::try_from(model.span_start)
         .map_err(|_| AgentError::Store("invalid stored evidence span".into()))?;
     let span_end = usize::try_from(model.span_end)
@@ -610,6 +620,7 @@ fn evidence_from_model(model: entities::retrieval_evidence::Model) -> Result<Ret
     let evidence = RetrievalEvidenceInput {
         rank: u16::try_from(model.rank)
             .map_err(|_| AgentError::Store("invalid stored evidence rank".into()))?,
+        source_token: model.source_token,
         document_id: model.document_id.into(),
         generation: crate::DocumentGeneration {
             content_revision: model.content_revision,

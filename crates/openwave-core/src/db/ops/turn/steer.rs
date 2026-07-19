@@ -129,6 +129,7 @@ pub(in crate::db) async fn accept_turn_steer(
         status: Set(TurnSteerStatus::Pending.as_str().into()),
         applied_lease_token: Set(None),
         message_id: Set(None),
+        preceding_assistant_message_id: Set(None),
         created_at: Set(now),
         resolved_at: Set(None),
     }
@@ -241,6 +242,7 @@ pub(in crate::db) async fn list_pending_turn_steers(
         .map(Some)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn apply_turn_steer(
     store: &DbStore,
     turn_id: TurnId,
@@ -248,6 +250,7 @@ pub(in crate::db) async fn apply_turn_steer(
     steer_id: TurnSteerId,
     attempt_event_ordinal: i32,
     preceding_assistant: Option<&crate::model::Message>,
+    preceding_citations: &[crate::AssistantCitationReference],
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<JournaledTurnSteerOutcome>> {
     if turn_id.0.is_nil() || lease_token.is_nil() || steer_id.0.is_nil() {
@@ -258,6 +261,13 @@ pub(in crate::db) async fn apply_turn_steer(
     if !(1..i32::MAX).contains(&attempt_event_ordinal) {
         return Err(AgentError::Store(
             "steer event ordinal must be positive and below the terminal slot".into(),
+        ));
+    }
+    if let Some(message) = preceding_assistant {
+        super::super::citation::validate_assistant_message(message, preceding_citations)?;
+    } else if !preceding_citations.is_empty() {
+        return Err(AgentError::Store(
+            "preceding citations require an assistant message".into(),
         ));
     }
     let now = canonical_db_timestamp(now)?;
@@ -291,9 +301,39 @@ pub(in crate::db) async fn apply_turn_steer(
     if status == TurnSteerStatus::Applied {
         let exact = steer.turn_id == turn_id.0 && steer.applied_lease_token == Some(lease_token);
         let outcome = if exact {
+            if steer.preceding_assistant_message_id
+                != preceding_assistant.map(|message| message.id.0)
+            {
+                return Err(AgentError::Store(format!(
+                    "applied turn steer {steer_id} has different preceding assistant presence"
+                )));
+            }
             ensure_exact_applied_message_on(&transaction, &steer).await?;
             if let Some(preceding) = preceding_assistant {
                 ensure_exact_preceding_message_on(&transaction, &steer, preceding).await?;
+                let expected = super::super::citation::resolve_references_on(
+                    &transaction,
+                    preceding.chat_id,
+                    preceding.turn_id,
+                    preceding_citations,
+                )
+                .await?
+                .into_iter()
+                .map(|evidence| crate::AssistantCitationReference {
+                    source_token: evidence.source_token,
+                })
+                .collect::<Vec<_>>();
+                let stored = super::super::citation::exact_references_for_message_on(
+                    &transaction,
+                    preceding.id,
+                )
+                .await?;
+                if stored != expected {
+                    return Err(AgentError::Store(format!(
+                        "applied turn steer {} has different preceding citations",
+                        TurnSteerId(steer.id)
+                    )));
+                }
             }
             let event =
                 exact_applied_event_on(&transaction, &steer, lease_token, attempt_event_ordinal)
@@ -391,6 +431,14 @@ pub(in crate::db) async fn apply_turn_steer(
             transaction.rollback().await.map_err(store_err)?;
             return Err(store_err(error));
         }
+        let evidence = super::super::citation::resolve_references_on(
+            &transaction,
+            preceding.chat_id,
+            preceding.turn_id,
+            preceding_citations,
+        )
+        .await?;
+        super::super::citation::insert_for_message_on(&transaction, preceding, &evidence).await?;
     }
 
     if !transfer_steer_message_identity_on(
@@ -434,6 +482,10 @@ pub(in crate::db) async fn apply_turn_steer(
             sea_orm::sea_query::Expr::value(Some(steer.id)),
         )
         .col_expr(
+            entities::turn_steer::Column::PrecedingAssistantMessageId,
+            sea_orm::sea_query::Expr::value(preceding_assistant.map(|message| message.id.0)),
+        )
+        .col_expr(
             entities::turn_steer::Column::ResolvedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
@@ -441,6 +493,7 @@ pub(in crate::db) async fn apply_turn_steer(
         .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
         .filter(entities::turn_steer::Column::AppliedLeaseToken.is_null())
         .filter(entities::turn_steer::Column::MessageId.is_null())
+        .filter(entities::turn_steer::Column::PrecedingAssistantMessageId.is_null())
         .filter(entities::turn_steer::Column::ResolvedAt.is_null())
         .exec(&transaction)
         .await

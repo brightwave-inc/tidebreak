@@ -6,20 +6,184 @@ use chrono::{Duration, Utc};
 use openwave_core::{
     AcceptAgentRunOutcome, AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
     AgentEvent, AgentRunExecution, AgentRunId, AgentRunStatus, ApplyTurnSteerOutcome,
-    BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome, CallId, Chat, ChatId,
-    ChatRootAttachment, ClaimClientToolCallOutcome, ClientToolCallRequest, CompleteTurnRunOutcome,
-    DbStore, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    AssistantCitationReference, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome,
+    ByteSpan, CallId, Chat, ChatId, ChatRootAttachment, ChunkId, ClaimClientToolCallOutcome,
+    ClientToolCallRequest, CompleteTurnRunOutcome, DbStore, DocumentGeneration, DocumentId,
+    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
     ParkTurnForClientCallOutcome, Project, ProjectId, RecordTurnFailureOutcome,
     RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome,
-    Role, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentChangeTerminal,
-    RootAttachmentOrigin, StopReason, Store, SubmitAgentRunResultOutcome, ToolCallExecution,
-    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry,
-    TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
+    RetrievalEvidenceInput, RetrievalEvidenceSource, Role, RootAttachmentChangeAction,
+    RootAttachmentChangeId, RootAttachmentChangeTerminal, RootAttachmentOrigin, StopReason, Store,
+    SubmitAgentRunResultOutcome, ToolCallExecution, ToolCallRecord, ToolCallResolution,
+    ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId,
+    TurnSteerStatus, Usage,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement, TransactionTrait};
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let nanosecond_created_at =
+        chrono::DateTime::<Utc>::from_timestamp(1_810_000_000, 123_456_789).unwrap();
+    let standalone = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        role: Role::Assistant,
+        content: "standalone".into(),
+        created_at: nanosecond_created_at,
+    };
+    store
+        .append_assistant_message_with_citations(&standalone, &[])
+        .await
+        .unwrap();
+    store
+        .append_assistant_message_with_citations(&standalone, &[])
+        .await
+        .unwrap();
+    let turn_id = TurnId::new();
+    assert!(matches!(
+        store
+            .accept_turn(turn_id, chat.id, "gpt-5", "cite")
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::Accepted(_)
+    ));
+    let claimed_at = utc_now_at_postgres_precision();
+    let lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(lease, claimed_at, claimed_at + Duration::minutes(1))
+        .await
+        .unwrap();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id,
+        provider_id: "pg_search".into(),
+        name: "search".into(),
+        arguments: serde_json::json!({"query": "fact"}),
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: claimed_at,
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    let document_id = DocumentId::new();
+    let span = ByteSpan::new(0, 4);
+    let source_token = uuid::Uuid::new_v4();
+    store
+        .resolve_server_tool_call_with_evidence(
+            call.id,
+            &ToolCallResolution::Completed {
+                result: "fact".into(),
+            },
+            claimed_at + Duration::milliseconds(1),
+            &[RetrievalEvidenceInput {
+                rank: 1,
+                source_token,
+                document_id,
+                generation: DocumentGeneration {
+                    content_revision: 1,
+                    revision_token: uuid::Uuid::new_v4(),
+                },
+                chunk_id: ChunkId::derive(document_id, span.start, span.end),
+                span,
+                snippet: "fact".into(),
+                heading_path: Vec::new(),
+                source_regions: Vec::new(),
+                source: RetrievalEvidenceSource::Inline,
+            }],
+        )
+        .await
+        .unwrap();
+    let completed_at = utc_now_at_postgres_precision();
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "answer".into(),
+        created_at: completed_at,
+    };
+    let citation = AssistantCitationReference { source_token };
+    assert!(matches!(
+        store
+            .complete_turn_run_with_citations_and_append_event(
+                turn_id,
+                lease,
+                0,
+                completed_at,
+                &output,
+                &[citation],
+                Usage::default(),
+                StopReason::EndTurn,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        CompleteTurnRunOutcome::Completed(_)
+    ));
+    assert!(matches!(
+        store
+            .complete_turn_run_with_citations_and_append_event(
+                turn_id,
+                lease,
+                0,
+                utc_now_at_postgres_precision(),
+                &output,
+                &[citation],
+                Usage::default(),
+                StopReason::EndTurn,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        CompleteTurnRunOutcome::Existing(_)
+    ));
+    assert!(store
+        .complete_turn_run_with_citations_and_append_event(
+            turn_id,
+            lease,
+            0,
+            utc_now_at_postgres_precision(),
+            &output,
+            &[],
+            Usage::default(),
+            StopReason::EndTurn,
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .get_chat_transcript(chat.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .citations
+            .len(),
+        1
+    );
+}
 
 fn utc_now_at_postgres_precision() -> chrono::DateTime<Utc> {
     chrono::DateTime::<Utc>::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap()
@@ -1235,6 +1399,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             steer_id,
             1,
             Some(&preceding),
+            &[],
             Utc::now(),
         )
         .await
@@ -1305,6 +1470,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             second_steer_id,
             2,
             None,
+            &[],
             Utc::now(),
         )
         .await
@@ -1340,6 +1506,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             steer_id,
             1,
             Some(&preceding),
+            &[],
             Utc::now(),
         )
         .await

@@ -16,6 +16,7 @@ fn pending_turn_steer(
         status: Set(TurnSteerStatus::Pending.as_str().into()),
         applied_lease_token: Set(None),
         message_id: Set(None),
+        preceding_assistant_message_id: Set(None),
         created_at: Set(now),
         resolved_at: Set(None),
     }
@@ -214,6 +215,54 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         None
     );
 
+    let source_token = uuid::Uuid::new_v4();
+    let search_call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: turn.id,
+        provider_id: "search_for_steer".into(),
+        name: "search".into(),
+        arguments: serde_json::json!({"query": "candidate"}),
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: Utc::now(),
+        resolved_at: None,
+    };
+    store.accept_tool_call(&search_call).await.unwrap();
+    let document_id = DocumentId::new();
+    let span = ByteSpan::new(0, 8);
+    let evidence = RetrievalEvidenceInput {
+        rank: 1,
+        source_token,
+        document_id,
+        generation: DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+        },
+        chunk_id: ChunkId::derive(document_id, span.start, span.end),
+        span,
+        snippet: "evidence".into(),
+        heading_path: vec!["Section".into()],
+        source_regions: Vec::new(),
+        source: RetrievalEvidenceSource::Inline,
+    };
+    store
+        .resolve_server_tool_call_with_evidence(
+            search_call.id,
+            &ToolCallResolution::Completed {
+                result: "search result".into(),
+            },
+            Utc::now(),
+            &[evidence],
+        )
+        .await
+        .unwrap();
+    let citation = crate::AssistantCitationReference { source_token };
     let candidate = Message {
         id: MessageId::new(),
         chat_id: chat.id,
@@ -230,6 +279,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
             steer_id,
             1,
             Some(&candidate),
+            &[citation],
             apply_at,
         )
         .await
@@ -250,6 +300,9 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     assert_eq!(applied.status, TurnSteerStatus::Applied);
     assert_eq!(applied.applied_lease_token, Some(lease_token));
     assert_eq!(applied.message_id, Some(MessageId(steer_id.0)));
+    let transcript = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+    assert_eq!(transcript.citations.len(), 1);
+    assert_eq!(transcript.citations[0].message_id, candidate.id);
     assert_eq!(
         applied.resolved_at,
         Some(DateTime::<Utc>::from_timestamp_micros(apply_at.timestamp_micros()).unwrap())
@@ -316,6 +369,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
             steer_id,
             1,
             Some(&candidate),
+            &[citation],
             Utc::now(),
         )
         .await
@@ -326,8 +380,26 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         ApplyTurnSteerOutcome::Existing(_)
     ));
     assert_eq!(recovered.event, applied_event);
+    assert!(store
+        .apply_turn_steer(
+            turn.id,
+            lease_token,
+            steer_id,
+            1,
+            Some(&candidate),
+            &[crate::AssistantCitationReference {
+                source_token: uuid::Uuid::nil(),
+            }],
+            Utc::now(),
+        )
+        .await
+        .is_err());
+    assert!(store
+        .apply_turn_steer(turn.id, lease_token, steer_id, 1, None, &[], Utc::now(),)
+        .await
+        .is_err());
     let second = store
-        .apply_turn_steer(turn.id, lease_token, second_id, 2, None, Utc::now())
+        .apply_turn_steer(turn.id, lease_token, second_id, 2, None, &[], Utc::now())
         .await
         .unwrap()
         .unwrap();
@@ -384,11 +456,61 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     };
     assert!(matches!(
         store
-            .complete_turn_run(turn.id, lease_token, 2, fresh_completed_at, &fresh_output)
+            .complete_turn_run_with_citations_and_append_event(
+                turn.id,
+                lease_token,
+                2,
+                fresh_completed_at,
+                &fresh_output,
+                &[citation],
+                Usage::default(),
+                StopReason::EndTurn,
+            )
             .await
             .unwrap(),
-        Some(CompleteTurnRunOutcome::Completed(_))
+        Some(JournaledTurnOutcome {
+            outcome: CompleteTurnRunOutcome::Completed(_),
+            terminal_event: Some(_),
+        })
     ));
+    assert!(matches!(
+        store
+            .complete_turn_run_with_citations_and_append_event(
+                turn.id,
+                lease_token,
+                2,
+                Utc::now(),
+                &fresh_output,
+                &[citation],
+                Usage::default(),
+                StopReason::EndTurn,
+            )
+            .await
+            .unwrap(),
+        Some(JournaledTurnOutcome {
+            outcome: CompleteTurnRunOutcome::Existing(_),
+            terminal_event: Some(_),
+        })
+    ));
+    assert!(store
+        .complete_turn_run_with_citations_and_append_event(
+            turn.id,
+            lease_token,
+            2,
+            Utc::now(),
+            &fresh_output,
+            &[],
+            Usage::default(),
+            StopReason::EndTurn,
+        )
+        .await
+        .is_err());
+    let transcript = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+    assert_eq!(transcript.citations.len(), 2);
+    assert!(transcript
+        .citations
+        .iter()
+        .any(|citation| citation.message_id == fresh_output.id));
     assert!(matches!(
         store
             .accept_turn_steer(
@@ -604,19 +726,19 @@ async fn turn_steer_application_enforces_fifo_and_message_sequence_on_timestamp_
     let applied_at = Utc::now();
     assert_eq!(
         store
-            .apply_turn_steer(turn.id, lease, high_id, 1, None, applied_at)
+            .apply_turn_steer(turn.id, lease, high_id, 1, None, &[], applied_at)
             .await
             .unwrap(),
         None
     );
     let low = store
-        .apply_turn_steer(turn.id, lease, low_id, 1, None, applied_at)
+        .apply_turn_steer(turn.id, lease, low_id, 1, None, &[], applied_at)
         .await
         .unwrap()
         .unwrap();
     assert!(matches!(low.outcome, ApplyTurnSteerOutcome::Applied(_)));
     let high = store
-        .apply_turn_steer(turn.id, lease, high_id, 2, None, applied_at)
+        .apply_turn_steer(turn.id, lease, high_id, 2, None, &[], applied_at)
         .await
         .unwrap()
         .unwrap();
@@ -681,7 +803,7 @@ async fn concurrent_apply_and_completion_leave_no_pending_steer() {
     let apply = tokio::spawn(async move {
         apply_barrier.wait().await;
         apply_store
-            .apply_turn_steer(turn.id, lease_token, steer_id, 1, None, Utc::now())
+            .apply_turn_steer(turn.id, lease_token, steer_id, 1, None, &[], Utc::now())
             .await
             .unwrap()
     });
@@ -882,7 +1004,7 @@ async fn concurrent_message_and_steer_reserve_one_shared_identity() {
         AcceptTurnSteerOutcome::Accepted(_) => {
             assert!(message.is_err());
             let applied = store
-                .apply_turn_steer(steer_turn.id, lease, shared_id, 1, None, Utc::now())
+                .apply_turn_steer(steer_turn.id, lease, shared_id, 1, None, &[], Utc::now())
                 .await
                 .unwrap()
                 .unwrap();
@@ -1193,7 +1315,7 @@ async fn failed_steer_message_insert_rolls_back_the_application_receipt() {
     .await
     .unwrap();
     assert!(store
-        .apply_turn_steer(turn.id, lease, steer_id, 1, None, Utc::now())
+        .apply_turn_steer(turn.id, lease, steer_id, 1, None, &[], Utc::now())
         .await
         .is_err());
     let pending = existing_steer(
@@ -1247,7 +1369,7 @@ async fn failed_steer_event_insert_rolls_back_message_receipt_and_revision() {
         .unwrap();
 
     assert!(store
-        .apply_turn_steer(turn.id, lease, steer_id, 1, None, Utc::now())
+        .apply_turn_steer(turn.id, lease, steer_id, 1, None, &[], Utc::now())
         .await
         .is_err());
 

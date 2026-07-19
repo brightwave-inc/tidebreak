@@ -3,8 +3,8 @@ use crate::model::{
     ByteSpan, ChatRootAttachment, DocumentParseOutput, DocumentSourceBlob, DocumentSourceUpsert,
     RetrievalEvidenceInput, RetrievalEvidenceSource, RootAttachmentChangeAction,
     RootAttachmentChangeFailure, RootAttachmentChangeTerminal, RootAttachmentOrigin,
-    SourceLocation, ToolCallExecution, ToolCallResolution, ToolCallStatus, MAX_ATTACHMENT_REVISION,
-    MAX_ROOT_ATTACHMENTS,
+    SourceLocation, SourceRegion, ToolCallExecution, ToolCallResolution, ToolCallStatus,
+    MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::ApplyTurnSteerOutcome;
 use crate::{ApprovalClass, ChunkId, ToolApprovalStatus};
@@ -5991,7 +5991,15 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     let first_steer_at = Utc::now();
     assert!(matches!(
         store
-            .apply_turn_steer(turn_id, turn_lease, stale_steer_id, 1, None, first_steer_at,)
+            .apply_turn_steer(
+                turn_id,
+                turn_lease,
+                stale_steer_id,
+                1,
+                None,
+                &[],
+                first_steer_at,
+            )
             .await
             .unwrap()
             .unwrap()
@@ -6056,6 +6064,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
                 pending_steer_id,
                 2,
                 None,
+                &[],
                 second_steer_at,
             )
             .await
@@ -9547,6 +9556,7 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     let span = ByteSpan::new(0, source.canonical_text.len());
     let evidence = RetrievalEvidenceInput {
         rank: 1,
+        source_token: uuid::Uuid::new_v4(),
         document_id: source.id,
         generation: document.generation(),
         chunk_id: ChunkId::derive(source.id, span.start, span.end),
@@ -9593,6 +9603,152 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     assert_eq!(stored[0].turn_id, call.turn_id);
     assert_eq!(stored[0].evidence, evidence);
 
+    let second_call = ToolCallRecord {
+        id: CallId::new(),
+        provider_id: "search_2".into(),
+        created_at: updated_at + chrono::Duration::milliseconds(1),
+        ..call.clone()
+    };
+    store.accept_tool_call(&second_call).await.unwrap();
+    let private_tail = "PRIVATE_RENDERER_TAIL";
+    let long_snippet = format!("{}{private_tail}", "x".repeat(700));
+    let long_span = ByteSpan::new(0, long_snippet.len());
+    let second_evidence = RetrievalEvidenceInput {
+        source_token: uuid::Uuid::new_v4(),
+        chunk_id: ChunkId::derive(source.id, long_span.start, long_span.end),
+        span: long_span,
+        snippet: long_snippet,
+        heading_path: vec!["H".repeat(200)],
+        source_regions: (0..9)
+            .map(|index| SourceRegion {
+                span: ByteSpan::new(index, index + 1),
+                location: SourceLocation::Page {
+                    number: std::num::NonZeroU32::new(
+                        u32::try_from(index + 1).expect("test page fits u32"),
+                    )
+                    .unwrap(),
+                },
+            })
+            .collect(),
+        ..evidence.clone()
+    };
+    store
+        .resolve_server_tool_call_with_evidence(
+            second_call.id,
+            &resolution,
+            resolved_at,
+            std::slice::from_ref(&second_evidence),
+        )
+        .await
+        .unwrap();
+
+    let assistant = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id: call.turn_id,
+        role: Role::Assistant,
+        content: "Grounded answer".into(),
+        created_at: resolved_at + chrono::Duration::seconds(1),
+    };
+    let reference = crate::AssistantCitationReference {
+        source_token: evidence.source_token,
+    };
+    let second_reference = crate::AssistantCitationReference {
+        source_token: second_evidence.source_token,
+    };
+    let unknown_reference = crate::AssistantCitationReference {
+        source_token: uuid::Uuid::new_v4(),
+    };
+    store
+        .append_assistant_message_with_citations(
+            &assistant,
+            &[unknown_reference, second_reference, reference],
+        )
+        .await
+        .unwrap();
+    store
+        .append_assistant_message_with_citations(
+            &assistant,
+            &[unknown_reference, second_reference, reference],
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .append_assistant_message_with_citations(&assistant, &[reference, second_reference])
+        .await
+        .is_err());
+    assert!(store
+        .append_assistant_message_with_citations(
+            &Message {
+                content: "different".into(),
+                ..assistant.clone()
+            },
+            &[second_reference, reference],
+        )
+        .await
+        .is_err());
+    let snapshot = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+    assert_eq!(snapshot.citations.len(), 2);
+    assert_eq!(snapshot.citations[0].message_id, assistant.id);
+    assert_eq!(snapshot.citations[0].ordinal, 1);
+    assert_eq!(snapshot.citations[1].ordinal, 2);
+    assert_eq!(snapshot.citations[0].excerpt.chars().count(), 600);
+    assert!(!snapshot.citations[0].excerpt.contains(private_tail));
+    assert_eq!(
+        snapshot.citations[0]
+            .heading
+            .as_ref()
+            .unwrap()
+            .chars()
+            .count(),
+        160
+    );
+    assert_eq!(snapshot.citations[0].pages, [1, 2, 3, 4, 5, 6, 7, 8]);
+
+    let other_chat = sample_chat();
+    store.create_chat(&other_chat).await.unwrap();
+    let cross_chat = Message {
+        id: MessageId::new(),
+        chat_id: other_chat.id,
+        turn_id: call.turn_id,
+        role: Role::Assistant,
+        content: "cross chat".into(),
+        created_at: assistant.created_at,
+    };
+    store
+        .append_assistant_message_with_citations(&cross_chat, &[reference])
+        .await
+        .unwrap();
+    assert!(store
+        .get_chat_transcript(other_chat.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .citations
+        .is_empty());
+    let cross_turn = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        role: Role::Assistant,
+        content: "cross turn".into(),
+        created_at: assistant.created_at,
+    };
+    store
+        .append_assistant_message_with_citations(&cross_turn, &[reference])
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_chat_transcript(chat.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .citations
+            .len(),
+        2
+    );
+
     let mut conflicting = evidence.clone();
     conflicting.generation.revision_token = uuid::Uuid::new_v4();
     assert_eq!(
@@ -9627,6 +9783,17 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
         store.list_retrieval_evidence(call.id).await.unwrap(),
         stored
     );
+    let historical = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+    assert_eq!(historical.citations, snapshot.citations);
+    assert_eq!(
+        store.delete_chat(chat.id).await.unwrap(),
+        DeleteChatOutcome::Deleted
+    );
+    assert!(entities::assistant_citation::Entity::find()
+        .all(&store.conn)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -9656,6 +9823,7 @@ async fn invalid_retrieval_identity_rolls_back_tool_completion() {
     let document_id = DocumentId::new();
     let invalid = RetrievalEvidenceInput {
         rank: 1,
+        source_token: uuid::Uuid::new_v4(),
         document_id,
         generation: DocumentGeneration {
             content_revision: 1,
@@ -9692,6 +9860,7 @@ async fn invalid_retrieval_identity_rolls_back_tool_completion() {
     let oversized_span = ByteSpan::new(0, oversized_snippet.len());
     let oversized = RetrievalEvidenceInput {
         rank: 1,
+        source_token: uuid::Uuid::new_v4(),
         document_id,
         generation: DocumentGeneration {
             content_revision: 1,
@@ -9716,6 +9885,7 @@ async fn invalid_retrieval_identity_rolls_back_tool_completion() {
     let nul_span = ByteSpan::new(0, 4);
     let nul = RetrievalEvidenceInput {
         rank: 1,
+        source_token: uuid::Uuid::new_v4(),
         document_id,
         generation: DocumentGeneration {
             content_revision: 1,
@@ -9742,6 +9912,7 @@ async fn invalid_retrieval_identity_rolls_back_tool_completion() {
         let span = ByteSpan::new(start, start + 4);
         let outside_storage_range = RetrievalEvidenceInput {
             rank: 1,
+            source_token: uuid::Uuid::new_v4(),
             document_id,
             generation: DocumentGeneration {
                 content_revision: 1,

@@ -1885,6 +1885,7 @@ impl MigrationTrait for Init {
             .eq(TurnSteerStatus::Pending.as_str())
             .and(Expr::col(TurnSteer::AppliedLeaseToken).is_null())
             .and(Expr::col(TurnSteer::MessageId).is_null())
+            .and(Expr::col(TurnSteer::PrecedingAssistantMessageId).is_null())
             .and(Expr::col(TurnSteer::ResolvedAt).is_null());
         let applied_steer = Expr::col(TurnSteer::Status)
             .eq(TurnSteerStatus::Applied.as_str())
@@ -1895,6 +1896,7 @@ impl MigrationTrait for Init {
             .eq(TurnSteerStatus::Rejected.as_str())
             .and(Expr::col(TurnSteer::AppliedLeaseToken).is_null())
             .and(Expr::col(TurnSteer::MessageId).is_null())
+            .and(Expr::col(TurnSteer::PrecedingAssistantMessageId).is_null())
             .and(Expr::col(TurnSteer::ResolvedAt).is_not_null());
         manager
             .create_table(
@@ -1924,6 +1926,7 @@ impl MigrationTrait for Init {
                     )
                     .col(ColumnDef::new(TurnSteer::AppliedLeaseToken).uuid())
                     .col(ColumnDef::new(TurnSteer::MessageId).uuid())
+                    .col(ColumnDef::new(TurnSteer::PrecedingAssistantMessageId).uuid())
                     .col(
                         ColumnDef::new(TurnSteer::CreatedAt)
                             .timestamp_with_time_zone()
@@ -1940,6 +1943,19 @@ impl MigrationTrait for Init {
                             .to_col(TurnRun::ChatId)
                             .to_col(TurnRun::Id)
                             .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_turn_steer_preceding_assistant")
+                            .from_tbl(TurnSteer::Table)
+                            .from_col(TurnSteer::PrecedingAssistantMessageId)
+                            .from_col(TurnSteer::ChatId)
+                            .from_col(TurnSteer::TurnId)
+                            .to_tbl(Message::Table)
+                            .to_col(Message::Id)
+                            .to_col(Message::ChatId)
+                            .to_col(Message::TurnId)
+                            .on_delete(ForeignKeyAction::Restrict),
                     )
                     .foreign_key(
                         ForeignKey::create()
@@ -2669,6 +2685,11 @@ async fn create_retrieval_evidence_table(manager: &SchemaManager<'_>) -> Result<
                 .table(RetrievalEvidence::Table)
                 .col(ColumnDef::new(RetrievalEvidence::CallId).uuid().not_null())
                 .col(ColumnDef::new(RetrievalEvidence::Rank).integer().not_null())
+                .col(
+                    ColumnDef::new(RetrievalEvidence::SourceToken)
+                        .uuid()
+                        .not_null(),
+                )
                 .col(ColumnDef::new(RetrievalEvidence::ChatId).uuid().not_null())
                 .col(ColumnDef::new(RetrievalEvidence::TurnId).uuid().not_null())
                 .col(
@@ -2751,6 +2772,126 @@ async fn create_retrieval_evidence_table(manager: &SchemaManager<'_>) -> Result<
                             .eq("inline")
                             .and(Expr::col(RetrievalEvidence::SourceUri).is_null())),
                 )
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_retrieval_evidence_source_token")
+                .table(RetrievalEvidence::Table)
+                .col(RetrievalEvidence::SourceToken)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_retrieval_evidence_exact_owner")
+                .table(RetrievalEvidence::Table)
+                .col(RetrievalEvidence::CallId)
+                .col(RetrievalEvidence::Rank)
+                .col(RetrievalEvidence::ChatId)
+                .col(RetrievalEvidence::TurnId)
+                .unique()
+                .to_owned(),
+        )
+        .await
+}
+
+async fn create_assistant_citation_table(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .create_table(
+            Table::create()
+                .table(AssistantCitation::Table)
+                .col(
+                    ColumnDef::new(AssistantCitation::Id)
+                        .uuid()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(AssistantCitation::MessageId)
+                        .uuid()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AssistantCitation::Ordinal)
+                        .integer()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(AssistantCitation::ChatId).uuid().not_null())
+                .col(ColumnDef::new(AssistantCitation::TurnId).uuid().not_null())
+                .col(
+                    ColumnDef::new(AssistantCitation::EvidenceCallId)
+                        .uuid()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AssistantCitation::EvidenceRank)
+                        .integer()
+                        .not_null(),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_assistant_citation_message")
+                        .from_tbl(AssistantCitation::Table)
+                        .from_col(AssistantCitation::MessageId)
+                        .from_col(AssistantCitation::ChatId)
+                        .from_col(AssistantCitation::TurnId)
+                        .to_tbl(Message::Table)
+                        .to_col(Message::Id)
+                        .to_col(Message::ChatId)
+                        .to_col(Message::TurnId)
+                        .on_delete(ForeignKeyAction::Cascade),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_assistant_citation_evidence")
+                        .from_tbl(AssistantCitation::Table)
+                        .from_col(AssistantCitation::EvidenceCallId)
+                        .from_col(AssistantCitation::EvidenceRank)
+                        .from_col(AssistantCitation::ChatId)
+                        .from_col(AssistantCitation::TurnId)
+                        .to_tbl(RetrievalEvidence::Table)
+                        .to_col(RetrievalEvidence::CallId)
+                        .to_col(RetrievalEvidence::Rank)
+                        .to_col(RetrievalEvidence::ChatId)
+                        .to_col(RetrievalEvidence::TurnId)
+                        .on_delete(ForeignKeyAction::Cascade),
+                )
+                .check(
+                    Expr::col(AssistantCitation::Ordinal)
+                        .between(1, crate::MAX_ASSISTANT_CITATIONS as i32),
+                )
+                .check(
+                    Expr::col(AssistantCitation::EvidenceRank)
+                        .between(1, crate::RetrievalEvidenceInput::MAX_RESULTS as i32),
+                )
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_assistant_citation_message_ordinal")
+                .table(AssistantCitation::Table)
+                .col(AssistantCitation::MessageId)
+                .col(AssistantCitation::Ordinal)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_assistant_citation_message_evidence")
+                .table(AssistantCitation::Table)
+                .col(AssistantCitation::MessageId)
+                .col(AssistantCitation::EvidenceCallId)
+                .col(AssistantCitation::EvidenceRank)
+                .unique()
                 .to_owned(),
         )
         .await
@@ -3019,6 +3160,7 @@ impl MigrationTrait for AddToolCalls {
             .await?;
 
         create_retrieval_evidence_table(manager).await?;
+        create_assistant_citation_table(manager).await?;
 
         manager
             .create_table(
@@ -3177,6 +3319,9 @@ impl MigrationTrait for AddToolCalls {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(AssistantCitation::Table).to_owned())
+            .await?;
         manager
             .drop_table(Table::drop().table(RetrievalEvidence::Table).to_owned())
             .await?;
@@ -4000,6 +4145,7 @@ enum RetrievalEvidence {
     Table,
     CallId,
     Rank,
+    SourceToken,
     ChatId,
     TurnId,
     DocumentId,
@@ -4013,6 +4159,18 @@ enum RetrievalEvidence {
     SourceRegions,
     SourceKind,
     SourceUri,
+}
+
+#[derive(DeriveIden)]
+enum AssistantCitation {
+    Table,
+    Id,
+    MessageId,
+    Ordinal,
+    ChatId,
+    TurnId,
+    EvidenceCallId,
+    EvidenceRank,
 }
 
 #[derive(DeriveIden)]
@@ -4350,6 +4508,7 @@ enum TurnSteer {
     Status,
     AppliedLeaseToken,
     MessageId,
+    PrecedingAssistantMessageId,
     CreatedAt,
     ResolvedAt,
 }
