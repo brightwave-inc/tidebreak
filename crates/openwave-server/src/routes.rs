@@ -1076,6 +1076,7 @@ pub async fn post_cancel(
 
 /// Body of `POST /chats/{id}/approvals/{call_id}`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApprovalBody {
     /// `approve` or `reject`.
     pub decision: ApprovalChoice,
@@ -1092,6 +1093,67 @@ pub enum ApprovalChoice {
     Reject,
 }
 
+/// Bounded query for restart/reconnect approval recovery.
+#[derive(Debug, Deserialize)]
+pub(crate) struct PendingApprovalsQuery {
+    #[serde(default = "default_pending_approvals_limit")]
+    pub limit: u64,
+}
+
+fn default_pending_approvals_limit() -> u64 {
+    50
+}
+
+/// Closed renderer-safe pending approval projection. Canonical arguments,
+/// model-authored summaries, and unknown tool names never cross this boundary.
+#[derive(Debug, Serialize)]
+pub(crate) struct PendingApprovalSnapshot {
+    pub call_id: CallId,
+    pub turn_id: TurnId,
+    pub action: crate::event_projection::RendererToolName,
+    pub approval: openwave_core::ToolApprovalKind,
+    pub class: openwave_core::ApprovalClass,
+    pub can_approve: bool,
+}
+
+/// `GET /chats/{id}/approvals` — recover a bounded page of pending cards.
+pub(crate) async fn list_pending_approvals(
+    State(state): State<AppState>,
+    Path(chat_id): Path<ChatId>,
+    Query(query): Query<PendingApprovalsQuery>,
+) -> Result<Json<Vec<PendingApprovalSnapshot>>, ServerError> {
+    if !(1..=100).contains(&query.limit) {
+        return Err(ServerError::bad_request(
+            "approval limit must be between 1 and 100",
+        ));
+    }
+    if state.store.get_chat(chat_id).await?.is_none() {
+        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
+    }
+    let approvals = state
+        .store
+        .list_pending_tool_call_approvals(chat_id, query.limit)
+        .await?;
+    Ok(Json(
+        approvals
+            .into_iter()
+            .map(|approval| {
+                let action =
+                    crate::event_projection::RendererToolName::from(approval.tool_name.as_str());
+                let kind = approval.kind;
+                PendingApprovalSnapshot {
+                    call_id: approval.call_id,
+                    turn_id: approval.turn_id,
+                    action,
+                    approval: kind,
+                    class: approval.class,
+                    can_approve: kind.is_approvable(),
+                }
+            })
+            .collect(),
+    ))
+}
+
 /// `POST /chats/{id}/approvals/{call_id}` — decide a parked Sensitive tool call.
 ///
 /// `204` on success. `404` if the chat or call isn't pending. The turn stays
@@ -1106,26 +1168,48 @@ pub async fn post_approval(
         return Err(ServerError::not_found(format!("chat {chat_id} not found")));
     }
     let decision = match body.decision {
-        ApprovalChoice::Approve => ApprovalDecision::Approve,
+        ApprovalChoice::Approve => {
+            if body.reason.is_some() {
+                return Err(ServerError::bad_request(
+                    "approval reason is only valid when rejecting",
+                ));
+            }
+            ApprovalDecision::Approve
+        }
         ApprovalChoice::Reject => ApprovalDecision::Reject {
             reason: body
                 .reason
-                .filter(|r| !r.is_empty())
+                .map(|reason| reason.trim().to_owned())
+                .filter(|reason| !reason.is_empty())
                 .unwrap_or_else(|| "user denied approval".into()),
         },
     };
-    match state.approvals.resolve(chat_id, call_id, decision) {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(crate::approvals::DecideError::NotPending) => Err(ServerError::not_found(format!(
-            "no pending approval for call {call_id}"
-        ))),
-        Err(crate::approvals::DecideError::WrongChat) => Err(ServerError::not_found(format!(
-            "no pending approval for call {call_id}"
-        ))),
-        Err(crate::approvals::DecideError::NotApprovable) => Err(ServerError::conflict_kind(
+    if decision
+        .reason()
+        .is_some_and(|reason| !openwave_core::ToolApproval::valid_reason(reason))
+    {
+        return Err(ServerError::bad_request(
+            "approval reject reason is invalid",
+        ));
+    }
+    match state.approvals.resolve(chat_id, call_id, decision).await? {
+        crate::approvals::ResolveApprovalOutcome::Resolved => Ok(StatusCode::NO_CONTENT),
+        crate::approvals::ResolveApprovalOutcome::NotPending => Err(ServerError::not_found(
+            format!("no pending approval for call {call_id}"),
+        )),
+        crate::approvals::ResolveApprovalOutcome::WrongChat => Err(ServerError::not_found(
+            format!("no pending approval for call {call_id}"),
+        )),
+        crate::approvals::ResolveApprovalOutcome::NotApprovable => Err(ServerError::conflict_kind(
             "approval_action_not_presentable",
             "this action cannot be approved from the renderer",
         )),
+        crate::approvals::ResolveApprovalOutcome::DecisionConflict => {
+            Err(ServerError::conflict_kind(
+                "approval_already_decided",
+                "this approval was already decided differently",
+            ))
+        }
     }
 }
 

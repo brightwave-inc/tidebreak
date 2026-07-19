@@ -42,11 +42,12 @@ describe("ToolCallCard", () => {
   });
 
   it("allows approval only for a fixed action description", () => {
-    expect(toolApprovalPresentation("web_search")).toEqual({
-      summary: "Allow this action: Search the web?",
+    expect(toolApprovalPresentation("search_may_share_query_and_excerpts")).toEqual({
+      summary:
+        "Allow search to send your query and potentially matching document excerpts to configured AI services outside OpenWave?",
       canApprove: true,
     });
-    expect(toolApprovalPresentation("mcp__private__upload")).toEqual({
+    expect(toolApprovalPresentation("unsupported")).toEqual({
       summary: "The exact action cannot be safely described.",
       canApprove: false,
     });

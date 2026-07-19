@@ -108,6 +108,7 @@ async fn drain_committed_events(
             ClaimedAgentEvent::Committed { event, .. } => {
                 let _ = events.sender(chat_id).send(event);
             }
+            ClaimedAgentEvent::Recovered { .. } => {}
             ClaimedAgentEvent::Flush(acknowledge) => {
                 let _ = acknowledge.send(());
             }
@@ -555,6 +556,17 @@ impl TurnWorker {
                                     )));
                                 }
                                 self.publish(turn.chat_id, event);
+                                ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                                    AgentError::msg(format!("turn {} event ordinal exhausted", turn.id))
+                                })?;
+                            }
+                            Some(ClaimedAgentEvent::Recovered { ordinal: event_ordinal, event: _ }) => {
+                                if event_ordinal != ordinal {
+                                    return Err(AgentError::msg(format!(
+                                        "turn {} recovered event ordinal {event_ordinal}, expected {ordinal}",
+                                        turn.id
+                                    )));
+                                }
                                 ordinal = ordinal.checked_add(1).ok_or_else(|| {
                                     AgentError::msg(format!("turn {} event ordinal exhausted", turn.id))
                                 })?;

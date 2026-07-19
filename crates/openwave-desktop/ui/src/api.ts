@@ -132,6 +132,7 @@ export type AgentEvent =
       type: "approval_required";
       call_id: string;
       action: RendererToolName;
+      approval: RendererApprovalKind;
       class: "read_only" | "workspace" | "sensitive";
     }
   | { type: "approval_decided"; call_id: string; approved: boolean }
@@ -160,6 +161,20 @@ export type RendererToolName =
   | "read_connected_file"
   | "spawn_sandbox_agent"
   | "other";
+
+export type RendererApprovalKind =
+  | "search_may_share_query_and_excerpts"
+  | "unsupported";
+
+/** A strict renderer-safe snapshot used to recover a parked approval. */
+export type PendingToolApproval = {
+  callId: string;
+  turnId: string;
+  action: RendererToolName;
+  approval: RendererApprovalKind;
+  class: "read_only" | "workspace" | "sensitive";
+  canApprove: boolean;
+};
 
 export type FolderAccessHint = "documents" | "downloads";
 
@@ -370,6 +385,33 @@ export class ApiClient {
     });
   }
 
+  async listPendingApprovals(chatId: string): Promise<PendingToolApproval[]> {
+    const body = await this.json<unknown>(`/chats/${chatId}/approvals`, {
+      headers: this.headers(),
+    });
+    if (!Array.isArray(body)) {
+      throw new Error("pending approval response is not an array");
+    }
+
+    const approvals = new Map<string, PendingToolApproval>();
+    let turnId: string | null = null;
+    for (const item of body) {
+      const approval = parsePendingToolApproval(item);
+      if (!approval) {
+        throw new Error("pending approval response contains an invalid item");
+      }
+      if (approvals.has(approval.callId)) {
+        throw new Error("pending approval response contains a duplicate call");
+      }
+      if (turnId !== null && turnId !== approval.turnId) {
+        throw new Error("pending approval response spans multiple turns");
+      }
+      turnId = approval.turnId;
+      approvals.set(approval.callId, approval);
+    }
+    return [...approvals.values()];
+  }
+
   async listPendingFolderAccessRequests(
     chatId: string,
   ): Promise<PendingFolderAccessRequest[]> {
@@ -445,6 +487,68 @@ export function parseFolderAccessRequest(
     folderHint,
     claimedByDesktop: value.claimed,
   };
+}
+
+export function parsePendingToolApproval(
+  value: unknown,
+): PendingToolApproval | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value);
+  if (
+    keys.some(
+      (key) =>
+        key !== "call_id" &&
+        key !== "turn_id" &&
+        key !== "action" &&
+        key !== "approval" &&
+        key !== "class" &&
+        key !== "can_approve",
+    ) ||
+    typeof value.call_id !== "string" ||
+    value.call_id.length === 0 ||
+    typeof value.turn_id !== "string" ||
+    value.turn_id.length === 0 ||
+    !isRendererToolName(value.action) ||
+    !isRendererApprovalKind(value.approval) ||
+    (value.class !== "read_only" &&
+      value.class !== "workspace" &&
+      value.class !== "sensitive") ||
+    typeof value.can_approve !== "boolean" ||
+    value.can_approve !== (value.approval === "search_may_share_query_and_excerpts")
+  ) {
+    return null;
+  }
+  return {
+    callId: value.call_id,
+    turnId: value.turn_id,
+    action: value.action,
+    approval: value.approval,
+    class: value.class,
+    canApprove: value.can_approve,
+  };
+}
+
+function isRendererToolName(value: unknown): value is RendererToolName {
+  return (
+    value === "search" ||
+    value === "web_search" ||
+    value === "read_file" ||
+    value === "list_dir" ||
+    value === "write_file" ||
+    value === "request_folder_access" ||
+    value === "connect_folder" ||
+    value === "list_connected_folders" ||
+    value === "list_folder" ||
+    value === "read_connected_file" ||
+    value === "spawn_sandbox_agent" ||
+    value === "other"
+  );
+}
+
+function isRendererApprovalKind(value: unknown): value is RendererApprovalKind {
+  return (
+    value === "search_may_share_query_and_excerpts" || value === "unsupported"
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

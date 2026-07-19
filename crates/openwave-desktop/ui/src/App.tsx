@@ -34,6 +34,11 @@ import { hydrateTranscriptHistory } from "./TranscriptHistory";
 import { useChatEventStream } from "./ChatEventStream";
 import { isNearBottom, scrollToLatest } from "./ChatScroll";
 import { DocumentsView } from "./DocumentsView";
+import {
+  reconcilePendingApprovalCards,
+  upsertPendingApprovalCard,
+} from "./ApprovalHistory";
+import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 
 type Msg = ChatMessage;
 
@@ -153,13 +158,19 @@ export default function App() {
   useEffect(() => {
     if (!client || !chat) return;
     let cancelled = false;
+    const selection = chatSelectionRef.current;
     setHydratedChatId(null);
     setMessages([]);
     hydratedMessageIdsRef.current = new Set();
     (async () => {
       try {
-        const transcript = await client.listChatMessages(chat.id);
-        if (cancelled) return;
+        const hydration = await loadChatApprovalHydration(
+          client,
+          chat.id,
+          () => !cancelled && selection === chatSelectionRef.current,
+        );
+        if (!hydration) return;
+        const { transcript, pendingApprovals } = hydration;
         lastSeqRef.current = transcript.last_event_seq;
         const hydrated = hydrateTranscriptHistory(
           transcript.messages,
@@ -170,26 +181,31 @@ export default function App() {
             .filter((entry) => entry.kind === "message")
             .map((entry) => entry.id),
         );
-        setMessages(
-          hydrated.map((entry) =>
-            entry.kind === "tool"
-              ? {
-                  id: entry.id,
-                  role: "tool",
-                  callId: entry.id,
-                  name: entry.name,
-                  status: entry.status,
-                }
-              : {
-                  id: entry.id,
-                  role: entry.role,
-                  text: entry.text,
-                },
-          ),
+        const transcriptMessages: Msg[] = hydrated.map((entry) =>
+          entry.kind === "tool"
+            ? {
+                id: entry.id,
+                role: "tool",
+                callId: entry.id,
+                name: entry.name,
+                status: entry.status,
+              }
+            : {
+                id: entry.id,
+                role: entry.role,
+                text: entry.text,
+              },
         );
+        setMessages(
+          reconcilePendingApprovalCards(transcriptMessages, pendingApprovals),
+        );
+        const pendingTurnId = pendingApprovals[0]?.turnId ?? null;
+        setActiveTurnId(pendingTurnId);
+        setBusy(pendingTurnId !== null);
         setHydratedChatId(chat.id);
       } catch (err) {
-        if (!cancelled) {
+        if (!cancelled && selection === chatSelectionRef.current) {
+          setBusy(true);
           setMessages([
             {
               id: nextId(),
@@ -197,7 +213,6 @@ export default function App() {
               text: `Could not load this conversation: ${String(err)}`,
             },
           ]);
-          setHydratedChatId(chat.id);
         }
       }
     })();
@@ -411,24 +426,16 @@ export default function App() {
     }
 
     if (event.type === "approval_required") {
-      const approval = toolApprovalPresentation(event.action);
+      const approval = toolApprovalPresentation(event.approval);
       provisionalToolCallIdsRef.current.delete(event.call_id);
       setMessages((prev) =>
-        updateToolCall(prev, event.call_id, (tool) => ({
-          ...tool,
-          status: "waiting_approval",
-        })),
-      );
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextId(),
-          role: "approval",
+        upsertPendingApprovalCard(prev, {
           callId: event.call_id,
-          summary: approval.summary,
+          action: event.action,
+          approval: event.approval,
           canApprove: approval.canApprove,
-        },
-      ]);
+        }),
+      );
       return;
     }
 

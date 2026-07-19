@@ -5,7 +5,9 @@
 //! provider diagnostics. WebSocket clients receive this deliberately closed
 //! projection instead.
 
-use openwave_core::{AgentEvent, ApprovalClass, CallId, MessageId, SequencedEvent, TurnId};
+use openwave_core::{
+    AgentEvent, ApprovalClass, CallId, MessageId, SequencedEvent, ToolApprovalKind, TurnId,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,6 +39,7 @@ pub(crate) enum RendererAgentEvent {
     ApprovalRequired {
         call_id: CallId,
         action: RendererToolName,
+        approval: ToolApprovalKind,
         class: ApprovalClass,
     },
     ApprovalDecided {
@@ -107,16 +110,6 @@ impl From<&str> for RendererToolName {
     }
 }
 
-impl RendererToolName {
-    /// Whether the renderer has a fixed, server-owned description that is
-    /// sufficient to present this action for an approval decision. This list
-    /// is intentionally narrower than the general tool-card allowlist: adding
-    /// a new Sensitive tool requires an explicit review of its approval copy.
-    pub(crate) const fn is_approvable(self) -> bool {
-        matches!(self, Self::Search)
-    }
-}
-
 impl From<&SequencedEvent> for RendererSequencedEvent {
     fn from(value: &SequencedEvent) -> Self {
         let event = match &value.event {
@@ -137,10 +130,12 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 call_id,
                 tool_name,
                 class,
+                kind,
                 ..
             } => RendererAgentEvent::ApprovalRequired {
                 call_id: *call_id,
                 action: tool_name.as_str().into(),
+                approval: *kind,
                 class: *class,
             },
             AgentEvent::ApprovalDecided { call_id, approved } => {
@@ -205,6 +200,7 @@ mod tests {
                 call_id,
                 tool_name: "provider_tool_with_secret".into(),
                 class: ApprovalClass::Sensitive,
+                kind: ToolApprovalKind::Unsupported,
                 summary: "upload /Users/private/document.txt".into(),
             },
             AgentEvent::ToolCallCompleted {
@@ -300,5 +296,23 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn search_approval_projects_frozen_egress_kind_without_private_payload() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 7,
+            event: AgentEvent::ApprovalRequired {
+                call_id: CallId::new(),
+                tool_name: "search".into(),
+                class: ApprovalClass::Sensitive,
+                kind: ToolApprovalKind::SearchMayShareQueryAndExcerpts,
+                summary: "private query and document title".into(),
+            },
+        });
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(json.contains("search_may_share_query_and_excerpts"));
+        assert!(!json.contains("private query"));
+        assert!(!json.contains("document title"));
     }
 }

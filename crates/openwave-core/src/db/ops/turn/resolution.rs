@@ -518,6 +518,9 @@ async fn record_turn_run_failure_inner(
     } else {
         TurnRunStatus::Failed
     };
+    if result_status == TurnRunStatus::Failed {
+        super::super::approval::close_pending_for_terminal_turn_on(&transaction, id, now).await?;
+    }
     let receipt = entities::turn_failure::ActiveModel {
         lease_token: Set(lease_token),
         turn_id: Set(id.0),

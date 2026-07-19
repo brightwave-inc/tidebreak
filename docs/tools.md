@@ -145,6 +145,14 @@ Network tools are sensitive. Approval, allowed outbound domains, credential
 injection, cancellation, and timeouts are enforced outside the model-supplied
 arguments.
 
+Sensitive server-tool approvals are durable. OpenWave commits the approval
+request and its journal event atomically, freezes a renderer-safe approval kind,
+and uses exact idempotent decisions. A reclaimed turn resumes persisted pending
+calls before requesting another model step, so restart recovery cannot silently
+skip an approval or execute a call under a newly relaxed tool policy. Search
+consent tells the user that the query and potentially matching document excerpts
+may leave OpenWave for the configured AI service.
+
 ## Reliability rules
 
 Every new tool should answer these questions before it is registered:

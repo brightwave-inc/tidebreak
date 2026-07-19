@@ -132,18 +132,18 @@ export function toolCallPresentation(
 }
 
 export function toolApprovalPresentation(
-  name: string,
+  kind: string,
 ): ToolApprovalPresentation {
-  const tool = TOOL_PRESENTATIONS[name];
-  if (!tool) {
+  if (kind === "search_may_share_query_and_excerpts") {
     return {
-      summary: "The exact action cannot be safely described.",
-      canApprove: false,
+      summary:
+        "Allow search to send your query and potentially matching document excerpts to configured AI services outside OpenWave?",
+      canApprove: true,
     };
   }
   return {
-    summary: `Allow this action: ${tool.label}?`,
-    canApprove: true,
+    summary: "The exact action cannot be safely described.",
+    canApprove: false,
   };
 }
 

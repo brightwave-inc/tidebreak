@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::approval::{ApprovalDecision, ApprovalRequest, ToolApproval};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{
@@ -448,6 +449,40 @@ pub enum AcceptToolCallOutcome {
     Existing(ToolCallRecord),
     /// The call identity already names different immutable request bytes.
     IdentityConflict,
+}
+
+/// Result of registering one exact durable approval request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestToolApprovalOutcome {
+    /// This call entered the pending approval state.
+    Requested(ToolApproval),
+    /// An exact retry recovered the same pending or decided request.
+    Existing(ToolApproval),
+    /// The call exists but its canonical identity differs from the request.
+    IdentityConflict,
+    /// The call is missing, terminal, or not a server-executed call.
+    Unavailable,
+}
+
+/// Approval registration plus its exact atomically committed required event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JournaledToolApprovalOutcome {
+    pub outcome: RequestToolApprovalOutcome,
+    /// Present only for a new commit or an exact retry of the same claim slot.
+    pub required_event: Option<SequencedEvent>,
+}
+
+/// Result of deciding one exact durable approval request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecideToolApprovalOutcome {
+    /// This request transitioned from pending to the supplied decision.
+    Decided(ToolApproval),
+    /// An exact retry recovered the same decision bytes.
+    Existing(ToolApproval),
+    /// The request was already decided differently.
+    DecisionConflict,
+    /// No pending or decided approval exists under this chat and call identity.
+    Unavailable,
 }
 
 /// A client claim and its secret per-claim fencing receipt.
@@ -1762,6 +1797,62 @@ pub trait Store: Send + Sync {
 
     /// Accept immutable canonical tool-call identity and arguments exactly once.
     async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome>;
+
+    /// Register a Sensitive server tool call for durable human review.
+    async fn request_tool_call_approval(
+        &self,
+        _request: &ApprovalRequest,
+        _requested_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<RequestToolApprovalOutcome> {
+        Err(AgentError::Store(
+            "durable tool approval storage is not implemented by this Store".into(),
+        ))
+    }
+
+    /// Register an approval and append `ApprovalRequired` in one claimed-turn
+    /// transaction. Exact retries recover the same event sequence.
+    async fn request_tool_call_approval_and_append_event(
+        &self,
+        _request: &ApprovalRequest,
+        _lease_token: uuid::Uuid,
+        _event_ordinal: i32,
+        _requested_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<JournaledToolApprovalOutcome> {
+        Err(AgentError::Store(
+            "journaled durable tool approval storage is not implemented by this Store".into(),
+        ))
+    }
+
+    /// Decide a previously registered approval exactly once.
+    async fn decide_tool_call_approval(
+        &self,
+        _chat_id: ChatId,
+        _call_id: CallId,
+        _decision: &ApprovalDecision,
+        _decided_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<DecideToolApprovalOutcome> {
+        Err(AgentError::Store(
+            "durable tool approval storage is not implemented by this Store".into(),
+        ))
+    }
+
+    /// Read private approval state for exact recovery.
+    async fn get_tool_call_approval(&self, _call_id: CallId) -> Result<Option<ToolApproval>> {
+        Err(AgentError::Store(
+            "durable tool approval storage is not implemented by this Store".into(),
+        ))
+    }
+
+    /// List a bounded page of pending approvals for one chat.
+    async fn list_pending_tool_call_approvals(
+        &self,
+        _chat_id: ChatId,
+        _limit: u64,
+    ) -> Result<Vec<ToolApproval>> {
+        Err(AgentError::Store(
+            "durable tool approval storage is not implemented by this Store".into(),
+        ))
+    }
 
     /// Claim the first lease with a caller-generated secret fencing token.
     /// A retry with the same executor and token recovers the original live

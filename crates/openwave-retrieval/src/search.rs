@@ -7,9 +7,9 @@
 //! the *same* `Arc<dyn VectorStore>` the ingest side writes to and the agent
 //! searches a live index.
 //!
-//! It is `ReadOnly` when embedding and optional reranking are guaranteed local.
-//! A provider-backed query is `Sensitive` because query text crosses a network or
-//! external-service boundary. Recoverable problems (empty query, an
+//! It is always `Sensitive`: even local retrieval returns matching document
+//! excerpts to the selected chat model, which may be a remote provider.
+//! Recoverable problems (empty query, an
 //! embedder/store hiccup) come back as [`ToolOutput::error`] for the model to see
 //! and adapt to, per the tool convention; only genuinely unexpected faults would
 //! be an `Err`.
@@ -153,15 +153,11 @@ impl Tool for SearchTool {
     }
 
     fn approval_class(&self) -> ApprovalClass {
-        let reranker_is_local = self
-            .reranker
-            .as_ref()
-            .is_none_or(|reranker| reranker.is_local());
-        if self.embedder.is_local() && self.store.is_local() && reranker_is_local {
-            ApprovalClass::ReadOnly
-        } else {
-            ApprovalClass::Sensitive
-        }
+        // Foreground search results include matching document excerpts. They
+        // are fed back into the selected chat provider even when retrieval,
+        // embedding, and reranking are local. Until the entire consumer path
+        // can prove it remains local, consent is required unconditionally.
+        ApprovalClass::Sensitive
     }
 
     async fn execute(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
@@ -414,11 +410,11 @@ mod tests {
     }
 
     #[test]
-    fn search_approval_tracks_query_egress() {
+    fn search_requires_consent_even_when_retrieval_is_local() {
         let store = Arc::new(InMemoryVectorStore::new(DIMS));
         let local = SearchTool::new(Arc::new(HashEmbedder::new(DIMS)), store.clone());
         assert_eq!(local.spec().name, "search");
-        assert_eq!(local.approval_class(), ApprovalClass::ReadOnly);
+        assert_eq!(local.approval_class(), ApprovalClass::Sensitive);
         assert!(local.spec().input_schema["required"]
             .as_array()
             .unwrap()

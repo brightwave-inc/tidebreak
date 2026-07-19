@@ -1,5 +1,13 @@
-import { describe, expect, it } from "vitest";
-import { parseFolderAccessRequest } from "./api";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  ApiClient,
+  parseFolderAccessRequest,
+  parsePendingToolApproval,
+} from "./api";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("parseFolderAccessRequest", () => {
   it("accepts only the closed renderer-safe consent projection", () => {
@@ -86,5 +94,53 @@ describe("parseFolderAccessRequest", () => {
         claimed: "yes",
       }),
     ).toBeNull();
+  });
+});
+
+describe("pending approval recovery", () => {
+  const safe = {
+    call_id: "call-1",
+    turn_id: "turn-1",
+    action: "search",
+    approval: "search_may_share_query_and_excerpts",
+    class: "sensitive",
+    can_approve: true,
+  };
+
+  it("parses only the closed renderer projection", () => {
+    expect(parsePendingToolApproval(safe)).toEqual({
+      callId: "call-1",
+      turnId: "turn-1",
+      action: "search",
+      approval: "search_may_share_query_and_excerpts",
+      class: "sensitive",
+      canApprove: true,
+    });
+    expect(parsePendingToolApproval({ ...safe, arguments: { query: "private" } })).toBeNull();
+    expect(parsePendingToolApproval({ ...safe, can_approve: false })).toBeNull();
+    expect(parsePendingToolApproval({ ...safe, action: "private_plugin" })).toBeNull();
+  });
+
+  it("fails closed on malformed, duplicate, or cross-turn pages", async () => {
+    const client = new ApiClient("http://127.0.0.1", "token");
+    for (const body of [
+      { approval: safe },
+      [{ ...safe, arguments: { query: "private" } }],
+      [safe, safe],
+      [safe, { ...safe, call_id: "call-2", turn_id: "turn-2" }],
+    ]) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      );
+      await expect(client.listPendingApprovals("chat-1")).rejects.toThrow(
+        /pending approval response/,
+      );
+    }
   });
 });

@@ -28,7 +28,10 @@ use futures_timer::Delay;
 use serde_json::Value;
 
 use crate::agent_tools::{validate_spawn_sandbox_agent_arguments, SpawnSandboxAgentArgs};
-use crate::approval::{ApprovalDecision, ApprovalGate, ApprovalRequest, RefuseGate};
+use crate::approval::{
+    ApprovalDecision, ApprovalGate, ApprovalJournalIdentity, ApprovalRequest,
+    ApprovalRequiredPublication, RefuseGate, ToolApprovalKind,
+};
 use crate::cancel::CancelToken;
 use crate::context;
 use crate::error::{AgentError, Result};
@@ -371,6 +374,8 @@ pub enum ClaimedAgentEvent {
     Pending { ordinal: i32, event: AgentEvent },
     /// Publish an event whose journal transaction already committed.
     Committed { ordinal: i32, event: SequencedEvent },
+    /// Consume an already committed event ordinal without live publication.
+    Recovered { ordinal: i32, event: SequencedEvent },
     /// Acknowledge after all preceding channel items have been handled.
     Flush(oneshot::Sender<()>),
 }
@@ -430,6 +435,58 @@ impl EventSink<'_> {
         };
         sender
             .unbounded_send(ClaimedAgentEvent::Committed { ordinal, event })
+            .map_err(|_| AgentError::Store("claimed turn event channel closed".into()))
+    }
+
+    fn proposed_ordinal(&self) -> Result<Option<i32>> {
+        match self {
+            Self::Legacy(_) => Ok(None),
+            Self::Claimed { next_ordinal, .. } => {
+                let ordinal = next_ordinal.load(Ordering::SeqCst);
+                if !(1..i32::MAX).contains(&ordinal) {
+                    return Err(AgentError::Store("turn event ordinal exhausted".into()));
+                }
+                Ok(Some(ordinal))
+            }
+        }
+    }
+
+    fn send_committed_proposed(&self, ordinal: i32, event: SequencedEvent) -> Result<()> {
+        self.send_recovered_or_committed_proposed(ordinal, event, true)
+    }
+
+    fn send_recovered_proposed(&self, ordinal: i32, event: SequencedEvent) -> Result<()> {
+        self.send_recovered_or_committed_proposed(ordinal, event, false)
+    }
+
+    fn send_recovered_or_committed_proposed(
+        &self,
+        ordinal: i32,
+        event: SequencedEvent,
+        publish: bool,
+    ) -> Result<()> {
+        let Self::Claimed {
+            sender,
+            next_ordinal,
+        } = self
+        else {
+            return Err(AgentError::Store(
+                "legacy turn cannot publish a committed durable event".into(),
+            ));
+        };
+        let next = ordinal
+            .checked_add(1)
+            .filter(|next| *next < i32::MAX)
+            .ok_or_else(|| AgentError::Store("turn event ordinal exhausted".into()))?;
+        next_ordinal
+            .compare_exchange(ordinal, next, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| AgentError::Store("turn event ordinal changed during approval".into()))?;
+        sender
+            .unbounded_send(if publish {
+                ClaimedAgentEvent::Committed { ordinal, event }
+            } else {
+                ClaimedAgentEvent::Recovered { ordinal, event }
+            })
             .map_err(|_| AgentError::Store("claimed turn event channel closed".into()))
     }
 }
@@ -680,6 +737,8 @@ impl Agent {
         // we build up as the loop runs.
         let mut transcript = self.load_transcript(chat.id).await?;
         let mut total_usage = Usage::default();
+        self.resume_pending_server_calls(chat, turn_id, events, &mut transcript)
+            .await?;
         let mut reduction_level: u32 = 0;
 
         for step in 0..self.config.max_steps {
@@ -938,6 +997,27 @@ impl Agent {
                 });
             }
 
+            let sensitive_calls = calls
+                .iter()
+                .filter(|call| {
+                    self.tools
+                        .get(&call.name)
+                        .is_some_and(|tool| tool.approval_class() == ApprovalClass::Sensitive)
+                })
+                .collect::<Vec<_>>();
+            if !sensitive_calls.is_empty()
+                && (calls.len() != 1 || sensitive_calls.len() != 1 || !text.is_empty())
+            {
+                events.send(AgentEvent::StreamInterrupted);
+                transcript.push(ChatMessage {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "A sensitive tool must be requested alone, without assistant text or sibling tool calls. Retry the request in that form.".into(),
+                    }],
+                });
+                continue;
+            }
+
             // Record the assistant message (text + any tool-use blocks).
             let mut blocks: Vec<ContentBlock> = Vec::new();
             if !text.is_empty() {
@@ -1103,7 +1183,11 @@ impl Agent {
             for call in &calls {
                 let (output, needs_resolution) = match recovered_results.remove(&call.call_id) {
                     Some(output) => (output, false),
-                    None => (self.run_tool(chat, turn_id, call, events).await, true),
+                    None if self.cancel.is_cancelled() => (
+                        ToolOutput::error("turn cancelled before tool execution"),
+                        true,
+                    ),
+                    None => (self.run_tool(chat, turn_id, call, events, None).await, true),
                 };
                 events.send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
@@ -1409,29 +1493,87 @@ impl Agent {
         turn_id: TurnId,
         call: &PendingCall,
         events: &EventSink<'_>,
+        durable_approval: Option<&crate::approval::ToolApproval>,
     ) -> ToolOutput {
         let Some(tool) = self.tools.get(&call.name) else {
             return ToolOutput::error(format!("unknown tool: {}", call.name));
         };
         // v1 policy: ReadOnly/Workspace auto; Sensitive parks on the approval gate.
-        // Arm *before* emitting ApprovalRequired so a client that sees the event
-        // can never race a 404 against a not-yet-parked call.
-        if matches!(tool.approval_class(), ApprovalClass::Sensitive) {
+        // Commit the approval request *before* emitting ApprovalRequired so a
+        // client that sees the event can never race a 404 against a request
+        // that exists only in this process.
+        let approval_class = durable_approval
+            .map(|approval| approval.class)
+            .unwrap_or_else(|| tool.approval_class());
+        if matches!(approval_class, ApprovalClass::Sensitive) {
             let summary = format!("{} requires approval", call.name);
-            let pending = self.approvals.arm(ApprovalRequest {
+            let kind = durable_approval
+                .map(|approval| approval.kind)
+                .unwrap_or_else(|| ToolApprovalKind::for_tool_name(&call.name));
+            if self.durable_steer_lease.is_some() && events.flush().await.is_err() {
+                return ToolOutput::error("approval event journal is unavailable");
+            }
+            let journal = match (self.durable_steer_lease, events.proposed_ordinal()) {
+                (_, Err(_)) => return ToolOutput::error("approval event journal is unavailable"),
+                (Some(lease_token), Ok(Some(event_ordinal))) => Some(ApprovalJournalIdentity {
+                    lease_token,
+                    event_ordinal,
+                }),
+                (None, Ok(None)) => None,
+                _ => return ToolOutput::error("approval event journal identity is invalid"),
+            };
+            let registering = self.approvals.register(
+                ApprovalRequest {
+                    call_id: call.call_id,
+                    chat_id: chat.id,
+                    turn_id,
+                    tool_name: call.name.clone(),
+                    class: ApprovalClass::Sensitive,
+                    kind,
+                    summary: summary.clone(),
+                },
+                journal,
+            );
+            let registration = match future::select(registering, self.cancel.cancelled()).await {
+                Either::Left((registration, _)) if !self.cancel.is_cancelled() => registration,
+                Either::Left(_) | Either::Right(((), _)) => {
+                    return ToolOutput::error("turn cancelled while registering approval");
+                }
+            };
+            let required = AgentEvent::ApprovalRequired {
                 call_id: call.call_id,
-                chat_id: chat.id,
-                turn_id,
                 tool_name: call.name.clone(),
                 class: ApprovalClass::Sensitive,
-                summary: summary.clone(),
-            });
-            events.send(AgentEvent::ApprovalRequired {
-                call_id: call.call_id,
-                tool_name: call.name.clone(),
-                class: ApprovalClass::Sensitive,
+                kind,
                 summary,
-            });
+            };
+            match registration.publication {
+                ApprovalRequiredPublication::Ordinary => events.send(required),
+                ApprovalRequiredPublication::Committed {
+                    event_ordinal,
+                    event,
+                } => {
+                    if events
+                        .send_committed_proposed(event_ordinal, event)
+                        .is_err()
+                    {
+                        return ToolOutput::error("approval event publication is unavailable");
+                    }
+                }
+                ApprovalRequiredPublication::Recovered {
+                    event_ordinal,
+                    event,
+                } => {
+                    if events
+                        .send_recovered_proposed(event_ordinal, event)
+                        .is_err()
+                    {
+                        return ToolOutput::error("approval event recovery is unavailable");
+                    }
+                }
+                ApprovalRequiredPublication::None => {}
+            }
+            let pending = registration.decision;
             // Race the decision against cancellation so a turn parked on approval
             // can still be stopped. On cancel we close the approval card
             // (`ApprovalDecided { approved: false }`) and return an error result;
@@ -1465,6 +1607,13 @@ impl Agent {
                 return ToolOutput::error("turn cancelled while awaiting approval");
             }
         }
+        // Cancellation can land after the caller's loop-level fence or while a
+        // recovered call is being classified. Recheck at the final boundary
+        // before any ReadOnly, Workspace, or approved Sensitive implementation
+        // can observe arguments or perform a side effect.
+        if self.cancel.is_cancelled() {
+            return ToolOutput::error("turn cancelled before tool execution");
+        }
         let ctx = self.config.tool_scratch.as_ref().map_or_else(
             || ToolCtx::without_private_scratch(chat.id, chat.project_id),
             |scratch| ToolCtx::with_private_scratch(chat.id, chat.project_id, scratch.clone()),
@@ -1479,6 +1628,122 @@ impl Agent {
             output.content = truncated;
         }
         output
+    }
+
+    /// Resume persisted server calls accepted by an earlier attempt before
+    /// asking the provider for new output. Approval-bearing calls are isolated
+    /// at admission, so their recovery never guesses batch order.
+    async fn resume_pending_server_calls(
+        &self,
+        chat: &Chat,
+        turn_id: TurnId,
+        events: &EventSink<'_>,
+        transcript: &mut Vec<ChatMessage>,
+    ) -> Result<()> {
+        let pending = self
+            .store
+            .list_tool_calls(chat.id)
+            .await?
+            .into_iter()
+            .filter(|call| {
+                call.turn_id == turn_id
+                    && call.execution == ToolCallExecution::Server
+                    && call.status == ToolCallStatus::Pending
+            })
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut approval_bearing = 0usize;
+        for call in &pending {
+            if self.store.get_tool_call_approval(call.id).await?.is_some()
+                || self
+                    .tools
+                    .get(&call.name)
+                    .is_some_and(|tool| tool.approval_class() == ApprovalClass::Sensitive)
+            {
+                approval_bearing += 1;
+            }
+        }
+        if approval_bearing > 0 && (pending.len() != 1 || approval_bearing != 1) {
+            return Err(AgentError::Store(format!(
+                "turn {turn_id} has an ambiguous pending sensitive tool batch"
+            )));
+        }
+        for stored in pending {
+            let call = PendingCall {
+                call_id: stored.id,
+                provider_id: stored.provider_id,
+                name: stored.name,
+                args: serde_json::to_string(&stored.arguments)?,
+            };
+            let durable_approval = self.store.get_tool_call_approval(call.call_id).await?;
+            let tool_available = self.tools.get(&call.name).is_some();
+            let cancelled_before_run = self.cancel.is_cancelled();
+            let output = if cancelled_before_run {
+                ToolOutput::error("turn cancelled before recovered tool execution")
+            } else {
+                self.run_tool(chat, turn_id, &call, events, durable_approval.as_ref())
+                    .await
+            };
+            let resolution = if output.is_error {
+                ToolCallResolution::Failed {
+                    result: output.content.clone(),
+                    error_code: "tool_error".into(),
+                    error_detail: None,
+                }
+            } else {
+                ToolCallResolution::Completed {
+                    result: output.content.clone(),
+                }
+            };
+            let outcome = self
+                .store
+                .resolve_server_tool_call_with_evidence(
+                    call.call_id,
+                    &resolution,
+                    Utc::now(),
+                    &output.private_evidence,
+                )
+                .await?;
+            if !matches!(
+                outcome,
+                ResolveToolCallOutcome::Resolved | ResolveToolCallOutcome::Existing
+            ) {
+                return Err(AgentError::Store(format!(
+                    "pending tool call {} could not be recovered: {outcome:?}",
+                    call.call_id
+                )));
+            }
+            // A missing implementation cannot enter `run_tool`'s approval
+            // branch. Resolution above atomically closes any still-pending
+            // approval with the failed call. Read back the winner so an
+            // approve-vs-resolution race projects the authoritative decision.
+            if durable_approval.is_some() && (!tool_available || cancelled_before_run) {
+                if let Some(approval) = self.store.get_tool_call_approval(call.call_id).await? {
+                    events.send(AgentEvent::ApprovalDecided {
+                        call_id: call.call_id,
+                        approved: matches!(
+                            approval.status,
+                            crate::approval::ToolApprovalStatus::Approved
+                        ),
+                    });
+                }
+            }
+            events.send(AgentEvent::ToolCallCompleted {
+                call_id: call.call_id,
+                output: output.clone(),
+            });
+            transcript.push(ChatMessage {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: call.provider_id,
+                    content: output.content,
+                    is_error: output.is_error,
+                }],
+            });
+        }
+        Ok(())
     }
 
     async fn persist(
@@ -1724,7 +1989,7 @@ mod tests {
     use crate::id::{ChatId, ProjectId};
     use crate::model::Project;
     use crate::provider::ProviderId;
-    use crate::tools::ReadFile;
+    use crate::tools::{ReadFile, WriteFile};
 
     fn tool_scratch(path: &std::path::Path) -> ToolScratch {
         ToolScratch::from_dir(
@@ -1738,6 +2003,7 @@ mod tests {
             .map(|emission| match emission {
                 ClaimedAgentEvent::Pending { event, .. } => event,
                 ClaimedAgentEvent::Committed { event, .. } => event.event,
+                ClaimedAgentEvent::Recovered { event, .. } => event.event,
                 ClaimedAgentEvent::Flush(_) => panic!("unhandled claimed-event flush"),
             })
             .collect()
@@ -3039,11 +3305,20 @@ mod tests {
     }
 
     impl ApprovalGate for SignalPendingGate {
-        fn arm(&self, _request: ApprovalRequest) -> crate::approval::ApprovalFuture<'_> {
-            if let Some(tx) = self.armed.lock().unwrap().take() {
-                let _ = tx.send(());
-            }
-            Box::pin(future::pending())
+        fn register(
+            &self,
+            _request: ApprovalRequest,
+            _journal: Option<crate::approval::ApprovalJournalIdentity>,
+        ) -> crate::approval::ApprovalRegistrationFuture<'_> {
+            Box::pin(async move {
+                if let Some(tx) = self.armed.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                crate::approval::ApprovalRegistration {
+                    decision: Box::pin(future::pending()) as crate::approval::ApprovalFuture,
+                    publication: crate::approval::ApprovalRequiredPublication::Ordinary,
+                }
+            })
         }
     }
 
@@ -3055,9 +3330,19 @@ mod tests {
     }
 
     impl ApprovalGate for CancelThenApproveGate {
-        fn arm(&self, _request: ApprovalRequest) -> crate::approval::ApprovalFuture<'_> {
-            self.cancel.cancel();
-            Box::pin(async { ApprovalDecision::Approve })
+        fn register(
+            &self,
+            _request: ApprovalRequest,
+            _journal: Option<crate::approval::ApprovalJournalIdentity>,
+        ) -> crate::approval::ApprovalRegistrationFuture<'_> {
+            Box::pin(async move {
+                self.cancel.cancel();
+                crate::approval::ApprovalRegistration {
+                    decision: Box::pin(async { ApprovalDecision::Approve })
+                        as crate::approval::ApprovalFuture,
+                    publication: crate::approval::ApprovalRequiredPublication::Ordinary,
+                }
+            })
         }
     }
 
@@ -3324,17 +3609,519 @@ mod tests {
             0,
             "cancel must preempt an approve that is ready in the same poll"
         );
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AgentEvent::ApprovalDecided {
-                approved: false,
-                ..
-            }
-        )));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ApprovalDecided { approved: true, .. })));
         assert!(matches!(
             events.last(),
             Some(AgentEvent::TurnCancelled { .. })
         ));
+    }
+
+    struct RestartTool {
+        ran: Arc<AtomicUsize>,
+        class: ApprovalClass,
+    }
+
+    #[async_trait]
+    impl Tool for RestartTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "search".into(),
+                description: "recover search".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        fn approval_class(&self) -> ApprovalClass {
+            self.class
+        }
+
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::text("recovered result"))
+        }
+    }
+
+    struct RestartGate(Arc<dyn Store>);
+
+    impl ApprovalGate for RestartGate {
+        fn register(
+            &self,
+            request: ApprovalRequest,
+            _journal: Option<crate::approval::ApprovalJournalIdentity>,
+        ) -> crate::approval::ApprovalRegistrationFuture<'_> {
+            let store = self.0.clone();
+            Box::pin(async move {
+                let approval = store
+                    .get_tool_call_approval(request.call_id)
+                    .await
+                    .unwrap()
+                    .expect("approval receipt must survive restart");
+                let decision = match approval.decision() {
+                    Some(decision) => decision,
+                    None => {
+                        store
+                            .decide_tool_call_approval(
+                                request.chat_id,
+                                request.call_id,
+                                &ApprovalDecision::Approve,
+                                Utc::now(),
+                            )
+                            .await
+                            .unwrap();
+                        ApprovalDecision::Approve
+                    }
+                };
+                crate::approval::ApprovalRegistration {
+                    decision: Box::pin(async move { decision }),
+                    publication: crate::approval::ApprovalRequiredPublication::None,
+                }
+            })
+        }
+    }
+
+    struct RestartProvider {
+        provider_id: String,
+        expect_error: bool,
+    }
+
+    #[async_trait]
+    impl ModelProvider for RestartProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("restart")
+        }
+
+        async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            assert!(request.messages.iter().any(|message| {
+                message.content.iter().any(|block| {
+                    matches!(
+                        block,
+                    ContentBlock::ToolResult { tool_use_id, is_error, .. }
+                        if tool_use_id == &self.provider_id && *is_error == self.expect_error
+                    )
+                })
+            }));
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "done".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    async fn assert_sensitive_restart_recovery(
+        preapproved: bool,
+        current_class: ApprovalClass,
+        tool_present: bool,
+    ) {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("restart.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        let accepted = match store
+            .accept_turn(turn_id, chat.id, "fake", "search")
+            .await
+            .unwrap()
+        {
+            crate::storage::AcceptTurnOutcome::Accepted(turn) => turn,
+            outcome => panic!("unexpected turn acceptance: {outcome:?}"),
+        };
+        let lease_token = uuid::Uuid::new_v4();
+        let claimed_at = Utc::now().max(accepted.available_at);
+        store
+            .claim_turn_run(
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(5),
+            )
+            .await
+            .unwrap();
+        let call = ToolCallRecord {
+            id: CallId::new(),
+            chat_id: chat.id,
+            turn_id,
+            provider_id: "persisted-search".into(),
+            name: "search".into(),
+            arguments: serde_json::json!({"query": "restart"}),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: claimed_at,
+            resolved_at: None,
+        };
+        store.accept_tool_call(&call).await.unwrap();
+        store
+            .request_tool_call_approval(
+                &ApprovalRequest {
+                    call_id: call.id,
+                    chat_id: chat.id,
+                    turn_id,
+                    tool_name: call.name.clone(),
+                    class: ApprovalClass::Sensitive,
+                    kind: ToolApprovalKind::for_tool_name(&call.name),
+                    summary: "search requires approval".into(),
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        if preapproved {
+            store
+                .decide_tool_call_approval(chat.id, call.id, &ApprovalDecision::Approve, Utc::now())
+                .await
+                .unwrap();
+        }
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        if tool_present {
+            registry.register(Box::new(RestartTool {
+                ran: ran.clone(),
+                class: current_class,
+            }));
+        }
+        let agent = Agent::new(
+            Arc::new(RestartProvider {
+                provider_id: call.provider_id.clone(),
+                expect_error: !tool_present,
+            }),
+            Arc::new(registry),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        )
+        .with_approvals(Arc::new(RestartGate(store.clone())))
+        .with_durable_steer(lease_token);
+        let (tx, mut rx) = unbounded();
+        let events = tokio::spawn(async move {
+            let mut collected = Vec::new();
+            while let Some(event) = rx.next().await {
+                match event {
+                    ClaimedAgentEvent::Flush(acknowledge) => {
+                        let _ = acknowledge.send(());
+                    }
+                    ClaimedAgentEvent::Pending { event, .. } => collected.push(event),
+                    ClaimedAgentEvent::Committed { event, .. }
+                    | ClaimedAgentEvent::Recovered { event, .. } => {
+                        collected.push(event.event);
+                    }
+                }
+            }
+            collected
+        });
+        assert!(matches!(
+            agent
+                .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+                .await
+                .unwrap(),
+            AgentTurnOutcome::Completed { .. }
+        ));
+        drop(tx);
+        let events = events.await.unwrap();
+        assert_eq!(ran.load(Ordering::SeqCst), usize::from(tool_present));
+        assert_eq!(
+            store
+                .list_tool_calls(chat.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|stored| stored.id == call.id)
+                .unwrap()
+                .status,
+            if tool_present {
+                ToolCallStatus::Completed
+            } else {
+                ToolCallStatus::Failed
+            }
+        );
+        if !tool_present {
+            let approval_decided = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        AgentEvent::ApprovalDecided {
+                            call_id,
+                            approved: false,
+                        } if *call_id == call.id
+                    )
+                })
+                .expect("missing tool must close its durable approval card");
+            let tool_completed = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        AgentEvent::ToolCallCompleted { call_id, .. } if *call_id == call.id
+                    )
+                })
+                .expect("missing tool must publish its failed completion");
+            assert!(approval_decided < tool_completed);
+        }
+    }
+
+    #[tokio::test]
+    async fn reclaimed_turn_resumes_pending_and_preapproved_sensitive_calls() {
+        assert_sensitive_restart_recovery(false, ApprovalClass::ReadOnly, true).await;
+        assert_sensitive_restart_recovery(true, ApprovalClass::Sensitive, true).await;
+        assert_sensitive_restart_recovery(false, ApprovalClass::ReadOnly, false).await;
+    }
+
+    async fn pending_workspace_restart(
+        name: &str,
+        arguments: Value,
+    ) -> (
+        tempfile::TempDir,
+        Arc<dyn Store>,
+        Chat,
+        TurnId,
+        uuid::Uuid,
+        ToolCallRecord,
+    ) {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("cancelled-restart.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        let accepted = match store
+            .accept_turn(turn_id, chat.id, "fake", "recover workspace call")
+            .await
+            .unwrap()
+        {
+            crate::storage::AcceptTurnOutcome::Accepted(turn) => turn,
+            outcome => panic!("unexpected turn acceptance: {outcome:?}"),
+        };
+        let lease_token = uuid::Uuid::new_v4();
+        let claimed_at = Utc::now().max(accepted.available_at);
+        assert!(store
+            .claim_turn_run(
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(5),
+            )
+            .await
+            .unwrap()
+            .turn
+            .is_some());
+        let call = ToolCallRecord {
+            id: CallId::new(),
+            chat_id: chat.id,
+            turn_id,
+            provider_id: "persisted-workspace-call".into(),
+            name: name.into(),
+            arguments,
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: claimed_at,
+            resolved_at: None,
+        };
+        store.accept_tool_call(&call).await.unwrap();
+        (db, store, chat, turn_id, lease_token, call)
+    }
+
+    #[tokio::test]
+    async fn cancelled_reclaim_resolves_pending_write_without_touching_scratch() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (_db, store, chat, turn_id, lease_token, call) = pending_workspace_restart(
+            "write_file",
+            serde_json::json!({"path": "cancelled.txt", "content": "must not exist"}),
+        )
+        .await;
+        store
+            .request_tool_call_approval(
+                &ApprovalRequest {
+                    call_id: call.id,
+                    chat_id: chat.id,
+                    turn_id,
+                    tool_name: call.name.clone(),
+                    class: ApprovalClass::Sensitive,
+                    kind: ToolApprovalKind::for_tool_name(&call.name),
+                    summary: "persisted write requires approval".into(),
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let provider = Arc::new(BoomProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let agent = Agent::new(
+            provider.clone(),
+            Arc::new(ToolRegistry::new().with(Box::new(WriteFile))),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                tool_scratch: Some(tool_scratch(scratch.path())),
+                ..AgentConfig::default()
+            },
+        )
+        .with_cancel(cancel)
+        .with_durable_steer(lease_token);
+        let (tx, rx) = unbounded();
+        assert!(matches!(
+            agent
+                .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+                .await
+                .unwrap(),
+            AgentTurnOutcome::Cancelled { .. }
+        ));
+        drop(tx);
+        let events = emitted_events(rx.collect().await);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(!scratch.path().join("cancelled.txt").exists());
+        let approval_decided = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::ApprovalDecided {
+                        call_id,
+                        approved: false,
+                    } if *call_id == call.id
+                )
+            })
+            .expect("cancelled recovery must close its durable approval card");
+        let tool_completed = events
+            .iter()
+            .position(|event| {
+                matches!(event, AgentEvent::ToolCallCompleted { call_id, .. } if *call_id == call.id)
+            })
+            .expect("cancelled recovery must publish failed tool completion");
+        assert!(approval_decided < tool_completed);
+        assert_eq!(
+            store
+                .list_tool_calls(chat.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|stored| stored.id == call.id)
+                .unwrap()
+                .status,
+            ToolCallStatus::Failed
+        );
+    }
+
+    struct CancelDuringRecoveryTool {
+        cancel: CancelToken,
+        classifications: AtomicUsize,
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CancelDuringRecoveryTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "recovery_write".into(),
+                description: "test recovery cancellation fence".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        fn approval_class(&self) -> ApprovalClass {
+            if self.classifications.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.cancel.cancel();
+            }
+            ApprovalClass::Workspace
+        }
+
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::text("unexpected execution"))
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_rechecks_cancellation_immediately_before_tool_execution() {
+        let (_db, store, chat, turn_id, lease_token, call) =
+            pending_workspace_restart("recovery_write", serde_json::json!({})).await;
+        let cancel = CancelToken::new();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let tool = CancelDuringRecoveryTool {
+            cancel: cancel.clone(),
+            classifications: AtomicUsize::new(0),
+            ran: ran.clone(),
+        };
+        let agent = Agent::new(
+            Arc::new(BoomProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(ToolRegistry::new().with(Box::new(tool))),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        )
+        .with_cancel(cancel)
+        .with_durable_steer(lease_token);
+        let (tx, _rx) = unbounded();
+        assert!(matches!(
+            agent
+                .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+                .await
+                .unwrap(),
+            AgentTurnOutcome::Cancelled { .. }
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store
+                .list_tool_calls(chat.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|stored| stored.id == call.id)
+                .unwrap()
+                .status,
+            ToolCallStatus::Failed
+        );
     }
 
     #[tokio::test]

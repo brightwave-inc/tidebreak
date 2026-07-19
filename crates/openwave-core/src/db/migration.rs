@@ -2781,6 +2781,13 @@ impl MigrationTrait for AddToolCalls {
                     .col(ColumnDef::new(ToolCall::Result).text())
                     .col(ColumnDef::new(ToolCall::ErrorCode).text())
                     .col(ColumnDef::new(ToolCall::ErrorDetail).text())
+                    .col(ColumnDef::new(ToolCall::ApprovalStatus).text())
+                    .col(ColumnDef::new(ToolCall::ApprovalClass).text())
+                    .col(ColumnDef::new(ToolCall::ApprovalKind).text())
+                    .col(ColumnDef::new(ToolCall::ApprovalReason).text())
+                    .col(ColumnDef::new(ToolCall::ApprovalRequestedAt).timestamp_with_time_zone())
+                    .col(ColumnDef::new(ToolCall::ApprovalDecidedAt).timestamp_with_time_zone())
+                    .col(ColumnDef::new(ToolCall::ApprovalEventSeq).big_integer())
                     .col(ColumnDef::new(ToolCall::ClientExecutorId).uuid())
                     .col(ColumnDef::new(ToolCall::ClientLeaseToken).uuid())
                     .col(ColumnDef::new(ToolCall::ClientLeaseExpiresAt).timestamp_with_time_zone())
@@ -2795,6 +2802,16 @@ impl MigrationTrait for AddToolCalls {
                             .name("fk_tool_call_chat")
                             .from(ToolCall::Table, ToolCall::ChatId)
                             .to(Chat::Table, Chat::Id),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_tool_call_approval_event")
+                            .from_tbl(ToolCall::Table)
+                            .from_col(ToolCall::ChatId)
+                            .from_col(ToolCall::ApprovalEventSeq)
+                            .to_tbl(Event::Table)
+                            .to_col(Event::ChatId)
+                            .to_col(Event::Seq),
                     )
                     .check(Expr::col(ToolCall::Execution).is_in([
                         crate::model::ToolCallExecution::Server.as_str(),
@@ -2909,6 +2926,58 @@ impl MigrationTrait for AddToolCalls {
                                             .and(Expr::col(ToolCall::ClientLeaseToken).is_null())
                                             .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())),
                                 )),
+                    )
+                    .check(
+                        Expr::col(ToolCall::ApprovalStatus)
+                            .is_null()
+                            .and(Expr::col(ToolCall::ApprovalClass).is_null())
+                            .and(Expr::col(ToolCall::ApprovalKind).is_null())
+                            .and(Expr::col(ToolCall::ApprovalReason).is_null())
+                            .and(Expr::col(ToolCall::ApprovalRequestedAt).is_null())
+                            .and(Expr::col(ToolCall::ApprovalDecidedAt).is_null())
+                            .and(Expr::col(ToolCall::ApprovalEventSeq).is_null())
+                            .or(Expr::col(ToolCall::Execution)
+                                .eq(crate::model::ToolCallExecution::Server.as_str())
+                                .and(Expr::col(ToolCall::ApprovalStatus).is_in([
+                                    crate::ToolApprovalStatus::Pending.as_str(),
+                                    crate::ToolApprovalStatus::Approved.as_str(),
+                                    crate::ToolApprovalStatus::Rejected.as_str(),
+                                ]))
+                                .and(Expr::col(ToolCall::ApprovalClass)
+                                    .eq(crate::ApprovalClass::Sensitive.as_str()))
+                                .and(Expr::col(ToolCall::ApprovalKind).is_in([
+                                    crate::ToolApprovalKind::SearchMayShareQueryAndExcerpts.as_str(),
+                                    crate::ToolApprovalKind::Unsupported.as_str(),
+                                ]))
+                                .and(Expr::col(ToolCall::ApprovalRequestedAt).is_not_null())
+                                .and(
+                                    Expr::col(ToolCall::ApprovalStatus)
+                                        .eq(crate::ToolApprovalStatus::Pending.as_str())
+                                        .and(Expr::col(ToolCall::Status)
+                                            .eq(crate::model::ToolCallStatus::Pending.as_str()))
+                                        .and(Expr::col(ToolCall::ApprovalReason).is_null())
+                                        .and(Expr::col(ToolCall::ApprovalDecidedAt).is_null())
+                                        .or(Expr::col(ToolCall::ApprovalStatus)
+                                            .eq(crate::ToolApprovalStatus::Approved.as_str())
+                                            .and(Expr::col(ToolCall::ApprovalReason).is_null())
+                                            .and(Expr::col(ToolCall::ApprovalDecidedAt).is_not_null()))
+                                        .or(Expr::col(ToolCall::ApprovalStatus)
+                                            .eq(crate::ToolApprovalStatus::Rejected.as_str())
+                                            .and(Expr::col(ToolCall::ApprovalReason).is_not_null())
+                                            .and(Expr::col(ToolCall::ApprovalDecidedAt).is_not_null())),
+                                )),
+                    )
+                    .check(
+                        Expr::col(ToolCall::ApprovalReason).is_null().or(Func::char_length(
+                            Expr::col(ToolCall::ApprovalReason),
+                        )
+                        .between(1, crate::ToolApproval::MAX_REASON_CHARS as i32)),
+                    )
+                    .check(
+                        Expr::col(ToolCall::ApprovalDecidedAt)
+                            .is_null()
+                            .or(Expr::col(ToolCall::ApprovalDecidedAt)
+                                .gte(Expr::col(ToolCall::ApprovalRequestedAt))),
                     )
                     .to_owned(),
             )
@@ -4299,6 +4368,13 @@ enum ToolCall {
     Result,
     ErrorCode,
     ErrorDetail,
+    ApprovalStatus,
+    ApprovalClass,
+    ApprovalKind,
+    ApprovalReason,
+    ApprovalRequestedAt,
+    ApprovalDecidedAt,
+    ApprovalEventSeq,
     ClientExecutorId,
     ClientLeaseToken,
     ClientLeaseExpiresAt,
