@@ -1326,6 +1326,22 @@ fn test_app_from_parts(
     store: Arc<dyn Store>,
     dir: tempfile::TempDir,
 ) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
+    test_app_from_parts_with_worker_config(
+        provider,
+        retrieval,
+        store,
+        dir,
+        turn_worker::TurnWorkerConfig::default(),
+    )
+}
+
+fn test_app_from_parts_with_worker_config(
+    provider: Arc<dyn ModelProvider>,
+    retrieval: Arc<Retriever>,
+    store: Arc<dyn Store>,
+    dir: tempfile::TempDir,
+    worker_config: turn_worker::TurnWorkerConfig,
+) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -1339,7 +1355,7 @@ fn test_app_from_parts(
         },
     );
     let token = state.token.clone();
-    spawn_turn_worker(&state);
+    spawn_turn_worker_with_config(&state, worker_config);
     (app(state), token, store, dir)
 }
 
@@ -8079,8 +8095,20 @@ async fn worker_recovers_ambiguous_claim_and_completion_with_exact_receipts() {
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
     );
-    let (router, token, store, _dir) =
-        test_app_from_parts(Arc::new(FakeProvider), retrieval, store, dir);
+    let (router, token, store, _dir) = test_app_from_parts_with_worker_config(
+        Arc::new(FakeProvider),
+        retrieval,
+        store,
+        dir,
+        turn_worker::TurnWorkerConfig {
+            // Keep this failure-injection test inside the committed claim's
+            // lease even when a loaded test host delays the retry task.
+            lease: Duration::from_secs(5 * 60),
+            failure_delay: Duration::from_millis(10),
+            max_concurrency: 1,
+            ..turn_worker::TurnWorkerConfig::default()
+        },
+    );
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
 
