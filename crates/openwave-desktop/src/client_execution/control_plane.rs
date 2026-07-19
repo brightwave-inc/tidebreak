@@ -89,6 +89,11 @@ pub(super) struct RootAttachmentChangeResponse {
     pub(super) change: RootAttachmentChangeView,
 }
 
+#[derive(Debug, Deserialize)]
+struct PendingRootAttachmentChanges {
+    changes: Vec<RootAttachmentChangeView>,
+}
+
 /// Closed native view of the fields needed to fence exact product/broker
 /// reconciliation. Server-only executor metadata is intentionally absent.
 #[derive(Debug, Deserialize)]
@@ -102,10 +107,12 @@ pub(super) struct RootAttachmentChangeView {
     pub(super) expected_revision: i64,
     pub(super) before_revision: i64,
     pub(super) intent_revision: i64,
+    pub(super) projection_existed_before: bool,
     pub(super) phase: RootAttachmentChangePhase,
     pub(super) result_revision: Option<i64>,
     pub(super) broker_currently_attached: Option<bool>,
     pub(super) failure: Option<RootAttachmentChangeFailure>,
+    pub(super) created_at: DateTime<Utc>,
 }
 
 impl ControlPlaneClient {
@@ -217,6 +224,7 @@ impl ControlPlaneClient {
         chat_id: ChatId,
         change_id: RootAttachmentChangeId,
         root_id: HostRootId,
+        action: RootAttachmentChangeAction,
         expected_attachment_revision: i64,
         created_at: DateTime<Utc>,
     ) -> Result<RootAttachmentChangeResponse, ControlPlaneError> {
@@ -224,12 +232,22 @@ impl ControlPlaneClient {
             &format!("/chats/{chat_id}/root-attachment-changes/{change_id}/begin"),
             &BeginRootAttachmentRequest {
                 root_id,
-                action: RootAttachmentChangeAction::Attach,
+                action,
                 expected_attachment_revision,
                 created_at,
             },
         )
         .await
+    }
+
+    pub(super) async fn pending_root_attachment_changes(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RootAttachmentChangeView>, ControlPlaneError> {
+        let response: PendingRootAttachmentChanges = self
+            .get(&format!("/root-attachment-changes/pending?limit={limit}"))
+            .await?;
+        Ok(response.changes)
     }
 
     pub(super) async fn finish_root_attachment_change(

@@ -42,10 +42,10 @@ revision. Project defaults are snapshotted into a new chat's exact attachment
 set; later project changes cannot silently widen that chat. These product rows
 are not grants: they contain no path, capability, consent, or display name, and
 host access still requires the broker's live attachment and authorization. The
-product store now has a durable attachment-change state machine and a
-native-only HTTP boundary for driving it, but the current picker still updates
-broker state directly. A native reconciler is the next slice, before any tool
-treats the projection as usable context.
+product store has a durable attachment-change state machine and a native-only
+HTTP boundary for driving it. Both user-facing connected-folder actions and
+agent-approved picker requests now converge the broker attachment and product
+projection through that state machine before reporting success.
 
 ### Native attachment-change boundary
 
@@ -79,9 +79,11 @@ the desktop supplies its private persisted identity before binding the server.
 Finish timestamps are clamped to immutable creation time under the store lock,
 so clock skew cannot strand a conversation's single pending operation.
 
-This boundary deliberately does not call the broker. Dispatch, unknown-receipt
-recovery, and retry policy belong to the forthcoming desktop reconciler, which
-will use these routes around the broker's idempotent attach/detach operations.
+This boundary deliberately does not call the broker. The desktop reconciler
+looks up the exact broker receipt first, dispatches the same idempotent attach
+or detach identity only when it is unknown, and then supplies the terminal
+observation to the product state machine. Startup recovery is sequential and
+bounded to 64 oldest pending changes per pass.
 
 ## The four layers
 
@@ -143,7 +145,8 @@ The Tauri host—not the renderer—owns the control handle. It opens the native
 folder picker, resolves the renderer's chat ID against the server's authoritative
 store, derives project or standalone ownership from that record, and forwards
 the picker result. Re-registering the same pinned filesystem object for the same
-subject reuses the root and only adds a missing conversation attachment.
+subject reuses the root. A separate product attachment change then confirms the
+exact conversation attachment before the renderer sees it as connected.
 
 The **renderer** presents connected folders and permission choices. It receives
 safe summaries, not the broker's persisted absolute-path registry.
@@ -175,6 +178,19 @@ receipt lets a recovering native client distinguish unknown, completed, and
 failed work without starting or replaying the mutation. Attachment changes are
 computed and published in one durable state replacement, so they do not expose
 a recoverable intermediate phase.
+
+The desktop's manual Disconnect action uses this conversation-only detach; it
+does not invoke global revocation. The connected-folder list is the intersection
+of the chat's pathless product projection and the broker's live safe summaries,
+so neither a broker-only registration nor a product-only intent is presented as
+converged access.
+
+Manual picker registration has a separate app-private receipt because it begins
+before product intent exists. The receipt contains the selected absolute path,
+original broker subject, and three distinct operation identities; none are
+serialized to the renderer. Recovery never starts a registration that was not
+already marked attempted. Once product begin commits, the server-owned pending
+change is the authoritative recovery queue for both attach and detach.
 
 The product database coordinates its side of the operation separately. It
 stores an `awaiting_broker` change before native code talks to the broker, then
