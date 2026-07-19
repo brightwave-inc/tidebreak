@@ -10,12 +10,14 @@ describe("hydrateTranscriptHistory", () => {
           role: "user",
           content: "find this",
           created_at: "2026-07-16T10:00:00Z",
+          citations: [],
         },
         {
           id: "assistant-1",
           role: "assistant",
           content: "done",
           created_at: "2026-07-16T10:00:02Z",
+          citations: [],
         },
       ],
       [
@@ -38,6 +40,72 @@ describe("hydrateTranscriptHistory", () => {
       }),
       expect.objectContaining({ id: "assistant-1", kind: "message" }),
     ]);
+  });
+
+  it("attaches sources only to their exact owning assistant message", () => {
+    const entries = hydrateTranscriptHistory(
+      [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "first",
+          created_at: "2026-07-16T10:00:00Z",
+          citations: [
+            {
+              id: "citation-1",
+              message_id: "assistant-1",
+              ordinal: 1,
+              excerpt: "safe excerpt",
+              heading: "Safe heading",
+              pages: [2],
+            },
+            {
+              id: "citation-crossed",
+              message_id: "assistant-2",
+              ordinal: 2,
+              excerpt: "must not cross messages",
+              heading: null,
+              pages: [],
+            },
+          ],
+        },
+        {
+          id: "assistant-2",
+          role: "assistant",
+          content: "second",
+          created_at: "2026-07-16T10:00:01Z",
+          citations: [],
+        },
+      ],
+      [],
+    );
+
+    expect(entries[0]).toMatchObject({
+      id: "assistant-1",
+      sources: [{ id: "citation-1", excerpt: "safe excerpt" }],
+    });
+    expect(entries[1]).toMatchObject({ id: "assistant-2", sources: [] });
+    expect(JSON.stringify(entries)).not.toContain("must not cross messages");
+  });
+
+  it("treats citations omitted from a partial response as an empty source list", () => {
+    const [entry] = hydrateTranscriptHistory(
+      [
+        {
+          id: "assistant-legacy",
+          role: "assistant",
+          content: "still readable",
+          created_at: "2026-07-16T10:00:00Z",
+        },
+      ],
+      [],
+    );
+
+    expect(entry).toMatchObject({
+      id: "assistant-legacy",
+      text: "still readable",
+      sources: [],
+    });
   });
 
   it("keeps the server's generic historical title on the generic card path", () => {

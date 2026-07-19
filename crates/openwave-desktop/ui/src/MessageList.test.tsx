@@ -15,7 +15,12 @@ describe("MessageBubble", () => {
     );
     const assistant = renderToStaticMarkup(
       <MessageBubble
-        message={{ id: "assistant-1", role: "assistant", text: "## Answer" }}
+        message={{
+          id: "assistant-1",
+          role: "assistant",
+          text: "## Answer",
+          sources: [],
+        }}
         busy={false}
         onApproval={noop}
       />,
@@ -38,7 +43,7 @@ describe("MessageBubble", () => {
         summary: "Search a site",
         canApprove: true,
       },
-      { id: "assistant-2", role: "assistant", text: "" },
+      { id: "assistant-2", role: "assistant", text: "", sources: [] },
     ];
     const markup = renderToStaticMarkup(
       <MessageList
@@ -88,7 +93,12 @@ describe("MessageBubble", () => {
     const messages: ChatMessage[] = [
       { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "completed" },
       { id: "tool-2", role: "tool", callId: "call-2", name: "read_file", status: "failed" },
-      { id: "assistant-1", role: "assistant", text: "Done" },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        text: "Done",
+        sources: [],
+      },
       { id: "tool-3", role: "tool", callId: "call-3", name: "list_dir", status: "cancelled" },
     ];
     const markup = renderToStaticMarkup(
@@ -181,5 +191,55 @@ describe("MessageBubble", () => {
     expect(markup).toContain("Use a tool: Tool complete");
     expect(markup).not.toContain("private_server");
     expect(markup).not.toContain("sensitive_path");
+  });
+
+  it("renders each source beneath only its owning assistant message", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "assistant-1",
+        role: "assistant",
+        text: "First answer",
+        sources: [
+          {
+            id: "private-citation-id",
+            ordinal: 1,
+            excerpt: "First source excerpt",
+            heading: "First source",
+            pages: [4],
+          },
+        ],
+      },
+      {
+        id: "assistant-2",
+        role: "assistant",
+        text: "Second answer",
+        sources: [],
+      },
+    ];
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={messages}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup.indexOf("First answer")).toBeLessThan(
+      markup.indexOf("First source excerpt"),
+    );
+    expect(markup.indexOf("First source excerpt")).toBeLessThan(
+      markup.indexOf("Second answer"),
+    );
+    expect(markup).not.toContain("private-citation-id");
+    expect(markup).not.toContain("ow-source");
   });
 });

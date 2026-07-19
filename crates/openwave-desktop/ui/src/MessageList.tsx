@@ -3,12 +3,18 @@ import type { PendingFolderAccessRequest } from "./api";
 import { FolderAccessCard } from "./FolderAccessCard";
 import type { FolderAccessDecision } from "./host";
 import { MessageMarkdown } from "./MessageMarkdown";
+import { AssistantSources, type AssistantSource } from "./AssistantSources";
 import { ToolCallCard, type ToolCallStatus } from "./ToolCallCard";
 import { ToolActivityGroup } from "./ToolActivityGroup";
 
 export type ChatMessage =
   | { id: string; role: "user"; text: string }
-  | { id: string; role: "assistant"; text: string }
+  | {
+      id: string;
+      role: "assistant";
+      text: string;
+      sources: AssistantSource[];
+    }
   | { id: string; role: "system"; text: string }
   | {
       id: string;
@@ -215,6 +221,7 @@ export function MessageBubble({
             …
           </span>
         ) : null}
+        <AssistantSources sources={message.sources} />
       </article>
     );
   }

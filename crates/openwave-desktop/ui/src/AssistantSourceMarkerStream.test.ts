@@ -80,4 +80,14 @@ describe("AssistantSourceMarkerStreamScrubber", () => {
     expect(scrubber.finish()).toBe("[[ow-source:01234567");
     expect(scrubber.finish()).toBe("");
   });
+
+  it("flushes malformed interruption prose but never releases a valid marker", () => {
+    const interrupted = new AssistantSourceMarkerStreamScrubber();
+    expect(interrupted.push("Answer [[ow-source:01234567")).toBe("Answer ");
+    expect(interrupted.finish()).toBe("[[ow-source:01234567");
+
+    const completedMarker = new AssistantSourceMarkerStreamScrubber();
+    expect(completedMarker.push(`Answer ${MARKER}`)).toBe("Answer ");
+    expect(completedMarker.finish()).toBe("");
+  });
 });
