@@ -68,6 +68,7 @@ pub enum AgentEvent {
         tool_name: String,
         /// The approval class that triggered the prompt.
         class: ApprovalClass,
+        kind: crate::approval::ToolApprovalKind,
         /// A short, human-readable summary of what will happen.
         summary: String,
     },

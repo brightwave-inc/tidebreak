@@ -46,7 +46,9 @@ pub use agent_tools::{
     SANDBOX_WEB_SEARCH_TOOL, SPAWN_SANDBOX_AGENT_TOOL,
 };
 pub use approval::{
-    ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalRequest, AutoApproveGate, RefuseGate,
+    ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
+    ApprovalRegistrationFuture, ApprovalRequest, ApprovalRequiredPublication, AutoApproveGate,
+    RefuseGate, ToolApproval, ToolApprovalKind, ToolApprovalStatus,
 };
 #[cfg(feature = "blob-fs")]
 pub use blob::FsBlobStore;
@@ -102,12 +104,13 @@ pub use storage::{
     ChatTranscriptSnapshot, ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome,
     ClaimSandboxToolCallOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim,
     CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
-    DeleteChatOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
-    EnsureDocumentParseJobOutcome, FailAgentRunOutcome, FinishAgentRunCancellationOutcome,
-    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledTurnOutcome,
-    JournaledTurnSteerOutcome, ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome,
-    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
+    DecideToolApprovalOutcome, DeleteChatOutcome, DocumentIndexJobReason,
+    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FailAgentRunOutcome,
+    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
+    JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
+    ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForClientCallOutcome,
+    RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome,
     RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome, ResolveToolCallOutcome,
     SecretProvider, Store, SubmitAgentRunResultOutcome, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };

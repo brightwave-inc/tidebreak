@@ -9110,6 +9110,36 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
     };
     assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 0);
 
+    // Closed request schema and reason validation fail before the durable
+    // decision, leaving the exact approval actionable.
+    for body in [
+        serde_json::json!({"decision": "reject", "reason": "bad\0reason"}),
+        serde_json::json!({"decision": "approve", "unexpected": true}),
+    ] {
+        let invalid = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/chats/{}/approvals/{call_id}", chat.id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(
+        store
+            .list_pending_tool_call_approvals(chat.id, 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
     // Approve via the HTTP endpoint.
     let decide = router
         .clone()
@@ -9138,7 +9168,7 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
         AgentEvent::TurnCompleted { .. }
     ));
 
-    // A second decide for the same call is 404 (already resolved).
+    // An exact decision retry remains an idempotent success after execution.
     let again = router
         .oneshot(
             Request::builder()
@@ -9153,7 +9183,7 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
         )
         .await
         .unwrap();
-    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+    assert_eq!(again.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -157,8 +157,8 @@ The built-in server registry currently contains:
 - `read_file` and `list_dir`, which are read-only;
 - `write_file`, which is confined to private per-chat scratch and runs without a
   prompt;
-- `search`, which queries the indexed corpus and requires approval only when its
-  embedder, store, or reranker can send data outside the machine;
+- `search`, which queries the indexed corpus and always requires approval because
+  matching excerpts are returned to the selected chat model, which may be remote;
 - `request_folder_access`, a client-owned consent proposal with a bounded
   user-facing reason, one read capability proposal, and an optional well-known
   picker hint for Documents or Downloads. It has no server executor and grants
@@ -381,10 +381,24 @@ work, so a new turn cannot race the old one.
 
 ### Approvals
 
-A sensitive tool call emits `ApprovalRequired` and parks until the user approves
-or rejects it. Approval waiting is process-local and the server enforces one
-process per data directory, so an application restart does not yet resume a
-parked approval.
+A sensitive server tool call records its approval request and
+`ApprovalRequired` event in the same transaction, then parks until the user
+approves or rejects it. The tool call owns an immutable approval identity and a
+frozen, renderer-safe approval kind. Decisions are exact and idempotent: a retry
+of the same decision recovers the committed result, while a contradictory
+decision conflicts. Cancellation and terminal failure close pending approvals
+atomically with the affected call.
+
+Approval state is durable rather than tied to a worker process. After a restart,
+the next claimed worker resumes the persisted server call before asking the
+model for another step. It either waits on the same approval, executes an
+already-approved call under the same frozen approval, or fails closed when the
+tool implementation is no longer available. Server-tool execution and result
+persistence are not yet one atomic, receipted operation, so a crash between
+them can replay execution; each tool still needs an idempotency or reconciliation
+contract before OpenWave can claim exactly-once effects. The search consent
+prompt explicitly describes that the query and potentially matching document
+excerpts may be sent to configured AI services outside OpenWave.
 
 ### Steering
 
@@ -677,8 +691,9 @@ The main next steps are:
 
 - extend the connected durable agent-run hierarchy with carefully scoped
   sandbox-safe capabilities and UI status surfaces;
-- unify client execution, approvals, folder consent, user questions, resource
-  waits, and child-agent waits as durable continuations that release workers;
+- unify client execution, folder consent, user questions, resource waits, and
+  child-agent waits with the durable approval pattern as continuations that
+  release workers;
 - persist model/tool step boundaries and side-effect receipts so sandbox and
   foreground runs can resume safely after process loss;
 - synchronize manual native connect/disconnect controls into the same pathless
@@ -687,7 +702,6 @@ The main next steps are:
   per-chat scratch separate;
 - add resumable checkpoints and explicit idempotency policy around remaining
   server-side tool effects;
-- make approvals resumable rather than process-local;
 - expose the remaining backend capabilities through the desktop information
   architecture: projects, documents, search, structured citations, and steer;
 - add richer parsers and wire indexed search into MCP;

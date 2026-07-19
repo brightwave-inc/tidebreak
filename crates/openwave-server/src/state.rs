@@ -70,7 +70,7 @@ pub struct AppState {
     pub active_turns: Arc<TurnGuard>,
     /// Live fan-out of turn events to connected WebSocket clients.
     pub events: Arc<EventBus>,
-    /// Parks Sensitive tool calls until `POST .../approvals/{call_id}` decides.
+    /// Coordinates durable Sensitive-tool decisions and low-latency wakeups.
     pub approvals: Arc<ApprovalBroker>,
 }
 
@@ -121,7 +121,7 @@ impl AppState {
         let blob_writes = Arc::new(BlobWriteGuard::new(config.data_dir.join("blob-locks")));
         Ok(Self {
             config: Arc::new(config),
-            store,
+            store: store.clone(),
             blobs,
             resolver,
             secrets,
@@ -140,7 +140,7 @@ impl AppState {
             root_attachment_routes_enabled: true,
             active_turns: Arc::new(TurnGuard::default()),
             events: Arc::new(EventBus::default()),
-            approvals: Arc::new(ApprovalBroker::new()),
+            approvals: Arc::new(ApprovalBroker::new(store)),
         })
     }
 }

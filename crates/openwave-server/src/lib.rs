@@ -207,6 +207,7 @@ pub fn app(state: AppState) -> Router {
             "/chats/{id}/client-executions/pending",
             get(routes::list_pending_folder_access_requests),
         )
+        .route("/chats/{id}/approvals", get(routes::list_pending_approvals))
         .route(
             "/chats/{id}/approvals/{call_id}",
             post(routes::post_approval),
@@ -363,9 +364,9 @@ pub async fn bind_with_client_executor_id(
 }
 
 async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<Server> {
-    // Desktop live delivery, steer, and approvals are process-local. Until the
-    // self-host control plane makes those paths durable, one process owns the
-    // complete data directory and its worker set.
+    // Desktop live delivery remains process-local. Turns, steering, and tool
+    // approvals are durable, while one process still owns the complete data
+    // directory and its worker set.
     let instance_lock = InstanceLock::acquire(&config)?;
     let store = connect_store(&config).await?;
     let secrets: Arc<dyn SecretProvider> = Arc::new(KeychainSecretProvider::new());

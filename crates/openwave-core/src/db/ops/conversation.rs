@@ -368,11 +368,6 @@ pub(in crate::db) async fn delete_chat(
     // tables intentionally use restrictive foreign keys to make normal state
     // machine mistakes visible; conversation deletion is the explicit terminal
     // owner that can erase their complete, quiesced graph in one transaction.
-    entities::event::Entity::delete_many()
-        .filter(entities::event::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
     entities::turn_client_wait::Entity::delete_many()
         .filter(entities::turn_client_wait::Column::ChatId.eq(chat_id.0))
         .exec(&transaction)
@@ -390,6 +385,13 @@ pub(in crate::db) async fn delete_chat(
         .map_err(store_err)?;
     entities::tool_call::Entity::delete_many()
         .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    // Approval-bearing tool calls own immutable receipts in the event journal.
+    // Remove those references before deleting their journal rows.
+    entities::event::Entity::delete_many()
+        .filter(entities::event::Column::ChatId.eq(chat_id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -562,6 +564,7 @@ where
             crate::model::ToolCallStatus::Cancelled.as_str(),
         ]))
         .order_by_asc(entities::tool_call::Column::CreatedAt)
+        .order_by_asc(entities::tool_call::Column::Id)
         .order_by_asc(entities::tool_call::Column::Id)
         .all(conn)
         .await

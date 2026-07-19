@@ -68,6 +68,18 @@ pub enum ApprovalClass {
     Sensitive,
 }
 
+impl ApprovalClass {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Workspace => "workspace",
+            Self::Sensitive => "sensitive",
+        }
+    }
+}
+
 /// A tool's public contract: name, description, and the JSON Schema its
 /// arguments must satisfy. This is what gets advertised to the model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

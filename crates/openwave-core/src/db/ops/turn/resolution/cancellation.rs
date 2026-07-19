@@ -201,6 +201,25 @@ async fn request_turn_cancellation_inner(
         }
         _ => TurnRunStatus::Cancelled,
     };
+    match next_status {
+        TurnRunStatus::Cancelling => {
+            super::super::super::approval::reject_pending_for_cancelling_turn_on(
+                &transaction,
+                id,
+                now,
+            )
+            .await?;
+        }
+        TurnRunStatus::Cancelled => {
+            super::super::super::approval::close_pending_for_terminal_turn_on(
+                &transaction,
+                id,
+                now,
+            )
+            .await?;
+        }
+        _ => {}
+    }
     if let Some((wait, call)) = cancel_unclaimed_call {
         let cancelled_call = entities::tool_call::Entity::update_many()
             .col_expr(
@@ -422,6 +441,9 @@ async fn finish_turn_cancellation_inner(
     if let Some(AgentEvent::TurnCancelled { usage }) = terminal_event {
         validate_terminal_usage(*usage, super::super::usage_from_turn_model(&turn)?)?;
     }
+
+    super::super::super::approval::close_pending_for_terminal_turn_on(&transaction, id, now)
+        .await?;
 
     let cancelled = entities::turn_run::Entity::update_many()
         .col_expr(

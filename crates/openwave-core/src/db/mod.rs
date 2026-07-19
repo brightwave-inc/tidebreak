@@ -16,6 +16,7 @@ use sea_orm::{
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 
+use crate::approval::{ApprovalDecision, ApprovalRequest, ToolApproval};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
@@ -43,14 +44,15 @@ use crate::storage::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, BeginRootAttachmentChangeOutcome,
     ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome, ClaimSandboxToolCallOutcome,
     ClaimTurnRunOutcome, CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
-    ConsumeAgentRunInboxOutcome, DeleteChatOutcome, DocumentIndexJobReason,
-    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FailAgentRunOutcome,
-    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    ConsumeAgentRunInboxOutcome, DecideToolApprovalOutcome, DeleteChatOutcome,
+    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
+    FailAgentRunOutcome, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
-    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkSandboxToolCallOutcome,
-    ParkTurnForAgentRunInboxOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
-    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
-    ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, Store, SubmitAgentRunResultOutcome,
+    JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
+    ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForClientCallOutcome,
+    RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome,
+    RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, Store,
+    SubmitAgentRunResultOutcome,
 };
 
 mod ops;
@@ -2278,6 +2280,53 @@ impl Store for DbStore {
 
     async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome> {
         ops::client_execution::accept_tool_call(self, call).await
+    }
+
+    async fn request_tool_call_approval(
+        &self,
+        request: &ApprovalRequest,
+        requested_at: chrono::DateTime<Utc>,
+    ) -> Result<RequestToolApprovalOutcome> {
+        ops::approval::request(self, request, requested_at).await
+    }
+
+    async fn request_tool_call_approval_and_append_event(
+        &self,
+        request: &ApprovalRequest,
+        lease_token: uuid::Uuid,
+        event_ordinal: i32,
+        requested_at: chrono::DateTime<Utc>,
+    ) -> Result<JournaledToolApprovalOutcome> {
+        ops::approval::request_and_append_event(
+            self,
+            request,
+            lease_token,
+            event_ordinal,
+            requested_at,
+        )
+        .await
+    }
+
+    async fn decide_tool_call_approval(
+        &self,
+        chat_id: ChatId,
+        call_id: CallId,
+        decision: &ApprovalDecision,
+        decided_at: chrono::DateTime<Utc>,
+    ) -> Result<DecideToolApprovalOutcome> {
+        ops::approval::decide(self, chat_id, call_id, decision, decided_at).await
+    }
+
+    async fn get_tool_call_approval(&self, call_id: CallId) -> Result<Option<ToolApproval>> {
+        ops::approval::get(self, call_id).await
+    }
+
+    async fn list_pending_tool_call_approvals(
+        &self,
+        chat_id: ChatId,
+        limit: u64,
+    ) -> Result<Vec<ToolApproval>> {
+        ops::approval::list_pending(self, chat_id, limit).await
     }
 
     async fn claim_client_tool_call(
