@@ -4,6 +4,7 @@ import {
   useLayoutEffect,
   useRef,
 } from "react";
+import { MAX_STEER_CHARACTERS } from "./ActiveTurnSteer";
 
 const MIN_COMPOSER_LINES = 1;
 export const MAX_COMPOSER_LINES = 6;
@@ -77,8 +78,12 @@ export type ComposerProps = {
   draft: string;
   onDraftChange: (draft: string) => void;
   onSend: () => Promise<void>;
+  onSteer: () => Promise<void>;
   onStop: () => Promise<void>;
   resetKey: string;
+  steerError: string | null;
+  steerPending: boolean;
+  steerStatus: string | null;
 };
 
 export function Composer({
@@ -90,14 +95,30 @@ export function Composer({
   draft,
   onDraftChange,
   onSend,
+  onSteer,
   onStop,
   resetKey,
+  steerError,
+  steerPending,
+  steerStatus,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const latestResetKeyRef = useRef(resetKey);
   latestResetKeyRef.current = resetKey;
-  const inputDisabled = disabled || busy;
-  const canSend = !inputDisabled && Boolean(draft.trim());
+  const inputDisabled = disabled;
+  const active = busy && activeTurnId !== null;
+  const hasDraft = Boolean(draft.trim());
+  const steerHasUnsupportedCharacter = active && draft.includes("\0");
+  const steerTooLong =
+    active && [...draft.trim()].length > MAX_STEER_CHARACTERS;
+  const canSubmit =
+    !inputDisabled &&
+    !steerPending &&
+    !cancelPending &&
+    hasDraft &&
+    !steerHasUnsupportedCharacter &&
+    !steerTooLong &&
+    (!busy || active);
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -105,13 +126,12 @@ export function Composer({
   }, [draft, resetKey]);
 
   async function submit(): Promise<void> {
-    if (!canSend) return;
+    if (!canSubmit) return;
     const submissionKey = resetKey;
-    await onSend();
+    await (active ? onSteer() : onSend());
 
-    // A successful send enters a running turn and keeps the input disabled.
-    // If the request fails, the input becomes available again and returns focus
-    // so the user can continue without another click.
+    // Restore focus after accepted guidance or a failed request. A new chat or
+    // disabled composer must never receive focus from an older submission.
     window.requestAnimationFrame(() => {
       const textarea = textareaRef.current;
       if (
@@ -142,7 +162,9 @@ export function Composer({
       <textarea
         ref={textareaRef}
         value={draft}
-        placeholder="Message OpenWave…"
+        placeholder={
+          active ? "Guide the active response…" : "Message OpenWave…"
+        }
         aria-label="Message"
         disabled={inputDisabled}
         onChange={onChange}
@@ -153,21 +175,35 @@ export function Composer({
         }}
       />
       <div className="composer-actions">
-        {busy && activeTurnId ? (
-          <button
-            type="button"
-            className="btn btn-stop"
-            aria-label={cancelPending ? "Stopping response" : "Stop response"}
-            disabled={disabled || cancelPending}
-            onClick={() => void onStop()}
-          >
-            {cancelPending ? "Stopping…" : "Stop"}
-          </button>
+        {active ? (
+          <>
+            {(hasDraft || steerPending) && (
+              <button
+                type="submit"
+                className="btn btn-primary"
+                aria-label="Redirect active response"
+                disabled={!canSubmit}
+              >
+                {steerPending ? "Sending…" : "Redirect"}
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn btn-stop"
+              aria-label={
+                cancelPending ? "Stopping response" : "Stop response"
+              }
+              disabled={disabled || cancelPending}
+              onClick={() => void onStop()}
+            >
+              {cancelPending ? "Stopping…" : "Stop"}
+            </button>
+          </>
         ) : (
           <button
             type="submit"
             className="btn btn-primary"
-            disabled={!canSend}
+            disabled={!canSubmit}
           >
             Send
           </button>
@@ -179,6 +215,26 @@ export function Composer({
       {cancelError && (
         <span className="composer-turn-error" role="status">
           Couldn’t stop turn: {cancelError}
+        </span>
+      )}
+      {steerError && (
+        <span className="composer-turn-error" role="alert">
+          Couldn’t redirect: {steerError}
+        </span>
+      )}
+      {steerStatus && !steerError && (
+        <span className="composer-turn-status" role="status">
+          {steerStatus}
+        </span>
+      )}
+      {steerTooLong && (
+        <span className="composer-turn-error" role="alert">
+          Guidance is too long.
+        </span>
+      )}
+      {steerHasUnsupportedCharacter && (
+        <span className="composer-turn-error" role="alert">
+          Guidance contains an unsupported character.
         </span>
       )}
     </form>

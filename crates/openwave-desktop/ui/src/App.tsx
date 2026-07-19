@@ -40,6 +40,11 @@ import {
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import {
+  ActiveTurnSteerFence,
+  canBeginActiveTurnSteer,
+  shouldClearAcceptedSteerDraft,
+} from "./ActiveTurnSteer";
+import {
   loadCurrentTerminalTranscript,
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
@@ -84,6 +89,11 @@ export default function App() {
     null,
   );
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const [steerPendingTurnId, setSteerPendingTurnId] = useState<string | null>(
+    null,
+  );
+  const [steerError, setSteerError] = useState<string | null>(null);
+  const [steerStatus, setSteerStatus] = useState<string | null>(null);
   const [creatingChat, setCreatingChat] = useState(false);
   const [deletingChatId, setDeletingChatId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
@@ -112,6 +122,10 @@ export default function App() {
   const resolvingFolderCallsRef = useRef<Set<string>>(new Set());
   const visibleFolderCallIdsRef = useRef<Set<string>>(new Set());
   const cancelRequestTurnRef = useRef<string | null>(null);
+  const activeTurnIdRef = useRef<string | null>(null);
+  const draftRef = useRef("");
+  const selectedChatIdRef = useRef<string | null>(null);
+  const steerFenceRef = useRef(new ActiveTurnSteerFence());
   const provisionalToolCallIdsRef = useRef<Set<string>>(new Set());
   const deletionInFlightRef = useRef(false);
 
@@ -131,6 +145,7 @@ export default function App() {
     return () => {
       cancelled = true;
       terminalHydrationGenerationRef.current += 1;
+      steerFenceRef.current.invalidate();
     };
   }, []);
 
@@ -187,7 +202,7 @@ export default function App() {
           reconcilePendingApprovalCards(presented.messages, pendingApprovals),
         );
         const pendingTurnId = pendingApprovals[0]?.turnId ?? null;
-        setActiveTurnId(pendingTurnId);
+        setCurrentActiveTurnId(pendingTurnId);
         setBusy(pendingTurnId !== null);
         setHydratedChatId(chat.id);
       } catch (err) {
@@ -343,6 +358,7 @@ export default function App() {
     const event = framed.event;
 
     if (event.type === "turn_started") {
+      const startsDifferentTurn = activeTurnIdRef.current !== event.turn_id;
       refreshAgentRunsRef.current?.();
       terminalHydrationGenerationRef.current += 1;
       assistantBufRef.current = "";
@@ -350,10 +366,11 @@ export default function App() {
         new AssistantSourceMarkerStreamScrubber();
       provisionalToolCallIdsRef.current = new Set();
       setBusy(true);
-      setActiveTurnId(event.turn_id);
+      setCurrentActiveTurnId(event.turn_id);
       setCancelPendingTurnId(null);
       setCancelError(null);
       cancelRequestTurnRef.current = null;
+      if (startsDifferentTurn) clearSteerRequestState();
       setMessages((prev) => [
         ...prev,
         { id: nextId(), role: "assistant", text: "", sources: [] },
@@ -562,10 +579,34 @@ export default function App() {
 
   function resolveActiveTurn() {
     setBusy(false);
-    setActiveTurnId(null);
+    setCurrentActiveTurnId(null);
     setCancelPendingTurnId(null);
     setCancelError(null);
     cancelRequestTurnRef.current = null;
+    clearSteerRequestState();
+  }
+
+  function setCurrentActiveTurnId(turnId: string | null) {
+    activeTurnIdRef.current = turnId;
+    setActiveTurnId(turnId);
+  }
+
+  function setComposerDraft(nextDraft: string) {
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+  }
+
+  function clearSteerRequestState() {
+    steerFenceRef.current.invalidate();
+    setSteerPendingTurnId(null);
+    setSteerError(null);
+    setSteerStatus(null);
+  }
+
+  function onComposerDraftChange(nextDraft: string) {
+    setComposerDraft(nextDraft);
+    setSteerError(null);
+    setSteerStatus(null);
   }
 
   async function refreshCatalog() {
@@ -585,10 +626,10 @@ export default function App() {
     const content = draft.trim();
     const turnId = crypto.randomUUID();
     terminalHydrationGenerationRef.current += 1;
-    setDraft("");
+    setComposerDraft("");
     setMessages((prev) => [...prev, { id: nextId(), role: "user", text: content }]);
     setBusy(true);
-    setActiveTurnId(turnId);
+    setCurrentActiveTurnId(turnId);
     setCancelPendingTurnId(null);
     setCancelError(null);
     try {
@@ -602,6 +643,79 @@ export default function App() {
         ...prev,
         { id: nextId(), role: "error", text: String(err) },
       ]);
+    }
+  }
+
+  async function onSteerActiveTurn() {
+    const admission = {
+      busy,
+      turnId: activeTurnIdRef.current,
+      cancelRequestTurnId: cancelRequestTurnRef.current,
+      deletionInFlight: deletionInFlightRef.current,
+    };
+    if (
+      !client ||
+      !chat ||
+      !canBeginActiveTurnSteer(admission)
+    ) {
+      return;
+    }
+    const turnId = admission.turnId;
+
+    const request = steerFenceRef.current.begin(
+      {
+        chatId: chat.id,
+        turnId,
+        selection: chatSelectionRef.current,
+      },
+      draftRef.current,
+      () => crypto.randomUUID(),
+    );
+    if (!request) return;
+
+    setSteerPendingTurnId(turnId);
+    setSteerError(null);
+    setSteerStatus("Sending guidance…");
+    setCancelError(null);
+    try {
+      await client.steer(
+        request.chatId,
+        request.turnId,
+        request.steerId,
+        request.content,
+        true,
+      );
+      if (
+        !steerFenceRef.current.canApplyResponse(request, {
+          chatId: selectedChatIdRef.current ?? "",
+          turnId: activeTurnIdRef.current ?? "",
+          selection: chatSelectionRef.current,
+        })
+      ) {
+        return;
+      }
+
+      steerFenceRef.current.finish(request);
+      setSteerPendingTurnId(null);
+      if (shouldClearAcceptedSteerDraft(request, draftRef.current)) {
+        setComposerDraft("");
+      }
+      setSteerStatus("Guidance sent");
+    } catch (err) {
+      if (
+        !steerFenceRef.current.canApplyResponse(request, {
+          chatId: selectedChatIdRef.current ?? "",
+          turnId: activeTurnIdRef.current ?? "",
+          selection: chatSelectionRef.current,
+        })
+      ) {
+        return;
+      }
+
+      steerFenceRef.current.fail(request);
+      setSteerPendingTurnId(null);
+      setSteerStatus(null);
+      setSteerError(String(err));
     }
   }
 
@@ -658,12 +772,13 @@ export default function App() {
       setAgentRunsError(null);
       setFolderAccessRequests([]);
       setFolderAccessErrors({});
-      setDraft("");
+      setComposerDraft("");
       setBusy(false);
-      setActiveTurnId(null);
+      setCurrentActiveTurnId(null);
       setCancelPendingTurnId(null);
       setCancelError(null);
       cancelRequestTurnRef.current = null;
+      clearSteerRequestState();
       activateChat(created);
       setChats((current) => [created, ...current]);
       setChatsError(null);
@@ -695,6 +810,7 @@ export default function App() {
       // This invalidates callbacks that captured the deleted selection. The
       // ref update also gates sends before the disabled composer renders.
       chatSelectionRef.current += 1;
+      clearSteerRequestState();
     }
     try {
       await client.deleteChat(target.id);
@@ -722,6 +838,7 @@ export default function App() {
   function activateChat(next: Chat) {
     chatSelectionRef.current += 1;
     terminalHydrationGenerationRef.current += 1;
+    selectedChatIdRef.current = next.id;
     assistantMarkerScrubberRef.current =
       new AssistantSourceMarkerStreamScrubber();
     setChat(next);
@@ -746,12 +863,13 @@ export default function App() {
     setAgentRunsError(null);
     setFolderAccessRequests([]);
     setFolderAccessErrors({});
-    setDraft("");
+    setComposerDraft("");
     setBusy(false);
-    setActiveTurnId(null);
+    setCurrentActiveTurnId(null);
     setCancelPendingTurnId(null);
     setCancelError(null);
     cancelRequestTurnRef.current = null;
+    clearSteerRequestState();
     setEditingTitle(false);
     activateChat(next);
     setStatus(`chat ${next.id.slice(0, 8)}…`);
@@ -1200,10 +1318,16 @@ export default function App() {
             }
             disabled={deletingChatId !== null}
             draft={draft}
-            onDraftChange={setDraft}
+            onDraftChange={onComposerDraftChange}
             onSend={onSend}
+            onSteer={onSteerActiveTurn}
             onStop={onCancelActiveTurn}
             resetKey={chat?.id ?? "no-chat"}
+            steerError={steerError}
+            steerPending={
+              activeTurnId !== null && steerPendingTurnId === activeTurnId
+            }
+            steerStatus={steerStatus}
           />
         </section>
 
