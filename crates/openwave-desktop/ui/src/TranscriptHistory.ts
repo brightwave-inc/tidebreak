@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatToolActivity } from "./api";
+import type { AssistantSource } from "./AssistantSources";
 import type { ToolCallStatus } from "./ToolCallCard";
 
 export type HydratedTranscriptEntry =
@@ -7,6 +8,7 @@ export type HydratedTranscriptEntry =
       kind: "message";
       role: ChatMessage["role"];
       text: string;
+      sources: AssistantSource[];
       createdAt: string;
     }
   | {
@@ -43,6 +45,18 @@ export function hydrateTranscriptHistory(
       kind: "message" as const,
       role: message.role,
       text: message.content,
+      sources:
+        message.role === "assistant"
+          ? (message.citations ?? [])
+              .filter((citation) => citation.message_id === message.id)
+              .map(({ id, ordinal, excerpt, heading, pages }) => ({
+                id,
+                ordinal,
+                excerpt,
+                heading,
+                pages,
+              }))
+          : [],
       createdAt: message.created_at,
     })),
     ...toolActivity.map((activity, index) => ({

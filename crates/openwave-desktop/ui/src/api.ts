@@ -53,6 +53,18 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   created_at: string;
+  /** Optional so a partial renderer-boundary response remains non-fatal. */
+  citations?: ChatMessageCitation[];
+};
+
+/** A bounded, renderer-safe evidence snapshot owned by one assistant message. */
+export type ChatMessageCitation = {
+  id: string;
+  message_id: string;
+  ordinal: number;
+  excerpt: string;
+  heading: string | null;
+  pages: number[];
 };
 
 /** A fixed, terminal tool-card projection with no canonical tool data. */

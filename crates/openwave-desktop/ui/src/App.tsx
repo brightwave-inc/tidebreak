@@ -30,7 +30,6 @@ import {
   toolApprovalPresentation,
   type ToolCallStatus,
 } from "./ToolCallCard";
-import { hydrateTranscriptHistory } from "./TranscriptHistory";
 import { useChatEventStream } from "./ChatEventStream";
 import { isNearBottom, scrollToLatest } from "./ChatScroll";
 import { DocumentsView } from "./DocumentsView";
@@ -39,6 +38,11 @@ import {
   upsertPendingApprovalCard,
 } from "./ApprovalHistory";
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
+import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
+import {
+  loadCurrentTerminalTranscript,
+  presentChatTranscript,
+} from "./ChatTranscriptPresentation";
 
 type Msg = ChatMessage;
 
@@ -97,6 +101,10 @@ export default function App() {
   const hydratedMessageIdsRef = useRef<Set<string>>(new Set());
   const lastSeqRef = useRef(0);
   const assistantBufRef = useRef("");
+  const assistantMarkerScrubberRef = useRef(
+    new AssistantSourceMarkerStreamScrubber(),
+  );
+  const terminalHydrationGenerationRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followsLatestRef = useRef(true);
   const refreshFolderAccessRef = useRef<(() => void) | null>(null);
@@ -122,6 +130,7 @@ export default function App() {
     })();
     return () => {
       cancelled = true;
+      terminalHydrationGenerationRef.current += 1;
     };
   }, []);
 
@@ -172,32 +181,10 @@ export default function App() {
         if (!hydration) return;
         const { transcript, pendingApprovals } = hydration;
         lastSeqRef.current = transcript.last_event_seq;
-        const hydrated = hydrateTranscriptHistory(
-          transcript.messages,
-          transcript.tool_activity,
-        );
-        hydratedMessageIdsRef.current = new Set(
-          hydrated
-            .filter((entry) => entry.kind === "message")
-            .map((entry) => entry.id),
-        );
-        const transcriptMessages: Msg[] = hydrated.map((entry) =>
-          entry.kind === "tool"
-            ? {
-                id: entry.id,
-                role: "tool",
-                callId: entry.id,
-                name: entry.name,
-                status: entry.status,
-              }
-            : {
-                id: entry.id,
-                role: entry.role,
-                text: entry.text,
-              },
-        );
+        const presented = presentChatTranscript(transcript);
+        hydratedMessageIdsRef.current = presented.messageIds;
         setMessages(
-          reconcilePendingApprovalCards(transcriptMessages, pendingApprovals),
+          reconcilePendingApprovalCards(presented.messages, pendingApprovals),
         );
         const pendingTurnId = pendingApprovals[0]?.turnId ?? null;
         setActiveTurnId(pendingTurnId);
@@ -357,7 +344,10 @@ export default function App() {
 
     if (event.type === "turn_started") {
       refreshAgentRunsRef.current?.();
+      terminalHydrationGenerationRef.current += 1;
       assistantBufRef.current = "";
+      assistantMarkerScrubberRef.current =
+        new AssistantSourceMarkerStreamScrubber();
       provisionalToolCallIdsRef.current = new Set();
       setBusy(true);
       setActiveTurnId(event.turn_id);
@@ -366,21 +356,23 @@ export default function App() {
       cancelRequestTurnRef.current = null;
       setMessages((prev) => [
         ...prev,
-        { id: nextId(), role: "assistant", text: "" },
+        { id: nextId(), role: "assistant", text: "", sources: [] },
       ]);
       return;
     }
 
     if (event.type === "text_delta") {
-      assistantBufRef.current += event.text;
+      assistantBufRef.current += assistantMarkerScrubberRef.current.push(
+        event.text,
+      );
       const text = assistantBufRef.current;
       setMessages((prev) => {
         const copy = [...prev];
         const last = copy[copy.length - 1];
         if (last?.role === "assistant") {
-          copy[copy.length - 1] = { id: last.id, role: "assistant", text };
+          copy[copy.length - 1] = { ...last, text };
         } else {
-          copy.push({ id: nextId(), role: "assistant", text });
+          copy.push({ id: nextId(), role: "assistant", text, sources: [] });
         }
         return copy;
       });
@@ -388,6 +380,9 @@ export default function App() {
     }
 
     if (event.type === "stream_interrupted") {
+      // The whole optimistic candidate is invalidated at this boundary. Finish
+      // clears any withheld marker-like tail before the replacement starts.
+      assistantMarkerScrubberRef.current.finish();
       assistantBufRef.current = "";
       const provisionalCallIds = provisionalToolCallIdsRef.current;
       provisionalToolCallIdsRef.current = new Set();
@@ -402,6 +397,12 @@ export default function App() {
     }
 
     if (event.type === "tool_call_started") {
+      flushAssistantMarkerTail();
+      if (provisionalToolCallIdsRef.current.size === 0) {
+        assistantBufRef.current = "";
+        assistantMarkerScrubberRef.current =
+          new AssistantSourceMarkerStreamScrubber();
+      }
       refreshAgentRunsRef.current?.();
       if (event.name === "request_folder_access") {
         refreshFolderAccessRef.current?.();
@@ -473,13 +474,21 @@ export default function App() {
     }
 
     if (event.type === "turn_completed") {
+      flushAssistantMarkerTail();
       provisionalToolCallIdsRef.current = new Set();
       resolveActiveTurn();
       refreshAgentRunsRef.current?.();
+      const selection = chatSelectionRef.current;
+      const generation = ++terminalHydrationGenerationRef.current;
+      if (chat) {
+        void refreshTerminalTranscript(chat.id, selection, generation);
+      }
       return;
     }
 
     if (event.type === "turn_cancelled") {
+      flushAssistantMarkerTail();
+      terminalHydrationGenerationRef.current += 1;
       provisionalToolCallIdsRef.current = new Set();
       resolveActiveTurn();
       refreshAgentRunsRef.current?.();
@@ -491,6 +500,8 @@ export default function App() {
     }
 
     if (event.type === "turn_failed") {
+      flushAssistantMarkerTail();
+      terminalHydrationGenerationRef.current += 1;
       provisionalToolCallIdsRef.current = new Set();
       resolveActiveTurn();
       refreshAgentRunsRef.current?.();
@@ -502,6 +513,50 @@ export default function App() {
           text: "The turn could not be completed.",
         },
       ]);
+    }
+  }
+
+  function flushAssistantMarkerTail() {
+    const tail = assistantMarkerScrubberRef.current.finish();
+    if (!tail) return;
+    assistantBufRef.current += tail;
+    const text = assistantBufRef.current;
+    setMessages((previous) => {
+      const copy = [...previous];
+      const last = copy[copy.length - 1];
+      if (last?.role === "assistant") {
+        copy[copy.length - 1] = { ...last, text };
+      } else {
+        copy.push({ id: nextId(), role: "assistant", text, sources: [] });
+      }
+      return copy;
+    });
+  }
+
+  async function refreshTerminalTranscript(
+    chatId: string,
+    selection: number,
+    generation: number,
+  ) {
+    if (!client) return;
+    try {
+      const presented = await loadCurrentTerminalTranscript(
+        client,
+        chatId,
+        () =>
+          chatSelectionRef.current === selection &&
+          terminalHydrationGenerationRef.current === generation,
+      );
+      if (!presented) return;
+      lastSeqRef.current = Math.max(
+        lastSeqRef.current,
+        presented.lastEventSeq,
+      );
+      hydratedMessageIdsRef.current = presented.messageIds;
+      setMessages(presented.messages);
+    } catch {
+      // The scrubbed optimistic response remains safe and visible. Reopening
+      // the conversation will load a fresh authoritative snapshot.
     }
   }
 
@@ -529,6 +584,7 @@ export default function App() {
     const selection = chatSelectionRef.current;
     const content = draft.trim();
     const turnId = crypto.randomUUID();
+    terminalHydrationGenerationRef.current += 1;
     setDraft("");
     setMessages((prev) => [...prev, { id: nextId(), role: "user", text: content }]);
     setBusy(true);
@@ -590,6 +646,8 @@ export default function App() {
       socketRef.current?.close();
       socketRef.current = null;
       assistantBufRef.current = "";
+      assistantMarkerScrubberRef.current =
+        new AssistantSourceMarkerStreamScrubber();
       provisionalToolCallIdsRef.current = new Set();
       lastSeqRef.current = 0;
       followsLatestRef.current = true;
@@ -663,6 +721,9 @@ export default function App() {
 
   function activateChat(next: Chat) {
     chatSelectionRef.current += 1;
+    terminalHydrationGenerationRef.current += 1;
+    assistantMarkerScrubberRef.current =
+      new AssistantSourceMarkerStreamScrubber();
     setChat(next);
   }
 
@@ -674,6 +735,8 @@ export default function App() {
     socketRef.current?.close();
     socketRef.current = null;
     assistantBufRef.current = "";
+    assistantMarkerScrubberRef.current =
+      new AssistantSourceMarkerStreamScrubber();
     lastSeqRef.current = 0;
     followsLatestRef.current = true;
     setHasUnreadActivity(false);
