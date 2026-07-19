@@ -88,18 +88,126 @@ describe("Composer", () => {
         draft="A later draft"
         onDraftChange={vi.fn()}
         onSend={noop}
+        onSteer={noop}
         onStop={noop}
         resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
       />,
     );
 
     expect(markup).toContain('class="composer-actions"');
-    expect(markup).toContain("Stop");
-    expect(markup).not.toContain(">Send<");
+    expect(markup).toContain("Redirect");
+    expect(markup).toContain(">Stop<");
+    expect(markup).toContain('aria-label="Redirect active response"');
     expect(markup).toContain('aria-label="Stop response"');
     expect(markup).toContain('aria-label="Message"');
-    expect(markup).toContain('disabled=""');
+    expect(markup).not.toContain('<textarea disabled=""');
     expect(markup).toContain('role="status"');
+  });
+
+  it("keeps Stop available for an active turn until the user types", () => {
+    const markup = renderToStaticMarkup(
+      <Composer
+        activeTurnId="turn-1"
+        busy
+        cancelError={null}
+        cancelPending={false}
+        disabled={false}
+        draft=""
+        onDraftChange={vi.fn()}
+        onSend={noop}
+        onSteer={noop}
+        onStop={noop}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
+      />,
+    );
+
+    expect(markup).toContain(">Stop<");
+    expect(markup).toContain('aria-label="Stop response"');
+    expect(markup).toContain("Guide the active response…");
+    expect(markup).not.toContain('<textarea disabled=""');
+  });
+
+  it("keeps the draft editable while fencing an in-flight steer", () => {
+    const markup = renderToStaticMarkup(
+      <Composer
+        activeTurnId="turn-1"
+        busy
+        cancelError={null}
+        cancelPending={false}
+        disabled={false}
+        draft="change course"
+        onDraftChange={vi.fn()}
+        onSend={noop}
+        onSteer={noop}
+        onStop={noop}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending
+        steerStatus="Sending guidance…"
+      />,
+    );
+
+    expect(markup).toContain(">Sending…<");
+    expect(markup).toContain(">Stop<");
+    expect(markup).toContain('aria-label="Redirect active response"');
+    expect(markup).not.toContain('<textarea disabled=""');
+    expect(markup).toContain("Sending guidance…");
+  });
+
+  it("keeps Stop available but fences Redirect while cancellation is pending", () => {
+    const markup = renderToStaticMarkup(
+      <Composer
+        activeTurnId="turn-1"
+        busy
+        cancelError={null}
+        cancelPending
+        disabled={false}
+        draft="change course"
+        onDraftChange={vi.fn()}
+        onSend={noop}
+        onSteer={noop}
+        onStop={noop}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
+      />,
+    );
+
+    expect(markup).toContain(">Redirect<");
+    expect(markup).toContain(">Stopping…<");
+    expect(markup.match(/disabled=""/g)).toHaveLength(2);
+  });
+
+  it("surfaces unsupported active-turn guidance instead of silently ignoring it", () => {
+    const markup = renderToStaticMarkup(
+      <Composer
+        activeTurnId="turn-1"
+        busy
+        cancelError={null}
+        cancelPending={false}
+        disabled={false}
+        draft={"change\0course"}
+        onDraftChange={vi.fn()}
+        onSend={noop}
+        onSteer={noop}
+        onStop={noop}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
+      />,
+    );
+
+    expect(markup).toContain("Guidance contains an unsupported character.");
+    expect(markup).toContain('aria-label="Redirect active response"');
+    expect(markup.match(/disabled=""/g)).toHaveLength(1);
   });
 
   it("disables an empty draft without hiding the send control", () => {
@@ -113,8 +221,12 @@ describe("Composer", () => {
         draft="   "
         onDraftChange={vi.fn()}
         onSend={noop}
+        onSteer={noop}
         onStop={noop}
         resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
       />,
     );
 

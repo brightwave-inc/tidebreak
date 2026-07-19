@@ -1099,6 +1099,7 @@ button {
 .composer-actions {
   display: flex;
   align-items: center;
+  gap: 0.45rem;
 }
 
 .composer-actions .btn {
@@ -1121,6 +1122,12 @@ button {
   color: var(--danger);
   font-size: 0.78rem;
   overflow-wrap: anywhere;
+}
+
+.composer-turn-status {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .sr-only {
