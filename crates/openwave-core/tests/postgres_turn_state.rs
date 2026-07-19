@@ -284,11 +284,16 @@ async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() 
     // Give the claimant time to begin its transaction and block on the row.
     // The wait is deliberately longer than the requested lease duration.
     tokio::time::sleep(StdDuration::from_millis(500)).await;
+    let lock_released_at = Utc::now();
     transaction.commit().await.unwrap();
 
     let claimed = claim.await.unwrap();
     assert_eq!(claimed.id, child_id);
-    assert!(claimed.lease_expires_at.unwrap() > Utc::now());
+    // Compare with the lock-release boundary, not the time this task happens
+    // to be polled again. A busy runner may resume this assertion after the
+    // intentionally short lease has expired; the regression this test guards
+    // is whether the lease was based on the pre-wait transaction timestamp.
+    assert!(claimed.lease_expires_at.unwrap() > lock_released_at);
     // The integration suite shares an isolated database, so leave no live
     // scheduler capacity behind for its independent concurrency cases.
     blocker
