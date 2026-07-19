@@ -582,6 +582,119 @@ button {
   background: transparent;
 }
 
+.assistant-sources {
+  width: min(100%, 38rem);
+  margin-top: 0.7rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.assistant-sources-toggle {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 7px;
+  padding: 0.22rem 0.32rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.assistant-sources-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.assistant-sources-toggle:hover,
+.assistant-sources-toggle:focus-visible {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--sidebar-active) 58%, transparent);
+}
+
+.assistant-sources-label {
+  font-weight: 600;
+}
+
+.assistant-source-pills {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 0.22rem;
+}
+
+.assistant-source-pill,
+.assistant-source-number {
+  display: inline-grid;
+  width: 1.28rem;
+  height: 1.28rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--bg-elevated) 82%, var(--sidebar));
+  font-size: 0.69rem;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.assistant-sources-chevron {
+  font-size: 1rem;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.assistant-sources[open] .assistant-sources-chevron {
+  transform: rotate(90deg);
+}
+
+.assistant-source-list {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0.45rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.assistant-source {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  border-left: 1px solid var(--line);
+  padding: 0.4rem 0.5rem;
+}
+
+.assistant-source-number {
+  margin-top: 0.08rem;
+}
+
+.assistant-source-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.18rem;
+}
+
+.assistant-source-copy strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 0.79rem;
+  font-weight: 600;
+}
+
+.assistant-source-copy p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.assistant-source-pages {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 550;
+}
+
 .message-notice {
   align-self: center;
   max-width: min(100%, 42rem);
@@ -903,8 +1016,10 @@ button {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tool-call-spinner {
+  .tool-call-spinner,
+  .assistant-sources-chevron {
     animation: none;
+    transition: none;
   }
 }
 
