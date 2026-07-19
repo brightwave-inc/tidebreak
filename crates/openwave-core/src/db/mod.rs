@@ -2093,6 +2093,7 @@ impl Store for DbStore {
         steer_id: TurnSteerId,
         attempt_event_ordinal: i32,
         preceding_assistant: Option<&Message>,
+        preceding_citations: &[crate::AssistantCitationReference],
         now: chrono::DateTime<Utc>,
     ) -> Result<Option<JournaledTurnSteerOutcome>> {
         ops::turn::apply_turn_steer(
@@ -2102,6 +2103,7 @@ impl Store for DbStore {
             steer_id,
             attempt_event_ordinal,
             preceding_assistant,
+            preceding_citations,
             now,
         )
         .await
@@ -2136,6 +2138,31 @@ impl Store for DbStore {
             expected_steer_revision,
             now,
             output,
+            usage,
+            stop_reason,
+        )
+        .await
+    }
+
+    async fn complete_turn_run_with_citations_and_append_event(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
+        now: chrono::DateTime<Utc>,
+        output: &Message,
+        citations: &[crate::AssistantCitationReference],
+        usage: Usage,
+        stop_reason: StopReason,
+    ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
+        ops::turn::complete_turn_run_with_citations_and_append_event(
+            self,
+            id,
+            lease_token,
+            expected_steer_revision,
+            now,
+            output,
+            citations,
             usage,
             stop_reason,
         )
@@ -2272,6 +2299,14 @@ impl Store for DbStore {
 
     async fn append_message(&self, message: &Message) -> Result<()> {
         ops::conversation::append_message(self, message).await
+    }
+
+    async fn append_assistant_message_with_citations(
+        &self,
+        message: &Message,
+        references: &[crate::AssistantCitationReference],
+    ) -> Result<()> {
+        ops::citation::append_assistant_message(self, message, references).await
     }
 
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>> {
@@ -2506,6 +2541,25 @@ impl Store for DbStore {
         event: &AgentEvent,
     ) -> Result<Option<SequencedEvent>> {
         ops::turn::recover_exact_terminal_event(self, turn_id, lease_token, event).await
+    }
+
+    async fn recover_exact_completed_turn_event(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        output: &Message,
+        citations: &[crate::AssistantCitationReference],
+        event: &AgentEvent,
+    ) -> Result<Option<SequencedEvent>> {
+        ops::turn::recover_exact_completed_turn_event(
+            self,
+            turn_id,
+            lease_token,
+            output,
+            citations,
+            event,
+        )
+        .await
     }
 
     async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {

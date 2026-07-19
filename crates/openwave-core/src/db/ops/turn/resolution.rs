@@ -47,6 +47,7 @@ pub(in crate::db) async fn complete_turn_run(
         expected_steer_revision,
         now,
         output,
+        &[],
         None,
     )
     .await?
@@ -72,11 +73,56 @@ pub(in crate::db) async fn complete_turn_run_and_append_event(
         expected_steer_revision,
         now,
         output,
+        &[],
         Some(&event),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn complete_turn_run_with_citations_and_append_event(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
+    now: chrono::DateTime<Utc>,
+    output: &Message,
+    citations: &[crate::AssistantCitationReference],
+    usage: Usage,
+    stop_reason: StopReason,
+) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
+    let event = AgentEvent::TurnCompleted { usage, stop_reason };
+    complete_turn_run_inner(
+        store,
+        id,
+        lease_token,
+        expected_steer_revision,
+        now,
+        output,
+        citations,
+        Some(&event),
+    )
+    .await
+}
+
+pub(in crate::db) async fn recover_exact_completed_turn_event(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    output: &Message,
+    citations: &[crate::AssistantCitationReference],
+    event: &AgentEvent,
+) -> Result<Option<SequencedEvent>> {
+    if exact_completed_turn_on(store, id, lease_token, output, citations)
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    exact_terminal_event_on(&store.conn, id, Some(lease_token), Some(event)).await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn complete_turn_run_inner(
     store: &DbStore,
     id: TurnId,
@@ -84,9 +130,11 @@ async fn complete_turn_run_inner(
     expected_steer_revision: i64,
     now: chrono::DateTime<Utc>,
     output: &Message,
+    citations: &[crate::AssistantCitationReference],
     terminal_event: Option<&AgentEvent>,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
     validate_turn_output(id, lease_token, output)?;
+    super::super::citation::validate_assistant_message(output, citations)?;
     let now = canonical_db_timestamp(now)?;
     let output_created_at = canonical_db_timestamp(output.created_at)?;
     if output_created_at > now {
@@ -136,6 +184,7 @@ async fn complete_turn_run_inner(
     {
         if existing.output_message_id != Some(output.id.0)
             || !exact_completed_output_on(&transaction, output).await?
+            || !exact_completed_citations_on(&transaction, output, citations).await?
         {
             return Err(AgentError::Store(format!(
                 "turn {id} was already completed with different output"
@@ -196,7 +245,9 @@ async fn complete_turn_run_inner(
     .await?
     {
         transaction.rollback().await.map_err(store_err)?;
-        if let Some(existing) = exact_completed_turn_on(store, id, lease_token, output).await? {
+        if let Some(existing) =
+            exact_completed_turn_on(store, id, lease_token, output, citations).await?
+        {
             let sequenced_event =
                 exact_terminal_event_on(&store.conn, id, Some(lease_token), terminal_event).await?;
             return Ok(Some(JournaledTurnOutcome {
@@ -220,7 +271,9 @@ async fn complete_turn_run_inner(
     };
     if let Err(error) = message.insert(&transaction).await {
         transaction.rollback().await.map_err(store_err)?;
-        if let Some(existing) = exact_completed_turn_on(store, id, lease_token, output).await? {
+        if let Some(existing) =
+            exact_completed_turn_on(store, id, lease_token, output, citations).await?
+        {
             let sequenced_event =
                 exact_terminal_event_on(&store.conn, id, Some(lease_token), terminal_event).await?;
             return Ok(Some(JournaledTurnOutcome {
@@ -230,6 +283,14 @@ async fn complete_turn_run_inner(
         }
         return Err(store_err(error));
     }
+    let evidence = super::super::citation::resolve_references_on(
+        &transaction,
+        output.chat_id,
+        output.turn_id,
+        citations,
+    )
+    .await?;
+    super::super::citation::insert_for_message_on(&transaction, output, &evidence).await?;
 
     let completed = entities::turn_run::Entity::update_many()
         .col_expr(
@@ -769,6 +830,7 @@ async fn exact_completed_turn_on(
     id: TurnId,
     lease_token: uuid::Uuid,
     output: &Message,
+    citations: &[crate::AssistantCitationReference],
 ) -> Result<Option<TurnRun>> {
     let Some(receipt) = entities::turn_claim::Entity::find_by_id(lease_token)
         .one(&store.conn)
@@ -793,12 +855,36 @@ async fn exact_completed_turn_on(
     }
     if existing.output_message_id != Some(output.id.0)
         || !exact_completed_output_on(&store.conn, output).await?
+        || !exact_completed_citations_on(&store.conn, output, citations).await?
     {
         return Err(AgentError::Store(format!(
             "turn {id} was already completed with different output"
         )));
     }
     Ok(Some(turn_run_from_model(existing)?))
+}
+
+async fn exact_completed_citations_on<C>(
+    conn: &C,
+    output: &Message,
+    citations: &[crate::AssistantCitationReference],
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let expected = super::super::citation::resolve_references_on(
+        conn,
+        output.chat_id,
+        output.turn_id,
+        citations,
+    )
+    .await?
+    .into_iter()
+    .map(|evidence| crate::AssistantCitationReference {
+        source_token: evidence.source_token,
+    })
+    .collect::<Vec<_>>();
+    Ok(super::super::citation::exact_references_for_message_on(conn, output.id).await? == expected)
 }
 
 async fn journal_chat_id(

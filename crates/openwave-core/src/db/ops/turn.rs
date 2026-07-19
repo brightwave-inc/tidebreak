@@ -36,10 +36,11 @@ pub(in crate::db) use client_wait::{
 };
 
 pub(in crate::db) use resolution::{
-    complete_turn_run, complete_turn_run_and_append_event, finish_turn_cancellation,
+    complete_turn_run, complete_turn_run_and_append_event,
+    complete_turn_run_with_citations_and_append_event, finish_turn_cancellation,
     finish_turn_cancellation_and_append_event, record_turn_run_failure,
-    record_turn_run_failure_and_append_event, request_turn_cancellation,
-    request_turn_cancellation_and_append_event,
+    record_turn_run_failure_and_append_event, recover_exact_completed_turn_event,
+    request_turn_cancellation, request_turn_cancellation_and_append_event,
 };
 pub(in crate::db) use steer::{accept_turn_steer, apply_turn_steer, list_pending_turn_steers};
 

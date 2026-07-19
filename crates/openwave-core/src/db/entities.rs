@@ -701,6 +701,7 @@ pub mod turn_steer {
         pub status: String,
         pub applied_lease_token: Option<Uuid>,
         pub message_id: Option<Uuid>,
+        pub preceding_assistant_message_id: Option<Uuid>,
         pub created_at: DateTimeUtc,
         pub resolved_at: Option<DateTimeUtc>,
     }
@@ -788,6 +789,7 @@ pub mod retrieval_evidence {
         pub call_id: Uuid,
         #[sea_orm(primary_key, auto_increment = false)]
         pub rank: i32,
+        pub source_token: Uuid,
         pub chat_id: Uuid,
         pub turn_id: Uuid,
         pub document_id: Uuid,
@@ -807,6 +809,50 @@ pub mod retrieval_evidence {
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod assistant_citation {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "assistant_citation")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub message_id: Uuid,
+        pub ordinal: i32,
+        pub chat_id: Uuid,
+        pub turn_id: Uuid,
+        pub evidence_call_id: Uuid,
+        pub evidence_rank: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter)]
+    pub enum Relation {
+        RetrievalEvidence,
+    }
+
+    impl RelationTrait for Relation {
+        fn def(&self) -> RelationDef {
+            match self {
+                Self::RetrievalEvidence => Entity::belongs_to(super::retrieval_evidence::Entity)
+                    .from((Column::EvidenceCallId, Column::EvidenceRank))
+                    .to((
+                        super::retrieval_evidence::Column::CallId,
+                        super::retrieval_evidence::Column::Rank,
+                    ))
+                    .into(),
+            }
+        }
+    }
+
+    impl Related<super::retrieval_evidence::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::RetrievalEvidence.def()
+        }
+    }
 
     impl ActiveModelBehavior for ActiveModel {}
 }

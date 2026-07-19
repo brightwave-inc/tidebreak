@@ -19,6 +19,7 @@ pub mod approval;
 #[cfg(feature = "blob-fs")]
 pub mod blob;
 pub mod cancel;
+pub mod citation;
 pub mod client_tools;
 pub mod config;
 pub mod context;
@@ -53,6 +54,11 @@ pub use approval::{
 #[cfg(feature = "blob-fs")]
 pub use blob::FsBlobStore;
 pub use cancel::{CancelToken, Cancelled};
+pub use citation::{
+    format_source_reference, parse_assistant_citations, AssistantCitationReference,
+    AssistantCitationSnapshot, ParsedAssistantCitations, MAX_ASSISTANT_CITATIONS,
+    MAX_CITATION_EXCERPT_CHARS, MAX_CITATION_HEADING_CHARS, MAX_CITATION_PAGES,
+};
 pub use client_tools::{
     list_connected_folders_tool_spec, list_folder_tool_spec, read_connected_file_tool_spec,
     request_folder_access_tool_spec, sandbox_folder_access_proposal_tool_spec,
@@ -69,9 +75,9 @@ pub use db::DbStore;
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{
-    AgentRunId, CallId, ChatId, ChunkId, DocumentId, DocumentJobId, HostRootId, HostRootIdError,
-    MessageId, ProjectId, RootAttachmentChangeId, RootAttachmentChangeIdError, StepId, TurnId,
-    TurnSteerId,
+    AgentRunId, AssistantCitationId, CallId, ChatId, ChunkId, DocumentId, DocumentJobId,
+    HostRootId, HostRootIdError, MessageId, ProjectId, RootAttachmentChangeId,
+    RootAttachmentChangeIdError, StepId, TurnId, TurnSteerId,
 };
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;

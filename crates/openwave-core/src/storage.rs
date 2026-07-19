@@ -48,6 +48,8 @@ pub const MAX_PENDING_ROOT_ATTACHMENT_CHANGES: u64 = 256;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatTranscriptSnapshot {
     pub messages: Vec<Message>,
+    /// Ordered renderer-safe sources keyed to their assistant message.
+    pub citations: Vec<crate::AssistantCitationSnapshot>,
     /// A renderer-safe historical projection. It contains fixed titles and
     /// lifecycle timestamps only; canonical tool records never leave storage.
     pub tool_activity: Vec<ChatToolActivitySnapshot>,
@@ -1595,6 +1597,7 @@ pub trait Store: Send + Sync {
     /// ordinal return [`ApplyTurnSteerOutcome::Existing`] with the same journal
     /// row even after the turn advances. A stale lease, rejected steer, or
     /// different winning lease returns `None`.
+    #[allow(clippy::too_many_arguments)]
     async fn apply_turn_steer(
         &self,
         _turn_id: TurnId,
@@ -1602,6 +1605,7 @@ pub trait Store: Send + Sync {
         _steer_id: TurnSteerId,
         _attempt_event_ordinal: i32,
         _preceding_assistant: Option<&Message>,
+        _preceding_citations: &[crate::AssistantCitationReference],
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<JournaledTurnSteerOutcome>> {
         turn_storage_unavailable()
@@ -1648,6 +1652,38 @@ pub trait Store: Send + Sync {
         _stop_reason: StopReason,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
         turn_storage_unavailable()
+    }
+
+    /// Complete one claimed turn with ordered evidence-backed assistant sources.
+    ///
+    /// The clean message, resolved same-turn citations, terminal transition, and
+    /// journal event commit together. Unknown opaque references are ignored.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_turn_run_with_citations_and_append_event(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
+        now: chrono::DateTime<chrono::Utc>,
+        output: &Message,
+        citations: &[crate::AssistantCitationReference],
+        usage: Usage,
+        stop_reason: StopReason,
+    ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
+        if citations.is_empty() {
+            self.complete_turn_run_and_append_event(
+                id,
+                lease_token,
+                expected_steer_revision,
+                now,
+                output,
+                usage,
+                stop_reason,
+            )
+            .await
+        } else {
+            turn_storage_unavailable()
+        }
     }
 
     /// Atomically record a failure for one exact live claimed attempt.
@@ -1791,6 +1827,21 @@ pub trait Store: Send + Sync {
 
     /// Append a message to its chat.
     async fn append_message(&self, message: &Message) -> Result<()>;
+
+    /// Atomically append a clean assistant message and its exact evidence-backed sources.
+    async fn append_assistant_message_with_citations(
+        &self,
+        message: &Message,
+        references: &[crate::AssistantCitationReference],
+    ) -> Result<()> {
+        if references.is_empty() {
+            self.append_message(message).await
+        } else {
+            Err(AgentError::Store(
+                "assistant citation storage is not implemented by this Store".into(),
+            ))
+        }
+    }
 
     /// List a chat's messages in creation order.
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>>;
@@ -2039,6 +2090,28 @@ pub trait Store: Send + Sync {
         _event: &AgentEvent,
     ) -> Result<Option<SequencedEvent>> {
         turn_storage_unavailable()
+    }
+
+    /// Recover a completed turn only when its output, ordered citations, and
+    /// terminal event match the exact request whose response was ambiguous.
+    ///
+    /// Stores without structured citation support retain the legacy recovery
+    /// path for citation-free outputs. Citation-aware stores must override this
+    /// method so a matching message identity cannot conceal different sources.
+    async fn recover_exact_completed_turn_event(
+        &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        _output: &Message,
+        citations: &[crate::AssistantCitationReference],
+        event: &AgentEvent,
+    ) -> Result<Option<SequencedEvent>> {
+        if citations.is_empty() {
+            self.recover_exact_turn_terminal_event(turn_id, lease_token, event)
+                .await
+        } else {
+            turn_storage_unavailable()
+        }
     }
 
     /// List a chat's journaled events with `seq` greater than `after`, in

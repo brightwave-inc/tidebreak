@@ -507,6 +507,7 @@ pub struct ChatMessageSnapshot {
     pub role: Role,
     pub content: String,
     pub created_at: chrono::DateTime<Utc>,
+    pub citations: Vec<openwave_core::AssistantCitationSnapshot>,
 }
 
 /// One visible transcript plus the durable journal watermark that produced it.
@@ -528,6 +529,7 @@ impl From<StoredMessage> for ChatMessageSnapshot {
             role: message.role,
             content: message.content,
             created_at: message.created_at,
+            citations: Vec::new(),
         }
     }
 }
@@ -544,11 +546,24 @@ pub async fn list_chat_messages(
         .get_chat_transcript(id)
         .await?
         .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))?;
+    let mut citations_by_message = std::collections::HashMap::new();
+    for citation in transcript.citations {
+        citations_by_message
+            .entry(citation.message_id)
+            .or_insert_with(Vec::new)
+            .push(citation);
+    }
     let messages = transcript
         .messages
         .into_iter()
         .filter(|message| matches!(message.role, Role::User | Role::Assistant))
-        .map(ChatMessageSnapshot::from)
+        .map(|message| {
+            let mut snapshot = ChatMessageSnapshot::from(message);
+            snapshot.citations = citations_by_message
+                .remove(&snapshot.id)
+                .unwrap_or_default();
+            snapshot
+        })
         .collect();
     Ok(Json(ChatTranscript {
         messages,

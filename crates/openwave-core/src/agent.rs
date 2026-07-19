@@ -33,6 +33,10 @@ use crate::approval::{
     ApprovalRequiredPublication, RefuseGate, ToolApprovalKind,
 };
 use crate::cancel::CancelToken;
+use crate::citation::{
+    classify_source_reference_candidate, parse_assistant_citations, AssistantCitationReference,
+    SourceReferenceCandidate,
+};
 use crate::context;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
@@ -281,6 +285,8 @@ pub enum AgentTurnOutcome {
     Completed {
         /// The final message to publish with the terminal state transition.
         output: Message,
+        /// Ordered opaque evidence references stripped from the final text.
+        citations: Vec<AssistantCitationReference>,
         /// Aggregate provider usage for the eventual terminal event.
         usage: Usage,
         /// Provider stop reason for the eventual terminal event.
@@ -491,6 +497,113 @@ impl EventSink<'_> {
     }
 }
 
+/// Holds only a suffix that could still become an exact source reference.
+/// Non-text provider events that arrive inside that suffix wait with it so an
+/// eventual malformed reference can be replayed in its original order.
+struct AssistantStreamEventFilter<'a, 'b> {
+    sink: &'a EventSink<'b>,
+    candidate: String,
+    pending: Vec<AgentEvent>,
+}
+
+impl<'a, 'b> AssistantStreamEventFilter<'a, 'b> {
+    fn new(sink: &'a EventSink<'b>) -> Self {
+        Self {
+            sink,
+            candidate: String::new(),
+            pending: Vec::new(),
+        }
+    }
+
+    fn send(&mut self, event: AgentEvent) {
+        if self.candidate.is_empty() {
+            self.sink.send(event);
+        } else {
+            self.pending.push(event);
+        }
+    }
+
+    fn send_text(&mut self, delta: &str) {
+        let mut safe = String::new();
+        for character in delta.chars() {
+            if self.candidate.is_empty() && character != '[' {
+                safe.push(character);
+                continue;
+            }
+            if !safe.is_empty() {
+                self.sink.send(AgentEvent::TextDelta {
+                    text: std::mem::take(&mut safe),
+                });
+            }
+            self.candidate.push(character);
+            self.pending.push(AgentEvent::TextDelta {
+                text: character.to_string(),
+            });
+            self.resolve_candidate();
+        }
+        if !safe.is_empty() {
+            self.sink.send(AgentEvent::TextDelta { text: safe });
+        }
+    }
+
+    fn resolve_candidate(&mut self) {
+        loop {
+            match classify_source_reference_candidate(&self.candidate) {
+                SourceReferenceCandidate::Possible => return,
+                SourceReferenceCandidate::Complete => {
+                    self.candidate.clear();
+                    for event in self.pending.drain(..) {
+                        if !matches!(event, AgentEvent::TextDelta { .. }) {
+                            self.sink.send(event);
+                        }
+                    }
+                    return;
+                }
+                SourceReferenceCandidate::Invalid => {
+                    let first_len = self
+                        .candidate
+                        .chars()
+                        .next()
+                        .expect("an invalid candidate is nonempty")
+                        .len_utf8();
+                    self.candidate.drain(..first_len);
+                    let first_text = self
+                        .pending
+                        .iter()
+                        .position(|event| matches!(event, AgentEvent::TextDelta { .. }))
+                        .expect("each candidate character has a pending text event");
+                    for event in self.pending.drain(..=first_text) {
+                        self.sink.send(event);
+                    }
+                    while self
+                        .pending
+                        .first()
+                        .is_some_and(|event| !matches!(event, AgentEvent::TextDelta { .. }))
+                    {
+                        self.sink.send(self.pending.remove(0));
+                    }
+                    if self.candidate.is_empty() {
+                        debug_assert!(self.pending.is_empty());
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        self.candidate.clear();
+        for event in self.pending.drain(..) {
+            self.sink.send(event);
+        }
+    }
+
+    fn discard(&mut self) {
+        self.candidate.clear();
+        self.pending.clear();
+    }
+}
+
 fn reserve_event_ordinal(next: &AtomicI32) -> Result<i32> {
     next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |ordinal| {
         ordinal.checked_add(1).filter(|next| *next < i32::MAX)
@@ -527,6 +640,11 @@ struct PendingCall {
     provider_id: String,
     name: String,
     args: String,
+}
+
+struct AssistantCandidate {
+    content: String,
+    citations: Vec<AssistantCitationReference>,
 }
 
 impl Agent {
@@ -807,6 +925,7 @@ impl Agent {
                 Cancelled,
                 Steered,
             }
+            let mut streamed_events = AssistantStreamEventFilter::new(events);
             let stream_end = loop {
                 let event = match future::select(
                     stream.next(),
@@ -821,17 +940,15 @@ impl Agent {
                 };
                 match event {
                     ProviderEvent::TextDelta { text: delta } => {
-                        events.send(AgentEvent::TextDelta {
-                            text: delta.clone(),
-                        });
                         text.push_str(&delta);
+                        streamed_events.send_text(&delta);
                     }
                     ProviderEvent::ReasoningDelta { text: delta } => {
-                        events.send(AgentEvent::ReasoningDelta { text: delta });
+                        streamed_events.send(AgentEvent::ReasoningDelta { text: delta });
                     }
                     ProviderEvent::ToolCallStarted { index, id, name } => {
                         let call_id = CallId::new();
-                        events.send(AgentEvent::ToolCallStarted {
+                        streamed_events.send(AgentEvent::ToolCallStarted {
                             call_id,
                             name: name.clone(),
                         });
@@ -845,7 +962,7 @@ impl Agent {
                     }
                     ProviderEvent::ToolCallArgsDelta { index, fragment } => {
                         if let Some(&i) = by_index.get(&index) {
-                            events.send(AgentEvent::ToolCallArgsDelta {
+                            streamed_events.send(AgentEvent::ToolCallArgsDelta {
                                 call_id: calls[i].call_id,
                                 fragment: fragment.clone(),
                             });
@@ -861,6 +978,14 @@ impl Agent {
                     ProviderEvent::Stop { reason } => stop_reason = reason,
                 }
             };
+            if matches!(stream_end, StreamEnd::Steered) {
+                streamed_events.discard();
+            } else {
+                // Normal completion and cancellation retain malformed or
+                // incomplete marker-like prose exactly. Only a steer discards
+                // the entire candidate under StreamInterrupted semantics.
+                streamed_events.finish();
+            }
             // Prefer cancel when both cancel and interrupt are ready (cancel is
             // the left arm of the nested select). Also catch a cancel that raced
             // the final stream event.
@@ -876,6 +1001,13 @@ impl Agent {
                     .await?;
                 continue;
             }
+
+            let parsed = parse_assistant_citations(&text);
+            let candidate = AssistantCandidate {
+                content: parsed.content,
+                citations: parsed.references,
+            };
+            let text = &candidate.content;
 
             let client_calls = calls
                 .iter()
@@ -1023,8 +1155,7 @@ impl Agent {
             if !text.is_empty() {
                 blocks.push(ContentBlock::Text { text: text.clone() });
                 if !calls.is_empty() {
-                    self.persist(chat.id, turn_id, Role::Assistant, &text)
-                        .await?;
+                    self.persist_assistant(chat.id, turn_id, &candidate).await?;
                 }
             }
             let mut recovered_results: HashMap<CallId, ToolOutput> = HashMap::new();
@@ -1113,7 +1244,8 @@ impl Agent {
                     created_at: Utc::now(),
                 };
                 if publish_terminal && !text.is_empty() {
-                    self.store.append_message(&output).await?;
+                    self.append_assistant_exact_retry(&output, &candidate.citations)
+                        .await?;
                 }
                 // Drain steers until the inbox is quiet, then complete. A steer
                 // that arrives as the stream finished must continue the turn
@@ -1134,7 +1266,7 @@ impl Agent {
                             chat,
                             turn_id,
                             &mut transcript,
-                            (!publish_terminal && !text.is_empty()).then_some(text.as_str()),
+                            (!publish_terminal && !text.is_empty()).then_some(&candidate),
                             events,
                         )
                         .await?
@@ -1144,6 +1276,7 @@ impl Agent {
                     if self.durable_steer_lease.is_some() {
                         return Ok(AgentTurnOutcome::Completed {
                             output,
+                            citations: candidate.citations.clone(),
                             usage: total_usage,
                             stop_reason,
                             steer_revision: generation_steer_revision,
@@ -1160,6 +1293,7 @@ impl Agent {
                     }) {
                         return Ok(AgentTurnOutcome::Completed {
                             output,
+                            citations: candidate.citations.clone(),
                             usage: total_usage,
                             stop_reason,
                             steer_revision: generation_steer_revision,
@@ -1285,7 +1419,7 @@ impl Agent {
         chat: &Chat,
         turn_id: TurnId,
         transcript: &mut Vec<ChatMessage>,
-        preceding_assistant: Option<&str>,
+        preceding_assistant: Option<&AssistantCandidate>,
         events: &EventSink<'_>,
     ) -> Result<bool> {
         let msgs = self.steer.drain();
@@ -1302,9 +1436,8 @@ impl Agent {
             )));
         }
         if self.durable_steer_lease.is_none() {
-            if let Some(text) = preceding_assistant {
-                self.persist(chat.id, turn_id, Role::Assistant, text)
-                    .await?;
+            if let Some(candidate) = preceding_assistant {
+                self.persist_assistant(chat.id, turn_id, candidate).await?;
             }
         }
         for msg in msgs {
@@ -1323,15 +1456,18 @@ impl Agent {
             });
         }
         let preceding = preceding_assistant
-            .filter(|text| !text.is_empty() && !durable.is_empty())
-            .map(|text| Message {
+            .filter(|candidate| !candidate.content.is_empty() && !durable.is_empty())
+            .map(|candidate| Message {
                 id: MessageId::new(),
                 chat_id: chat.id,
                 turn_id,
                 role: Role::Assistant,
-                content: text.to_owned(),
+                content: candidate.content.clone(),
                 created_at: Utc::now(),
             });
+        let preceding_citations = preceding_assistant
+            .filter(|candidate| !candidate.content.is_empty() && !durable.is_empty())
+            .map_or(&[][..], |candidate| candidate.citations.as_slice());
         if !durable.is_empty() {
             events.flush().await?;
         }
@@ -1346,6 +1482,7 @@ impl Agent {
                     steer.id,
                     event_ordinal,
                     preceding_assistant,
+                    if index == 0 { preceding_citations } else { &[] },
                 )
                 .await?;
             let steer = match journaled.outcome {
@@ -1434,6 +1571,7 @@ impl Agent {
         steer_id: crate::id::TurnSteerId,
         attempt_event_ordinal: i32,
         preceding_assistant: Option<&Message>,
+        preceding_citations: &[AssistantCitationReference],
     ) -> Result<JournaledTurnSteerOutcome> {
         let mut exact_retry_attempted = false;
         loop {
@@ -1445,6 +1583,7 @@ impl Agent {
                     steer_id,
                     attempt_event_ordinal,
                     preceding_assistant,
+                    preceding_citations,
                     Utc::now(),
                 )
                 .await
@@ -1767,6 +1906,47 @@ impl Agent {
         Ok(id)
     }
 
+    async fn persist_assistant(
+        &self,
+        chat_id: crate::id::ChatId,
+        turn_id: TurnId,
+        candidate: &AssistantCandidate,
+    ) -> Result<MessageId> {
+        let id = MessageId::new();
+        let message = Message {
+            id,
+            chat_id,
+            turn_id,
+            role: Role::Assistant,
+            content: candidate.content.clone(),
+            created_at: Utc::now(),
+        };
+        self.append_assistant_exact_retry(&message, &candidate.citations)
+            .await?;
+        Ok(id)
+    }
+
+    async fn append_assistant_exact_retry(
+        &self,
+        message: &Message,
+        citations: &[AssistantCitationReference],
+    ) -> Result<()> {
+        if self
+            .store
+            .append_assistant_message_with_citations(message, citations)
+            .await
+            .is_err()
+        {
+            // The first response can be lost after commit. Reuse every stable
+            // request field so storage can prove and recover only that exact
+            // message/citation sequence.
+            self.store
+                .append_assistant_message_with_citations(message, citations)
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn load_transcript(&self, chat_id: crate::id::ChatId) -> Result<Vec<ChatMessage>> {
         let messages = self.store.list_messages(chat_id).await?;
         let tool_calls = self.store.list_tool_calls(chat_id).await?;
@@ -2009,6 +2189,70 @@ mod tests {
             .collect()
     }
 
+    fn streamed_text(events: &[AgentEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn stream_filter_preserves_normal_and_cancel_tails_but_discards_steered_tail() {
+        let incomplete = "normal [[ow-source:abcdef";
+        let (normal_tx, normal_rx) = unbounded();
+        let normal_sink = EventSink::Legacy(&normal_tx);
+        let mut normal = AssistantStreamEventFilter::new(&normal_sink);
+        for character in incomplete.chars() {
+            normal.send_text(&character.to_string());
+        }
+        normal.finish();
+        drop(normal);
+        drop(normal_tx);
+        let normal_events = normal_rx.collect::<Vec<_>>().await;
+        assert_eq!(streamed_text(&normal_events), incomplete);
+
+        let malformed = "cancel [[ow-source:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA]]";
+        let (cancel_tx, cancel_rx) = unbounded();
+        let cancel_sink = EventSink::Legacy(&cancel_tx);
+        let mut cancelled = AssistantStreamEventFilter::new(&cancel_sink);
+        for character in malformed.chars() {
+            cancelled.send_text(&character.to_string());
+        }
+        // Cancellation uses the same literal flush as a normal stream end
+        // before the terminal cancellation event is published.
+        cancelled.finish();
+        cancelled.send(AgentEvent::TurnCancelled {
+            usage: Usage::default(),
+        });
+        drop(cancelled);
+        drop(cancel_tx);
+        let cancel_events = cancel_rx.collect::<Vec<_>>().await;
+        assert_eq!(streamed_text(&cancel_events), malformed);
+        assert!(matches!(
+            cancel_events.last(),
+            Some(AgentEvent::TurnCancelled { .. })
+        ));
+
+        let (steer_tx, steer_rx) = unbounded();
+        let steer_sink = EventSink::Legacy(&steer_tx);
+        let mut steered = AssistantStreamEventFilter::new(&steer_sink);
+        steered.send_text("steer ");
+        steered.send_text("[[ow-source:abcdef");
+        steered.discard();
+        steered.send(AgentEvent::StreamInterrupted);
+        drop(steered);
+        drop(steer_tx);
+        let steer_events = steer_rx.collect::<Vec<_>>().await;
+        assert_eq!(streamed_text(&steer_events), "steer ");
+        assert!(matches!(
+            steer_events.last(),
+            Some(AgentEvent::StreamInterrupted)
+        ));
+    }
+
     #[test]
     fn client_tool_arguments_are_parsed_without_forgiving_malformed_json() {
         assert_eq!(
@@ -2035,6 +2279,173 @@ mod tests {
 
     struct ContextRecordingTool {
         observed_project: Arc<Mutex<Option<Option<ProjectId>>>>,
+    }
+
+    struct CitationSearchTool {
+        source_token: uuid::Uuid,
+    }
+
+    #[async_trait]
+    impl Tool for CitationSearchTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "search".into(),
+                description: "test search".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::ReadOnly
+        }
+
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            let document_id = crate::DocumentId::new();
+            let span = crate::ByteSpan::new(0, 8);
+            Ok(
+                ToolOutput::text("search result").with_private_evidence(vec![
+                    crate::RetrievalEvidenceInput {
+                        rank: 1,
+                        source_token: self.source_token,
+                        document_id,
+                        generation: crate::DocumentGeneration {
+                            content_revision: 1,
+                            revision_token: uuid::Uuid::new_v4(),
+                        },
+                        chunk_id: crate::ChunkId::derive(document_id, span.start, span.end),
+                        span,
+                        snippet: "evidence".into(),
+                        heading_path: vec!["Facts".into()],
+                        source_regions: Vec::new(),
+                        source: crate::RetrievalEvidenceSource::Inline,
+                    },
+                ]),
+            )
+        }
+    }
+
+    struct IntermediateCitationProvider {
+        calls: AtomicUsize,
+        marker: String,
+    }
+
+    #[async_trait]
+    impl ModelProvider for IntermediateCitationProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("citation-test")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let step = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = match step {
+                0 => vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "search_1".into(),
+                        name: "search".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ],
+                1 => {
+                    let candidate = format!("intermediate {}", self.marker);
+                    let mut events = candidate
+                        .chars()
+                        .map(|character| ProviderEvent::TextDelta {
+                            text: character.to_string(),
+                        })
+                        .collect::<Vec<_>>();
+                    events.extend([
+                        ProviderEvent::ToolCallStarted {
+                            index: 0,
+                            id: "read_1".into(),
+                            name: "read_file".into(),
+                        },
+                        ProviderEvent::ToolCallArgsDelta {
+                            index: 0,
+                            fragment: r#"{"path":"note.txt"}"#.into(),
+                        },
+                        ProviderEvent::Stop {
+                            reason: StopReason::ToolUse,
+                        },
+                    ]);
+                    events
+                }
+                _ => vec![
+                    ProviderEvent::TextDelta {
+                        text: "final".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ],
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn intermediate_assistant_source_marker_is_stripped_and_attached_atomically() {
+        let db = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("citations.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let source_token = uuid::Uuid::new_v4();
+        let marker =
+            crate::format_source_reference(crate::AssistantCitationReference { source_token });
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("note.txt"), "note").unwrap();
+        let agent = Agent::new(
+            Arc::new(IntermediateCitationProvider {
+                calls: AtomicUsize::new(0),
+                marker,
+            }),
+            Arc::new(
+                ToolRegistry::new()
+                    .with(Box::new(CitationSearchTool { source_token }))
+                    .with(Box::new(ReadFile)),
+            ),
+            store.clone(),
+            AgentConfig {
+                model: "test".into(),
+                tool_scratch: Some(tool_scratch(workspace.path())),
+                ..Default::default()
+            },
+        );
+        let (tx, _rx) = unbounded();
+        agent.run_turn(&chat, "question", &tx).await.unwrap();
+        let transcript = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+        assert!(transcript
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("[[ow-source:")));
+        let intermediate = transcript
+            .messages
+            .iter()
+            .find(|message| message.content == "intermediate ")
+            .expect("clean intermediate assistant message");
+        assert_eq!(transcript.citations.len(), 1);
+        assert_eq!(transcript.citations[0].message_id, intermediate.id);
     }
 
     #[async_trait]
