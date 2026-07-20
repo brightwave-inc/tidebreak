@@ -84,10 +84,19 @@ independently enforces depth one. A later non-blocking spawn tool can let the
 foreground continue after spawning, but must earn the same checkpoint and
 replay rules.
 
-The wait also carries an immutable atomic-admission marker. Only that receipt
-allows a later retry to recover the combined transition; an older path that
-accepted a child and parked a turn in separate commits is never mistaken for
-proof that both effects committed together.
+Core now prepares, but does not advertise, the typed boundary for that later
+cutover. A non-blocking spawn will return only its stable opaque child agent
+ID. The paired `wait_for_agents` call accepts one to four unique child IDs in
+caller order and has only `All` completion semantics; its result contains each
+typed terminal child payload in that same order. Durable runtime validation
+must still prove every ID is a depth-one child owned by the exact origin turn. No
+scheduler lease, executor identity, or continuation token crosses this
+model-facing boundary.
+
+The current serial single-child wait also carries an immutable atomic-admission
+marker. Only that receipt allows a later retry to recover the combined
+transition; an older path that accepted a child and parked a turn in separate
+commits is never mistaken for proof that both effects committed together.
 
 ## One continuation model
 
