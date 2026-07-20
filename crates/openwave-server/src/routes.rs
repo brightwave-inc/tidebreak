@@ -15,9 +15,9 @@ use tokio::sync::broadcast::error::RecvError;
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
     ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome, Message as StoredMessage, MessageId,
-    Project, ProjectId, RequestTurnCancellationOutcome, Role, SandboxToolCall,
-    SandboxToolCallStatus, SecretProvider, SequencedEvent, Store, ToolCallExecution,
-    ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
+    Project, ProjectId, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Role,
+    SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store,
+    ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -768,6 +768,101 @@ pub async fn list_agent_runs(
         snapshots.push(AgentRunSnapshot::from_run(run, activity));
     }
     Ok(Json(snapshots))
+}
+
+/// Renderer-safe result of requesting cancellation for one sandbox run.
+///
+/// The command can expose only the two states it successfully produces or
+/// recovers. Worker leases, delegated input, retry budgets, and diagnostics
+/// remain behind the server boundary.
+#[derive(Debug, Serialize)]
+pub struct AgentRunCancellationSnapshot {
+    pub id: openwave_core::AgentRunId,
+    pub status: AgentRunCancellationStatus,
+}
+
+/// Closed renderer vocabulary for a successful sandbox cancellation request.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunCancellationStatus {
+    Cancelling,
+    Cancelled,
+}
+
+/// `POST /chats/{chat_id}/agent-runs/{run_id}/cancel` — durably cancel one
+/// chat-owned sandbox run.
+///
+/// Unclaimed work becomes terminal immediately. A live worker retains its
+/// exact lease and acknowledges the `cancelling` state before quiescing.
+/// Exact retries of either state return the same renderer-safe result.
+pub async fn cancel_agent_run(
+    State(state): State<AppState>,
+    Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
+) -> Result<(StatusCode, Json<AgentRunCancellationSnapshot>), ServerError> {
+    state
+        .store
+        .get_chat(chat_id)
+        .await?
+        .ok_or_else(|| ServerError::not_found(format!("chat {chat_id} not found")))?;
+
+    loop {
+        let run = state
+            .store
+            .get_agent_run(run_id)
+            .await?
+            .ok_or_else(|| ServerError::not_found(format!("agent run {run_id} not found")))?;
+        if run.chat_id != chat_id {
+            return Err(ServerError::conflict_kind(
+                "agent_run_chat_mismatch",
+                format!("agent run {run_id} does not belong to chat {chat_id}"),
+            ));
+        }
+        if run.execution != AgentRunExecution::Sandbox {
+            return Err(ServerError::conflict_kind(
+                "agent_run_not_cancellable",
+                format!("agent run {run_id} is not a sandbox run"),
+            ));
+        }
+
+        let Some(outcome) = state.store.request_agent_run_cancellation(run_id).await? else {
+            // A claim or heartbeat may win after the ownership read. Retry the
+            // same idempotent command; the store serializes the next attempt
+            // against that lifecycle transition.
+            tokio::task::yield_now().await;
+            continue;
+        };
+        let (run, status) = match outcome {
+            RequestAgentRunCancellationOutcome::Cancelled(run) => {
+                (run, AgentRunCancellationStatus::Cancelled)
+            }
+            RequestAgentRunCancellationOutcome::Requested(run) => {
+                (run, AgentRunCancellationStatus::Cancelling)
+            }
+            RequestAgentRunCancellationOutcome::Existing(run) => {
+                let status = match run.status {
+                    AgentRunStatus::Cancelling => AgentRunCancellationStatus::Cancelling,
+                    AgentRunStatus::Cancelled => AgentRunCancellationStatus::Cancelled,
+                    _ => {
+                        return Err(ServerError::internal(
+                            "agent-run cancellation recovered an invalid state",
+                        ));
+                    }
+                };
+                (run, status)
+            }
+            RequestAgentRunCancellationOutcome::AlreadyTerminal(run) => {
+                return Err(ServerError::conflict_kind(
+                    "agent_run_already_terminal",
+                    format!("agent run {} already finished before cancellation", run.id),
+                ));
+            }
+        };
+        state.agent_run_wake.notify_one();
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(AgentRunCancellationSnapshot { id: run.id, status }),
+        ));
+    }
 }
 
 #[cfg(test)]
