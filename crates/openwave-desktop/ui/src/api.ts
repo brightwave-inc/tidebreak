@@ -114,6 +114,12 @@ export type AgentRun = {
   updated_at: string;
 };
 
+/** The complete renderer projection returned by one sandbox stop request. */
+export type SandboxAgentCancellation = {
+  id: string;
+  status: "cancelling" | "cancelled";
+};
+
 /**
  * Live agent activity is intentionally a closed vocabulary. The server never
  * sends tool inputs, results, host paths, grants, executor identities, leases,
@@ -219,7 +225,11 @@ export class ApiClient {
     return headers;
   }
 
-  private async json<T>(path: string, init?: RequestInit): Promise<T> {
+  private async json<T>(
+    path: string,
+    init?: RequestInit,
+    expectedStatus?: number,
+  ): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, init);
     if (!response.ok) {
       let detail = response.statusText;
@@ -231,7 +241,12 @@ export class ApiClient {
       }
       throw new Error(`${response.status}: ${detail}`);
     }
-    if (response.status === 204 || response.status === 202) return undefined as T;
+    if (expectedStatus !== undefined && response.status !== expectedStatus) {
+      throw new Error(
+        `unexpected response status: expected ${expectedStatus}, received ${response.status}`,
+      );
+    }
+    if (response.status === 204) return undefined as T;
     const text = await response.text();
     if (!text) return undefined as T;
     return JSON.parse(text) as T;
@@ -353,6 +368,25 @@ export class ApiClient {
     return this.json(`/chats/${chatId}/agent-runs`, {
       headers: this.headers(),
     });
+  }
+
+  async cancelAgentRun(
+    chatId: string,
+    runId: string,
+  ): Promise<SandboxAgentCancellation> {
+    const body = await this.json<unknown>(
+      `/chats/${encodeURIComponent(chatId)}/agent-runs/${encodeURIComponent(runId)}/cancel`,
+      {
+        method: "POST",
+        headers: this.headers(),
+      },
+      202,
+    );
+    const cancellation = parseSandboxAgentCancellation(body);
+    if (!cancellation || cancellation.id !== runId) {
+      throw new Error("sandbox cancellation response is invalid");
+    }
+    return cancellation;
   }
 
   postMessage(chatId: string, turnId: string, content: string): Promise<void> {
@@ -499,6 +533,22 @@ export function parseFolderAccessRequest(
     folderHint,
     claimedByDesktop: value.claimed,
   };
+}
+
+export function parseSandboxAgentCancellation(
+  value: unknown,
+): SandboxAgentCancellation | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value);
+  if (
+    keys.some((key) => key !== "id" && key !== "status") ||
+    typeof value.id !== "string" ||
+    value.id.length === 0 ||
+    (value.status !== "cancelling" && value.status !== "cancelled")
+  ) {
+    return null;
+  }
+  return { id: value.id, status: value.status };
 }
 
 export function parsePendingToolApproval(

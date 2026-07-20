@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { AgentRun } from "./api";
+import { canStopSandboxAgentRun } from "./SandboxAgentStop";
 
 const MAX_RECENT_TERMINAL_SANDBOX_RUNS = 2;
 
@@ -16,11 +17,17 @@ export function AgentActivityPanel({
   loading,
   error,
   onRetry,
+  stoppingRunIds,
+  stopErrorRunIds,
+  onStop,
 }: {
   runs: AgentRun[];
   loading: boolean;
   error: string | null;
   onRetry: () => void;
+  stoppingRunIds: ReadonlySet<string>;
+  stopErrorRunIds: ReadonlySet<string>;
+  onStop: (runId: string) => void;
 }) {
   if (loading) {
     return <div className="agent-activity-state">Loading activity…</div>;
@@ -76,6 +83,9 @@ export function AgentActivityPanel({
               run={run}
               label={`Background task ${index + 1}`}
               announce
+              stopping={stoppingRunIds.has(run.id)}
+              stopError={stopErrorRunIds.has(run.id)}
+              onStop={onStop}
             />
           ))}
         </ActivityGroup>
@@ -129,10 +139,16 @@ function AgentActivityItem({
   run,
   label,
   announce = false,
+  stopping = false,
+  stopError = false,
+  onStop,
 }: {
   run: AgentRun;
   label: string;
   announce?: boolean;
+  stopping?: boolean;
+  stopError?: boolean;
+  onStop?: (runId: string) => void;
 }) {
   const activity = isActiveAgentRunStatus(run.status)
     ? agentActivityPresentation(run.activity)
@@ -148,14 +164,32 @@ function AgentActivityItem({
         <span className="agent-activity-detail">
           {activity?.detail ?? agentRunStatusDescription(run.status)}
         </span>
+        {stopError && canStopSandboxAgentRun(run) && (
+          <span className="agent-activity-stop-error" role="status">
+            Could not stop this task. Try again.
+          </span>
+        )}
       </span>
-      <strong
-        aria-live={announce ? "polite" : undefined}
-        aria-atomic={announce ? "true" : undefined}
-        aria-label={announce ? `${activity?.label ?? label}: ${status}` : undefined}
-      >
-        {status}
-      </strong>
+      <span className="agent-activity-item-actions">
+        <strong
+          aria-live={announce ? "polite" : undefined}
+          aria-atomic={announce ? "true" : undefined}
+          aria-label={announce ? `${activity?.label ?? label}: ${status}` : undefined}
+        >
+          {status}
+        </strong>
+        {onStop && canStopSandboxAgentRun(run) && (
+          <button
+            type="button"
+            className="agent-activity-stop"
+            disabled={stopping}
+            aria-label={`Stop ${label.toLowerCase()}`}
+            onClick={() => onStop(run.id)}
+          >
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
+        )}
+      </span>
     </li>
   );
 }
