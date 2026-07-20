@@ -31,4 +31,17 @@ describe("MessageMarkdown", () => {
     expect(markup).not.toContain("<iframe");
     expect(markup).not.toContain("javascript:");
   });
+
+  it("adds a table-level copy action without exposing Markdown attributes", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>
+        {"| Name | Value |\n| --- | --- |\n| Alpha | **1** |"}
+      </MessageMarkdown>,
+    );
+
+    expect(markup).toContain("<table>");
+    expect(markup).toContain('aria-label="Copy table contents"');
+    expect(markup).toContain("Alpha");
+    expect(markup).toContain("<strong>1</strong>");
+  });
 });

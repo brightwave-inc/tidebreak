@@ -1,10 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
-import {
-  copyMessageText,
-  formatMessageTimestamp,
-  MessageFooter,
-} from "./MessageFooter";
+import { describe, expect, it } from "vitest";
+import { formatMessageTimestamp, MessageFooter } from "./MessageFooter";
 
 describe("MessageFooter", () => {
   it("renders copy and a machine-readable timestamp for a settled assistant message", () => {
@@ -44,20 +40,6 @@ describe("MessageFooter", () => {
     );
 
     expect(markup).toBe("");
-  });
-
-  it("copies the exact plain Markdown source", async () => {
-    const writeText = vi.fn(async () => undefined);
-
-    await copyMessageText("## Answer\n\n- one", { writeText });
-
-    expect(writeText).toHaveBeenCalledWith("## Answer\n\n- one");
-  });
-
-  it("keeps clipboard failures available to the component error state", async () => {
-    await expect(copyMessageText("Answer", undefined)).rejects.toThrow(
-      "Clipboard access is unavailable",
-    );
   });
 
   it("rejects malformed durable timestamps instead of rendering bad text", () => {

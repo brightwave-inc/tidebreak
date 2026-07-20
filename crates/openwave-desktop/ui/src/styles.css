@@ -880,7 +880,7 @@ button {
 .message-markdown ol,
 .message-markdown pre,
 .message-markdown blockquote,
-.message-markdown .markdown-table-wrap {
+.message-markdown .markdown-table-frame {
   margin: 0 0 0.7rem;
 }
 
@@ -967,6 +967,12 @@ button {
   border-top: 1px solid var(--line);
 }
 
+.markdown-table-frame {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
 .markdown-table-wrap {
   overflow-x: auto;
 }
@@ -987,6 +993,32 @@ button {
 
 .message-markdown th {
   font-weight: 650;
+}
+
+.markdown-table-actions {
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid var(--line);
+  padding: 0.25rem;
+  background: color-mix(in srgb, var(--sidebar) 45%, transparent);
+}
+
+.markdown-table-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 0;
+  border-radius: 5px;
+  padding: 0.2rem 0.38rem;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.72rem;
+}
+
+.markdown-table-copy:hover,
+.markdown-table-copy:focus-visible {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--sidebar-active) 60%, transparent);
 }
 
 .markdown-image-omitted {
