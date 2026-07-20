@@ -32,8 +32,8 @@ use crate::model::{
     DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
     DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
     Message, Project, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
-    ToolCallResolution, TurnAgentRunWait, TurnCheckpointProgress, TurnClientWait,
-    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
+    ToolCallResolution, TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress,
+    TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
 
@@ -618,6 +618,54 @@ pub enum ParkTurnForAgentRunInboxOutcome {
     SteerPending(TurnRun),
     /// The request came from provider output generated before an applied steer.
     OutputSuperseded(TurnRun),
+}
+
+/// Result of checkpointing a foreground turn on an ordered sandbox-child set.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParkTurnForAgentRunWaitSetOutcome {
+    /// The immutable set receipt and foreground lease release committed together.
+    Parked {
+        turn: TurnRun,
+        wait: TurnAgentRunWaitSet,
+    },
+    /// An exact ambiguous retry recovered the committed checkpoint.
+    Existing {
+        turn: TurnRun,
+        wait: TurnAgentRunWaitSet,
+    },
+    /// The wait identity, turn, or ordered child set is bound differently.
+    IdentityConflict,
+    /// A durable steer won the checkpoint race and must be applied first.
+    SteerPending(TurnRun),
+    /// The request came from provider output generated before an applied steer.
+    OutputSuperseded(TurnRun),
+}
+
+/// Result of atomically consuming a satisfied ordered child set and waking its turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeTurnForAgentRunWaitSetOutcome {
+    /// Every requested result was consumed and the turn became claimable.
+    Resumed {
+        turn: TurnRun,
+        wait: TurnAgentRunWaitSet,
+        results: Vec<AgentRunInboxEntry>,
+    },
+    /// The exact continuation retry recovered its prior consumption and wake.
+    Existing {
+        turn: TurnRun,
+        wait: TurnAgentRunWaitSet,
+        results: Vec<AgentRunInboxEntry>,
+    },
+    /// At least one requested child has not delivered a result yet.
+    NotReady(TurnAgentRunWaitSet),
+    /// A child is terminal but its required immutable inbox delivery is absent.
+    /// This fails closed so reconciliation can repair the delivery without the
+    /// parent silently losing terminal context.
+    TerminalDeliveryMissing {
+        wait: TurnAgentRunWaitSet,
+        child_run_id: AgentRunId,
+        child_status: crate::model::AgentRunStatus,
+    },
 }
 
 /// A client-call resolution together with the turn transition it triggered.
@@ -1882,6 +1930,39 @@ pub trait Store: Send + Sync {
         _progress: TurnCheckpointProgress,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<ParkTurnForAgentRunInboxOutcome>> {
+        turn_storage_unavailable()
+    }
+
+    /// Persist an ordered, unique, bounded child set and release a claimed
+    /// foreground turn in the same transaction. Every child must carry an
+    /// immutable sandbox admission owned by this exact origin turn. Exact
+    /// retries recover the receipt before lease expiry or steering state is
+    /// considered.
+    #[allow(clippy::too_many_arguments)]
+    async fn park_turn_for_agent_run_wait_set(
+        &self,
+        _wait_id: CallId,
+        _turn_id: TurnId,
+        _child_run_ids: &[AgentRunId],
+        _condition: crate::model::AgentRunWaitCondition,
+        _lease_token: uuid::Uuid,
+        _expected_steer_revision: i64,
+        _progress: TurnCheckpointProgress,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<ParkTurnForAgentRunWaitSetOutcome>> {
+        turn_storage_unavailable()
+    }
+
+    /// Consume every matching child inbox result exactly once and wake the
+    /// foreground turn when the committed completion condition is satisfied.
+    /// Results are returned in immutable request order, never delivery order.
+    /// An exact retry with `resume_token` recovers the prior transition before
+    /// mutable parent liveness is checked.
+    async fn resume_turn_for_agent_run_wait_set(
+        &self,
+        _wait_id: CallId,
+        _resume_token: uuid::Uuid,
+    ) -> Result<Option<ResumeTurnForAgentRunWaitSetOutcome>> {
         turn_storage_unavailable()
     }
 

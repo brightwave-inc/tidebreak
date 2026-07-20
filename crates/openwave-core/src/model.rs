@@ -1665,6 +1665,75 @@ pub struct TurnAgentRunWait {
     pub closed_at: Option<DateTime<Utc>>,
 }
 
+/// Explicit completion policy for a durable multi-child foreground wait.
+///
+/// The first local fan-out contract deliberately supports only `All`: the
+/// parent resumes once every requested child has delivered a terminal inbox
+/// result. Keeping the policy in the receipt makes request identity explicit
+/// and leaves an additive path for an eventual `Any` policy without changing
+/// the atomic checkpoint shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AgentRunWaitCondition {
+    /// Resume only after every child in request order has delivered a result.
+    All,
+}
+
+impl AgentRunWaitCondition {
+    /// Stable database and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+        }
+    }
+}
+
+/// One durable checkpoint for an ordered set of sandbox children.
+///
+/// Child order is part of immutable request identity. Results are returned in
+/// this order even when the children finish in a different order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnAgentRunWaitSet {
+    /// Stable model-call identity for this wait request.
+    pub id: crate::id::CallId,
+    /// Foreground coordinator shared by the turn and every child.
+    pub parent_run_id: crate::id::AgentRunId,
+    /// Exact origin turn that admitted every child and owns this checkpoint.
+    pub turn_id: TurnId,
+    /// Conversation shared by the turn and every child.
+    pub chat_id: ChatId,
+    /// Bounded, unique children in caller-requested order.
+    pub child_run_ids: Vec<crate::id::AgentRunId>,
+    /// Completion policy committed as immutable request identity.
+    pub condition: AgentRunWaitCondition,
+    /// Exact foreground lease that created the checkpoint.
+    pub park_lease_token: Uuid,
+    /// Steering generation observed by the model output being checkpointed.
+    pub expected_steer_revision: i64,
+    /// Failure attempt containing the checkpoint.
+    pub attempt_count: i32,
+    /// Exact lease-segment ordinal containing the checkpoint.
+    pub claim_count: i32,
+    /// Progress committed before releasing the foreground worker.
+    pub progress: TurnCheckpointProgress,
+    /// Durable lifecycle of this ordered wait.
+    pub status: TurnAgentRunWaitStatus,
+    /// Database time at which the checkpoint committed.
+    pub parked_at: DateTime<Utc>,
+    /// Database time at which all inbox results resumed the turn, if any.
+    pub closed_at: Option<DateTime<Utc>>,
+    /// Exact continuation identity that consumed all results, if resumed.
+    pub resume_token: Option<Uuid>,
+}
+
+impl TurnAgentRunWaitSet {
+    /// The admission layer already caps outstanding children at four. Keeping
+    /// the wait bound equal prevents an oversized continuation checkpoint.
+    pub const MAX_CHILDREN: usize = AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN as usize;
+}
+
 /// Durable lifecycle of a [`TurnAgentRunWait`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

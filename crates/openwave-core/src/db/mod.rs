@@ -29,12 +29,12 @@ use crate::id::{
 use crate::model::Role;
 use crate::model::{
     validate_project_root_projection, AgentRun, AgentRunExecution, AgentRunInboxEntry,
-    AgentRunStatus, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat,
-    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentParseOutput, DocumentProcessingStatus, DocumentRecord, DocumentScope,
-    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message,
-    Project, RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall,
-    SandboxToolCallReceipt, SandboxToolCallRequest, SourceRegion, ToolCallRecord,
+    AgentRunStatus, AgentRunWaitCondition, BeginRootAttachmentChange, BlobRetirement,
+    BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
+    DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
+    DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
+    DocumentUpsert, Message, Project, RootAttachmentChange, RootAttachmentChangeTerminal,
+    SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest, SourceRegion, ToolCallRecord,
     ToolCallResolution, TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWaitStatus,
     TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
 };
@@ -50,9 +50,10 @@ use crate::storage::{
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
     JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
-    ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForClientCallOutcome,
-    RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome,
-    RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, Store,
+    ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
+    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
+    RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
+    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Store,
     SubmitAgentRunResultOutcome,
 };
 
@@ -2327,6 +2328,39 @@ impl Store for DbStore {
             now,
         )
         .await
+    }
+
+    async fn park_turn_for_agent_run_wait_set(
+        &self,
+        wait_id: CallId,
+        turn_id: TurnId,
+        child_run_ids: &[AgentRunId],
+        condition: AgentRunWaitCondition,
+        lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
+        progress: TurnCheckpointProgress,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<ParkTurnForAgentRunWaitSetOutcome>> {
+        ops::turn::park_turn_for_agent_run_wait_set(
+            self,
+            wait_id,
+            turn_id,
+            child_run_ids,
+            condition,
+            lease_token,
+            expected_steer_revision,
+            progress,
+            now,
+        )
+        .await
+    }
+
+    async fn resume_turn_for_agent_run_wait_set(
+        &self,
+        wait_id: CallId,
+        resume_token: uuid::Uuid,
+    ) -> Result<Option<ResumeTurnForAgentRunWaitSetOutcome>> {
+        ops::turn::resume_turn_for_agent_run_wait_set(self, wait_id, resume_token).await
     }
 
     async fn append_message(&self, message: &Message) -> Result<()> {
