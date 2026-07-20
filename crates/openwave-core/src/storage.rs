@@ -661,11 +661,13 @@ pub enum ParkTurnForAgentRunWaitSetOutcome {
     /// The immutable set receipt and foreground lease release committed together.
     Parked {
         turn: TurnRun,
+        call: ToolCallRecord,
         wait: TurnAgentRunWaitSet,
     },
     /// An exact ambiguous retry recovered the committed checkpoint.
     Existing {
         turn: TurnRun,
+        call: ToolCallRecord,
         wait: TurnAgentRunWaitSet,
     },
     /// The wait identity, turn, or ordered child set is bound differently.
@@ -677,19 +679,23 @@ pub enum ParkTurnForAgentRunWaitSetOutcome {
 }
 
 /// Result of atomically consuming a satisfied ordered child set and waking its turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ResumeTurnForAgentRunWaitSetOutcome {
     /// Every requested result was consumed and the turn became claimable.
     Resumed {
         turn: TurnRun,
+        call: ToolCallRecord,
         wait: TurnAgentRunWaitSet,
         results: Vec<AgentRunInboxEntry>,
+        event: SequencedEvent,
     },
     /// The exact continuation retry recovered its prior consumption and wake.
     Existing {
         turn: TurnRun,
+        call: ToolCallRecord,
         wait: TurnAgentRunWaitSet,
         results: Vec<AgentRunInboxEntry>,
+        event: SequencedEvent,
     },
     /// At least one requested child has not delivered a result yet.
     NotReady(TurnAgentRunWaitSet),
@@ -2009,16 +2015,9 @@ pub trait Store: Send + Sync {
     /// immutable sandbox admission owned by this exact origin turn. Exact
     /// retries recover the receipt before lease expiry or steering state is
     /// considered.
-    #[allow(clippy::too_many_arguments)]
     async fn park_turn_for_agent_run_wait_set(
         &self,
-        _wait_id: CallId,
-        _turn_id: TurnId,
-        _child_run_ids: &[AgentRunId],
-        _condition: crate::model::AgentRunWaitCondition,
-        _lease_token: uuid::Uuid,
-        _expected_steer_revision: i64,
-        _progress: TurnCheckpointProgress,
+        _request: &crate::model::AgentRunWaitSetCheckpointRequest,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<ParkTurnForAgentRunWaitSetOutcome>> {
         turn_storage_unavailable()

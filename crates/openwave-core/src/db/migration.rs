@@ -714,6 +714,21 @@ async fn create_turn_agent_run_wait_set_tables(manager: &SchemaManager<'_>) -> R
                         .not_null(),
                 )
                 .col(
+                    ColumnDef::new(TurnAgentRunWaitSet::ProviderId)
+                        .text()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(TurnAgentRunWaitSet::HistoryOrder)
+                        .big_integer()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(TurnAgentRunWaitSet::Arguments)
+                        .json_binary()
+                        .not_null(),
+                )
+                .col(
                     ColumnDef::new(TurnAgentRunWaitSet::Condition)
                         .text()
                         .not_null(),
@@ -764,6 +779,12 @@ async fn create_turn_agent_run_wait_set_tables(manager: &SchemaManager<'_>) -> R
                         .not_null(),
                 )
                 .col(
+                    ColumnDef::new(TurnAgentRunWaitSet::EventOrdinal)
+                        .integer()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(TurnAgentRunWaitSet::EventSeq).big_integer())
+                .col(
                     ColumnDef::new(TurnAgentRunWaitSet::Status)
                         .text()
                         .not_null(),
@@ -790,6 +811,30 @@ async fn create_turn_agent_run_wait_set_tables(manager: &SchemaManager<'_>) -> R
                 )
                 .foreign_key(
                     ForeignKey::create()
+                        .name("fk_turn_agent_run_wait_set_tool")
+                        .from_tbl(TurnAgentRunWaitSet::Table)
+                        .from_col(TurnAgentRunWaitSet::Id)
+                        .from_col(TurnAgentRunWaitSet::ChatId)
+                        .from_col(TurnAgentRunWaitSet::HistoryOrder)
+                        .to_tbl(ToolCall::Table)
+                        .to_col(ToolCall::Id)
+                        .to_col(ToolCall::ChatId)
+                        .to_col(ToolCall::HistoryOrder)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_turn_agent_run_wait_set_event")
+                        .from_tbl(TurnAgentRunWaitSet::Table)
+                        .from_col(TurnAgentRunWaitSet::ChatId)
+                        .from_col(TurnAgentRunWaitSet::EventSeq)
+                        .to_tbl(Event::Table)
+                        .to_col(Event::ChatId)
+                        .to_col(Event::Seq)
+                        .on_delete(ForeignKeyAction::Restrict),
+                )
+                .foreign_key(
+                    ForeignKey::create()
                         .name("fk_turn_agent_run_wait_set_claim")
                         .from_tbl(TurnAgentRunWaitSet::Table)
                         .from_col(TurnAgentRunWaitSet::ParkLeaseToken)
@@ -808,6 +853,12 @@ async fn create_turn_agent_run_wait_set_tables(manager: &SchemaManager<'_>) -> R
                         .eq(AgentRunWaitCondition::All.as_str()),
                 )
                 .check(Expr::col(TurnAgentRunWaitSet::ExpectedSteerRevision).gte(0))
+                .check(Expr::col(TurnAgentRunWaitSet::HistoryOrder).gt(0))
+                .check(Expr::col(TurnAgentRunWaitSet::EventOrdinal).between(2, i32::MAX - 1))
+                .check(
+                    Func::char_length(Expr::col(TurnAgentRunWaitSet::ProviderId))
+                        .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
+                )
                 .check(Expr::col(TurnAgentRunWaitSet::AttemptCount).gte(1))
                 .check(
                     Expr::col(TurnAgentRunWaitSet::ClaimCount)
@@ -826,14 +877,17 @@ async fn create_turn_agent_run_wait_set_tables(manager: &SchemaManager<'_>) -> R
                         .eq(TurnAgentRunWaitStatus::Waiting.as_str())
                         .and(Expr::col(TurnAgentRunWaitSet::ClosedAt).is_null())
                         .and(Expr::col(TurnAgentRunWaitSet::ResumeToken).is_null())
+                        .and(Expr::col(TurnAgentRunWaitSet::EventSeq).is_null())
                         .or(Expr::col(TurnAgentRunWaitSet::Status)
                             .eq(TurnAgentRunWaitStatus::Resumed.as_str())
                             .and(Expr::col(TurnAgentRunWaitSet::ClosedAt).is_not_null())
-                            .and(Expr::col(TurnAgentRunWaitSet::ResumeToken).is_not_null()))
+                            .and(Expr::col(TurnAgentRunWaitSet::ResumeToken).is_not_null())
+                            .and(Expr::col(TurnAgentRunWaitSet::EventSeq).is_not_null()))
                         .or(Expr::col(TurnAgentRunWaitSet::Status)
                             .eq(TurnAgentRunWaitStatus::Cancelled.as_str())
                             .and(Expr::col(TurnAgentRunWaitSet::ClosedAt).is_not_null())
-                            .and(Expr::col(TurnAgentRunWaitSet::ResumeToken).is_null())),
+                            .and(Expr::col(TurnAgentRunWaitSet::ResumeToken).is_null())
+                            .and(Expr::col(TurnAgentRunWaitSet::EventSeq).is_not_null())),
                 )
                 .check(
                     Expr::col(TurnAgentRunWaitSet::ClosedAt)
@@ -889,8 +943,7 @@ async fn create_turn_agent_run_wait_set_tables(manager: &SchemaManager<'_>) -> R
                 .col(
                     ColumnDef::new(TurnAgentRunWaitMember::ChildRunId)
                         .uuid()
-                        .not_null()
-                        .unique_key(),
+                        .not_null(),
                 )
                 .col(
                     ColumnDef::new(TurnAgentRunWaitMember::ParentRunId)
@@ -905,6 +958,11 @@ async fn create_turn_agent_run_wait_set_tables(manager: &SchemaManager<'_>) -> R
                 .col(
                     ColumnDef::new(TurnAgentRunWaitMember::ChatId)
                         .uuid()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(TurnAgentRunWaitMember::Open)
+                        .boolean()
                         .not_null(),
                 )
                 .primary_key(
@@ -947,6 +1005,17 @@ async fn create_turn_agent_run_wait_set_tables(manager: &SchemaManager<'_>) -> R
                     Expr::col(TurnAgentRunWaitMember::Position)
                         .lt(crate::model::TurnAgentRunWaitSet::MAX_CHILDREN as i32),
                 )
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_turn_agent_run_wait_member_one_open_child")
+                .table(TurnAgentRunWaitMember::Table)
+                .col(TurnAgentRunWaitMember::ChildRunId)
+                .unique()
+                .and_where(Expr::col(TurnAgentRunWaitMember::Open).eq(true))
                 .to_owned(),
         )
         .await
@@ -2170,8 +2239,6 @@ impl MigrationTrait for Init {
             )
             .await?;
 
-        create_turn_agent_run_wait_set_tables(manager).await?;
-
         manager
             .create_table(
                 Table::create()
@@ -2447,19 +2514,6 @@ impl MigrationTrait for Init {
             .await?;
         manager
             .drop_table(Table::drop().table(TurnFailure::Table).to_owned())
-            .await?;
-        manager
-            .drop_table(
-                Table::drop()
-                    .table(TurnAgentRunWaitMember::Table)
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .drop_table(Table::drop().table(TurnAgentRunWaitSet::Table).to_owned())
-            .await?;
-        manager
-            .drop_table(Table::drop().table(TurnAgentRunWaitLock::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(TurnAgentRunWait::Table).to_owned())
@@ -3503,10 +3557,11 @@ impl MigrationTrait for AddToolCalls {
                                 ))
                             .or(Expr::col(ToolCall::Execution)
                                 .eq(crate::model::ToolCallExecution::Orchestration.as_str())
-                                .and(Expr::col(ToolCall::Status)
-                                    .eq(crate::model::ToolCallStatus::Completed.as_str()))
-                                .and(Expr::col(ToolCall::Result).is_not_null())
-                                .and(Expr::col(ToolCall::ResolvedAt).is_not_null())
+                                .and(Expr::col(ToolCall::Status).is_in([
+                                    crate::model::ToolCallStatus::Pending.as_str(),
+                                    crate::model::ToolCallStatus::Completed.as_str(),
+                                    crate::model::ToolCallStatus::Cancelled.as_str(),
+                                ]))
                                 .and(Expr::col(ToolCall::ErrorCode).is_null())
                                 .and(Expr::col(ToolCall::ErrorDetail).is_null())
                                 .and(Expr::col(ToolCall::ClientExecutorId).is_null())
@@ -3616,6 +3671,8 @@ impl MigrationTrait for AddToolCalls {
                     .to_owned(),
             )
             .await?;
+
+        create_turn_agent_run_wait_set_tables(manager).await?;
 
         manager
             .create_table(
@@ -4007,6 +4064,19 @@ impl MigrationTrait for AddToolCalls {
             .await?;
         manager
             .drop_table(Table::drop().table(TurnClientWait::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(TurnAgentRunWaitMember::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(Table::drop().table(TurnAgentRunWaitSet::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(TurnAgentRunWaitLock::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(ToolCall::Table).to_owned())
@@ -5057,6 +5127,9 @@ enum TurnAgentRunWaitSet {
     ParentRunId,
     TurnId,
     ChatId,
+    ProviderId,
+    HistoryOrder,
+    Arguments,
     Condition,
     ParkLeaseToken,
     ExpectedSteerRevision,
@@ -5067,6 +5140,8 @@ enum TurnAgentRunWaitSet {
     OutputTokens,
     CacheReadInputTokens,
     CacheCreationInputTokens,
+    EventOrdinal,
+    EventSeq,
     Status,
     ParkedAt,
     ClosedAt,
@@ -5088,6 +5163,7 @@ enum TurnAgentRunWaitMember {
     ParentRunId,
     OriginTurnId,
     ChatId,
+    Open,
 }
 
 #[derive(DeriveIden)]

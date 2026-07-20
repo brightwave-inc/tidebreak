@@ -10,8 +10,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 
+use crate::error::{AgentError, Result};
 use crate::id::AgentRunId;
-use crate::model::{AgentRun, AgentRunResultPayload, TurnAgentRunWaitSet};
+use crate::model::{
+    AgentRun, AgentRunInboxEntry, AgentRunResultPayload, ToolCallRecord, TurnAgentRunWaitSet,
+};
 use crate::tool::ToolSpec;
 
 /// Stable name for the foreground-only sandbox delegation tool.
@@ -28,6 +31,19 @@ pub const SANDBOX_WEB_SEARCH_TOOL: &str = "web_search";
 pub const MAX_SANDBOX_AGENT_TASK_CHARS: usize = 16_000;
 /// Maximum number of depth-one children in one foreground wait request.
 pub const MAX_WAIT_FOR_AGENTS_CHILDREN: usize = TurnAgentRunWaitSet::MAX_CHILDREN;
+
+/// Maximum serialized JSON bytes allocated to one model-facing child result.
+///
+/// Four entries plus the fixed result-envelope overhead remain below the
+/// durable tool-call result cap. The bound is on encoded JSON rather than
+/// characters so control-character escaping and four-byte Unicode cannot
+/// expand a valid child receipt into an unresumable wait.
+pub const MAX_WAIT_FOR_AGENT_RESULT_JSON_BYTES: usize = 120 * 1024;
+const WAIT_RESULT_TRUNCATION_MARKER: &str = "\n…[truncated for parent context]";
+pub(crate) const WAIT_INTERRUPTED_BY_STEER_RESULT: &str =
+    "Wait interrupted by a newer user message.";
+pub(crate) const WAIT_CANCELLED_WITH_TURN_RESULT: &str =
+    "Wait cancelled because the foreground turn was cancelled.";
 
 /// Canonical model proposal for one isolated sandbox task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +102,8 @@ pub struct WaitForAgentResult {
     pub agent_id: AgentRunId,
     /// Typed terminal payload produced by that child.
     pub result: AgentRunResultPayload,
+    /// Whether the parent-facing projection shortened the immutable payload.
+    pub truncated: bool,
 }
 
 /// Closed model-facing result for one all-children wait.
@@ -93,6 +111,85 @@ pub struct WaitForAgentResult {
 pub struct WaitForAgentsResult {
     /// One result per requested child, in the exact request order.
     pub results: Vec<WaitForAgentResult>,
+}
+
+/// Build the canonical, bounded model-facing result for an ordered wait.
+///
+/// Immutable child receipts remain untouched. Only the projection inserted in
+/// the foreground tool history may be shortened, and shortened text always
+/// carries an explicit marker.
+pub(crate) fn canonical_wait_for_agents_result(entries: &[AgentRunInboxEntry]) -> Result<String> {
+    if entries.is_empty() || entries.len() > MAX_WAIT_FOR_AGENTS_CHILDREN {
+        return Err(AgentError::Store(
+            "ordered wait result has an invalid child count".into(),
+        ));
+    }
+    let mut results = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let original = WaitForAgentResult {
+            agent_id: entry.child_run_id,
+            result: entry.result.payload.clone(),
+            truncated: false,
+        };
+        if serde_json::to_vec(&original)?.len() <= MAX_WAIT_FOR_AGENT_RESULT_JSON_BYTES {
+            results.push(original);
+            continue;
+        }
+        let AgentRunResultPayload::FinalText { text } = &entry.result.payload else {
+            return Err(AgentError::Store(
+                "non-text sandbox result exceeds its parent projection budget".into(),
+            ));
+        };
+        results.push(WaitForAgentResult {
+            agent_id: entry.child_run_id,
+            result: AgentRunResultPayload::FinalText {
+                text: truncate_wait_result_text(entry.child_run_id, text)?,
+            },
+            truncated: true,
+        });
+    }
+    let result = serde_json::to_string(&WaitForAgentsResult { results })?;
+    if result.len() > ToolCallRecord::MAX_RESULT_BYTES {
+        return Err(AgentError::Store(
+            "ordered wait result exceeds the durable tool-call result budget".into(),
+        ));
+    }
+    Ok(result)
+}
+
+fn truncate_wait_result_text(agent_id: AgentRunId, text: &str) -> Result<String> {
+    let boundaries = text
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(text.len()))
+        .collect::<Vec<_>>();
+    let fits = |end: usize| -> Result<bool> {
+        let projected = WaitForAgentResult {
+            agent_id,
+            result: AgentRunResultPayload::FinalText {
+                text: format!("{}{}", &text[..end], WAIT_RESULT_TRUNCATION_MARKER),
+            },
+            truncated: true,
+        };
+        Ok(serde_json::to_vec(&projected)?.len() <= MAX_WAIT_FOR_AGENT_RESULT_JSON_BYTES)
+    };
+    let mut low = 0;
+    let mut high = boundaries.len();
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        if fits(boundaries[mid - 1])? {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    let end = boundaries[low.saturating_sub(1)];
+    if !fits(end)? {
+        return Err(AgentError::Store(
+            "ordered wait truncation marker exceeds its projection budget".into(),
+        ));
+    }
+    Ok(format!("{}{}", &text[..end], WAIT_RESULT_TRUNCATION_MARKER))
 }
 
 impl SpawnSandboxAgentArgs {
@@ -202,9 +299,35 @@ pub fn sandbox_web_search_tool_spec() -> ToolSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     fn child_ids(count: usize) -> Vec<AgentRunId> {
         (0..count).map(|_| AgentRunId::new()).collect()
+    }
+
+    fn inbox(agent_id: AgentRunId, text: String) -> AgentRunInboxEntry {
+        let now = Utc::now();
+        AgentRunInboxEntry {
+            parent_run_id: AgentRunId::new(),
+            child_run_id: agent_id,
+            chat_id: crate::ChatId::new(),
+            result: crate::AgentRunResult {
+                agent_run_id: agent_id,
+                lease_token: uuid::Uuid::new_v4(),
+                attempt_count: 1,
+                claim_count: 1,
+                payload: AgentRunResultPayload::FinalText { text: text.clone() },
+                text,
+                submitted_at: now,
+            },
+            status: crate::AgentRunInboxStatus::Pending,
+            claim_count: 0,
+            lease_token: None,
+            lease_expires_at: None,
+            consumed_lease_token: None,
+            consumed_at: None,
+            delivered_at: now,
+        }
     }
 
     #[test]
@@ -317,6 +440,7 @@ mod tests {
                 result: AgentRunResultPayload::FinalText {
                     text: "finished".into(),
                 },
+                truncated: false,
             }],
         };
         assert_eq!(
@@ -325,8 +449,51 @@ mod tests {
                 "results": [{
                     "agent_id": agent_id,
                     "result": {"kind": "final_text", "text": "finished"},
+                    "truncated": false,
                 }],
             })
         );
+    }
+
+    #[test]
+    fn wait_result_projection_bounds_worst_case_json_escaping_without_mutating_receipts() {
+        let entries = (0..MAX_WAIT_FOR_AGENTS_CHILDREN)
+            .map(|_| inbox(AgentRunId::new(), "\u{1}".repeat(AgentRun::MAX_RESULT_LEN)))
+            .collect::<Vec<_>>();
+        let original = entries[0].result.payload.clone();
+
+        let encoded = canonical_wait_for_agents_result(&entries).unwrap();
+        assert!(encoded.len() <= ToolCallRecord::MAX_RESULT_BYTES);
+        assert_eq!(entries[0].result.payload, original);
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(value["results"].as_array().unwrap().len(), 4);
+        for result in value["results"].as_array().unwrap() {
+            assert_eq!(result["truncated"], true);
+            assert!(result["result"]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with(WAIT_RESULT_TRUNCATION_MARKER));
+        }
+    }
+
+    #[test]
+    fn wait_result_projection_truncates_only_at_unicode_boundaries() {
+        let text = "🧭".repeat(AgentRun::MAX_RESULT_LEN);
+        let entries = (0..MAX_WAIT_FOR_AGENTS_CHILDREN)
+            .map(|_| inbox(AgentRunId::new(), text.clone()))
+            .collect::<Vec<_>>();
+
+        let encoded = canonical_wait_for_agents_result(&entries).unwrap();
+        assert!(encoded.len() <= ToolCallRecord::MAX_RESULT_BYTES);
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        for result in value["results"].as_array().unwrap() {
+            assert_eq!(result["truncated"], true);
+            let projected = result["result"]["text"].as_str().unwrap();
+            assert!(projected.ends_with(WAIT_RESULT_TRUNCATION_MARKER));
+            assert!(projected
+                .trim_end_matches(WAIT_RESULT_TRUNCATION_MARKER)
+                .chars()
+                .all(|character| character == '🧭'));
+        }
     }
 }

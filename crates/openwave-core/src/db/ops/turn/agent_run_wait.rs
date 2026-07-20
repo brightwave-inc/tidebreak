@@ -5,8 +5,8 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::model::{
-    AgentRunExecution, AgentRunStatus, TurnAgentRunWait, TurnAgentRunWaitStatus,
-    TurnCheckpointProgress, TurnRunStatus, TurnSteerStatus,
+    AgentRunExecution, AgentRunInboxStatus, AgentRunStatus, TurnAgentRunWait,
+    TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnRunStatus, TurnSteerStatus,
 };
 use crate::storage::ParkTurnForAgentRunInboxOutcome;
 use crate::{AgentRunId, TurnId, TurnRun};
@@ -117,6 +117,7 @@ where
 
     if entities::turn_agent_run_wait_member::Entity::find()
         .filter(entities::turn_agent_run_wait_member::Column::ChildRunId.eq(child_run_id.0))
+        .filter(entities::turn_agent_run_wait_member::Column::Open.eq(true))
         .one(conn)
         .await
         .map_err(store_err)?
@@ -181,6 +182,23 @@ where
     });
     if !valid_child {
         return Ok(Some(ParkTurnForAgentRunInboxOutcome::IdentityConflict));
+    }
+    if let Some(inbox) = entities::agent_run_inbox::Entity::find_by_id(child_run_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+    {
+        let pending_unclaimed = inbox.parent_run_id == turn.agent_run_id
+            && inbox.chat_id == turn.chat_id
+            && inbox.status == AgentRunInboxStatus::Pending.as_str()
+            && inbox.claim_count == 0
+            && inbox.lease_token.is_none()
+            && inbox.lease_expires_at.is_none()
+            && inbox.consumed_lease_token.is_none()
+            && inbox.consumed_at.is_none();
+        if !pending_unclaimed {
+            return Ok(Some(ParkTurnForAgentRunInboxOutcome::IdentityConflict));
+        }
     }
     let totals = checked_checkpoint_totals(&turn, progress)?;
     let wait = entities::turn_agent_run_wait::ActiveModel {

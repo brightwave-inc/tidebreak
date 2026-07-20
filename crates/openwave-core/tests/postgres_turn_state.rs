@@ -6,13 +6,13 @@ use chrono::{Duration, Utc};
 use openwave_core::{
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent,
     AgentRunCancellationReason, AgentRunExecution, AgentRunId, AgentRunInboxStatus,
-    AgentRunResultPayload, AgentRunStatus, AgentRunWaitCondition, ApplyTurnSteerOutcome,
-    AssistantCitationReference, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome,
-    ByteSpan, CallId, Chat, ChatId, ChatRootAttachment, CheckpointSandboxSpawnOutcome, ChunkId,
-    ClaimClientToolCallOutcome, ClientToolCallRequest, CompleteTurnRunOutcome, DbStore,
-    DeleteChatOutcome, DocumentGeneration, DocumentId, FinishAgentRunCancellationOutcome,
-    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
+    AgentRunResultPayload, AgentRunStatus, AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest,
+    ApplyTurnSteerOutcome, AssistantCitationReference, BeginRootAttachmentChange,
+    BeginRootAttachmentChangeOutcome, ByteSpan, CallId, Chat, ChatId, ChatRootAttachment,
+    CheckpointSandboxSpawnOutcome, ChunkId, ClaimClientToolCallOutcome, ClientToolCallRequest,
+    CompleteTurnRunOutcome, DbStore, DeleteChatOutcome, DocumentGeneration, DocumentId,
+    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, Project, ProjectId,
     RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrievalEvidenceInput,
@@ -25,6 +25,51 @@ use openwave_core::{
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement, TransactionTrait};
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[allow(clippy::too_many_arguments)]
+async fn park_wait_set_for_test<S: Store + ?Sized>(
+    store: &S,
+    wait_id: CallId,
+    turn_id: TurnId,
+    child_run_ids: &[AgentRunId],
+    condition: AgentRunWaitCondition,
+    lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
+    progress: TurnCheckpointProgress,
+    now: chrono::DateTime<Utc>,
+) -> openwave_core::Result<Option<ParkTurnForAgentRunWaitSetOutcome>> {
+    let turn = store
+        .get_turn_run(turn_id)
+        .await?
+        .ok_or_else(|| openwave_core::AgentError::Store("test turn disappeared".into()))?;
+    store
+        .append_turn_event(
+            turn.chat_id,
+            turn_id,
+            lease_token,
+            1,
+            now,
+            &AgentEvent::TurnStarted { turn_id },
+        )
+        .await?;
+    store
+        .park_turn_for_agent_run_wait_set(
+            &AgentRunWaitSetCheckpointRequest {
+                call_id: wait_id,
+                origin_turn_id: turn_id,
+                child_run_ids: child_run_ids.to_vec(),
+                condition,
+                lease_token,
+                expected_steer_revision,
+                provider_id: format!("provider-{wait_id}"),
+                arguments: serde_json::json!({"agent_ids": child_run_ids}),
+                event_ordinal: 2,
+                progress,
+            },
+            now,
+        )
+        .await
+}
 
 #[tokio::test]
 async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
@@ -1237,19 +1282,19 @@ async fn postgres_multi_child_wait_resumes_in_request_order_exactly_once() {
         },
     };
     assert!(matches!(
-        store
-            .park_turn_for_agent_run_wait_set(
-                wait_id,
-                turn.id,
-                &requested,
-                AgentRunWaitCondition::All,
-                lease,
-                turn.steer_revision,
-                progress,
-                utc_now_at_postgres_precision(),
-            )
-            .await
-            .unwrap(),
+        park_wait_set_for_test(
+            &store,
+            wait_id,
+            turn.id,
+            &requested,
+            AgentRunWaitCondition::All,
+            lease,
+            turn.steer_revision,
+            progress,
+            utc_now_at_postgres_precision(),
+        )
+        .await
+        .unwrap(),
         Some(ParkTurnForAgentRunWaitSetOutcome::Parked { .. })
     ));
     postgres_complete_next_child(&store, "postgres completion one").await;
@@ -1357,7 +1402,8 @@ async fn postgres_concurrent_cross_chat_wait_identity_converges_to_typed_conflic
         usage: Usage::default(),
     };
     let (first, second) = tokio::join!(
-        first_store.park_turn_for_agent_run_wait_set(
+        park_wait_set_for_test(
+            &first_store,
             wait_id,
             first_turn.id,
             &first_members,
@@ -1367,7 +1413,8 @@ async fn postgres_concurrent_cross_chat_wait_identity_converges_to_typed_conflic
             progress,
             utc_now_at_postgres_precision(),
         ),
-        second_store.park_turn_for_agent_run_wait_set(
+        park_wait_set_for_test(
+            &second_store,
             wait_id,
             second_turn.id,
             &second_members,

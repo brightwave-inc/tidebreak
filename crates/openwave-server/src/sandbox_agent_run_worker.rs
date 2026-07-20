@@ -1502,16 +1502,34 @@ mod tests {
         let child_b = admit_sandbox(&store, chat.id, CallId::new(), "b").await;
         let wait_id = CallId::new();
         store
-            .park_turn_for_agent_run_wait_set(
-                wait_id,
+            .append_turn_event(
+                chat.id,
                 foreground.id,
-                &[child_b.id, child_a.id],
-                openwave_core::AgentRunWaitCondition::All,
                 foreground_lease,
-                foreground.steer_revision,
-                TurnCheckpointProgress {
-                    model_steps: 1,
-                    usage: Usage::default(),
+                1,
+                Utc::now(),
+                &openwave_core::AgentEvent::TurnStarted {
+                    turn_id: foreground.id,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .park_turn_for_agent_run_wait_set(
+                &openwave_core::AgentRunWaitSetCheckpointRequest {
+                    call_id: wait_id,
+                    origin_turn_id: foreground.id,
+                    child_run_ids: vec![child_b.id, child_a.id],
+                    condition: openwave_core::AgentRunWaitCondition::All,
+                    lease_token: foreground_lease,
+                    expected_steer_revision: foreground.steer_revision,
+                    provider_id: format!("provider-{wait_id}"),
+                    arguments: serde_json::json!({"agent_ids": [child_b.id, child_a.id]}),
+                    event_ordinal: 2,
+                    progress: TurnCheckpointProgress {
+                        model_steps: 1,
+                        usage: Usage::default(),
+                    },
                 },
                 Utc::now(),
             )
@@ -1560,16 +1578,34 @@ mod tests {
         let set_child = admit_sandbox(&store, set_chat.id, CallId::new(), "set child").await;
         let wait_id = CallId::new();
         store
-            .park_turn_for_agent_run_wait_set(
-                wait_id,
+            .append_turn_event(
+                set_chat.id,
                 set_turn.id,
-                &[set_child.id],
-                openwave_core::AgentRunWaitCondition::All,
                 set_lease,
-                set_turn.steer_revision,
-                TurnCheckpointProgress {
-                    model_steps: 1,
-                    usage: Usage::default(),
+                1,
+                Utc::now(),
+                &openwave_core::AgentEvent::TurnStarted {
+                    turn_id: set_turn.id,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .park_turn_for_agent_run_wait_set(
+                &openwave_core::AgentRunWaitSetCheckpointRequest {
+                    call_id: wait_id,
+                    origin_turn_id: set_turn.id,
+                    child_run_ids: vec![set_child.id],
+                    condition: openwave_core::AgentRunWaitCondition::All,
+                    lease_token: set_lease,
+                    expected_steer_revision: set_turn.steer_revision,
+                    provider_id: format!("provider-{wait_id}"),
+                    arguments: serde_json::json!({"agent_ids": [set_child.id]}),
+                    event_ordinal: 2,
+                    progress: TurnCheckpointProgress {
+                        model_steps: 1,
+                        usage: Usage::default(),
+                    },
                 },
                 Utc::now(),
             )

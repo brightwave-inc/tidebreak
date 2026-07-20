@@ -40,6 +40,7 @@ async fn request_turn_cancellation_inner(
     // request, while avoiding the scheduler/turn inversion that would arise
     // from taking this lock after the turn lock.
     super::super::super::agent_run::acquire_agent_run_claim_lock(&transaction).await?;
+    super::super::multi_agent_run_wait::acquire_wait_set_lock(&transaction).await?;
     if let Some(chat_id) = journal_chat_id {
         if !acquire_chat_write_lock(&transaction, chat_id).await? {
             return Err(AgentError::Store(format!(
