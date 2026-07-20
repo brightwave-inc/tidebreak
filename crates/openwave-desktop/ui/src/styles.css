@@ -1042,19 +1042,17 @@ button {
 .tool-activity-group {
   width: min(100%, 31rem);
   align-self: flex-start;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--bg-elevated) 88%, var(--sidebar));
 }
 
 .tool-activity-group-toggle {
   display: flex;
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   align-items: center;
-  gap: 0.55rem;
+  gap: 0.42rem;
   border: 0;
-  border-radius: 8px;
-  padding: 0.6rem 0.65rem;
+  border-radius: 6px;
+  padding: 0.24rem 0.32rem;
   color: var(--muted);
   background: transparent;
   text-align: left;
@@ -1062,49 +1060,119 @@ button {
 
 .tool-activity-group-toggle:hover,
 .tool-activity-group-toggle:focus-visible {
-  background: color-mix(in srgb, var(--sidebar-active) 65%, transparent);
-}
-
-.tool-activity-group-icon {
-  width: 1.15rem;
-  flex: 0 0 auto;
   color: var(--ink);
-  font-size: 1.3rem;
-  line-height: 1;
-  text-align: center;
+  background: color-mix(in srgb, var(--sidebar-active) 58%, transparent);
 }
 
-.tool-activity-group-copy {
+.tool-activity-group-status {
   display: grid;
-  min-width: 0;
-  gap: 0.04rem;
+  width: 1.15rem;
+  height: 1.15rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--ink);
+  background: var(--user-bg);
+  font-size: 0.7rem;
+  font-weight: 650;
+  line-height: 1;
 }
 
-.tool-activity-group-copy strong,
-.tool-activity-group-copy span {
+.tool-activity-group-status.is-completed {
+  color: oklch(0.42 0.13 150);
+  background: oklch(0.95 0.035 150);
+}
+
+.tool-activity-group-status.is-failed,
+.tool-activity-group-status.is-unknown {
+  color: var(--danger);
+  background: oklch(0.97 0.01 25);
+}
+
+.tool-activity-group-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.tool-activity-group-copy strong {
-  color: var(--ink);
   font-size: 0.82rem;
-  font-weight: 600;
+  font-weight: 550;
 }
 
-.tool-activity-group-copy span {
-  font-size: 0.75rem;
+.tool-activity-group-chevron {
+  flex: 0 0 auto;
+  font-size: 1rem;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.tool-activity-group-chevron.is-expanded {
+  transform: rotate(90deg);
 }
 
 .tool-activity-group-list {
   display: grid;
-  gap: 0.45rem;
-  padding: 0 0.65rem 0.65rem;
+  gap: 0.7rem;
+  margin: 0.35rem 0 0 0.86rem;
+  border-left: 1px solid var(--line);
+  padding: 0.3rem 0 0.25rem 1rem;
 }
 
-.tool-activity-group-list .tool-call-card {
-  width: 100%;
+.tool-activity-timeline-item {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 0.55rem;
+  color: var(--muted);
+}
+
+.tool-activity-timeline-marker {
+  position: absolute;
+  left: -1.04rem;
+  display: grid;
+  width: 1rem;
+  height: 1rem;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--ink);
+  background: var(--bg);
+  font-size: 0.67rem;
+  font-weight: 650;
+  line-height: 1;
+  transform: translateX(-50%);
+}
+
+.tool-activity-timeline-item.is-completed .tool-activity-timeline-marker {
+  color: oklch(0.42 0.13 150);
+}
+
+.tool-activity-timeline-item.is-failed .tool-activity-timeline-marker,
+.tool-activity-timeline-item.is-unknown .tool-activity-timeline-marker {
+  color: var(--danger);
+}
+
+.tool-activity-timeline-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.05rem;
+}
+
+.tool-activity-timeline-copy strong {
+  color: var(--ink);
+  font-size: 0.8rem;
+  font-weight: 550;
+}
+
+.tool-activity-timeline-copy span {
+  font-size: 0.74rem;
+}
+
+.tool-activity-unavailable {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 @keyframes tool-call-spin {
@@ -1116,7 +1184,8 @@ button {
 @media (prefers-reduced-motion: reduce) {
   .tool-call-spinner,
   .assistant-sources-chevron,
-  .message-footer {
+  .message-footer,
+  .tool-activity-group-chevron {
     animation: none;
     transition: none;
   }

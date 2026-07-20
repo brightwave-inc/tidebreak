@@ -178,7 +178,7 @@ export function groupMessageItems(
 
     items.push(
       <ToolActivityGroup
-        key={activities[0].id}
+        key={`tool-activity-group-${groupIndex}`}
         activities={activities}
         groupIndex={groupIndex}
       />,
