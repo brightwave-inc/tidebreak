@@ -604,10 +604,14 @@ button {
   overflow-wrap: anywhere;
 }
 
-.message-user {
+.message-user-frame {
   width: fit-content;
   max-width: min(80%, 38rem);
   align-self: flex-end;
+}
+
+.message-user {
+  width: 100%;
   border-radius: 15px 15px 4px 15px;
   padding: 0.52rem 0.78rem;
   background: color-mix(in srgb, var(--sidebar-active) 84%, var(--bg-elevated));
@@ -618,6 +622,62 @@ button {
   align-self: flex-start;
   padding: 0.1rem 0;
   background: transparent;
+}
+
+.message-footer {
+  display: flex;
+  min-height: 1.7rem;
+  align-items: center;
+  gap: 0.35rem;
+  padding-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.message-user-frame .message-footer {
+  padding-inline: 0.3rem;
+}
+
+.message-assistant:hover .message-footer,
+.message-assistant:focus-within .message-footer,
+.message-user-frame:hover .message-footer,
+.message-user-frame:focus-within .message-footer {
+  opacity: 1;
+}
+
+.message-footer-spacer {
+  flex: 1 1 auto;
+}
+
+.message-footer time {
+  cursor: default;
+  white-space: nowrap;
+}
+
+.message-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  border: 0;
+  border-radius: 5px;
+  padding: 0.18rem 0.32rem;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.72rem;
+}
+
+.message-copy:hover,
+.message-copy:focus-visible {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--sidebar-active) 60%, transparent);
+}
+
+@media (hover: none) {
+  .message-footer {
+    opacity: 1;
+  }
 }
 
 .assistant-sources {
@@ -1055,7 +1115,8 @@ button {
 
 @media (prefers-reduced-motion: reduce) {
   .tool-call-spinner,
-  .assistant-sources-chevron {
+  .assistant-sources-chevron,
+  .message-footer {
     animation: none;
     transition: none;
   }

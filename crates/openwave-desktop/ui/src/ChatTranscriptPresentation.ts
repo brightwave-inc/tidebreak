@@ -44,11 +44,13 @@ export function presentChatTranscript(
             role: "assistant",
             text: entry.text,
             sources: entry.sources,
+            createdAt: entry.createdAt,
           }
         : {
             id: entry.id,
             role: "user",
             text: entry.text,
+            createdAt: entry.createdAt,
           },
   );
 
