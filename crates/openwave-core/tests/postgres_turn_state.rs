@@ -8,8 +8,8 @@ use openwave_core::{
     AgentRunExecution, AgentRunId, AgentRunStatus, ApplyTurnSteerOutcome,
     AssistantCitationReference, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome,
     ByteSpan, CallId, Chat, ChatId, ChatRootAttachment, ChunkId, ClaimClientToolCallOutcome,
-    ClientToolCallRequest, CompleteTurnRunOutcome, DbStore, DocumentGeneration, DocumentId,
-    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    ClientToolCallRequest, CompleteTurnRunOutcome, DbStore, DeleteChatOutcome, DocumentGeneration,
+    DocumentId, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
     ParkTurnForClientCallOutcome, Project, ProjectId, RecordTurnFailureOutcome,
     RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome,
@@ -265,6 +265,57 @@ async fn postgres_admit_sandbox(
     }
 }
 
+async fn cleanup_postgres_sandbox_chat(store: &DbStore, chat_id: ChatId) {
+    for run in store
+        .list_agent_runs(chat_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.execution == AgentRunExecution::Sandbox)
+    {
+        let lease_token = run.lease_token;
+        store.request_agent_run_cancellation(run.id).await.unwrap();
+        let current = store.get_agent_run(run.id).await.unwrap().unwrap();
+        if current.status == AgentRunStatus::Cancelling {
+            store
+                .finish_agent_run_cancellation(
+                    run.id,
+                    lease_token.expect("running sandbox cleanup retains its lease token"),
+                )
+                .await
+                .unwrap()
+                .expect("sandbox cleanup cancellation should resolve");
+        }
+    }
+
+    for turn in store.list_turn_runs(chat_id).await.unwrap() {
+        let lease_token = turn.lease_token;
+        let cancel_at = utc_now_at_postgres_precision().max(turn.updated_at);
+        store
+            .request_turn_cancellation(turn.id, cancel_at)
+            .await
+            .unwrap();
+        let current = store.get_turn_run(turn.id).await.unwrap().unwrap();
+        if current.status == TurnRunStatus::Cancelling {
+            let finish_at = utc_now_at_postgres_precision().max(current.updated_at);
+            store
+                .finish_turn_cancellation(
+                    turn.id,
+                    lease_token.expect("running turn cleanup retains its lease token"),
+                    finish_at,
+                )
+                .await
+                .unwrap()
+                .expect("foreground cleanup cancellation should resolve");
+        }
+    }
+
+    assert_eq!(
+        store.delete_chat(chat_id).await.unwrap(),
+        DeleteChatOutcome::Deleted
+    );
+}
+
 #[tokio::test]
 async fn postgres_agent_runs_enforce_foreground_parentage_and_idempotency() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
@@ -307,6 +358,7 @@ async fn postgres_agent_runs_enforce_foreground_parentage_and_idempotency() {
         )
         .await
         .is_err());
+    cleanup_postgres_sandbox_chat(&store, chat.id).await;
 }
 
 #[tokio::test]
@@ -359,6 +411,8 @@ async fn postgres_agent_run_identity_collision_recovers_exactly_across_chats() {
         }
     }
     assert_eq!((accepted, conflicted), (1, 1));
+    cleanup_postgres_sandbox_chat(&store, first_chat.id).await;
+    cleanup_postgres_sandbox_chat(&store, second_chat.id).await;
 }
 
 #[tokio::test]
@@ -417,9 +471,7 @@ async fn postgres_concurrent_sandbox_admission_respects_origin_turn_cap() {
         .filter(|run| run.execution == AgentRunExecution::Sandbox)
         .collect::<Vec<_>>();
     assert_eq!(sandbox_runs.len(), 2);
-    for run in sandbox_runs {
-        store.request_agent_run_cancellation(run.id).await.unwrap();
-    }
+    cleanup_postgres_sandbox_chat(&store, chat.id).await;
 }
 
 #[tokio::test]
@@ -479,6 +531,7 @@ async fn postgres_concurrent_exact_sandbox_admission_converges() {
         })
         .count();
     assert_eq!((accepted, existing), (1, 1));
+    cleanup_postgres_sandbox_chat(&store, chat.id).await;
 }
 
 #[tokio::test]
@@ -545,6 +598,7 @@ async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
         .await
         .unwrap()
         .is_none());
+    cleanup_postgres_sandbox_chat(&store, chat.id).await;
 }
 
 #[tokio::test]
@@ -594,6 +648,8 @@ async fn postgres_concurrent_sandbox_claims_respect_global_and_per_chat_limits()
         .collect::<Vec<_>>();
     assert_eq!(claimed.len(), 2);
     assert_ne!(claimed[0].chat_id, claimed[1].chat_id);
+    cleanup_postgres_sandbox_chat(store.as_ref(), first_chat.id).await;
+    cleanup_postgres_sandbox_chat(store.as_ref(), second_chat.id).await;
 }
 
 #[tokio::test]
@@ -683,6 +739,7 @@ async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() 
         ))
         .await
         .unwrap();
+    cleanup_postgres_sandbox_chat(&store, chat.id).await;
 }
 
 #[tokio::test]
@@ -786,6 +843,7 @@ async fn postgres_sandbox_terminal_transitions_are_exact_and_fenced() {
         Some(FinishAgentRunCancellationOutcome::Cancelled(run))
             if run.status == AgentRunStatus::Cancelled
     ));
+    cleanup_postgres_sandbox_chat(&store, chat.id).await;
 }
 
 #[tokio::test]
