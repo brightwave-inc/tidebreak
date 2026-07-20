@@ -1362,7 +1362,6 @@ impl MigrationTrait for Init {
                     .to_owned(),
             )
             .await?;
-
         manager
             .create_index(
                 Index::create()
@@ -3347,6 +3346,7 @@ impl MigrationTrait for AddToolCalls {
                     .col(ColumnDef::new(ToolCall::ChatId).uuid().not_null())
                     .col(ColumnDef::new(ToolCall::TurnId).uuid().not_null())
                     .col(ColumnDef::new(ToolCall::ProviderId).text().not_null())
+                    .col(ColumnDef::new(ToolCall::HistoryOrder).big_integer().not_null())
                     .col(ColumnDef::new(ToolCall::Name).text().not_null())
                     .col(ColumnDef::new(ToolCall::Arguments).json_binary().not_null())
                     .col(ColumnDef::new(ToolCall::Execution).text().not_null())
@@ -3389,6 +3389,7 @@ impl MigrationTrait for AddToolCalls {
                     .check(Expr::col(ToolCall::Execution).is_in([
                         crate::model::ToolCallExecution::Server.as_str(),
                         crate::model::ToolCallExecution::Client.as_str(),
+                        crate::model::ToolCallExecution::Orchestration.as_str(),
                     ]))
                     .check(Expr::col(ToolCall::Status).is_in([
                         crate::model::ToolCallStatus::Pending.as_str(),
@@ -3396,6 +3397,7 @@ impl MigrationTrait for AddToolCalls {
                         crate::model::ToolCallStatus::Failed.as_str(),
                         crate::model::ToolCallStatus::Cancelled.as_str(),
                     ]))
+                    .check(Expr::col(ToolCall::HistoryOrder).gt(0))
                     .check(
                         Func::char_length(Expr::col(ToolCall::ProviderId))
                             .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
@@ -3498,7 +3500,18 @@ impl MigrationTrait for AddToolCalls {
                                             .and(Expr::col(ToolCall::ClientExecutorId).is_null())
                                             .and(Expr::col(ToolCall::ClientLeaseToken).is_null())
                                             .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())),
-                                )),
+                                ))
+                            .or(Expr::col(ToolCall::Execution)
+                                .eq(crate::model::ToolCallExecution::Orchestration.as_str())
+                                .and(Expr::col(ToolCall::Status)
+                                    .eq(crate::model::ToolCallStatus::Completed.as_str()))
+                                .and(Expr::col(ToolCall::Result).is_not_null())
+                                .and(Expr::col(ToolCall::ResolvedAt).is_not_null())
+                                .and(Expr::col(ToolCall::ErrorCode).is_null())
+                                .and(Expr::col(ToolCall::ErrorDetail).is_null())
+                                .and(Expr::col(ToolCall::ClientExecutorId).is_null())
+                                .and(Expr::col(ToolCall::ClientLeaseToken).is_null())
+                                .and(Expr::col(ToolCall::ClientLeaseExpiresAt).is_null())),
                     )
                     .check(
                         Expr::col(ToolCall::ApprovalStatus)
@@ -3559,10 +3572,11 @@ impl MigrationTrait for AddToolCalls {
         manager
             .create_index(
                 Index::create()
-                    .name("idx_tool_call_chat")
+                    .name("idx_tool_call_chat_history")
                     .table(ToolCall::Table)
                     .col(ToolCall::ChatId)
-                    .col(ToolCall::CreatedAt)
+                    .col(ToolCall::HistoryOrder)
+                    .unique()
                     .to_owned(),
             )
             .await?;
@@ -3581,12 +3595,239 @@ impl MigrationTrait for AddToolCalls {
         manager
             .create_index(
                 Index::create()
+                    .name("idx_tool_call_checkpoint_identity")
+                    .table(ToolCall::Table)
+                    .col(ToolCall::Id)
+                    .col(ToolCall::ChatId)
+                    .col(ToolCall::HistoryOrder)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
                     .name("idx_tool_call_client_pending")
                     .table(ToolCall::Table)
                     .col(ToolCall::ChatId)
                     .col(ToolCall::Execution)
                     .col(ToolCall::Status)
                     .col(ToolCall::ClientLeaseExpiresAt)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(SandboxSpawnCheckpoint::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::CallId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::ChildRunId)
+                            .uuid()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::ParentRunId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::OriginTurnId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::ChatId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::LeaseToken)
+                            .uuid()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::AttemptCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::ClaimCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::ProviderId)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::HistoryOrder)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::Arguments)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::Result)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::SteerRevision)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::EventOrdinal)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::ModelSteps)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::InputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::OutputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::CacheReadInputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::CacheCreationInputTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::EventSeq)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxSpawnCheckpoint::CommittedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_sandbox_spawn_checkpoint_admission")
+                            .from_tbl(SandboxSpawnCheckpoint::Table)
+                            .from_col(SandboxSpawnCheckpoint::ChildRunId)
+                            .from_col(SandboxSpawnCheckpoint::OriginTurnId)
+                            .from_col(SandboxSpawnCheckpoint::ParentRunId)
+                            .from_col(SandboxSpawnCheckpoint::ChatId)
+                            .to_tbl(SandboxAgentAdmission::Table)
+                            .to_col(SandboxAgentAdmission::ChildRunId)
+                            .to_col(SandboxAgentAdmission::OriginTurnId)
+                            .to_col(SandboxAgentAdmission::ParentRunId)
+                            .to_col(SandboxAgentAdmission::ChatId)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_sandbox_spawn_checkpoint_claim")
+                            .from_tbl(SandboxSpawnCheckpoint::Table)
+                            .from_col(SandboxSpawnCheckpoint::LeaseToken)
+                            .from_col(SandboxSpawnCheckpoint::OriginTurnId)
+                            .from_col(SandboxSpawnCheckpoint::AttemptCount)
+                            .from_col(SandboxSpawnCheckpoint::ClaimCount)
+                            .to_tbl(TurnClaim::Table)
+                            .to_col(TurnClaim::Token)
+                            .to_col(TurnClaim::TurnId)
+                            .to_col(TurnClaim::AttemptCount)
+                            .to_col(TurnClaim::ClaimCount)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_sandbox_spawn_checkpoint_tool")
+                            .from_tbl(SandboxSpawnCheckpoint::Table)
+                            .from_col(SandboxSpawnCheckpoint::CallId)
+                            .from_col(SandboxSpawnCheckpoint::ChatId)
+                            .from_col(SandboxSpawnCheckpoint::HistoryOrder)
+                            .to_tbl(ToolCall::Table)
+                            .to_col(ToolCall::Id)
+                            .to_col(ToolCall::ChatId)
+                            .to_col(ToolCall::HistoryOrder)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_sandbox_spawn_checkpoint_event")
+                            .from_tbl(SandboxSpawnCheckpoint::Table)
+                            .from_col(SandboxSpawnCheckpoint::ChatId)
+                            .from_col(SandboxSpawnCheckpoint::EventSeq)
+                            .to_tbl(Event::Table)
+                            .to_col(Event::ChatId)
+                            .to_col(Event::Seq)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(Expr::col(SandboxSpawnCheckpoint::AttemptCount).gte(1))
+                    .check(
+                        Expr::col(SandboxSpawnCheckpoint::ClaimCount)
+                            .gte(Expr::col(SandboxSpawnCheckpoint::AttemptCount)),
+                    )
+                    .check(Expr::col(SandboxSpawnCheckpoint::SteerRevision).gte(0))
+                    .check(Expr::col(SandboxSpawnCheckpoint::EventOrdinal).between(2, i32::MAX - 1))
+                    .check(Expr::col(SandboxSpawnCheckpoint::ModelSteps).gt(0))
+                    .check(Expr::col(SandboxSpawnCheckpoint::HistoryOrder).gt(0))
+                    .check(
+                        Expr::col(SandboxSpawnCheckpoint::InputTokens)
+                            .between(0, i64::from(u32::MAX)),
+                    )
+                    .check(
+                        Expr::col(SandboxSpawnCheckpoint::OutputTokens)
+                            .between(0, i64::from(u32::MAX)),
+                    )
+                    .check(
+                        Expr::col(SandboxSpawnCheckpoint::CacheReadInputTokens)
+                            .between(0, i64::from(u32::MAX)),
+                    )
+                    .check(
+                        Expr::col(SandboxSpawnCheckpoint::CacheCreationInputTokens)
+                            .between(0, i64::from(u32::MAX)),
+                    )
+                    .check(
+                        Func::char_length(Expr::col(SandboxSpawnCheckpoint::ProviderId))
+                            .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
+                    )
+                    .check(
+                        Func::char_length(Expr::col(SandboxSpawnCheckpoint::Result))
+                            .lte(crate::model::ToolCallRecord::MAX_RESULT_BYTES as i32),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_sandbox_spawn_checkpoint_event")
+                    .table(SandboxSpawnCheckpoint::Table)
+                    .col(SandboxSpawnCheckpoint::ChatId)
+                    .col(SandboxSpawnCheckpoint::EventSeq)
+                    .unique()
                     .to_owned(),
             )
             .await?;
@@ -3751,6 +3992,13 @@ impl MigrationTrait for AddToolCalls {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(SandboxSpawnCheckpoint::Table)
+                    .to_owned(),
+            )
+            .await?;
         manager
             .drop_table(Table::drop().table(AssistantCitation::Table).to_owned())
             .await?;
@@ -4696,6 +4944,32 @@ enum SandboxAgentAdmission {
 }
 
 #[derive(DeriveIden)]
+enum SandboxSpawnCheckpoint {
+    Table,
+    CallId,
+    ChildRunId,
+    ParentRunId,
+    OriginTurnId,
+    ChatId,
+    LeaseToken,
+    AttemptCount,
+    ClaimCount,
+    ProviderId,
+    HistoryOrder,
+    Arguments,
+    Result,
+    SteerRevision,
+    EventOrdinal,
+    ModelSteps,
+    InputTokens,
+    OutputTokens,
+    CacheReadInputTokens,
+    CacheCreationInputTokens,
+    EventSeq,
+    CommittedAt,
+}
+
+#[derive(DeriveIden)]
 enum AgentRunClaim {
     Table,
     Token,
@@ -5004,6 +5278,7 @@ enum ToolCall {
     ChatId,
     TurnId,
     ProviderId,
+    HistoryOrder,
     Name,
     Arguments,
     Execution,

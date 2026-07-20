@@ -2046,6 +2046,14 @@ fn rebuild_transcript(messages: &[Message], tool_calls: &[ToolCallRecord]) -> Ve
     out
 }
 
+#[cfg(test)]
+pub(crate) fn rebuild_transcript_for_test(
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+) -> Vec<ChatMessage> {
+    rebuild_transcript(messages, tool_calls)
+}
+
 /// Partition calls into per-model-step batches (see [`rebuild_transcript`]).
 fn batch_tool_calls(tool_calls: &[ToolCallRecord]) -> Vec<Vec<&ToolCallRecord>> {
     let mut batches: Vec<Vec<&ToolCallRecord>> = Vec::new();
@@ -2053,6 +2061,14 @@ fn batch_tool_calls(tool_calls: &[ToolCallRecord]) -> Vec<Vec<&ToolCallRecord>> 
     let mut batch_done_at: Option<chrono::DateTime<Utc>> = None;
 
     for call in tool_calls {
+        if call.execution == ToolCallExecution::Orchestration {
+            if !current.is_empty() {
+                batches.push(std::mem::take(&mut current));
+            }
+            batches.push(vec![call]);
+            batch_done_at = None;
+            continue;
+        }
         if let Some(done) = batch_done_at {
             if call.created_at >= done {
                 batches.push(std::mem::take(&mut current));
@@ -4868,6 +4884,60 @@ mod tests {
                 is_error: false
             }] if tool_use_id == "tu_1" && content == "ok"
         ));
+    }
+
+    #[test]
+    fn orchestration_forces_a_model_step_boundary_despite_overlapping_timestamps() {
+        let turn = TurnId::new();
+        let chat = ChatId::new();
+        let t1 = DateTime::<Utc>::from_timestamp(1_001, 0).unwrap();
+        let t2 = DateTime::<Utc>::from_timestamp(1_002, 0).unwrap();
+        let t3 = DateTime::<Utc>::from_timestamp(1_003, 0).unwrap();
+        let call = |provider_id: &str,
+                    execution: ToolCallExecution,
+                    created_at: DateTime<Utc>,
+                    resolved_at: DateTime<Utc>| ToolCallRecord {
+            id: CallId::new(),
+            chat_id: chat,
+            turn_id: turn,
+            provider_id: provider_id.into(),
+            name: if execution == ToolCallExecution::Orchestration {
+                crate::SPAWN_SANDBOX_AGENT_TOOL.into()
+            } else {
+                "read_file".into()
+            },
+            arguments: serde_json::json!({}),
+            execution,
+            status: ToolCallStatus::Completed,
+            result: Some("ok".into()),
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at,
+            resolved_at: Some(resolved_at),
+        };
+        let calls = vec![
+            call("ordinary-before", ToolCallExecution::Server, t1, t3),
+            call("spawn", ToolCallExecution::Orchestration, t2, t2),
+            call("ordinary-after", ToolCallExecution::Server, t2, t3),
+        ];
+        let batches = batch_tool_calls(&calls);
+        assert_eq!(batches.len(), 3);
+        assert_eq!(
+            batches
+                .iter()
+                .map(|batch| batch
+                    .iter()
+                    .map(|call| call.provider_id.as_str())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            vec![
+                vec!["ordinary-before"],
+                vec!["spawn"],
+                vec!["ordinary-after"],
+            ]
+        );
     }
 
     #[test]

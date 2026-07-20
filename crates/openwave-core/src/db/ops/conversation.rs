@@ -393,6 +393,11 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
+    entities::sandbox_spawn_checkpoint::Entity::delete_many()
+        .filter(entities::sandbox_spawn_checkpoint::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
     entities::tool_call::Entity::delete_many()
         .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
         .exec(&transaction)
@@ -575,8 +580,7 @@ where
             crate::model::ToolCallStatus::Failed.as_str(),
             crate::model::ToolCallStatus::Cancelled.as_str(),
         ]))
-        .order_by_asc(entities::tool_call::Column::CreatedAt)
-        .order_by_asc(entities::tool_call::Column::Id)
+        .order_by_asc(entities::tool_call::Column::HistoryOrder)
         .order_by_asc(entities::tool_call::Column::Id)
         .all(conn)
         .await
@@ -703,7 +707,7 @@ pub(in crate::db) async fn list_tool_calls(
 ) -> Result<Vec<ToolCallRecord>> {
     entities::tool_call::Entity::find()
         .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
-        .order_by_asc(entities::tool_call::Column::CreatedAt)
+        .order_by_asc(entities::tool_call::Column::HistoryOrder)
         .all(&store.conn)
         .await
         .map_err(store_err)?

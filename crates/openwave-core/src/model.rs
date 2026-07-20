@@ -1213,6 +1213,51 @@ pub struct SandboxAgentAdmission {
     pub admitted_at: DateTime<Utc>,
 }
 
+/// Immutable receipt for one non-blocking foreground sandbox spawn.
+///
+/// The receipt binds model output, exact turn-claim provenance, child
+/// admission, transcript tool history, accounting, and journal order. It is
+/// read before mutable lease or steer checks so an ambiguous commit retry can
+/// always recover the original transition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxSpawnCheckpoint {
+    pub call_id: crate::id::CallId,
+    pub child_run_id: crate::id::AgentRunId,
+    pub parent_run_id: crate::id::AgentRunId,
+    pub origin_turn_id: crate::id::TurnId,
+    pub chat_id: ChatId,
+    pub lease_token: Uuid,
+    pub attempt_count: i32,
+    pub claim_count: i32,
+    pub provider_id: String,
+    pub history_order: i64,
+    pub arguments: serde_json::Value,
+    pub result: String,
+    pub steer_revision: i64,
+    pub event_ordinal: i32,
+    pub progress: TurnCheckpointProgress,
+    pub event_seq: i64,
+    pub committed_at: DateTime<Utc>,
+}
+
+/// One proposed non-blocking sandbox spawn checkpoint.
+///
+/// `arguments` and `result` are supplied explicitly because their canonical
+/// bytes are part of the immutable model-call identity. The storage layer
+/// parses and validates both closed contracts before committing anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxSpawnCheckpointRequest {
+    pub origin_turn_id: crate::id::TurnId,
+    pub lease_token: Uuid,
+    pub expected_steer_revision: i64,
+    pub call_id: crate::id::CallId,
+    pub provider_id: String,
+    pub arguments: serde_json::Value,
+    pub result: String,
+    pub event_ordinal: i32,
+    pub progress: TurnCheckpointProgress,
+}
+
 /// Immutable final text submitted by one exact sandbox worker lease.
 ///
 /// This receipt is intentionally separate from [`AgentRun`]: clearing the live
@@ -2041,6 +2086,11 @@ pub enum ToolCallExecution {
     Server,
     /// Execute through a separately leased trusted client surface.
     Client,
+    /// Foreground orchestration committed atomically by the turn state machine.
+    ///
+    /// These records rebuild structured model history, but are never eligible
+    /// for either generic server or client execution.
+    Orchestration,
 }
 
 impl ToolCallExecution {
@@ -2050,6 +2100,7 @@ impl ToolCallExecution {
         match self {
             Self::Server => "server",
             Self::Client => "client",
+            Self::Orchestration => "orchestration",
         }
     }
 }

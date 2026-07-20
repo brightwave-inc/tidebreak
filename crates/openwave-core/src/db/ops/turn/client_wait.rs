@@ -13,7 +13,7 @@ use crate::storage::ParkTurnForClientCallOutcome;
 use crate::{AgentEvent, ChatId, SequencedEvent, TurnId, TurnRun};
 
 use super::super::super::{entities, store_err, DbStore};
-use super::super::{acquire_chat_write_lock, acquire_turn_write_lock};
+use super::super::{acquire_chat_write_lock, acquire_turn_write_lock, next_tool_history_order_on};
 use super::{canonical_db_timestamp, turn_run_from_model};
 
 pub(in crate::db) struct ClientWaitTurnTransition {
@@ -130,12 +130,14 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         return Ok(Some(ParkTurnForClientCallOutcome::IdentityConflict));
     }
     let totals = checked_checkpoint_totals(&turn, progress)?;
+    let history_order = next_tool_history_order_on(&transaction, call.chat_id).await?;
 
     let inserted = entities::tool_call::Entity::insert(entities::tool_call::ActiveModel {
         id: Set(call.id.0),
         chat_id: Set(call.chat_id.0),
         turn_id: Set(turn_id.0),
         provider_id: Set(call.provider_id.clone()),
+        history_order: Set(history_order),
         name: Set(call.name.clone()),
         arguments: Set(call.arguments.clone()),
         execution: Set(ToolCallExecution::Client.as_str().into()),
