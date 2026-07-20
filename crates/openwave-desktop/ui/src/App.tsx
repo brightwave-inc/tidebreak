@@ -48,11 +48,11 @@ import {
   loadCurrentTerminalTranscript,
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
+import { AgentActivityPanel, agentRunsForChat } from "./AgentActivityPanel";
 
 type Msg = ChatMessage;
 
 let msgSeq = 0;
-const MAX_RECENT_TERMINAL_SANDBOX_RUNS = 2;
 
 function nextId(): string {
   msgSeq += 1;
@@ -71,6 +71,7 @@ export default function App() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
+  const [agentRunsChatId, setAgentRunsChatId] = useState<string | null>(null);
   const [agentRunsLoading, setAgentRunsLoading] = useState(false);
   const [agentRunsError, setAgentRunsError] = useState<string | null>(null);
   const [folderAccessRequests, setFolderAccessRequests] = useState<
@@ -262,6 +263,7 @@ export default function App() {
     };
 
     setAgentRuns([]);
+    setAgentRunsChatId(chat.id);
     setAgentRunsError(null);
     setAgentRunsLoading(true);
     refreshAgentRunsRef.current = () => void refresh();
@@ -275,7 +277,8 @@ export default function App() {
     };
   }, [client, chat?.id]);
 
-  const hasActiveSandboxRun = agentRuns.some(
+  const visibleAgentRuns = agentRunsForChat(agentRunsChatId, chat?.id ?? null, agentRuns);
+  const hasActiveSandboxRun = visibleAgentRuns.some(
     (run) =>
       run.execution === "sandbox" &&
       ["queued", "running", "cancelling", "waiting", "retry_wait"].includes(
@@ -1264,9 +1267,9 @@ export default function App() {
               }}
             />
             <AgentActivityPanel
-              runs={agentRuns}
-              loading={agentRunsLoading}
-              error={agentRunsError}
+              runs={visibleAgentRuns}
+              loading={agentRunsChatId === chat.id ? agentRunsLoading : true}
+              error={agentRunsChatId === chat.id ? agentRunsError : null}
               onRetry={() => refreshAgentRunsRef.current?.()}
             />
           </div>
@@ -1425,226 +1428,6 @@ function discardToolCalls(messages: Msg[], callIds: Set<string>): Msg[] {
 
 function withoutConnectionState(status: string): string {
   return status.replace(/ · (?:live|reconnecting)$/, "");
-}
-
-function AgentActivityPanel({
-  runs,
-  loading,
-  error,
-  onRetry,
-}: {
-  runs: AgentRun[];
-  loading: boolean;
-  error: string | null;
-  onRetry: () => void;
-}) {
-  if (loading) {
-    return <div className="agent-activity-state">Loading activity…</div>;
-  }
-
-  if (error) {
-    return (
-      <div className="agent-activity-state is-error" role="status">
-        Activity unavailable
-        <button type="button" className="agent-activity-retry" onClick={onRetry}>
-          Retry
-        </button>
-      </div>
-    );
-  }
-
-  const foreground = runs.find((run) => run.execution === "foreground");
-  const sandboxes = runs.filter((run) => run.execution === "sandbox");
-  if (!foreground && sandboxes.length === 0) return null;
-
-  const activeSandboxes = sandboxes.filter((run) =>
-    isActiveAgentRunStatus(run.status),
-  );
-  const terminalSandboxes = sandboxes
-    .filter((run) => !isActiveAgentRunStatus(run.status))
-    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
-  const recentTerminalSandboxes = terminalSandboxes.slice(
-    0,
-    MAX_RECENT_TERMINAL_SANDBOX_RUNS,
-  );
-  const hiddenTerminalCount = terminalSandboxes.length - recentTerminalSandboxes.length;
-  const active = runs.some((run) => isActiveAgentRunStatus(run.status));
-  return (
-    <section
-      className="agent-activity"
-      aria-label="Agent activity"
-      aria-live={active ? "polite" : "off"}
-    >
-      <div className="agent-activity-heading">
-        <span>Activity</span>
-        <span className="agent-activity-summary">
-          {activeSandboxes.length > 0
-            ? `${activeSandboxes.length} background ${activeSandboxes.length === 1 ? "task" : "tasks"}`
-            : recentTerminalSandboxes.length > 0
-              ? "Recent background work"
-              : "No background work"}
-        </span>
-      </div>
-      <ul className="agent-activity-list">
-        {foreground && <AgentActivityItem run={foreground} label="Conversation" />}
-        {activeSandboxes.map((run, index) => (
-          <AgentActivityItem
-            key={run.id}
-            run={run}
-            label={`Background task ${index + 1}`}
-          />
-        ))}
-        {recentTerminalSandboxes.map((run, index) => (
-          <AgentActivityItem
-            key={run.id}
-            run={run}
-            label={`Recent background task ${index + 1}`}
-          />
-        ))}
-      </ul>
-      {hiddenTerminalCount > 0 && (
-        <p className="agent-activity-history">
-          {hiddenTerminalCount} earlier {hiddenTerminalCount === 1 ? "result" : "results"}
-        </p>
-      )}
-    </section>
-  );
-}
-
-function AgentActivityItem({ run, label }: { run: AgentRun; label: string }) {
-  const activity = agentActivityPresentation(run.activity);
-  const status = activity?.status ?? readableAgentRunStatus(run.status);
-  return (
-    <li
-      className={`agent-activity-item is-${run.status}${activity ? ` is-activity-${activity.sourceStatus}` : ""}`}
-    >
-      <span className="agent-activity-indicator" aria-hidden="true" />
-      <span className="agent-activity-item-copy">
-        <span>{activity?.label ?? label}</span>
-        <span className="agent-activity-detail">
-          {activity?.detail ?? agentRunStatusDescription(run.status)}
-        </span>
-      </span>
-      <strong>{status}</strong>
-    </li>
-  );
-}
-
-function agentActivityPresentation(
-  activity: AgentRun["activity"],
-): { label: string; detail: string; status: string; sourceStatus: string } | null {
-  if (!activity) return null;
-
-  switch (activity.kind) {
-    case "web_search":
-      switch (activity.status) {
-        case "waiting":
-          return {
-            label: "Web search",
-            detail: "Waiting to search",
-            status: "waiting",
-            sourceStatus: "waiting",
-          };
-        case "running":
-          return {
-            label: "Web search",
-            detail: "Searching the web",
-            status: "searching",
-            sourceStatus: "running",
-          };
-      }
-    case "list_connected_folders":
-      switch (activity.status) {
-        case "waiting":
-          return {
-            label: "Connected folders",
-            detail: "Waiting to check connected folders",
-            status: "waiting",
-            sourceStatus: "waiting",
-          };
-        case "running":
-          return {
-            label: "Connected folders",
-            detail: "Checking connected folders",
-            status: "checking",
-            sourceStatus: "running",
-          };
-      }
-    case "list_folder":
-      switch (activity.status) {
-        case "waiting":
-          return {
-            label: "Folder",
-            detail: "Waiting to list a folder",
-            status: "waiting",
-            sourceStatus: "waiting",
-          };
-        case "running":
-          return {
-            label: "Folder",
-            detail: "Listing a folder",
-            status: "listing",
-            sourceStatus: "running",
-          };
-      }
-    case "read_connected_file":
-      switch (activity.status) {
-        case "waiting":
-          return {
-            label: "File",
-            detail: "Waiting to read a file",
-            status: "waiting",
-            sourceStatus: "waiting",
-          };
-        case "running":
-          return {
-            label: "File",
-            detail: "Reading a file",
-            status: "reading",
-            sourceStatus: "running",
-          };
-      }
-  }
-}
-
-function readableAgentRunStatus(status: AgentRun["status"]): string {
-  switch (status) {
-    case "retry_wait":
-      return "retrying";
-    case "cancelling":
-      return "stopping";
-    default:
-      return status;
-  }
-}
-
-function isActiveAgentRunStatus(status: AgentRun["status"]): boolean {
-  return ["active", "queued", "running", "cancelling", "waiting", "retry_wait"].includes(
-    status,
-  );
-}
-
-function agentRunStatusDescription(status: AgentRun["status"]): string {
-  switch (status) {
-    case "active":
-      return "Ready for this conversation";
-    case "queued":
-      return "Queued to start";
-    case "running":
-      return "Working in the background";
-    case "cancelling":
-      return "Stopping";
-    case "waiting":
-      return "Waiting to continue";
-    case "retry_wait":
-      return "Waiting to retry";
-    case "completed":
-      return "Finished";
-    case "failed":
-      return "Could not finish";
-    case "cancelled":
-      return "Stopped";
-  }
 }
 
 function FoldersPanel({ chat }: { chat: Chat }) {

@@ -438,6 +438,44 @@ button {
   list-style: none;
 }
 
+.agent-activity-group {
+  display: grid;
+  gap: 0.15rem;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+}
+
+.agent-activity-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 620;
+}
+
+.agent-activity-group-indicator {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 45%, var(--line));
+}
+
+.agent-activity-group-indicator.is-active {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.agent-activity-group-count {
+  min-width: 1.1rem;
+  border-radius: 999px;
+  padding: 0.02rem 0.3rem;
+  background: color-mix(in srgb, var(--line) 55%, transparent);
+  text-align: center;
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .agent-activity-history {
   margin: 0;
   padding-top: 0.15rem;
@@ -451,7 +489,7 @@ button {
   gap: 0.45rem;
   min-width: 0;
   padding: 0.3rem 0;
-  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--line) 54%, transparent);
   font-size: 0.77rem;
 }
 
