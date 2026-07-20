@@ -1,6 +1,7 @@
 import { memo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { MarkdownTable } from "./MarkdownTable";
 
 /**
  * Keep model-generated navigation deliberately narrow. `react-markdown` does
@@ -47,11 +48,7 @@ const components: Components = {
   code: ({ children }) => <code>{children}</code>,
   pre: ({ children }) => <pre>{children}</pre>,
   blockquote: ({ children }) => <blockquote>{children}</blockquote>,
-  table: ({ children }) => (
-    <div className="markdown-table-wrap">
-      <table>{children}</table>
-    </div>
-  ),
+  table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
 };
 
 interface MessageMarkdownProps {
