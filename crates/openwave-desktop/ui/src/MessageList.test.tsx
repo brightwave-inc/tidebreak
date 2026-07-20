@@ -242,4 +242,121 @@ describe("MessageBubble", () => {
     expect(markup).not.toContain("private-citation-id");
     expect(markup).not.toContain("ow-source");
   });
+
+  it("shows settled message actions without treating the active response as finished", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        text: "Earlier question",
+        createdAt: "2026-07-20T10:00:00Z",
+      },
+      {
+        id: "assistant-settled",
+        role: "assistant",
+        text: "Earlier answer",
+        sources: [],
+        createdAt: "2026-07-20T10:00:01Z",
+      },
+      {
+        id: "assistant-streaming",
+        role: "assistant",
+        text: "Partial answer",
+        sources: [],
+        createdAt: "2026-07-20T10:01:00Z",
+      },
+    ];
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={messages}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        busy
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup.match(/aria-label="Copy"/g)).toHaveLength(1);
+    expect(markup.match(/class="message-footer"/g)).toHaveLength(2);
+    expect(markup).toContain('class="message-user-frame"');
+    expect(markup).not.toContain('dateTime="2026-07-20T10:01:00Z"');
+  });
+
+  it("does not add message actions to tool, system, or error rows", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "tool-1",
+        role: "tool",
+        callId: "call-1",
+        name: "read_file",
+        status: "running",
+      },
+      { id: "system-1", role: "system", text: "turn cancelled" },
+      { id: "error-1", role: "error", text: "could not complete" },
+    ];
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={messages}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup).not.toContain("message-footer");
+    expect(markup).not.toContain("Copy");
+  });
+
+  it("keeps the previous assistant settled while a submitted user message awaits turn start", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "assistant-settled",
+        role: "assistant",
+        text: "Previous answer",
+        sources: [],
+        createdAt: "2026-07-20T10:00:00Z",
+      },
+      {
+        id: "user-optimistic",
+        role: "user",
+        text: "Next question",
+        createdAt: "2026-07-20T10:01:00Z",
+      },
+    ];
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={messages}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        busy
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Copy"');
+    expect(markup).toContain('dateTime="2026-07-20T10:00:00Z"');
+    expect(markup).toContain('dateTime="2026-07-20T10:01:00Z"');
+  });
 });

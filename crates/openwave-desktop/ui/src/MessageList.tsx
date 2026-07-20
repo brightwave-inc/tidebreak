@@ -3,17 +3,19 @@ import type { PendingFolderAccessRequest } from "./api";
 import { FolderAccessCard } from "./FolderAccessCard";
 import type { FolderAccessDecision } from "./host";
 import { MessageMarkdown } from "./MessageMarkdown";
+import { MessageFooter } from "./MessageFooter";
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
 import { ToolCallCard, type ToolCallStatus } from "./ToolCallCard";
 import { ToolActivityGroup } from "./ToolActivityGroup";
 
 export type ChatMessage =
-  | { id: string; role: "user"; text: string }
+  | { id: string; role: "user"; text: string; createdAt?: string }
   | {
       id: string;
       role: "assistant";
       text: string;
       sources: AssistantSource[];
+      createdAt?: string;
     }
   | { id: string; role: "system"; text: string }
   | {
@@ -116,6 +118,23 @@ export function groupMessageItems(
   const items: ReactNode[] = [];
   let index = 0;
   let groupIndex = 0;
+  let streamingAssistantId: string | undefined;
+  if (busy) {
+    for (
+      let messageIndex = messages.length - 1;
+      messageIndex >= 0;
+      messageIndex -= 1
+    ) {
+      const candidate = messages[messageIndex];
+      if (candidate?.role === "assistant") {
+        streamingAssistantId = candidate.id;
+        break;
+      }
+      // A newly submitted user message is busy before its turn-start event
+      // arrives. Do not make the preceding completed assistant look live.
+      if (candidate?.role === "user") break;
+    }
+  }
 
   while (index < messages.length) {
     const message = messages[index];
@@ -125,7 +144,7 @@ export function groupMessageItems(
         <MessageBubble
           key={message.id}
           message={message}
-          busy={busy}
+          busy={message.id === streamingAssistantId}
           onApproval={onApproval}
         />,
       );
@@ -150,7 +169,7 @@ export function groupMessageItems(
         <MessageBubble
           key={message.id}
           message={message}
-          busy={busy}
+          busy={message.id === streamingAssistantId}
           onApproval={onApproval}
         />,
       );
@@ -222,15 +241,28 @@ export function MessageBubble({
           </span>
         ) : null}
         <AssistantSources sources={message.sources} />
+        <MessageFooter
+          role="assistant"
+          text={message.text}
+          createdAt={message.createdAt}
+          settled={!busy}
+        />
       </article>
     );
   }
 
   if (message.role === "user") {
     return (
-      <article className="message message-user" aria-label="You">
-        <MessageMarkdown>{message.text}</MessageMarkdown>
-      </article>
+      <div className="message-user-frame">
+        <article className="message message-user" aria-label="You">
+          <MessageMarkdown>{message.text}</MessageMarkdown>
+        </article>
+        <MessageFooter
+          role="user"
+          text={message.text}
+          createdAt={message.createdAt}
+        />
+      </div>
     );
   }
 

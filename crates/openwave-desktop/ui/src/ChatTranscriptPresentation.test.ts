@@ -43,6 +43,7 @@ describe("terminal transcript presentation", () => {
         id: "assistant-durable",
         role: "assistant",
         text: "Clean durable answer",
+        createdAt: "2026-07-19T10:00:00Z",
         sources: [
           {
             id: "citation-private-id",
@@ -143,6 +144,7 @@ describe("terminal transcript presentation", () => {
         id: "assistant-durable",
         role: "assistant",
         text: "Clean durable answer",
+        createdAt: "2026-07-19T10:00:00Z",
         sources: [],
       },
     ]);

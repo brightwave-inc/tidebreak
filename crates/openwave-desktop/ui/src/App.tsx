@@ -376,7 +376,13 @@ export default function App() {
       if (startsDifferentTurn) clearSteerRequestState();
       setMessages((prev) => [
         ...prev,
-        { id: nextId(), role: "assistant", text: "", sources: [] },
+        {
+          id: nextId(),
+          role: "assistant",
+          text: "",
+          sources: [],
+          createdAt: new Date().toISOString(),
+        },
       ]);
       return;
     }
@@ -392,7 +398,13 @@ export default function App() {
         if (last?.role === "assistant") {
           copy[copy.length - 1] = { ...last, text };
         } else {
-          copy.push({ id: nextId(), role: "assistant", text, sources: [] });
+          copy.push({
+            id: nextId(),
+            role: "assistant",
+            text,
+            sources: [],
+            createdAt: new Date().toISOString(),
+          });
         }
         return copy;
       });
@@ -488,7 +500,12 @@ export default function App() {
       hydratedMessageIdsRef.current.add(event.message_id);
       setMessages((prev) => [
         ...prev,
-        { id: event.message_id, role: "user", text: event.text },
+        {
+          id: event.message_id,
+          role: "user",
+          text: event.text,
+          createdAt: new Date().toISOString(),
+        },
       ]);
       return;
     }
@@ -547,7 +564,13 @@ export default function App() {
       if (last?.role === "assistant") {
         copy[copy.length - 1] = { ...last, text };
       } else {
-        copy.push({ id: nextId(), role: "assistant", text, sources: [] });
+        copy.push({
+          id: nextId(),
+          role: "assistant",
+          text,
+          sources: [],
+          createdAt: new Date().toISOString(),
+        });
       }
       return copy;
     });
@@ -630,7 +653,15 @@ export default function App() {
     const turnId = crypto.randomUUID();
     terminalHydrationGenerationRef.current += 1;
     setComposerDraft("");
-    setMessages((prev) => [...prev, { id: nextId(), role: "user", text: content }]);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: nextId(),
+        role: "user",
+        text: content,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
     setBusy(true);
     setCurrentActiveTurnId(turnId);
     setCancelPendingTurnId(null);
