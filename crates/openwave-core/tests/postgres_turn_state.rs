@@ -5,13 +5,13 @@ use std::{sync::Arc, time::Duration as StdDuration};
 use chrono::{Duration, Utc};
 use openwave_core::{
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent,
-    AgentRunExecution, AgentRunId, AgentRunInboxStatus, AgentRunStatus, AgentRunWaitCondition,
-    ApplyTurnSteerOutcome, AssistantCitationReference, BeginRootAttachmentChange,
-    BeginRootAttachmentChangeOutcome, ByteSpan, CallId, Chat, ChatId, ChatRootAttachment, ChunkId,
-    ClaimClientToolCallOutcome, ClientToolCallRequest, CompleteTurnRunOutcome, DbStore,
-    DeleteChatOutcome, DocumentGeneration, DocumentId, FinishAgentRunCancellationOutcome,
-    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
+    AgentRunCancellationReason, AgentRunExecution, AgentRunId, AgentRunInboxStatus,
+    AgentRunResultPayload, AgentRunStatus, AgentRunWaitCondition, ApplyTurnSteerOutcome,
+    AssistantCitationReference, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome,
+    ByteSpan, CallId, Chat, ChatId, ChatRootAttachment, ChunkId, ClaimClientToolCallOutcome,
+    ClientToolCallRequest, CompleteTurnRunOutcome, DbStore, DeleteChatOutcome, DocumentGeneration,
+    DocumentId, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, Project, ProjectId,
     RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrievalEvidenceInput,
@@ -335,6 +335,363 @@ async fn cleanup_postgres_sandbox_chat(store: &DbStore, chat_id: ChatId) {
         store.delete_chat(chat_id).await.unwrap(),
         DeleteChatOutcome::Deleted
     );
+}
+
+#[tokio::test]
+async fn postgres_parent_cancellation_and_first_child_claim_converge_without_identity_errors() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (origin, origin_lease) = postgres_live_turn(&store, chat.id).await;
+    let child = postgres_admit_sandbox(
+        &store,
+        chat.id,
+        CallId::new(),
+        "race the first claim against parent cancellation",
+    )
+    .await;
+    let child_lease = uuid::Uuid::new_v4();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+    let claim = {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .claim_agent_run(child_lease, Duration::minutes(5), 4, 4)
+                .await
+        })
+    };
+    let cancel = {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .request_turn_cancellation(
+                    origin.id,
+                    utc_now_at_postgres_precision().max(origin.updated_at),
+                )
+                .await
+        })
+    };
+    let claimed = claim
+        .await
+        .unwrap()
+        .expect("claim race must not return Store error");
+    let cancelled = cancel
+        .await
+        .unwrap()
+        .expect("parent cancellation race must not return Store error");
+    assert!(cancelled.is_some());
+    let claim_won = claimed.is_some();
+    if let Some(claimed) = claimed.as_ref() {
+        assert_eq!(claimed.id, child.id);
+    }
+
+    let current = store.get_agent_run(child.id).await.unwrap().unwrap();
+    match current.status {
+        AgentRunStatus::Cancelled => {
+            assert!(!claim_won, "cancelled child cannot also commit a claim");
+        }
+        AgentRunStatus::Cancelling => {
+            assert_eq!(current.lease_token, Some(child_lease));
+            assert!(matches!(
+                store
+                    .finish_agent_run_cancellation(child.id, child_lease)
+                    .await
+                    .unwrap(),
+                Some(FinishAgentRunCancellationOutcome::Cancelled(_))
+            ));
+        }
+        status => panic!("unexpected child state after claim/cancel race: {status:?}"),
+    }
+    let inbox = store
+        .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+        .await
+        .unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].status, AgentRunInboxStatus::Cancelled);
+    assert!(matches!(
+        inbox[0].result.payload,
+        AgentRunResultPayload::Cancelled {
+            reason: AgentRunCancellationReason::ParentTurnCancelled
+        }
+    ));
+    let parent = store.get_turn_run(origin.id).await.unwrap().unwrap();
+    if parent.status == TurnRunStatus::Cancelling {
+        store
+            .finish_turn_cancellation(
+                origin.id,
+                origin_lease,
+                utc_now_at_postgres_precision().max(parent.updated_at),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    cleanup_postgres_sandbox_chat(&store, chat.id).await;
+
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (origin, origin_lease) = postgres_live_turn(&store, chat.id).await;
+    let child = postgres_admit_sandbox(
+        &store,
+        chat.id,
+        CallId::new(),
+        "race direct cancellation against parent cancellation",
+    )
+    .await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let direct = {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store.request_agent_run_cancellation(child.id).await
+        })
+    };
+    let parent = {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .request_turn_cancellation(
+                    origin.id,
+                    utc_now_at_postgres_precision().max(origin.updated_at),
+                )
+                .await
+        })
+    };
+    assert!(direct
+        .await
+        .unwrap()
+        .expect("direct cancellation race must not return Store error")
+        .is_some());
+    assert!(parent
+        .await
+        .unwrap()
+        .expect("parent cancellation race must not return Store error")
+        .is_some());
+    let inbox = store
+        .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+        .await
+        .unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].status, AgentRunInboxStatus::Cancelled);
+    assert!(matches!(
+        inbox[0].result.payload,
+        AgentRunResultPayload::Cancelled {
+            reason: AgentRunCancellationReason::Requested
+                | AgentRunCancellationReason::ParentTurnCancelled
+        }
+    ));
+    assert!(matches!(
+        store
+            .request_agent_run_cancellation(child.id)
+            .await
+            .unwrap(),
+        Some(RequestAgentRunCancellationOutcome::Existing(_))
+    ));
+    let parent = store.get_turn_run(origin.id).await.unwrap().unwrap();
+    if parent.status == TurnRunStatus::Cancelling {
+        store
+            .finish_turn_cancellation(
+                origin.id,
+                origin_lease,
+                utc_now_at_postgres_precision().max(parent.updated_at),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    cleanup_postgres_sandbox_chat(&store, chat.id).await;
+}
+
+#[tokio::test]
+async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lock_waits() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+
+    // An admission can already own chat/turn while cancellation owns the
+    // scheduler and waits for chat. Commit a correctly shaped child from that
+    // transaction after the caller timestamp was captured; cancellation must
+    // use post-lock database time for the child result and parent transition.
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (origin, origin_lease) = postgres_live_turn(&store, chat.id).await;
+    let call = CallId::new();
+    let child_id = AgentRunId::sandbox_for_spawn_call(call);
+    let blocker_connection = Database::connect(&url).await.unwrap();
+    let blocker = blocker_connection.begin().await.unwrap();
+    blocker
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!("UPDATE chat SET title = title WHERE id = '{}'", chat.id.0),
+        ))
+        .await
+        .unwrap();
+    let stale_now = utc_now_at_postgres_precision();
+    let contender = store.clone();
+    let cancellation = tokio::spawn(async move {
+        contender
+            .request_turn_cancellation(origin.id, stale_now)
+            .await
+    });
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    blocker
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!(
+                "INSERT INTO agent_run (id, chat_id, parent_id, parent_depth, spawn_call_id, execution, depth, status, input, attempt_count, max_attempts, claim_count, available_at, deadline_at, lease_token, lease_expires_at, started_at, finished_at, last_error_code, last_error_detail, created_at, updated_at) \
+                 SELECT '{}', '{}', '{}', 0, '{}', 'sandbox', 1, 'queued', 'admitted while cancellation waited', 0, 3, 0, admitted_at, admitted_at + interval '30 minutes', NULL, NULL, NULL, NULL, NULL, NULL, admitted_at, admitted_at \
+                 FROM (SELECT clock_timestamp() AS admitted_at) AS admission_clock",
+                child_id.0,
+                chat.id.0,
+                AgentRunId::foreground_for_chat(chat.id).0,
+                call.0,
+            ),
+        ))
+        .await
+        .unwrap();
+    blocker
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!(
+                "INSERT INTO sandbox_agent_admission (child_run_id, parent_run_id, origin_turn_id, chat_id, spawn_call_id, admitted_at) \
+                 VALUES ('{}', '{}', '{}', '{}', '{}', clock_timestamp())",
+                child_id.0,
+                AgentRunId::foreground_for_chat(chat.id).0,
+                origin.id.0,
+                chat.id.0,
+                call.0,
+            ),
+        ))
+        .await
+        .unwrap();
+    blocker.commit().await.unwrap();
+    assert!(cancellation
+        .await
+        .unwrap()
+        .expect("post-admission cancellation must not regress time")
+        .is_some());
+    let child = store.get_agent_run(child_id).await.unwrap().unwrap();
+    assert_eq!(child.status, AgentRunStatus::Cancelled);
+    assert!(child.updated_at >= child.created_at);
+    let parent = store.get_turn_run(origin.id).await.unwrap().unwrap();
+    store
+        .finish_turn_cancellation(
+            origin.id,
+            origin_lease,
+            utc_now_at_postgres_precision().max(parent.updated_at),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    cleanup_postgres_sandbox_chat(&store, chat.id).await;
+
+    // A heartbeat owns the scheduler row. Cancellation captures its caller
+    // time before waiting, then must advance from the heartbeat's database
+    // timestamp rather than overwrite it with stale request time.
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (origin, origin_lease) = postgres_live_turn(&store, chat.id).await;
+    let child = postgres_admit_sandbox(
+        &store,
+        chat.id,
+        CallId::new(),
+        "heartbeat while parent cancellation waits",
+    )
+    .await;
+    let child_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(child_lease, Duration::minutes(5), 4, 4)
+        .await
+        .unwrap()
+        .unwrap();
+    let blocker_connection = Database::connect(&url).await.unwrap();
+    let blocker = blocker_connection.begin().await.unwrap();
+    blocker
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "UPDATE agent_run_claim_lock SET id = id WHERE id = 1",
+        ))
+        .await
+        .unwrap();
+    let stale_now = utc_now_at_postgres_precision();
+    let contender = store.clone();
+    let cancellation = tokio::spawn(async move {
+        contender
+            .request_turn_cancellation(origin.id, stale_now)
+            .await
+    });
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    blocker
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!(
+                "UPDATE agent_run SET lease_expires_at = clock_timestamp() + interval '5 minutes', updated_at = clock_timestamp() WHERE id = '{}'",
+                child.id.0
+            ),
+        ))
+        .await
+        .unwrap();
+    let heartbeat_row = blocker
+        .query_one(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!(
+                "SELECT updated_at FROM agent_run WHERE id = '{}'",
+                child.id.0
+            ),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    let heartbeat_at = heartbeat_row
+        .try_get::<chrono::DateTime<Utc>>("", "updated_at")
+        .unwrap();
+    blocker.commit().await.unwrap();
+    assert!(cancellation
+        .await
+        .unwrap()
+        .expect("post-heartbeat cancellation must not regress time")
+        .is_some());
+    let child = store.get_agent_run(child.id).await.unwrap().unwrap();
+    assert_eq!(child.status, AgentRunStatus::Cancelling);
+    assert!(child.updated_at >= heartbeat_at);
+    store
+        .finish_agent_run_cancellation(child.id, child_lease)
+        .await
+        .unwrap()
+        .unwrap();
+    let parent = store.get_turn_run(origin.id).await.unwrap().unwrap();
+    store
+        .finish_turn_cancellation(
+            origin.id,
+            origin_lease,
+            utc_now_at_postgres_precision().max(parent.updated_at),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    cleanup_postgres_sandbox_chat(&store, chat.id).await;
 }
 
 #[tokio::test]

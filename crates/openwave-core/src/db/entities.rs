@@ -457,7 +457,8 @@ pub mod agent_run_cancellation {
         pub lease_token: Uuid,
         pub attempt_count: i32,
         pub claim_count: i32,
-        pub cancelled_at: DateTimeUtc,
+        pub reason: String,
+        pub requested_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

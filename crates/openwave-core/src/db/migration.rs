@@ -161,6 +161,7 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
         .and(Expr::col(AgentRun::AttemptCount).gte(0))
         .and(Expr::col(AgentRun::AttemptCount).lte(Expr::col(AgentRun::MaxAttempts)))
         .and(Expr::col(AgentRun::ClaimCount).gte(Expr::col(AgentRun::AttemptCount)))
+        .and(Expr::col(AgentRun::ClaimCount).lt(i32::MAX))
         .and(Expr::col(AgentRun::AvailableAt).gte(Expr::col(AgentRun::CreatedAt)))
         .and(Expr::col(AgentRun::DeadlineAt).gt(Expr::col(AgentRun::CreatedAt)))
         .and(
@@ -1170,7 +1171,12 @@ async fn create_agent_run_cancellation_table(manager: &SchemaManager<'_>) -> Res
                         .not_null(),
                 )
                 .col(
-                    ColumnDef::new(AgentRunCancellation::CancelledAt)
+                    ColumnDef::new(AgentRunCancellation::Reason)
+                        .string()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(AgentRunCancellation::RequestedAt)
                         .timestamp_with_time_zone()
                         .not_null(),
                 )
@@ -1204,6 +1210,10 @@ async fn create_agent_run_cancellation_table(manager: &SchemaManager<'_>) -> Res
                     Expr::col(AgentRunCancellation::ClaimCount)
                         .gte(Expr::col(AgentRunCancellation::AttemptCount)),
                 )
+                .check(Expr::col(AgentRunCancellation::Reason).is_in([
+                    crate::model::AgentRunCancellationReason::Requested.as_str(),
+                    crate::model::AgentRunCancellationReason::ParentTurnCancelled.as_str(),
+                ]))
                 .to_owned(),
         )
         .await
@@ -4722,7 +4732,8 @@ enum AgentRunCancellation {
     LeaseToken,
     AttemptCount,
     ClaimCount,
-    CancelledAt,
+    Reason,
+    RequestedAt,
 }
 
 #[derive(DeriveIden)]

@@ -1718,11 +1718,18 @@ async fn parked_parent_cancellation_cascades_to_an_unclaimed_sandbox_child() {
         .await
         .unwrap()
         .is_none());
-    assert!(store
+    let inbox = store
         .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
         .await
-        .unwrap()
-        .is_empty());
+        .unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].status, AgentRunInboxStatus::Cancelled);
+    assert!(matches!(
+        inbox[0].result.payload,
+        crate::AgentRunResultPayload::Cancelled {
+            reason: crate::AgentRunCancellationReason::ParentTurnCancelled
+        }
+    ));
 }
 
 #[tokio::test]
@@ -1962,6 +1969,225 @@ async fn sandbox_cancellation_fences_running_work_and_recovers_exact_acknowledge
 }
 
 #[tokio::test]
+async fn operational_claim_count_cannot_use_cancellation_provenance_sentinel() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let child = admit_sandbox_for_test(&store, chat.id, "reserve cancellation provenance").await;
+    assert!(crate::db::entities::agent_run::Entity::update_many()
+        .col_expr(
+            crate::db::entities::agent_run::Column::ClaimCount,
+            sea_orm::sea_query::Expr::value(i32::MAX),
+        )
+        .filter(crate::db::entities::agent_run::Column::Id.eq(child.id.0))
+        .exec(&store.conn)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn direct_cancellation_reason_wins_a_later_parent_cancellation() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (origin, origin_lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child = admit_sandbox_for_test(&store, chat.id, "preserve first cancellation cause").await;
+    let child_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(child_lease, Duration::minutes(5), 1, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        child.id
+    );
+    assert!(matches!(
+        store
+            .request_agent_run_cancellation(child.id)
+            .await
+            .unwrap(),
+        Some(RequestAgentRunCancellationOutcome::Requested(_))
+    ));
+    assert!(matches!(
+        store
+            .request_turn_cancellation(origin.id, Utc::now())
+            .await
+            .unwrap(),
+        Some(crate::RequestTurnCancellationOutcome::Requested(turn))
+            if turn.status == TurnRunStatus::Cancelling
+    ));
+    let child_after_parent = store.get_agent_run(child.id).await.unwrap().unwrap();
+    assert_eq!(child_after_parent.status, AgentRunStatus::Cancelling);
+    assert_eq!(child_after_parent.lease_token, Some(child_lease));
+
+    assert!(matches!(
+        store
+            .finish_agent_run_cancellation(child.id, child_lease)
+            .await
+            .unwrap(),
+        Some(FinishAgentRunCancellationOutcome::Cancelled(_))
+    ));
+    let inbox = store
+        .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+        .await
+        .unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].status, AgentRunInboxStatus::Cancelled);
+    assert!(matches!(
+        inbox[0].result.payload,
+        crate::AgentRunResultPayload::Cancelled {
+            reason: crate::AgentRunCancellationReason::Requested
+        }
+    ));
+    assert!(matches!(
+        store
+            .finish_turn_cancellation(origin.id, origin_lease, Utc::now())
+            .await
+            .unwrap(),
+        Some(crate::FinishTurnCancellationOutcome::Cancelled(_))
+    ));
+}
+
+#[tokio::test]
+async fn cancellation_retry_survives_later_origin_completion() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (origin, origin_lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child = admit_sandbox_for_test(&store, chat.id, "cancel before parent completes").await;
+    store
+        .request_agent_run_cancellation(child.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let completed_at = Utc::now().max(origin.updated_at);
+    let output = crate::Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id: origin.id,
+        role: Role::Assistant,
+        content: "parent completed independently".into(),
+        created_at: completed_at,
+    };
+    assert!(matches!(
+        store
+            .complete_turn_run(origin.id, origin_lease, 0, completed_at, &output)
+            .await
+            .unwrap(),
+        Some(crate::CompleteTurnRunOutcome::Completed(_))
+    ));
+    assert!(matches!(
+        store.request_agent_run_cancellation(child.id).await.unwrap(),
+        Some(RequestAgentRunCancellationOutcome::Existing(run))
+            if run.status == AgentRunStatus::Cancelled
+    ));
+    let inbox = store
+        .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+        .await
+        .unwrap();
+    assert_eq!(inbox[0].status, AgentRunInboxStatus::Pending);
+}
+
+#[tokio::test]
+async fn parent_cancellation_preserves_a_live_child_lease_until_exact_ack() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (origin, origin_lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child = admit_sandbox_for_test(&store, chat.id, "parent will cancel this live task").await;
+    let child_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(child_lease, Duration::minutes(5), 1, 1)
+        .await
+        .unwrap()
+        .unwrap();
+
+    store
+        .request_turn_cancellation(origin.id, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    let cancelling = store.get_agent_run(child.id).await.unwrap().unwrap();
+    assert_eq!(cancelling.status, AgentRunStatus::Cancelling);
+    assert_eq!(cancelling.lease_token, Some(child_lease));
+    assert!(store
+        .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .submit_agent_run_result(child.id, child_lease, "late success")
+        .await
+        .unwrap()
+        .is_none());
+
+    store
+        .finish_agent_run_cancellation(child.id, child_lease)
+        .await
+        .unwrap()
+        .unwrap();
+    let inbox = store
+        .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+        .await
+        .unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].status, AgentRunInboxStatus::Cancelled);
+    assert!(matches!(
+        inbox[0].result.payload,
+        crate::AgentRunResultPayload::Cancelled {
+            reason: crate::AgentRunCancellationReason::ParentTurnCancelled
+        }
+    ));
+    store
+        .finish_turn_cancellation(origin.id, origin_lease, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn single_wait_resumes_with_deterministic_cancellation_context() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let parent_id = AgentRunId::foreground_for_chat(chat.id);
+    let child = admit_sandbox_for_test(&store, chat.id, "cancel this parked task").await;
+    let parked = park_foreground_turn_on_child(&store, chat.id, child.id).await;
+    store
+        .request_agent_run_cancellation(child.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let continuation = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run_inbox_entry(parent_id, child.id, continuation, Duration::minutes(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let resumed = store
+        .consume_agent_run_inbox_entry_and_resume_turn(parent_id, child.id, continuation)
+        .await
+        .unwrap()
+        .unwrap();
+    let ConsumeAgentRunInboxAndResumeTurnOutcome::Resumed { inbox, turn } = resumed else {
+        panic!("unexpected exact cancellation resume: {resumed:?}")
+    };
+    assert_eq!(turn.id, parked.id);
+    assert_eq!(turn.status, TurnRunStatus::Resuming);
+    assert!(matches!(
+        inbox.result.payload,
+        crate::AgentRunResultPayload::Cancelled {
+            reason: crate::AgentRunCancellationReason::Requested
+        }
+    ));
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert!(messages.iter().any(|message| {
+        message.role == Role::System && message.content.ends_with("Sandbox task was cancelled.")
+    }));
+}
+
+#[tokio::test]
 async fn expired_sandbox_cancellation_is_terminal_and_cannot_fake_worker_acknowledgement() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
@@ -2010,11 +2236,14 @@ async fn expired_sandbox_cancellation_is_terminal_and_cannot_fake_worker_acknowl
         .await
         .unwrap()
         .is_none());
-    assert!(store
-        .finish_agent_run_cancellation(expired_after_request, lease_token)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(matches!(
+        store
+            .finish_agent_run_cancellation(expired_after_request, lease_token)
+            .await
+            .unwrap(),
+        Some(FinishAgentRunCancellationOutcome::Existing(run))
+            if run.status == AgentRunStatus::Cancelled
+    ));
 }
 
 #[tokio::test]
