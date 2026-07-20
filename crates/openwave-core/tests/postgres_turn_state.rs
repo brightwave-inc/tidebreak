@@ -1023,6 +1023,11 @@ async fn postgres_multi_child_wait_resumes_in_request_order_exactly_once() {
         Some(ParkTurnForAgentRunWaitSetOutcome::Parked { .. })
     ));
     postgres_complete_next_child(&store, "postgres completion one").await;
+    assert!(store
+        .list_ready_agent_run_wait_set_candidates(1)
+        .await
+        .unwrap()
+        .is_empty());
     let resume_token = uuid::Uuid::new_v4();
     assert!(matches!(
         store
@@ -1032,6 +1037,25 @@ async fn postgres_multi_child_wait_resumes_in_request_order_exactly_once() {
         Some(ResumeTurnForAgentRunWaitSetOutcome::NotReady(_))
     ));
     postgres_complete_next_child(&store, "postgres completion two").await;
+    let candidate = store
+        .list_ready_agent_run_wait_set_candidates(1)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("postgres recovery scan should decode a ready wait");
+    assert_eq!(candidate.wait_id, wait_id);
+    assert_eq!(
+        candidate.ready_at,
+        store
+            .list_agent_run_inbox(turn.agent_run_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.delivered_at)
+            .max()
+            .unwrap()
+    );
     let results = match store
         .resume_turn_for_agent_run_wait_set(wait_id, resume_token)
         .await

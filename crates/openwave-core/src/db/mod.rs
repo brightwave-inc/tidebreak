@@ -29,8 +29,8 @@ use crate::id::{
 use crate::model::Role;
 use crate::model::{
     validate_project_root_projection, AgentRun, AgentRunExecution, AgentRunInboxEntry,
-    AgentRunStatus, AgentRunWaitCondition, BeginRootAttachmentChange, BlobRetirement,
-    BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
+    AgentRunStatus, AgentRunWaitCondition, AgentRunWaitSetCandidate, BeginRootAttachmentChange,
+    BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
     DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
     DocumentUpsert, Message, Project, RootAttachmentChange, RootAttachmentChangeTerminal,
@@ -2020,6 +2020,13 @@ impl Store for DbStore {
 
     async fn list_agent_run_inbox_candidates(&self, limit: u64) -> Result<Vec<AgentRunInboxEntry>> {
         ops::agent_run::list_agent_run_inbox_candidates(self, limit).await
+    }
+
+    async fn list_ready_agent_run_wait_set_candidates(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<AgentRunWaitSetCandidate>> {
+        ops::turn::list_ready_agent_run_wait_set_candidates(self, limit).await
     }
 
     async fn claim_agent_run_inbox_entry(

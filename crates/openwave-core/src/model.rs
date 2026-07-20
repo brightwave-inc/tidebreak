@@ -1773,6 +1773,18 @@ pub struct TurnAgentRunWaitSet {
     pub resume_token: Option<Uuid>,
 }
 
+/// Minimal recovery hint for an ordered sandbox-child wait that appears ready.
+///
+/// This projection deliberately carries no ownership or consumption authority:
+/// workers must pass a fresh continuation token to the exact resume transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentRunWaitSetCandidate {
+    /// Stable wait-call identity.
+    pub wait_id: crate::id::CallId,
+    /// Database time at which the last required child result was delivered.
+    pub ready_at: DateTime<Utc>,
+}
+
 impl TurnAgentRunWaitSet {
     /// The admission layer already caps outstanding children at four. Keeping
     /// the wait bound equal prevents an oversized continuation checkpoint.

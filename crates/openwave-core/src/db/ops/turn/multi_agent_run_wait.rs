@@ -2,13 +2,15 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, QueryFilter,
+    QueryOrder, Set, Statement, TransactionTrait,
 };
 
 use crate::error::{AgentError, Result};
 use crate::model::{
-    AgentRunExecution, AgentRunInboxStatus, AgentRunWaitCondition, TurnAgentRunWaitSet,
-    TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnRunStatus, TurnSteerStatus,
+    AgentRunExecution, AgentRunInboxStatus, AgentRunWaitCondition, AgentRunWaitSetCandidate,
+    TurnAgentRunWaitSet, TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnRunStatus,
+    TurnSteerStatus,
 };
 use crate::storage::{ParkTurnForAgentRunWaitSetOutcome, ResumeTurnForAgentRunWaitSetOutcome};
 use crate::{AgentRunId, CallId, TurnId};
@@ -19,6 +21,105 @@ use super::super::agent_run::{
 };
 use super::super::{acquire_chat_write_lock, acquire_turn_write_lock};
 use super::{canonical_db_timestamp, turn_run_from_model};
+
+/// Find ordered child waits that appear ready after a process restart.
+///
+/// This is intentionally a read-only hint. It performs stricter projection
+/// validation than the resume transaction needs for safety so malformed or
+/// partially-corrupt ownership rows are excluded instead of being handed to a
+/// worker. The resume transition re-locks and rechecks every relationship.
+#[derive(Debug, FromQueryResult)]
+struct ReadyWaitSetRow {
+    wait_id: uuid::Uuid,
+    ready_at: chrono::DateTime<Utc>,
+}
+
+pub(in crate::db) async fn list_ready_agent_run_wait_set_candidates(
+    store: &DbStore,
+    limit: u64,
+) -> Result<Vec<AgentRunWaitSetCandidate>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let now = database_now(&store.conn).await?;
+    // The joins are an intentionally strict prefilter: because the joined row
+    // count must equal the complete member count, one missing, claimed, or
+    // ownership-mismatched member excludes the set before LIMIT is applied.
+    // This keeps the scan bounded without allowing corrupt historical rows to
+    // starve a later coherent wait.
+    let sql = format!(
+        r#"
+SELECT w.id AS wait_id, MAX(i.delivered_at) AS ready_at
+FROM turn_agent_run_wait_set w
+JOIN turn_run t
+  ON t.id = w.turn_id AND t.chat_id = w.chat_id AND t.agent_run_id = w.parent_run_id
+JOIN agent_run p
+  ON p.id = w.parent_run_id AND p.chat_id = w.chat_id AND p.depth = 0
+JOIN turn_agent_run_wait_member m
+  ON m.wait_id = w.id AND m.parent_run_id = w.parent_run_id
+ AND m.origin_turn_id = w.turn_id AND m.chat_id = w.chat_id
+JOIN sandbox_agent_admission a
+  ON a.child_run_id = m.child_run_id AND a.parent_run_id = w.parent_run_id
+ AND a.origin_turn_id = w.turn_id AND a.chat_id = w.chat_id
+JOIN agent_run c
+  ON c.id = m.child_run_id AND c.chat_id = w.chat_id AND c.depth = 1
+ AND c.parent_id = w.parent_run_id AND c.parent_depth = 0
+ AND c.spawn_call_id = a.spawn_call_id
+JOIN agent_run_inbox i
+  ON i.child_run_id = m.child_run_id AND i.parent_run_id = w.parent_run_id
+ AND i.chat_id = w.chat_id AND i.parent_depth = 0
+JOIN agent_run_result r
+  ON r.agent_run_id = i.child_run_id AND r.lease_token = i.result_lease_token
+ AND r.attempt_count = i.result_attempt_count AND r.claim_count = i.result_claim_count
+WHERE w.status = 'waiting' AND w.condition = 'all'
+  AND w.closed_at IS NULL AND w.resume_token IS NULL
+  AND w.expected_steer_revision >= 0 AND w.attempt_count >= 1
+  AND w.claim_count >= w.attempt_count AND w.model_steps > 0
+  AND w.input_tokens >= 0 AND w.output_tokens >= 0
+  AND w.cache_read_input_tokens >= 0 AND w.cache_creation_input_tokens >= 0
+  AND t.status = 'waiting_for_agent_run'
+  AND t.attempt_count = w.attempt_count AND t.claim_count = w.claim_count
+  AND t.lease_token IS NULL AND t.lease_expires_at IS NULL
+  AND t.steer_revision = w.expected_steer_revision AND t.updated_at >= w.parked_at
+  AND t.model_steps >= w.model_steps AND t.input_tokens >= w.input_tokens
+  AND t.output_tokens >= w.output_tokens
+  AND t.cache_read_input_tokens >= w.cache_read_input_tokens
+  AND t.cache_creation_input_tokens >= w.cache_creation_input_tokens
+  AND p.execution = 'foreground' AND p.status = 'active' AND p.parent_id IS NULL
+  AND c.execution = 'sandbox' AND c.status IN ('completed', 'failed', 'cancelled')
+  AND i.status = 'pending' AND i.claim_count = 0
+  AND i.lease_token IS NULL AND i.lease_expires_at IS NULL
+  AND i.consumed_lease_token IS NULL AND i.consumed_at IS NULL
+GROUP BY w.id
+HAVING COUNT(*) BETWEEN 1 AND {max_children}
+   AND COUNT(*) = (SELECT COUNT(*) FROM turn_agent_run_wait_member all_m WHERE all_m.wait_id = w.id)
+   AND MIN(m.position) = 0 AND MAX(m.position) = COUNT(*) - 1
+   AND COUNT(DISTINCT m.child_run_id) = COUNT(*)
+ORDER BY MAX(i.delivered_at) ASC, w.id ASC
+LIMIT {limit}
+"#,
+        max_children = TurnAgentRunWaitSet::MAX_CHILDREN,
+        limit = limit.min(i64::MAX as u64),
+    );
+    let rows = ReadyWaitSetRow::find_by_statement(Statement::from_string(
+        store.conn.get_database_backend(),
+        sql,
+    ))
+    .all(&store.conn)
+    .await
+    .map_err(store_err)?;
+    let mut candidates = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.wait_id.is_nil() || row.ready_at > now {
+            continue;
+        }
+        candidates.push(AgentRunWaitSetCandidate {
+            wait_id: CallId(row.wait_id),
+            ready_at: row.ready_at,
+        });
+    }
+    Ok(candidates)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
