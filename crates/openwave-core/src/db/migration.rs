@@ -344,6 +344,19 @@ async fn create_agent_run_table(manager: &SchemaManager<'_>) -> Result<(), DbErr
     manager
         .create_index(
             Index::create()
+                .name("idx_agent_run_admission_identity")
+                .table(AgentRun::Table)
+                .col(AgentRun::Id)
+                .col(AgentRun::ParentId)
+                .col(AgentRun::ChatId)
+                .col(AgentRun::SpawnCallId)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
                 .name("idx_agent_run_spawn_call")
                 .table(AgentRun::Table)
                 .col(AgentRun::SpawnCallId)
@@ -1052,7 +1065,6 @@ impl MigrationTrait for Init {
                     .to_owned(),
             )
             .await?;
-
         manager
             .create_table(
                 Table::create()
@@ -1598,6 +1610,98 @@ impl MigrationTrait for Init {
                     .to_owned(),
             )
             .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_turn_run_admission_owner")
+                    .table(TurnRun::Table)
+                    .col(TurnRun::Id)
+                    .col(TurnRun::ChatId)
+                    .col(TurnRun::AgentRunId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(SandboxAgentAdmission::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(SandboxAgentAdmission::ChildRunId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxAgentAdmission::ParentRunId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxAgentAdmission::OriginTurnId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxAgentAdmission::ChatId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxAgentAdmission::SpawnCallId)
+                            .uuid()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(SandboxAgentAdmission::AdmittedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_sandbox_agent_admission_child")
+                            .from_tbl(SandboxAgentAdmission::Table)
+                            .from_col(SandboxAgentAdmission::ChildRunId)
+                            .from_col(SandboxAgentAdmission::ParentRunId)
+                            .from_col(SandboxAgentAdmission::ChatId)
+                            .from_col(SandboxAgentAdmission::SpawnCallId)
+                            .to_tbl(AgentRun::Table)
+                            .to_col(AgentRun::Id)
+                            .to_col(AgentRun::ParentId)
+                            .to_col(AgentRun::ChatId)
+                            .to_col(AgentRun::SpawnCallId)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_sandbox_agent_admission_origin_turn")
+                            .from_tbl(SandboxAgentAdmission::Table)
+                            .from_col(SandboxAgentAdmission::OriginTurnId)
+                            .from_col(SandboxAgentAdmission::ChatId)
+                            .from_col(SandboxAgentAdmission::ParentRunId)
+                            .to_tbl(TurnRun::Table)
+                            .to_col(TurnRun::Id)
+                            .to_col(TurnRun::ChatId)
+                            .to_col(TurnRun::AgentRunId)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_sandbox_agent_admission_outstanding")
+                    .table(SandboxAgentAdmission::Table)
+                    .col(SandboxAgentAdmission::OriginTurnId)
+                    .col(SandboxAgentAdmission::AdmittedAt)
+                    .col(SandboxAgentAdmission::ChildRunId)
+                    .to_owned(),
+            )
+            .await?;
 
         manager
             .create_table(
@@ -2035,6 +2139,9 @@ impl MigrationTrait for Init {
             .await?;
         manager
             .drop_table(Table::drop().table(TurnAgentRunWait::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(SandboxAgentAdmission::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(TurnRun::Table).to_owned())
@@ -4250,6 +4357,17 @@ enum AgentRun {
     LastErrorDetail,
     CreatedAt,
     UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum SandboxAgentAdmission {
+    Table,
+    ChildRunId,
+    ParentRunId,
+    OriginTurnId,
+    ChatId,
+    SpawnCallId,
+    AdmittedAt,
 }
 
 #[derive(DeriveIden)]

@@ -1,20 +1,22 @@
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait, Set, Statement, TransactionTrait,
 };
 
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::model::{
     AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunInboxStatus, AgentRunResult,
-    AgentRunResultPayload, AgentRunStatus, TurnRun,
+    AgentRunResultPayload, AgentRunStatus, SandboxAgentAdmission, TurnRun, TurnRunStatus,
+    TurnSteerStatus,
 };
 use crate::storage::{
-    AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, ClaimAgentRunInboxOutcome,
-    ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome, FailAgentRunOutcome,
-    FinishAgentRunCancellationOutcome, ParkTurnForAgentRunInboxOutcome,
-    RequestAgentRunCancellationOutcome, SubmitAgentRunResultOutcome,
+    AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AdmitSandboxAgentRunOutcome,
+    ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
+    ConsumeAgentRunInboxOutcome, FailAgentRunOutcome, FinishAgentRunCancellationOutcome,
+    ParkTurnForAgentRunInboxOutcome, RequestAgentRunCancellationOutcome,
+    SubmitAgentRunResultOutcome,
 };
 use crate::{RequestFolderAccessArgs, RequestedFolderHint};
 
@@ -92,6 +94,11 @@ pub(in crate::db) async fn accept_agent_run(
     execution: AgentRunExecution,
     input: Option<&str>,
 ) -> Result<AcceptAgentRunOutcome> {
+    if execution == AgentRunExecution::Sandbox {
+        return Err(AgentError::Store(
+            "sandbox agent runs require exact turn-bound admission".into(),
+        ));
+    }
     validate_request(id, parent_id, spawn_call_id, execution, input)?;
 
     let transaction = store.conn.begin().await.map_err(store_err)?;
@@ -236,116 +243,161 @@ pub(in crate::db) async fn accept_agent_run(
     Ok(AcceptAgentRunOutcome::Accepted(run))
 }
 
-/// Accept one sandbox child and park its exact foreground turn in the same
-/// transaction. The sandbox parent comes from the locked turn, which binds
-/// child hierarchy and checkpoint scope without trusting a caller-supplied
-/// parent id.
-#[allow(clippy::too_many_arguments)] // Atomic checkpoint inputs form the durable receipt identity.
-pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn admit_sandbox_agent_run(
     store: &DbStore,
-    child_run_id: AgentRunId,
-    turn_id: TurnId,
+    origin_turn_id: TurnId,
     spawn_call_id: CallId,
     input: &str,
     lease_token: uuid::Uuid,
     expected_steer_revision: i64,
-    progress: crate::TurnCheckpointProgress,
+    max_outstanding_children: u32,
     now: chrono::DateTime<Utc>,
-) -> Result<Option<AcceptSandboxAgentRunAndParkTurnOutcome>> {
-    validate_agent_run_inbox_park_request(turn_id, child_run_id, lease_token, progress)?;
-    let now = canonical_db_timestamp(now)?;
-    let Some(scope) = entities::turn_run::Entity::find_by_id(turn_id.0)
+) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
+    validate_admission_request(
+        origin_turn_id,
+        spawn_call_id,
+        input,
+        lease_token,
+        max_outstanding_children,
+    )?;
+    // Validate the caller timestamp at the boundary, but never use a value
+    // captured before lock acquisition to fence a live lease.
+    canonical_db_timestamp(now)?;
+    let Some(scope) = entities::turn_run::Entity::find_by_id(origin_turn_id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
     else {
         return Ok(None);
     };
-
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, ChatId(scope.chat_id)).await?
-        || !acquire_turn_write_lock(&transaction, turn_id).await?
+        || !acquire_turn_write_lock(&transaction, origin_turn_id).await?
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let turn = entities::turn_run::Entity::find_by_id(turn_id.0)
+    let turn = entities::turn_run::Entity::find_by_id(origin_turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
         .expect("locked turn exists");
+    let now = database_now(&transaction).await?;
+    let outcome = admit_sandbox_agent_run_on(
+        &transaction,
+        &turn,
+        spawn_call_id,
+        input,
+        lease_token,
+        expected_steer_revision,
+        max_outstanding_children,
+        now,
+    )
+    .await;
+    match outcome {
+        Ok(outcome) => {
+            transaction.commit().await.map_err(store_err)?;
+            Ok(Some(outcome))
+        }
+        Err(error) => {
+            // PostgreSQL aborts the transaction after a unique-key race. Roll
+            // it back before resolving the immutable identity on a fresh
+            // connection; this also covers an ambiguous insert result.
+            transaction.rollback().await.map_err(store_err)?;
+            if let Some(outcome) = resolve_existing_sandbox_admission_on(
+                &store.conn,
+                origin_turn_id,
+                ChatId(turn.chat_id),
+                AgentRunId(turn.agent_run_id),
+                spawn_call_id,
+                input,
+            )
+            .await?
+            {
+                Ok(Some(outcome))
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+pub(in crate::db) async fn get_sandbox_agent_admission(
+    store: &DbStore,
+    child_run_id: AgentRunId,
+) -> Result<Option<SandboxAgentAdmission>> {
+    entities::sandbox_agent_admission::Entity::find_by_id(child_run_id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .map(sandbox_agent_admission_from_model)
+        .transpose()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn admit_sandbox_agent_run_on<C>(
+    conn: &C,
+    turn: &entities::turn_run::Model,
+    spawn_call_id: CallId,
+    input: &str,
+    lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
+    max_outstanding_children: u32,
+    now: chrono::DateTime<Utc>,
+) -> Result<AdmitSandboxAgentRunOutcome>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let origin_turn_id = TurnId(turn.id);
     let chat_id = ChatId(turn.chat_id);
     let parent_id = AgentRunId(turn.agent_run_id);
-    validate_request(
-        child_run_id,
-        Some(parent_id),
-        Some(spawn_call_id),
-        AgentRunExecution::Sandbox,
-        Some(input),
-    )?;
+    let child_run_id = AgentRunId::sandbox_for_spawn_call(spawn_call_id);
 
-    let existing = match find_by_id_on(&transaction, child_run_id).await? {
-        Some(existing) => Some(existing),
-        None => find_by_spawn_call_on(&transaction, spawn_call_id).await?,
-    };
-    if let Some(existing) = existing {
-        let canonical_child_run_id = AgentRunId(existing.id);
-        let exact = matches!(
-            existing_request_outcome(
-                existing.clone(),
-                chat_id,
-                Some(parent_id),
-                Some(spawn_call_id),
-                AgentRunExecution::Sandbox,
-                Some(input),
-            )?,
-            AcceptAgentRunOutcome::Existing(_)
-        );
-        if !exact {
-            transaction.commit().await.map_err(store_err)?;
-            return Ok(Some(
-                AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
-            ));
-        }
-        // A child accepted outside this operation must never be retrofitted
-        // into a foreground checkpoint. A committed checkpoint is the only
-        // durable proof that this is an exact retry of the combined action.
-        let atomic_wait =
-            entities::turn_agent_run_wait::Entity::find_by_id(canonical_child_run_id.0)
-                .one(&transaction)
-                .await
-                .map_err(store_err)?;
-        if !atomic_wait.is_some_and(|wait| wait.atomic_admission) {
-            transaction.commit().await.map_err(store_err)?;
-            return Ok(Some(
-                AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
-            ));
-        }
-        let outcome = park_turn_for_agent_run_inbox_on(
-            &transaction,
-            turn_id,
-            canonical_child_run_id,
-            lease_token,
-            expected_steer_revision,
-            progress,
-            now,
-            true,
-        )
-        .await?;
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(Some(match outcome {
-            Some(ParkTurnForAgentRunInboxOutcome::Existing { turn, wait }) => {
-                AcceptSandboxAgentRunAndParkTurnOutcome::Existing {
-                    child: agent_run_from_model(existing)?,
-                    turn,
-                    wait,
-                }
-            }
-            _ => AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
-        }));
+    if let Some(outcome) = resolve_existing_sandbox_admission_on(
+        conn,
+        origin_turn_id,
+        chat_id,
+        parent_id,
+        spawn_call_id,
+        input,
+    )
+    .await?
+    {
+        return Ok(outcome);
     }
 
-    let parent = find_by_id_on(&transaction, parent_id).await?;
+    if find_by_id_on(conn, child_run_id).await?.is_some()
+        || find_by_spawn_call_on(conn, spawn_call_id).await?.is_some()
+    {
+        return Ok(AdmitSandboxAgentRunOutcome::IdentityConflict);
+    }
+
+    if turn.status != TurnRunStatus::Running.as_str()
+        || turn.lease_token != Some(lease_token)
+        || turn
+            .lease_expires_at
+            .is_none_or(|lease_expires_at| lease_expires_at <= now)
+        || turn.updated_at > now
+    {
+        return Ok(AdmitSandboxAgentRunOutcome::LeaseLost);
+    }
+    let steer_pending = entities::turn_steer::Entity::find()
+        .filter(entities::turn_steer::Column::TurnId.eq(origin_turn_id.0))
+        .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if steer_pending || turn.steer_revision != expected_steer_revision {
+        let turn = super::turn::turn_run_from_model(turn.clone())?;
+        return Ok(if steer_pending {
+            AdmitSandboxAgentRunOutcome::SteerPending(turn)
+        } else {
+            AdmitSandboxAgentRunOutcome::OutputSuperseded(turn)
+        });
+    }
+    let parent = find_by_id_on(conn, parent_id).await?;
     let parent_available = parent.is_some_and(|parent| {
         parent.chat_id == chat_id.0
             && parent.parent_id.is_none()
@@ -354,14 +406,36 @@ pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
             && parent.status == AgentRunStatus::Active.as_str()
     });
     if !parent_available {
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(Some(
-            AcceptSandboxAgentRunAndParkTurnOutcome::ParentUnavailable,
-        ));
+        return Ok(AdmitSandboxAgentRunOutcome::ParentUnavailable);
     }
 
-    let created_at = database_now(&transaction).await?;
-    let model = entities::agent_run::ActiveModel {
+    let outstanding = entities::agent_run::Entity::find()
+        .filter(
+            entities::agent_run::Column::Id.in_subquery(
+                entities::sandbox_agent_admission::Entity::find()
+                    .select_only()
+                    .column(entities::sandbox_agent_admission::Column::ChildRunId)
+                    .filter(
+                        entities::sandbox_agent_admission::Column::OriginTurnId
+                            .eq(origin_turn_id.0),
+                    )
+                    .into_query(),
+            ),
+        )
+        .filter(entities::agent_run::Column::Status.is_not_in([
+            AgentRunStatus::Completed.as_str(),
+            AgentRunStatus::Failed.as_str(),
+            AgentRunStatus::Cancelled.as_str(),
+        ]))
+        .count(conn)
+        .await
+        .map_err(store_err)?;
+    if outstanding >= u64::from(max_outstanding_children) {
+        return Ok(AdmitSandboxAgentRunOutcome::AtCapacity);
+    }
+
+    let created_at = database_now(conn).await?;
+    let child = entities::agent_run::ActiveModel {
         id: Set(child_run_id.0),
         chat_id: Set(chat_id.0),
         parent_id: Set(Some(parent_id.0)),
@@ -385,10 +459,210 @@ pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
         created_at: Set(created_at),
         updated_at: Set(created_at),
     }
-    .insert(&transaction)
+    .insert(conn)
     .await
     .map_err(store_err)?;
-    let child = agent_run_from_model(model)?;
+    let admission = entities::sandbox_agent_admission::ActiveModel {
+        child_run_id: Set(child_run_id.0),
+        parent_run_id: Set(parent_id.0),
+        origin_turn_id: Set(origin_turn_id.0),
+        chat_id: Set(chat_id.0),
+        spawn_call_id: Set(spawn_call_id.0),
+        admitted_at: Set(created_at),
+    }
+    .insert(conn)
+    .await
+    .map_err(store_err)?;
+    Ok(AdmitSandboxAgentRunOutcome::Accepted {
+        child: agent_run_from_model(child)?,
+        admission: sandbox_agent_admission_from_model(admission)?,
+    })
+}
+
+async fn resolve_existing_sandbox_admission_on<C>(
+    conn: &C,
+    origin_turn_id: TurnId,
+    chat_id: ChatId,
+    parent_id: AgentRunId,
+    spawn_call_id: CallId,
+    input: &str,
+) -> Result<Option<AdmitSandboxAgentRunOutcome>>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let child_run_id = AgentRunId::sandbox_for_spawn_call(spawn_call_id);
+    let existing_admission = entities::sandbox_agent_admission::Entity::find()
+        .filter(
+            Condition::any()
+                .add(entities::sandbox_agent_admission::Column::ChildRunId.eq(child_run_id.0))
+                .add(entities::sandbox_agent_admission::Column::SpawnCallId.eq(spawn_call_id.0)),
+        )
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    if let Some(admission) = existing_admission {
+        let child = find_by_id_on(conn, AgentRunId(admission.child_run_id)).await?;
+        let exact = admission.child_run_id == child_run_id.0
+            && admission.parent_run_id == parent_id.0
+            && admission.origin_turn_id == origin_turn_id.0
+            && admission.chat_id == chat_id.0
+            && admission.spawn_call_id == spawn_call_id.0
+            && child.as_ref().is_some_and(|child| {
+                child.chat_id == chat_id.0
+                    && child.parent_id == Some(parent_id.0)
+                    && child.spawn_call_id == Some(spawn_call_id.0)
+                    && child.execution == AgentRunExecution::Sandbox.as_str()
+                    && child.input.as_deref() == Some(input)
+            });
+        return Ok(Some(if exact {
+            AdmitSandboxAgentRunOutcome::Existing {
+                child: agent_run_from_model(child.expect("exact admission has child"))?,
+                admission: sandbox_agent_admission_from_model(admission)?,
+            }
+        } else {
+            AdmitSandboxAgentRunOutcome::IdentityConflict
+        }));
+    }
+    Ok(None)
+}
+
+/// Accept one sandbox child and park its exact foreground turn in the same
+/// transaction. The sandbox parent comes from the locked turn, which binds
+/// child hierarchy and checkpoint scope without trusting a caller-supplied
+/// parent id.
+#[allow(clippy::too_many_arguments)] // Atomic checkpoint inputs form the durable receipt identity.
+pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
+    store: &DbStore,
+    child_run_id: AgentRunId,
+    turn_id: TurnId,
+    spawn_call_id: CallId,
+    input: &str,
+    lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
+    progress: crate::TurnCheckpointProgress,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<AcceptSandboxAgentRunAndParkTurnOutcome>> {
+    validate_agent_run_inbox_park_request(turn_id, child_run_id, lease_token, progress)?;
+    // Validate the API value, then take authoritative time after acquiring the
+    // same locks that protect the lease transition.
+    canonical_db_timestamp(now)?;
+    let Some(scope) = entities::turn_run::Entity::find_by_id(turn_id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, ChatId(scope.chat_id)).await?
+        || !acquire_turn_write_lock(&transaction, turn_id).await?
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let turn = entities::turn_run::Entity::find_by_id(turn_id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .expect("locked turn exists");
+    let now = database_now(&transaction).await?;
+    if child_run_id != AgentRunId::sandbox_for_spawn_call(spawn_call_id) {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(
+            AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
+        ));
+    }
+    validate_admission_request(
+        turn_id,
+        spawn_call_id,
+        input,
+        lease_token,
+        AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,
+    )?;
+    let admission_outcome = admit_sandbox_agent_run_on(
+        &transaction,
+        &turn,
+        spawn_call_id,
+        input,
+        lease_token,
+        expected_steer_revision,
+        AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,
+        now,
+    )
+    .await;
+    let admission_outcome = match admission_outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let chat_id = ChatId(turn.chat_id);
+            let parent_id = AgentRunId(turn.agent_run_id);
+            transaction.rollback().await.map_err(store_err)?;
+            if resolve_existing_sandbox_admission_on(
+                &store.conn,
+                turn_id,
+                chat_id,
+                parent_id,
+                spawn_call_id,
+                input,
+            )
+            .await?
+            .is_some()
+            {
+                return Ok(Some(
+                    AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
+                ));
+            }
+            return Err(error);
+        }
+    };
+    let (child, existing) = match admission_outcome {
+        AdmitSandboxAgentRunOutcome::Accepted { child, .. } => (child, false),
+        AdmitSandboxAgentRunOutcome::Existing { child, .. } => {
+            let atomic_wait = entities::turn_agent_run_wait::Entity::find_by_id(child.id.0)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?;
+            if !atomic_wait.is_some_and(|wait| wait.atomic_admission) {
+                transaction.commit().await.map_err(store_err)?;
+                return Ok(Some(
+                    AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
+                ));
+            }
+            (child, true)
+        }
+        AdmitSandboxAgentRunOutcome::IdentityConflict => {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(
+                AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
+            ));
+        }
+        AdmitSandboxAgentRunOutcome::ParentUnavailable => {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(
+                AcceptSandboxAgentRunAndParkTurnOutcome::ParentUnavailable,
+            ));
+        }
+        AdmitSandboxAgentRunOutcome::LeaseLost => {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(None);
+        }
+        AdmitSandboxAgentRunOutcome::AtCapacity => {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(AcceptSandboxAgentRunAndParkTurnOutcome::AtCapacity));
+        }
+        AdmitSandboxAgentRunOutcome::SteerPending(turn) => {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(AcceptSandboxAgentRunAndParkTurnOutcome::SteerPending(
+                turn,
+            )));
+        }
+        AdmitSandboxAgentRunOutcome::OutputSuperseded(turn) => {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(
+                AcceptSandboxAgentRunAndParkTurnOutcome::OutputSuperseded(turn),
+            ));
+        }
+    };
 
     let outcome = park_turn_for_agent_run_inbox_on(
         &transaction,
@@ -408,6 +682,9 @@ pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
     let outcome = match outcome {
         ParkTurnForAgentRunInboxOutcome::Parked { turn, wait } => {
             AcceptSandboxAgentRunAndParkTurnOutcome::Parked { child, turn, wait }
+        }
+        ParkTurnForAgentRunInboxOutcome::Existing { turn, wait } if existing => {
+            AcceptSandboxAgentRunAndParkTurnOutcome::Existing { child, turn, wait }
         }
         ParkTurnForAgentRunInboxOutcome::SteerPending(turn) => {
             transaction.rollback().await.map_err(store_err)?;
@@ -476,10 +753,16 @@ pub(in crate::db) async fn claim_agent_run(
                 transaction.commit().await.map_err(store_err)?;
                 return Ok(None);
             };
+            let admitted = entities::sandbox_agent_admission::Entity::find_by_id(agent_run_id)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?
+                .is_some();
             let existing = find_by_id_on(&transaction, AgentRunId(agent_run_id))
                 .await?
                 .filter(|run| {
-                    run.execution == AgentRunExecution::Sandbox.as_str()
+                    admitted
+                        && run.execution == AgentRunExecution::Sandbox.as_str()
                         && matches!(run.status.as_str(), "running" | "cancelling")
                         && Some(run.attempt_count) == receipt.attempt_count
                         && Some(run.claim_count) == receipt.claim_count
@@ -538,6 +821,7 @@ pub(in crate::db) async fn claim_agent_run(
 
         let live = entities::agent_run::Entity::find()
             .filter(entities::agent_run::Column::Execution.eq(AgentRunExecution::Sandbox.as_str()))
+            .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
             .filter(entities::agent_run::Column::Status.is_in([
                 AgentRunStatus::Running.as_str(),
                 AgentRunStatus::Cancelling.as_str(),
@@ -2003,10 +2287,13 @@ where
 {
     let backend = conn.get_database_backend();
     // PostgreSQL's CURRENT_TIMESTAMP is fixed at transaction start. Claimers
-    // can wait on the scheduler lock, so use its statement-time clock there;
-    // SQLite's CURRENT_TIMESTAMP already has the desired statement semantics.
+    // can wait on a lock, so use statement-time clocks. SQLite's bare
+    // CURRENT_TIMESTAMP loses fractional seconds; use the end of its current
+    // clock millisecond so application-authored microsecond timestamps from
+    // that same millisecond never appear to come from the future.
     let clock_sql = match backend {
         DatabaseBackend::Postgres => "SELECT clock_timestamp() AS now",
+        DatabaseBackend::Sqlite => "SELECT (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '999Z') AS now",
         _ => "SELECT CURRENT_TIMESTAMP AS now",
     };
     let statement = Statement::from_string(backend, clock_sql);
@@ -2051,6 +2338,7 @@ where
 {
     entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::Execution.eq(AgentRunExecution::Sandbox.as_str()))
+        .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
         .filter(entities::agent_run::Column::Status.is_in([
             AgentRunStatus::Queued.as_str(),
             AgentRunStatus::Running.as_str(),
@@ -2082,6 +2370,7 @@ where
     loop {
         let page = entities::agent_run::Entity::find()
             .filter(entities::agent_run::Column::Execution.eq(AgentRunExecution::Sandbox.as_str()))
+            .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
             .filter(
                 sea_orm::Condition::any()
                     .add(
@@ -2137,6 +2426,7 @@ where
 {
     entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::Execution.eq(AgentRunExecution::Sandbox.as_str()))
+        .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
         .filter(
             sea_orm::Condition::any()
                 .add(entities::agent_run::Column::Status.eq(AgentRunStatus::Cancelling.as_str()))
@@ -2164,6 +2454,13 @@ where
         .one(conn)
         .await
         .map_err(store_err)
+}
+
+fn admitted_child_id_subquery() -> sea_orm::sea_query::SelectStatement {
+    sea_orm::sea_query::Query::select()
+        .column(entities::sandbox_agent_admission::Column::ChildRunId)
+        .from(entities::sandbox_agent_admission::Entity)
+        .to_owned()
 }
 
 async fn fail_candidate_on<C>(
@@ -2421,6 +2718,34 @@ fn validate_request(
     }
 }
 
+fn validate_admission_request(
+    origin_turn_id: TurnId,
+    spawn_call_id: CallId,
+    input: &str,
+    lease_token: uuid::Uuid,
+    max_outstanding_children: u32,
+) -> Result<()> {
+    if origin_turn_id.0.is_nil() || spawn_call_id.0.is_nil() || lease_token.is_nil() {
+        return Err(AgentError::Store(
+            "sandbox admission identities must not be nil".into(),
+        ));
+    }
+    if max_outstanding_children == 0 || max_outstanding_children > AgentRun::MAX_CONCURRENCY_LIMIT {
+        return Err(AgentError::Store(format!(
+            "sandbox outstanding-child limit must be in 1..={}",
+            AgentRun::MAX_CONCURRENCY_LIMIT
+        )));
+    }
+    let input_len = input.chars().count();
+    if input_len == 0 || input_len > AgentRun::MAX_INPUT_LEN {
+        return Err(AgentError::Store(format!(
+            "sandbox agent-run task must contain 1..={} characters",
+            AgentRun::MAX_INPUT_LEN
+        )));
+    }
+    Ok(())
+}
+
 pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> Result<AgentRun> {
     let execution = match model.execution.as_str() {
         "foreground" => AgentRunExecution::Foreground,
@@ -2457,6 +2782,29 @@ pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> 
         created_at: model.created_at,
         updated_at: model.updated_at,
     })
+}
+
+fn sandbox_agent_admission_from_model(
+    model: entities::sandbox_agent_admission::Model,
+) -> Result<SandboxAgentAdmission> {
+    let admission = SandboxAgentAdmission {
+        child_run_id: AgentRunId(model.child_run_id),
+        parent_run_id: AgentRunId(model.parent_run_id),
+        origin_turn_id: TurnId(model.origin_turn_id),
+        chat_id: ChatId(model.chat_id),
+        spawn_call_id: CallId(model.spawn_call_id),
+        admitted_at: model.admitted_at,
+    };
+    if admission.child_run_id != AgentRunId::sandbox_for_spawn_call(admission.spawn_call_id)
+        || admission.parent_run_id.0.is_nil()
+        || admission.origin_turn_id.0.is_nil()
+        || admission.chat_id.0.is_nil()
+    {
+        return Err(AgentError::Store(
+            "invalid stored sandbox agent admission".into(),
+        ));
+    }
+    Ok(admission)
 }
 
 fn agent_run_status_from_db(value: &str) -> Result<AgentRunStatus> {

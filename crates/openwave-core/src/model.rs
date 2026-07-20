@@ -1180,12 +1180,37 @@ impl AgentRun {
     pub const DEFAULT_MAX_DURATION: chrono::Duration = chrono::Duration::hours(1);
     /// Largest accepted scheduler concurrency bound.
     pub const MAX_CONCURRENCY_LIMIT: u32 = 1_024;
+    /// Default maximum children from one foreground turn that may remain
+    /// nonterminal at once. Admission enforces this independently from worker
+    /// concurrency so queued work is bounded before it reaches the scheduler.
+    pub const DEFAULT_MAX_OUTSTANDING_CHILDREN: u32 = 4;
     /// Maximum stable failure-category length.
     pub const MAX_ERROR_CODE_LEN: usize = 128;
     /// Maximum persisted diagnostic-detail length.
     pub const MAX_ERROR_DETAIL_LEN: usize = 4_096;
     /// Maximum final text stored in an immutable sandbox result receipt.
     pub const MAX_RESULT_LEN: usize = 65_536;
+}
+
+/// Immutable ownership receipt for one admitted sandbox child.
+///
+/// The origin turn is intentionally distinct from the long-lived foreground
+/// coordinator. A foreground run can span many turns, while every sandbox
+/// child belongs to the exact turn and model call that delegated its task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxAgentAdmission {
+    /// Deterministic child identity derived from [`Self::spawn_call_id`].
+    pub child_run_id: crate::id::AgentRunId,
+    /// Foreground coordinator that owned the origin turn.
+    pub parent_run_id: crate::id::AgentRunId,
+    /// Exact foreground turn that admitted the child.
+    pub origin_turn_id: crate::id::TurnId,
+    /// Conversation shared by the origin turn, parent, and child.
+    pub chat_id: ChatId,
+    /// Exact model call that requested the child.
+    pub spawn_call_id: crate::id::CallId,
+    /// Database time at which admission committed.
+    pub admitted_at: DateTime<Utc>,
 }
 
 /// Immutable final text submitted by one exact sandbox worker lease.

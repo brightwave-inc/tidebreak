@@ -91,9 +91,9 @@ pub use model::{
     Message, Project, RetrievalEvidence, RetrievalEvidenceInput, RetrievalEvidenceSource, Role,
     RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
     RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentOrigin,
-    RootAttachmentSubjectKind, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
-    SandboxToolCallStatus, SourceLocation, SourceRegion, ToolCallExecution, ToolCallRecord,
-    ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitStatus,
+    RootAttachmentSubjectKind, SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt,
+    SandboxToolCallRequest, SandboxToolCallStatus, SourceLocation, SourceRegion, ToolCallExecution,
+    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnAgentRunWait, TurnAgentRunWaitStatus,
     TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
     TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus, MAX_ATTACHMENT_REVISION,
     MAX_ROOT_ATTACHMENTS,
@@ -105,7 +105,7 @@ pub use provider::{
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptToolCallOutcome,
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, ApplyTurnSteerOutcome,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome, ApplyTurnSteerOutcome,
     BeginRootAttachmentChangeOutcome, BlobStore, ChatToolActivitySnapshot, ChatToolActivityStatus,
     ChatTranscriptSnapshot, ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome,
     ClaimSandboxToolCallOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim,

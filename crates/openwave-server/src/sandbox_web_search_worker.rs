@@ -360,9 +360,9 @@ mod tests {
     use std::sync::Mutex;
 
     use openwave_core::{
-        AcceptAgentRunOutcome, AgentRunExecution, AgentRunId, AgentRunStatus, CallId, Chat, ChatId,
-        ClaimSandboxToolCallOutcome, DbStore, ParkSandboxToolCallOutcome,
-        RequestAgentRunCancellationOutcome, SandboxToolCallRequest, Store,
+        AgentRunStatus, CallId, Chat, ChatId, ClaimSandboxToolCallOutcome, DbStore,
+        ParkSandboxToolCallOutcome, RequestAgentRunCancellationOutcome, SandboxToolCallRequest,
+        Store,
     };
     use openwave_web_search::{WebSearchProviderKind, WebSearchResult};
 
@@ -430,19 +430,40 @@ mod tests {
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
-        let run = match store
-            .accept_agent_run(
-                AgentRunId::new(),
+        let turn_id = openwave_core::TurnId::new();
+        store
+            .accept_turn(
+                turn_id,
                 chat.id,
-                Some(AgentRunId::foreground_for_chat(chat.id)),
-                Some(CallId::new()),
-                AgentRunExecution::Sandbox,
-                Some("search"),
+                "sandbox-test-model",
+                "sandbox search test",
+            )
+            .await
+            .unwrap();
+        let turn_lease = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        let turn = store
+            .claim_turn_run(turn_lease, now, now + chrono::Duration::hours(1))
+            .await
+            .unwrap()
+            .turn
+            .unwrap();
+        let call = CallId::new();
+        let run = match store
+            .admit_sandbox_agent_run(
+                turn.id,
+                call,
+                "search",
+                turn_lease,
+                turn.steer_revision,
+                1,
+                Utc::now(),
             )
             .await
             .unwrap()
+            .unwrap()
         {
-            AcceptAgentRunOutcome::Accepted(run) => run,
+            openwave_core::AdmitSandboxAgentRunOutcome::Accepted { child, .. } => child,
             outcome => panic!("unexpected sandbox admission: {outcome:?}"),
         };
         let worker_lease = uuid::Uuid::new_v4();

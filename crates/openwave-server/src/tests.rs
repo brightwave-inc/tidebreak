@@ -9,15 +9,15 @@ use axum::http::{header, Request, StatusCode};
 use futures::stream::{self, BoxStream, StreamExt};
 // Tests use the in-memory store; production wires LanceDB in `bind`.
 use openwave_core::{
-    AcceptAgentRunOutcome, Agent, AgentConfig, AgentErrorInfo, AgentEvent, AgentRunExecution,
-    AgentRunId, AgentRunInboxStatus, AgentRunStatus, ApprovalClass, BeginRootAttachmentChange,
-    BlobStore, CallId, Chat, ChatId, ChatRequest, ChatRootAttachment, ClaimedAgentEvent,
-    ClientToolCallRequest, ContentBlock, HostRootId, Message, MessageId, ModelProvider,
-    ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent,
-    ProviderId, Role, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentOrigin,
-    SandboxToolCallRequest, SecretProvider, SequencedEvent, StopReason, Tool, ToolCallExecution,
-    ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput, ToolRegistry,
-    ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
+    Agent, AgentConfig, AgentErrorInfo, AgentEvent, AgentRunInboxStatus, AgentRunStatus,
+    ApprovalClass, BeginRootAttachmentChange, BlobStore, CallId, Chat, ChatId, ChatRequest,
+    ChatRootAttachment, ClaimedAgentEvent, ClientToolCallRequest, ContentBlock, HostRootId,
+    Message, MessageId, ModelProvider, ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome,
+    Project, ProjectId, ProviderEvent, ProviderId, Role, RootAttachmentChangeAction,
+    RootAttachmentChangeId, RootAttachmentOrigin, SandboxToolCallRequest, SecretProvider,
+    SequencedEvent, StopReason, Tool, ToolCallExecution, ToolCallRecord, ToolCallResolution,
+    ToolCallStatus, ToolCtx, ToolOutput, ToolRegistry, ToolSpec, TurnCheckpointProgress, TurnId,
+    TurnRunStatus, TurnSteerId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -1795,6 +1795,48 @@ fn spawn_turn_worker_with_config(state: &AppState, config: turn_worker::TurnWork
 
 async fn test_app() -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
     test_app_with(Arc::new(FakeProvider)).await
+}
+
+async fn admit_sandbox_for_test(
+    store: &Arc<dyn Store>,
+    chat_id: ChatId,
+    input: &str,
+) -> openwave_core::AgentRun {
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(
+            turn_id,
+            chat_id,
+            "sandbox-test-model",
+            "sandbox server test",
+        )
+        .await
+        .unwrap();
+    let turn_lease = uuid::Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let turn = store
+        .claim_turn_run(turn_lease, now, now + chrono::Duration::hours(1))
+        .await
+        .unwrap()
+        .turn
+        .expect("sandbox test turn should claim");
+    match store
+        .admit_sandbox_agent_run(
+            turn.id,
+            CallId::new(),
+            input,
+            turn_lease,
+            turn.steer_revision,
+            1,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap()
+        .expect("sandbox test admission should resolve")
+    {
+        openwave_core::AdmitSandboxAgentRunOutcome::Accepted { child, .. } => child,
+        outcome => panic!("unexpected sandbox test admission: {outcome:?}"),
+    }
 }
 
 /// A normal authenticated local API plus a handle to its test-only secret
@@ -6157,21 +6199,7 @@ async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
         json_body(response).await
     };
 
-    let run = match store
-        .accept_agent_run(
-            AgentRunId::new(),
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("research"),
-        )
-        .await
-        .unwrap()
-    {
-        AcceptAgentRunOutcome::Accepted(run) => run,
-        outcome => panic!("unexpected sandbox admission: {outcome:?}"),
-    };
+    let run = admit_sandbox_for_test(&store, chat.id, "research").await;
     let worker_lease = uuid::Uuid::new_v4();
     assert_eq!(
         store
@@ -6463,21 +6491,7 @@ async fn agent_run_snapshots_omit_persisted_raw_failure_detail() {
     assert_eq!(response.status(), StatusCode::CREATED);
     let chat: Chat = json_body(response).await;
 
-    let run = match store
-        .accept_agent_run(
-            AgentRunId::new(),
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("research"),
-        )
-        .await
-        .unwrap()
-    {
-        AcceptAgentRunOutcome::Accepted(run) => run,
-        outcome => panic!("unexpected sandbox admission: {outcome:?}"),
-    };
+    let run = admit_sandbox_for_test(&store, chat.id, "research").await;
     let lease_token = uuid::Uuid::new_v4();
     assert_eq!(
         store

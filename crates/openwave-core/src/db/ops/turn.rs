@@ -878,7 +878,7 @@ where
     })
 }
 
-fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
+pub(in crate::db) fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
     let usage = usage_from_turn_model(&model)?;
     Ok(TurnRun {
         id: TurnId(model.id),

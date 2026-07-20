@@ -14,21 +14,76 @@ use chrono::{Duration, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
 async fn accepted_sandbox_for_tool_test(store: &DbStore, chat_id: ChatId) -> AgentRun {
-    match store
-        .accept_agent_run(
-            AgentRunId::new(),
+    admit_sandbox_for_test(store, chat_id, "Use the durable sandbox tool checkpoint").await
+}
+
+async fn live_turn_for_sandbox_test(
+    store: &DbStore,
+    chat_id: ChatId,
+) -> (crate::TurnRun, uuid::Uuid) {
+    if let Some(turn) = store
+        .list_turn_runs(chat_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|turn| turn.status == TurnRunStatus::Running)
+    {
+        return (
+            turn.clone(),
+            turn.lease_token.expect("running turn has lease"),
+        );
+    }
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(
+            turn_id,
             chat_id,
-            Some(AgentRunId::foreground_for_chat(chat_id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("Use the durable sandbox tool checkpoint"),
+            "sandbox-test-model",
+            "sandbox test admission",
+        )
+        .await
+        .unwrap();
+    let lease = uuid::Uuid::new_v4();
+    let now = Utc::now();
+    let turn = store
+        .claim_turn_run(lease, now, now + Duration::hours(1))
+        .await
+        .unwrap()
+        .turn
+        .expect("sandbox test turn should claim");
+    assert_eq!(turn.id, turn_id);
+    (turn, lease)
+}
+
+async fn admit_sandbox_call_for_test(
+    store: &DbStore,
+    chat_id: ChatId,
+    call_id: CallId,
+    input: &str,
+) -> AgentRun {
+    let (turn, lease) = live_turn_for_sandbox_test(store, chat_id).await;
+    match store
+        .admit_sandbox_agent_run(
+            turn.id,
+            call_id,
+            input,
+            lease,
+            turn.steer_revision,
+            AgentRun::MAX_CONCURRENCY_LIMIT,
+            Utc::now(),
         )
         .await
         .unwrap()
+        .expect("sandbox test admission should resolve")
     {
-        AcceptAgentRunOutcome::Accepted(run) => run,
-        outcome => panic!("unexpected sandbox acceptance: {outcome:?}"),
+        crate::AdmitSandboxAgentRunOutcome::Accepted { child, .. }
+        | crate::AdmitSandboxAgentRunOutcome::Existing { child, .. } => child,
+        outcome => panic!("unexpected sandbox test admission: {outcome:?}"),
     }
+}
+
+async fn admit_sandbox_for_test(store: &DbStore, chat_id: ChatId, input: &str) -> AgentRun {
+    admit_sandbox_call_for_test(store, chat_id, CallId::new(), input).await
 }
 
 async fn force_expired_agent_lease(store: &DbStore, id: AgentRunId) {
@@ -76,18 +131,7 @@ async fn submit_sandbox_result(
     input: &str,
     text: &str,
 ) -> (AgentRunId, crate::AgentRunResult) {
-    let child_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            child_id,
-            chat_id,
-            Some(AgentRunId::foreground_for_chat(chat_id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some(input),
-        )
-        .await
-        .unwrap();
+    let child_id = admit_sandbox_for_test(store, chat_id, input).await.id;
     let lease_token = uuid::Uuid::new_v4();
     let claimed = store
         .claim_agent_run(lease_token, Duration::minutes(1), 1, 1)
@@ -112,23 +156,7 @@ async fn park_foreground_turn_on_child(
     chat_id: ChatId,
     child_run_id: AgentRunId,
 ) -> crate::TurnRun {
-    let queued = match store
-        .accept_turn(TurnId::new(), chat_id, "gpt-5", "wait for the child")
-        .await
-        .unwrap()
-    {
-        AcceptTurnOutcome::Accepted(turn) => turn,
-        outcome => panic!("unexpected turn acceptance: {outcome:?}"),
-    };
-    let lease_token = uuid::Uuid::new_v4();
-    let now = Utc::now();
-    let running = store
-        .claim_turn_run(lease_token, now, now + Duration::minutes(5))
-        .await
-        .unwrap()
-        .turn
-        .expect("foreground turn should claim");
-    assert_eq!(running.id, queued.id);
+    let (running, lease_token) = live_turn_for_sandbox_test(store, chat_id).await;
     let progress = TurnCheckpointProgress {
         model_steps: 1,
         usage: Usage {
@@ -178,8 +206,8 @@ async fn sandbox_spawn_and_foreground_checkpoint_commit_as_one_exact_transition(
         .turn
         .expect("foreground turn should claim");
     assert_eq!(running.id, queued.id);
-    let child_run_id = AgentRunId::new();
     let spawn_call_id = CallId::new();
+    let child_run_id = AgentRunId::sandbox_for_spawn_call(spawn_call_id);
     let progress = TurnCheckpointProgress {
         model_steps: 1,
         usage: Usage {
@@ -227,7 +255,7 @@ async fn sandbox_spawn_and_foreground_checkpoint_commit_as_one_exact_transition(
     assert!(matches!(
         store
             .accept_sandbox_agent_run_and_park_turn(
-                child_run_id,
+                AgentRunId::new(),
                 running.id,
                 spawn_call_id,
                 "research the question",
@@ -238,13 +266,20 @@ async fn sandbox_spawn_and_foreground_checkpoint_commit_as_one_exact_transition(
             )
             .await
             .unwrap(),
-        Some(AcceptSandboxAgentRunAndParkTurnOutcome::Existing { child, turn, wait })
-            if child == parked.0 && turn == parked.1 && wait == parked.2
+        Some(AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict)
     ));
+    let admission = store
+        .get_sandbox_agent_admission(child_run_id)
+        .await
+        .unwrap()
+        .expect("sandbox child should retain its exact origin ownership");
+    assert_eq!(admission.child_run_id, child_run_id);
+    assert_eq!(admission.origin_turn_id, running.id);
+    assert_eq!(admission.spawn_call_id, spawn_call_id);
     assert!(matches!(
         store
             .accept_sandbox_agent_run_and_park_turn(
-                AgentRunId::new(),
+                child_run_id,
                 running.id,
                 spawn_call_id,
                 "research the question",
@@ -292,12 +327,13 @@ async fn sandbox_spawn_checkpoint_rolls_back_when_foreground_lease_or_steer_is_s
         model_steps: 1,
         usage: Usage::default(),
     };
-    let stale_child_id = AgentRunId::new();
+    let stale_call_id = CallId::new();
+    let stale_child_id = AgentRunId::sandbox_for_spawn_call(stale_call_id);
     assert!(store
         .accept_sandbox_agent_run_and_park_turn(
             stale_child_id,
             running.id,
-            CallId::new(),
+            stale_call_id,
             "this child must roll back",
             uuid::Uuid::new_v4(),
             running.steer_revision,
@@ -309,13 +345,14 @@ async fn sandbox_spawn_checkpoint_rolls_back_when_foreground_lease_or_steer_is_s
         .is_none());
     assert!(store.get_agent_run(stale_child_id).await.unwrap().is_none());
 
-    let superseded_child_id = AgentRunId::new();
+    let superseded_call_id = CallId::new();
+    let superseded_child_id = AgentRunId::sandbox_for_spawn_call(superseded_call_id);
     assert!(matches!(
         store
             .accept_sandbox_agent_run_and_park_turn(
                 superseded_child_id,
                 running.id,
-                CallId::new(),
+                superseded_call_id,
                 "this child must not survive a stale model output",
                 lease_token,
                 running.steer_revision + 1,
@@ -366,19 +403,21 @@ async fn sandbox_spawn_checkpoint_never_retrofits_a_separately_accepted_child() 
         .turn
         .expect("foreground turn should claim");
     assert_eq!(running.id, queued.id);
-    let child_run_id = AgentRunId::new();
     let spawn_call_id = CallId::new();
+    let child_run_id = AgentRunId::sandbox_for_spawn_call(spawn_call_id);
     store
-        .accept_agent_run(
-            child_run_id,
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(spawn_call_id),
-            AgentRunExecution::Sandbox,
-            Some("accepted by an older boundary"),
+        .admit_sandbox_agent_run(
+            running.id,
+            spawn_call_id,
+            "accepted by an older boundary",
+            lease_token,
+            running.steer_revision,
+            AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,
+            Utc::now(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("standalone admission should resolve");
     let progress = TurnCheckpointProgress {
         model_steps: 1,
         usage: Usage::default(),
@@ -405,7 +444,7 @@ async fn sandbox_spawn_checkpoint_never_retrofits_a_separately_accepted_child() 
     assert!(matches!(
         store
             .accept_sandbox_agent_run_and_park_turn(
-                AgentRunId::new(),
+                child_run_id,
                 running.id,
                 spawn_call_id,
                 "accepted by an older boundary",
@@ -423,6 +462,336 @@ async fn sandbox_spawn_checkpoint_never_retrofits_a_separately_accepted_child() 
         Some(legacy_parked.0)
     );
     assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn sandbox_admission_is_exact_bounded_and_releases_terminal_capacity() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let first_call = CallId::new();
+    let first = store
+        .admit_sandbox_agent_run(
+            turn.id,
+            first_call,
+            "first bounded child",
+            lease,
+            turn.steer_revision,
+            1,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let first_child = match first {
+        crate::AdmitSandboxAgentRunOutcome::Accepted { child, admission } => {
+            assert_eq!(admission.origin_turn_id, turn.id);
+            assert_eq!(admission.parent_run_id, turn.agent_run_id);
+            assert_eq!(admission.spawn_call_id, first_call);
+            child
+        }
+        outcome => panic!("unexpected admission outcome: {outcome:?}"),
+    };
+    assert_eq!(
+        first_child.id,
+        AgentRunId::sandbox_for_spawn_call(first_call)
+    );
+    assert!(matches!(
+        store
+            .admit_sandbox_agent_run(
+                turn.id,
+                first_call,
+                "first bounded child",
+                lease,
+                turn.steer_revision,
+                1,
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        Some(crate::AdmitSandboxAgentRunOutcome::Existing { child, .. })
+            if child == first_child
+    ));
+
+    let second_call = CallId::new();
+    assert!(matches!(
+        store
+            .admit_sandbox_agent_run(
+                turn.id,
+                second_call,
+                "second bounded child",
+                lease,
+                turn.steer_revision,
+                1,
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        Some(crate::AdmitSandboxAgentRunOutcome::AtCapacity)
+    ));
+
+    let finished_at = Utc::now();
+    crate::db::entities::agent_run::Entity::update_many()
+        .col_expr(
+            crate::db::entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(AgentRunStatus::Cancelled.as_str()),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(finished_at)),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(finished_at),
+        )
+        .filter(crate::db::entities::agent_run::Column::Id.eq(first_child.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert!(store
+        .get_sandbox_agent_admission(first_child.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(matches!(
+        store
+            .admit_sandbox_agent_run(
+                turn.id,
+                second_call,
+                "second bounded child",
+                lease,
+                turn.steer_revision,
+                1,
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        Some(crate::AdmitSandboxAgentRunOutcome::Accepted { child, .. })
+            if child.id == AgentRunId::sandbox_for_spawn_call(second_call)
+    ));
+}
+
+#[tokio::test]
+async fn concurrent_sandbox_admission_never_oversubscribes_origin_turn() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let store = std::sync::Arc::new(store);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for index in 0..8 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .admit_sandbox_agent_run(
+                    turn.id,
+                    CallId::new(),
+                    &format!("concurrent child {index}"),
+                    lease,
+                    turn.steer_revision,
+                    2,
+                    Utc::now(),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        }));
+    }
+    let outcomes = futures::future::join_all(tasks).await;
+    let accepted = outcomes
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|outcome| matches!(outcome, crate::AdmitSandboxAgentRunOutcome::Accepted { .. }))
+        .count();
+    assert_eq!(accepted, 2);
+    assert_eq!(
+        store
+            .list_agent_runs(chat.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|run| run.execution == AgentRunExecution::Sandbox)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn concurrent_exact_sandbox_admission_converges_on_one_receipt() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let call = CallId::new();
+    let store = std::sync::Arc::new(store);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .admit_sandbox_agent_run(
+                    turn.id,
+                    call,
+                    "the same concurrent child",
+                    lease,
+                    turn.steer_revision,
+                    2,
+                    Utc::now(),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        }));
+    }
+    let outcomes = futures::future::join_all(tasks).await;
+    let accepted = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome.as_ref().unwrap(),
+                crate::AdmitSandboxAgentRunOutcome::Accepted { .. }
+            )
+        })
+        .count();
+    let existing = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome.as_ref().unwrap(),
+                crate::AdmitSandboxAgentRunOutcome::Existing { .. }
+            )
+        })
+        .count();
+    assert_eq!((accepted, existing), (1, 1));
+    assert_eq!(
+        store
+            .list_agent_runs(chat.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|run| run.execution == AgentRunExecution::Sandbox)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn sandbox_child_cannot_park_a_different_origin_turn() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (first_turn, first_lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child = match store
+        .admit_sandbox_agent_run(
+            first_turn.id,
+            CallId::new(),
+            "owned by only the first turn",
+            first_lease,
+            first_turn.steer_revision,
+            2,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        crate::AdmitSandboxAgentRunOutcome::Accepted { child, .. } => child,
+        outcome => panic!("unexpected first admission: {outcome:?}"),
+    };
+    let cancelled_at = Utc::now();
+    store
+        .request_turn_cancellation(first_turn.id, cancelled_at)
+        .await
+        .unwrap();
+    store
+        .finish_turn_cancellation(first_turn.id, first_lease, Utc::now())
+        .await
+        .unwrap();
+
+    let (second_turn, second_lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    assert_ne!(second_turn.id, first_turn.id);
+    assert!(matches!(
+        store
+            .park_turn_for_agent_run_inbox(
+                second_turn.id,
+                child.id,
+                second_lease,
+                second_turn.steer_revision,
+                TurnCheckpointProgress {
+                    model_steps: 1,
+                    usage: Usage::default(),
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        Some(ParkTurnForAgentRunInboxOutcome::IdentityConflict)
+    ));
+    assert_eq!(
+        store.get_turn_run(second_turn.id).await.unwrap(),
+        Some(second_turn)
+    );
+}
+
+#[tokio::test]
+async fn sandbox_admission_rejects_cross_turn_identity_and_fk_corruption() {
+    let (_dir, store) = temp_store().await;
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    let (first_turn, first_lease) = live_turn_for_sandbox_test(&store, first_chat.id).await;
+    let (second_turn, second_lease) = live_turn_for_sandbox_test(&store, second_chat.id).await;
+    let call = CallId::new();
+    let child = match store
+        .admit_sandbox_agent_run(
+            first_turn.id,
+            call,
+            "owned by the first turn",
+            first_lease,
+            first_turn.steer_revision,
+            2,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        crate::AdmitSandboxAgentRunOutcome::Accepted { child, .. } => child,
+        outcome => panic!("unexpected admission outcome: {outcome:?}"),
+    };
+    assert!(matches!(
+        store
+            .admit_sandbox_agent_run(
+                second_turn.id,
+                call,
+                "owned by the first turn",
+                second_lease,
+                second_turn.steer_revision,
+                2,
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        Some(crate::AdmitSandboxAgentRunOutcome::IdentityConflict)
+    ));
+
+    let malformed = crate::db::entities::sandbox_agent_admission::ActiveModel {
+        child_run_id: Set(child.id.0),
+        parent_run_id: Set(second_turn.agent_run_id.0),
+        origin_turn_id: Set(second_turn.id.0),
+        chat_id: Set(second_chat.id.0),
+        spawn_call_id: Set(CallId::new().0),
+        admitted_at: Set(Utc::now()),
+    };
+    assert!(malformed.insert(&store.conn).await.is_err());
 }
 
 #[tokio::test]
@@ -464,23 +833,15 @@ async fn foreground_and_sandbox_runs_roundtrip_with_exact_idempotency() {
         AcceptAgentRunOutcome::Existing(existing) if existing == foreground
     ));
 
-    let sandbox_id = AgentRunId::new();
     let spawn_call_id = CallId::new();
-    let sandbox = match store
-        .accept_agent_run(
-            sandbox_id,
-            chat.id,
-            Some(foreground_id),
-            Some(spawn_call_id),
-            AgentRunExecution::Sandbox,
-            Some("Inspect the selected documents"),
-        )
-        .await
-        .unwrap()
-    {
-        AcceptAgentRunOutcome::Accepted(run) => run,
-        outcome => panic!("unexpected sandbox outcome: {outcome:?}"),
-    };
+    let sandbox = admit_sandbox_call_for_test(
+        &store,
+        chat.id,
+        spawn_call_id,
+        "Inspect the selected documents",
+    )
+    .await;
+    let sandbox_id = AgentRunId::sandbox_for_spawn_call(spawn_call_id);
     assert_eq!(sandbox.parent_id, Some(foreground_id));
     assert_eq!(sandbox.spawn_call_id, Some(spawn_call_id));
     assert_eq!(sandbox.depth, 1);
@@ -499,46 +860,29 @@ async fn foreground_and_sandbox_runs_roundtrip_with_exact_idempotency() {
     );
 
     assert!(matches!(
-        store
-            .accept_agent_run(
-                sandbox_id,
-                chat.id,
-                Some(foreground_id),
-                Some(spawn_call_id),
-                AgentRunExecution::Sandbox,
-                Some("Inspect the selected documents"),
-            )
-            .await
-            .unwrap(),
-        AcceptAgentRunOutcome::Existing(existing) if existing == sandbox
+        admit_sandbox_call_for_test(
+            &store,
+            chat.id,
+            spawn_call_id,
+            "Inspect the selected documents",
+        ).await,
+        existing if existing == sandbox
     ));
+    let (turn, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
     assert!(matches!(
         store
-            .accept_agent_run(
-                AgentRunId::new(),
-                chat.id,
-                Some(foreground_id),
-                Some(spawn_call_id),
-                AgentRunExecution::Sandbox,
-                Some("Inspect the selected documents"),
+            .admit_sandbox_agent_run(
+                turn.id,
+                spawn_call_id,
+                "Changed delegated task",
+                lease,
+                turn.steer_revision,
+                AgentRun::MAX_CONCURRENCY_LIMIT,
+                Utc::now(),
             )
             .await
             .unwrap(),
-        AcceptAgentRunOutcome::Existing(existing) if existing == sandbox
-    ));
-    assert!(matches!(
-        store
-            .accept_agent_run(
-                AgentRunId::new(),
-                chat.id,
-                Some(foreground_id),
-                Some(spawn_call_id),
-                AgentRunExecution::Sandbox,
-                Some("Changed delegated task"),
-            )
-            .await
-            .unwrap(),
-        AcceptAgentRunOutcome::IdentityConflict
+        Some(crate::AdmitSandboxAgentRunOutcome::IdentityConflict)
     ));
     assert_eq!(
         store.get_agent_run(sandbox_id).await.unwrap(),
@@ -571,52 +915,27 @@ async fn agent_run_acceptance_enforces_one_foreground_and_depth_one_children() {
         AcceptAgentRunOutcome::ForegroundExists(existing) if existing.id == foreground_id
     ));
 
-    let child_id = AgentRunId::new();
-    assert!(matches!(
-        store
-            .accept_agent_run(
-                child_id,
-                chat.id,
-                Some(foreground_id),
-                Some(CallId::new()),
-                AgentRunExecution::Sandbox,
-                Some("first child"),
-            )
-            .await
-            .unwrap(),
-        AcceptAgentRunOutcome::Accepted(_)
-    ));
-    assert!(matches!(
-        store
-            .accept_agent_run(
-                AgentRunId::new(),
-                chat.id,
-                Some(child_id),
-                Some(CallId::new()),
-                AgentRunExecution::Sandbox,
-                Some("forbidden grandchild"),
-            )
-            .await
-            .unwrap(),
-        AcceptAgentRunOutcome::ParentUnavailable
-    ));
+    let child_id = admit_sandbox_for_test(&store, chat.id, "first child")
+        .await
+        .id;
+    assert_eq!(
+        store.get_agent_run(child_id).await.unwrap().unwrap().depth,
+        AgentRun::MAX_DEPTH
+    );
 
     let other_chat = sample_chat();
     store.create_chat(&other_chat).await.unwrap();
-    assert!(matches!(
-        store
-            .accept_agent_run(
-                AgentRunId::new(),
-                other_chat.id,
-                Some(foreground_id),
-                Some(CallId::new()),
-                AgentRunExecution::Sandbox,
-                Some("cross-chat child"),
-            )
-            .await
-            .unwrap(),
-        AcceptAgentRunOutcome::ParentUnavailable
-    ));
+    assert!(store
+        .accept_agent_run(
+            AgentRunId::new(),
+            other_chat.id,
+            Some(foreground_id),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("cross-chat child"),
+        )
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -682,20 +1001,17 @@ async fn agent_run_acceptance_rejects_invalid_shapes_and_identity_reuse() {
         .await
         .is_err());
 
-    assert!(matches!(
-        store
-            .accept_agent_run(
-                foreground_id,
-                chat.id,
-                Some(foreground_id),
-                Some(CallId::new()),
-                AgentRunExecution::Sandbox,
-                Some("different immutable request"),
-            )
-            .await
-            .unwrap(),
-        AcceptAgentRunOutcome::IdentityConflict
-    ));
+    assert!(store
+        .accept_agent_run(
+            foreground_id,
+            chat.id,
+            Some(foreground_id),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("different immutable request"),
+        )
+        .await
+        .is_err());
     assert!(store
         .list_agent_runs(ChatId::new())
         .await
@@ -751,27 +1067,112 @@ async fn agent_run_schema_rejects_cross_chat_parentage() {
 }
 
 #[tokio::test]
+async fn scheduler_never_claims_a_sandbox_row_without_an_admission_receipt() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let parent_id = AgentRunId::foreground_for_chat(chat.id);
+    let spawn_call_id = CallId::new();
+    let child_id = AgentRunId::sandbox_for_spawn_call(spawn_call_id);
+    let now = Utc::now();
+    crate::db::entities::agent_run::ActiveModel {
+        id: Set(child_id.0),
+        chat_id: Set(chat.id.0),
+        parent_id: Set(Some(parent_id.0)),
+        parent_depth: Set(Some(0)),
+        spawn_call_id: Set(Some(spawn_call_id.0)),
+        execution: Set(AgentRunExecution::Sandbox.as_str().into()),
+        depth: Set(1),
+        status: Set(AgentRunStatus::Queued.as_str().into()),
+        input: Set(Some("receiptless corruption".into())),
+        attempt_count: Set(0),
+        max_attempts: Set(AgentRun::DEFAULT_MAX_ATTEMPTS),
+        claim_count: Set(0),
+        available_at: Set(now),
+        deadline_at: Set(Some(now + AgentRun::DEFAULT_MAX_DURATION)),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        started_at: Set(None),
+        finished_at: Set(None),
+        last_error_code: Set(None),
+        last_error_detail: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 4, 2)
+        .await
+        .unwrap()
+        .is_none());
+    let receiptless = store.get_agent_run(child_id).await.unwrap().unwrap();
+    assert_eq!(receiptless.status, AgentRunStatus::Queued);
+    assert_eq!(receiptless.claim_count, 0);
+
+    let claim_token = uuid::Uuid::new_v4();
+    let lease_expires_at = Utc::now() + Duration::minutes(5);
+    crate::db::entities::agent_run_claim::ActiveModel {
+        token: Set(claim_token),
+        agent_run_id: Set(Some(child_id.0)),
+        attempt_count: Set(Some(1)),
+        claim_count: Set(Some(1)),
+        claimed_at: Set(now),
+        lease_expires_at: Set(Some(lease_expires_at)),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+    crate::db::entities::agent_run::Entity::update_many()
+        .col_expr(
+            crate::db::entities::agent_run::Column::Status,
+            sea_orm::sea_query::Expr::value(AgentRunStatus::Running.as_str()),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::AttemptCount,
+            sea_orm::sea_query::Expr::value(1),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::ClaimCount,
+            sea_orm::sea_query::Expr::value(1),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Some(claim_token)),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::StartedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            crate::db::entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(crate::db::entities::agent_run::Column::Id.eq(child_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert!(store
+        .claim_agent_run(claim_token, Duration::minutes(1), 4, 2)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn sandbox_claims_are_exact_reclaimable_and_heartbeatable() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let foreground_id = AgentRunId::foreground_for_chat(chat.id);
-    let child_id = AgentRunId::new();
-    let _child = match store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(foreground_id),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("claim and heartbeat"),
-        )
+    let child_id = admit_sandbox_for_test(&store, chat.id, "claim and heartbeat")
         .await
-        .unwrap()
-    {
-        AcceptAgentRunOutcome::Accepted(run) => run,
-        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
-    };
+        .id;
 
     let first_token = uuid::Uuid::new_v4();
     let first = store
@@ -802,7 +1203,7 @@ async fn sandbox_claims_are_exact_reclaimable_and_heartbeatable() {
         .await
         .unwrap());
     assert!(!store
-        .heartbeat_agent_run(child_id, first_token, Duration::minutes(2))
+        .heartbeat_agent_run(child_id, first_token, Duration::minutes(1))
         .await
         .unwrap());
     assert!(!store
@@ -853,17 +1254,7 @@ async fn sandbox_claims_are_exact_reclaimable_and_heartbeatable() {
 
     let later_chat = sample_chat();
     store.create_chat(&later_chat).await.unwrap();
-    store
-        .accept_agent_run(
-            AgentRunId::new(),
-            later_chat.id,
-            Some(AgentRunId::foreground_for_chat(later_chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("later work"),
-        )
-        .await
-        .unwrap();
+    admit_sandbox_for_test(&store, later_chat.id, "later work").await;
     assert!(store
         .claim_agent_run(exhausted_scan, Duration::minutes(1), 2, 1)
         .await
@@ -876,18 +1267,9 @@ async fn sandbox_result_submission_is_fenced_and_idempotent() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let child_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("return a concise result"),
-        )
+    let child_id = admit_sandbox_for_test(&store, chat.id, "return a concise result")
         .await
-        .unwrap();
+        .id;
     let lease_token = uuid::Uuid::new_v4();
     store
         .claim_agent_run(lease_token, Duration::minutes(1), 1, 1)
@@ -954,18 +1336,9 @@ async fn sandbox_folder_proposal_is_typed_fenced_and_idempotent() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let child_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("ask the parent about folder consent"),
-        )
+    let child_id = admit_sandbox_for_test(&store, chat.id, "ask the parent about folder consent")
         .await
-        .unwrap();
+        .id;
     let lease_token = uuid::Uuid::new_v4();
     store
         .claim_agent_run(lease_token, Duration::minutes(1), 1, 1)
@@ -1148,18 +1521,9 @@ async fn child_inbox_consumption_atomically_wakes_a_parked_foreground_turn() {
         .turn
         .expect("foreground turn should claim");
     assert_eq!(running.id, queued.id);
-    let child_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(parent_id),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("research the question"),
-        )
+    let child_id = admit_sandbox_for_test(&store, chat.id, "research the question")
         .await
-        .unwrap();
+        .id;
     let progress = TurnCheckpointProgress {
         model_steps: 1,
         usage: Usage {
@@ -1272,19 +1636,10 @@ async fn parked_parent_cancellation_retires_a_delivered_child_without_an_orphan_
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
 
-    let child_id = AgentRunId::new();
     let parent_id = AgentRunId::foreground_for_chat(chat.id);
-    store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(parent_id),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("finish before the parent is cancelled"),
-        )
+    let child_id = admit_sandbox_for_test(&store, chat.id, "finish before the parent is cancelled")
         .await
-        .unwrap();
+        .id;
     let parked = park_foreground_turn_on_child(&store, chat.id, child_id).await;
     let child_lease = uuid::Uuid::new_v4();
     assert_eq!(
@@ -1335,18 +1690,13 @@ async fn parked_parent_cancellation_cascades_to_an_unclaimed_sandbox_child() {
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
 
-    let child_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("this work should be fenced before it starts"),
-        )
-        .await
-        .unwrap();
+    let child_id = admit_sandbox_for_test(
+        &store,
+        chat.id,
+        "this work should be fenced before it starts",
+    )
+    .await
+    .id;
     let parked = park_foreground_turn_on_child(&store, chat.id, child_id).await;
     assert!(matches!(
         store
@@ -1380,19 +1730,10 @@ async fn failed_child_result_is_persisted_in_the_resumed_parent_transcript() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let child_id = AgentRunId::new();
     let parent_id = AgentRunId::foreground_for_chat(chat.id);
-    store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(parent_id),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("this task will fail"),
-        )
+    let child_id = admit_sandbox_for_test(&store, chat.id, "this task will fail")
         .await
-        .unwrap();
+        .id;
     crate::db::entities::agent_run::Entity::update_many()
         .col_expr(
             crate::db::entities::agent_run::Column::MaxAttempts,
@@ -1558,18 +1899,9 @@ async fn sandbox_cancellation_fences_running_work_and_recovers_exact_acknowledge
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let queued_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            queued_id,
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("cancel before claim"),
-        )
+    let queued_id = admit_sandbox_for_test(&store, chat.id, "cancel before claim")
         .await
-        .unwrap();
+        .id;
     assert!(matches!(
         store.request_agent_run_cancellation(queued_id).await.unwrap(),
         Some(RequestAgentRunCancellationOutcome::Cancelled(run)) if run.status == AgentRunStatus::Cancelled
@@ -1584,18 +1916,9 @@ async fn sandbox_cancellation_fences_running_work_and_recovers_exact_acknowledge
         .unwrap()
         .is_none());
 
-    let running_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            running_id,
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("cancel while running"),
-        )
+    let running_id = admit_sandbox_for_test(&store, chat.id, "cancel while running")
         .await
-        .unwrap();
+        .id;
     let lease_token = uuid::Uuid::new_v4();
     store
         .claim_agent_run(lease_token, Duration::minutes(1), 1, 1)
@@ -1643,20 +1966,10 @@ async fn expired_sandbox_cancellation_is_terminal_and_cannot_fake_worker_acknowl
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let parent_id = AgentRunId::foreground_for_chat(chat.id);
-
-    let expired_before_request = AgentRunId::new();
-    store
-        .accept_agent_run(
-            expired_before_request,
-            chat.id,
-            Some(parent_id),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("cancel after lease expiry"),
-        )
-        .await
-        .unwrap();
+    let expired_before_request =
+        admit_sandbox_for_test(&store, chat.id, "cancel after lease expiry")
+            .await
+            .id;
     store
         .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 1, 1)
         .await
@@ -1677,18 +1990,10 @@ async fn expired_sandbox_cancellation_is_terminal_and_cannot_fake_worker_acknowl
         .unwrap()
         .is_none());
 
-    let expired_after_request = AgentRunId::new();
-    store
-        .accept_agent_run(
-            expired_after_request,
-            chat.id,
-            Some(parent_id),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("expire after cancellation request"),
-        )
-        .await
-        .unwrap();
+    let expired_after_request =
+        admit_sandbox_for_test(&store, chat.id, "expire after cancellation request")
+            .await
+            .id;
     let lease_token = uuid::Uuid::new_v4();
     store
         .claim_agent_run(lease_token, Duration::minutes(1), 1, 1)
@@ -1719,36 +2024,18 @@ async fn unavailable_parent_rejects_result_without_holding_the_scheduler_lock() 
     let other_chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
     store.create_chat(&other_chat).await.unwrap();
-    let child_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("parent may finish first"),
-        )
+    let child_id = admit_sandbox_for_test(&store, chat.id, "parent may finish first")
         .await
-        .unwrap();
+        .id;
     let lease_token = uuid::Uuid::new_v4();
     store
         .claim_agent_run(lease_token, Duration::minutes(1), 2, 1)
         .await
         .unwrap()
         .unwrap();
-    let other_child_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            other_child_id,
-            other_chat.id,
-            Some(AgentRunId::foreground_for_chat(other_chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("scheduler remains usable"),
-        )
+    let other_child_id = admit_sandbox_for_test(&store, other_chat.id, "scheduler remains usable")
         .await
-        .unwrap();
+        .id;
     let now = Utc::now();
     crate::db::entities::agent_run::Entity::update_many()
         .col_expr(
@@ -1799,21 +2086,7 @@ async fn sandbox_claims_enforce_global_and_per_chat_limits() {
         (first_chat.id, "first-b"),
         (second_chat.id, "second-a"),
     ] {
-        let run = match store
-            .accept_agent_run(
-                AgentRunId::new(),
-                chat_id,
-                Some(AgentRunId::foreground_for_chat(chat_id)),
-                Some(CallId::new()),
-                AgentRunExecution::Sandbox,
-                Some(task),
-            )
-            .await
-            .unwrap()
-        {
-            AcceptAgentRunOutcome::Accepted(run) => run,
-            outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
-        };
+        let run = admit_sandbox_for_test(&store, chat_id, task).await;
         accepted.push(run);
     }
 
@@ -1840,22 +2113,8 @@ async fn sandbox_claim_terminalizes_expired_deadlines() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let child_id = AgentRunId::new();
-    let child = match store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("deadline"),
-        )
-        .await
-        .unwrap()
-    {
-        AcceptAgentRunOutcome::Accepted(run) => run,
-        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
-    };
+    let child = admit_sandbox_for_test(&store, chat.id, "deadline").await;
+    let child_id = child.id;
     force_expired_agent_deadline(&store, child.id).await;
     assert!(store
         .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 1, 1)
@@ -1882,35 +2141,18 @@ async fn expired_cancelling_sandbox_run_is_reaped_and_releases_capacity() {
     let other_chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
     store.create_chat(&other_chat).await.unwrap();
-    let child_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("cancellation reaper"),
-        )
+    let child_id = admit_sandbox_for_test(&store, chat.id, "cancellation reaper")
         .await
-        .unwrap();
+        .id;
     store
         .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 2, 1)
         .await
         .unwrap()
         .unwrap();
-    let other_child_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            other_child_id,
-            other_chat.id,
-            Some(AgentRunId::foreground_for_chat(other_chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("capacity-consuming live worker"),
-        )
-        .await
-        .unwrap();
+    let other_child_id =
+        admit_sandbox_for_test(&store, other_chat.id, "capacity-consuming live worker")
+            .await
+            .id;
     let other = store
         .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 2, 1)
         .await
@@ -1947,21 +2189,7 @@ async fn concurrent_sandbox_claimers_respect_both_limits() {
     store.create_chat(&first_chat).await.unwrap();
     store.create_chat(&second_chat).await.unwrap();
     for chat_id in [first_chat.id, first_chat.id, second_chat.id, second_chat.id] {
-        let _accepted = match store
-            .accept_agent_run(
-                AgentRunId::new(),
-                chat_id,
-                Some(AgentRunId::foreground_for_chat(chat_id)),
-                Some(CallId::new()),
-                AgentRunExecution::Sandbox,
-                Some("concurrent claim"),
-            )
-            .await
-            .unwrap()
-        {
-            AcceptAgentRunOutcome::Accepted(run) => run,
-            outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
-        };
+        let _accepted = admit_sandbox_for_test(&store, chat_id, "concurrent claim").await;
     }
 
     let store = std::sync::Arc::new(store);
