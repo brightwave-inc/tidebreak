@@ -1269,6 +1269,18 @@ pub enum AgentRunCancellationReason {
     ParentTurnCancelled,
 }
 
+/// Immutable executor identity retained by a sandbox cancellation request.
+///
+/// This is operational fencing data for trusted workers and is never part of
+/// the renderer-facing cancellation response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentRunCancellationSignal {
+    pub agent_run_id: crate::id::AgentRunId,
+    pub lease_token: Uuid,
+    pub attempt_count: i32,
+    pub claim_count: i32,
+}
+
 impl AgentRunCancellationReason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {

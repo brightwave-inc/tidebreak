@@ -15,9 +15,9 @@ use tokio::sync::broadcast::error::RecvError;
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
     ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome, Message as StoredMessage, MessageId,
-    Project, ProjectId, RequestTurnCancellationOutcome, Role, SandboxToolCall,
-    SandboxToolCallStatus, SecretProvider, SequencedEvent, Store, ToolCallExecution,
-    ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
+    Project, ProjectId, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Role,
+    SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store,
+    ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -770,6 +770,158 @@ pub async fn list_agent_runs(
     Ok(Json(snapshots))
 }
 
+/// Closed renderer-safe acknowledgement for sandbox cancellation.
+#[derive(Debug, Serialize)]
+pub struct AgentRunCancellationSnapshot {
+    pub id: openwave_core::AgentRunId,
+    pub status: AgentRunCancellationStatus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunCancellationStatus {
+    Cancelling,
+    Cancelled,
+}
+
+/// `POST /chats/{chat_id}/agent-runs/{run_id}/cancel` — durably request
+/// cancellation of one sandbox child.
+///
+/// The durable transition commits before any process-local signal is sent.
+/// Exact retries of cancelling or cancelled work remain accepted. Foreground,
+/// wrong-chat, successful, and failed runs are rejected without exposing
+/// executor details.
+pub async fn post_agent_run_cancel(
+    State(state): State<AppState>,
+    Path((chat_id, run_id)): Path<(ChatId, openwave_core::AgentRunId)>,
+) -> Result<(StatusCode, Json<AgentRunCancellationSnapshot>), ServerError> {
+    if state.store.get_chat(chat_id).await?.is_none() {
+        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
+    }
+    let Some(run) = state.store.get_agent_run(run_id).await? else {
+        return Err(ServerError::conflict("sandbox run is not cancellable"));
+    };
+    if run.chat_id != chat_id || run.execution != AgentRunExecution::Sandbox {
+        return Err(ServerError::conflict("sandbox run is not cancellable"));
+    }
+
+    let mut outcome = None;
+    for _ in 0..8 {
+        if let Some(resolved) = state.store.request_agent_run_cancellation(run_id).await? {
+            outcome = Some(resolved);
+            break;
+        }
+        let Some(current) = state.store.get_agent_run(run_id).await? else {
+            return Err(ServerError::conflict("sandbox run is not cancellable"));
+        };
+        if current.chat_id != chat_id || current.execution != AgentRunExecution::Sandbox {
+            return Err(ServerError::conflict("sandbox run is not cancellable"));
+        }
+        tokio::task::yield_now().await;
+    }
+    let Some(outcome) = outcome else {
+        return Err(ServerError::conflict(
+            "sandbox run cancellation could not be serialized",
+        ));
+    };
+
+    let (run, status) = match outcome {
+        RequestAgentRunCancellationOutcome::Requested(run) => {
+            let status = AgentRunCancellationStatus::Cancelling;
+            (run, status)
+        }
+        RequestAgentRunCancellationOutcome::Cancelled(run) => {
+            (run, AgentRunCancellationStatus::Cancelled)
+        }
+        RequestAgentRunCancellationOutcome::Existing(run)
+            if run.status == AgentRunStatus::Cancelled =>
+        {
+            (run, AgentRunCancellationStatus::Cancelled)
+        }
+        RequestAgentRunCancellationOutcome::Existing(run)
+            if run.status == AgentRunStatus::Cancelling =>
+        {
+            (run, AgentRunCancellationStatus::Cancelling)
+        }
+        RequestAgentRunCancellationOutcome::AlreadyTerminal(_)
+        | RequestAgentRunCancellationOutcome::Existing(_) => {
+            return Err(ServerError::conflict("sandbox run is not cancellable"));
+        }
+    };
+
+    signal_sandbox_run_after_commit(&state, run.id).await;
+    state.agent_run_wake.notify_one();
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AgentRunCancellationSnapshot { id: run.id, status }),
+    ))
+}
+
+/// Best-effort local acceleration after a sandbox cancellation has committed.
+///
+/// The immutable receipts provide exact attempt identities. Missing receipts,
+/// transient read failures, and absent local workers are harmless because the
+/// durable state machine remains authoritative and its workers will eventually
+/// observe the cancellation through heartbeats, lease expiry, or terminal
+/// write fencing.
+async fn signal_sandbox_run_after_commit(state: &AppState, run_id: openwave_core::AgentRunId) {
+    if let Ok(Some(signal)) = state.store.get_agent_run_cancellation_signal(run_id).await {
+        state
+            .sandbox_attempts
+            .cancel_model(run_id, signal.lease_token);
+    }
+    // Cancelling a waiting run atomically terminalizes its live tool call and
+    // records the exact executor lease. Never infer that lease from mutable
+    // call state or signal every call belonging to a run.
+    if let Ok(calls) = state
+        .store
+        .list_sandbox_tool_calls_for_agent_run(run_id)
+        .await
+    {
+        for call in calls {
+            if call.status != SandboxToolCallStatus::Cancelled {
+                continue;
+            }
+            if let Ok(Some(receipt)) = state.store.get_sandbox_tool_call_receipt(call.id).await {
+                if receipt.status == SandboxToolCallStatus::Cancelled {
+                    state.sandbox_attempts.cancel_search(
+                        call.id,
+                        run_id,
+                        receipt.executor_lease_token,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Signal only children durably owned by the cancelled origin turn.
+async fn signal_origin_sandbox_runs_after_commit(
+    state: &AppState,
+    chat_id: ChatId,
+    origin_turn_id: TurnId,
+) {
+    let Ok(runs) = state.store.list_agent_runs(chat_id).await else {
+        return;
+    };
+    for run in runs {
+        if run.execution != AgentRunExecution::Sandbox
+            || !matches!(
+                run.status,
+                AgentRunStatus::Cancelling | AgentRunStatus::Cancelled
+            )
+        {
+            continue;
+        }
+        let Ok(Some(admission)) = state.store.get_sandbox_agent_admission(run.id).await else {
+            continue;
+        };
+        if admission.origin_turn_id == origin_turn_id {
+            signal_sandbox_run_after_commit(state, run.id).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod activity_tests {
     use super::*;
@@ -1081,6 +1233,10 @@ pub async fn post_cancel(
         let _ = state.events.sender(id).send(event);
     }
     state.active_turns.cancel(id, body.turn_id);
+    // The turn transaction has already committed its child cancellation
+    // cascade. Exact local handles now reduce provider shutdown latency without
+    // taking part in the durable decision.
+    signal_origin_sandbox_runs_after_commit(&state, id, body.turn_id).await;
     state.turn_job_wake.notify_one();
     // A parked-parent cancellation can fence a queued or running sandbox
     // child. Wake its worker promptly; durable claims remain the source of

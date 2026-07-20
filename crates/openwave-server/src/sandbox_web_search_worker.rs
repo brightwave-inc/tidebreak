@@ -18,6 +18,7 @@ use openwave_web_search::{
 use serde::Deserialize;
 use tokio::sync::Notify;
 
+use crate::state::SandboxAttemptGuard;
 use crate::web_search;
 
 const WEB_SEARCH_TOOL: &str = "web_search";
@@ -95,28 +96,48 @@ pub(crate) struct SandboxWebSearchWorker {
     store: Arc<dyn Store>,
     search: Arc<dyn SandboxWebSearch>,
     wake: Arc<Notify>,
+    attempts: Arc<SandboxAttemptGuard>,
     config: SandboxWebSearchWorkerConfig,
 }
 
 impl SandboxWebSearchWorker {
-    pub(crate) fn new(
+    pub(crate) fn with_attempts(
         store: Arc<dyn Store>,
         secrets: Arc<dyn openwave_core::SecretProvider>,
         wake: Arc<Notify>,
+        attempts: Arc<SandboxAttemptGuard>,
         config: SandboxWebSearchWorkerConfig,
     ) -> Self {
-        Self::with_search(
+        Self::with_search_and_attempts(
             store.clone(),
             Arc::new(HostSandboxWebSearch { store, secrets }),
             wake,
+            attempts,
             config,
         )
     }
 
+    #[cfg(test)]
     fn with_search(
         store: Arc<dyn Store>,
         search: Arc<dyn SandboxWebSearch>,
         wake: Arc<Notify>,
+        config: SandboxWebSearchWorkerConfig,
+    ) -> Self {
+        Self::with_search_and_attempts(
+            store,
+            search,
+            wake,
+            Arc::new(SandboxAttemptGuard::default()),
+            config,
+        )
+    }
+
+    fn with_search_and_attempts(
+        store: Arc<dyn Store>,
+        search: Arc<dyn SandboxWebSearch>,
+        wake: Arc<Notify>,
+        attempts: Arc<SandboxAttemptGuard>,
         config: SandboxWebSearchWorkerConfig,
     ) -> Self {
         assert!(!config.lease.is_zero());
@@ -125,6 +146,7 @@ impl SandboxWebSearchWorker {
             store,
             search,
             wake,
+            attempts,
             config,
         }
     }
@@ -199,50 +221,85 @@ impl SandboxWebSearchWorker {
         call: SandboxToolCall,
         lease_token: uuid::Uuid,
     ) -> Result<SandboxWebSearchWorkerOutcome> {
+        let Some(active_attempt) =
+            self.attempts
+                .register_search(call.id, call.agent_run_id, lease_token)
+        else {
+            return Ok(SandboxWebSearchWorkerOutcome::LeaseLost(call.id));
+        };
+        let cancel = active_attempt.cancel_token();
+        // Close cancel-before-register and prove this exact executor lease
+        // before resolving credentials or beginning outbound work.
+        let Some(_) = self
+            .store
+            .heartbeat_sandbox_tool_call(call.id, lease_token, chrono_duration(self.config.lease)?)
+            .await?
+        else {
+            return Ok(SandboxWebSearchWorkerOutcome::LeaseLost(call.id));
+        };
         let resolution = match parse_web_search_request(&call) {
             Err(resolution) => resolution,
-            Ok(request) => match self.search.resolve().await {
-                Ok(None) => failed_resolution(
-                    "web_search_disabled",
-                    "Web search is not configured for this host.",
-                ),
-                Err(SandboxWebSearchError::Failed) => {
-                    failed_resolution("web_search_failed", "Web search could not complete.")
+            Ok(request) => match {
+                let resolve = self.search.resolve();
+                tokio::pin!(resolve);
+                tokio::select! {
+                    resolved = &mut resolve => Some(resolved),
+                    _ = cancel.cancelled() => None,
                 }
-                Ok(Some(provider)) => {
-                    // This is the final database-clock cancellation/deadline/lease
-                    // proof after settings and credentials resolve, immediately
-                    // before the provider can observe an outbound request.
-                    let Some(expires_at) = self
-                        .store
-                        .heartbeat_sandbox_tool_call(
-                            call.id,
-                            lease_token,
-                            chrono_duration(
-                                self.config.lease.saturating_add(Duration::from_millis(1)),
-                            )?,
-                        )
-                        .await?
-                    else {
-                        return Ok(SandboxWebSearchWorkerOutcome::LeaseLost(call.id));
-                    };
-                    match remaining_execution_time(expires_at) {
-                        None => return Ok(SandboxWebSearchWorkerOutcome::LeaseLost(call.id)),
-                        Some(timeout) => {
-                            match tokio::time::timeout(timeout, provider.search(request)).await {
-                                Ok(Ok(response)) => serialize_response(response),
-                                Ok(Err(_)) => failed_resolution(
-                                    "web_search_failed",
-                                    "Web search could not complete.",
-                                ),
-                                Err(_) => failed_resolution(
-                                    "web_search_timed_out",
-                                    "Web search did not complete before its sandbox lease expired.",
-                                ),
-                            }
+            } {
+                None => return Ok(SandboxWebSearchWorkerOutcome::LeaseLost(call.id)),
+                Some(resolved) => match resolved {
+                    Ok(None) => failed_resolution(
+                        "web_search_disabled",
+                        "Web search is not configured for this host.",
+                    ),
+                    Err(SandboxWebSearchError::Failed) => {
+                        failed_resolution("web_search_failed", "Web search could not complete.")
+                    }
+                    Ok(Some(provider)) => {
+                        // This is the final database-clock cancellation/deadline/lease
+                        // proof after settings and credentials resolve, immediately
+                        // before the provider can observe an outbound request.
+                        let Some(expires_at) = self
+                            .store
+                            .heartbeat_sandbox_tool_call(
+                                call.id,
+                                lease_token,
+                                chrono_duration(
+                                    self.config.lease.saturating_add(Duration::from_millis(1)),
+                                )?,
+                            )
+                            .await?
+                        else {
+                            return Ok(SandboxWebSearchWorkerOutcome::LeaseLost(call.id));
+                        };
+                        match remaining_execution_time(expires_at) {
+                            None => return Ok(SandboxWebSearchWorkerOutcome::LeaseLost(call.id)),
+                            Some(timeout) => match {
+                                let search =
+                                    tokio::time::timeout(timeout, provider.search(request));
+                                tokio::pin!(search);
+                                tokio::select! {
+                                    result = &mut search => Some(result),
+                                    _ = cancel.cancelled() => None,
+                                }
+                            } {
+                                None => return Ok(SandboxWebSearchWorkerOutcome::LeaseLost(call.id)),
+                                Some(result) => match result {
+                                    Ok(Ok(response)) => serialize_response(response),
+                                    Ok(Err(_)) => failed_resolution(
+                                        "web_search_failed",
+                                        "Web search could not complete.",
+                                    ),
+                                    Err(_) => failed_resolution(
+                                        "web_search_timed_out",
+                                        "Web search did not complete before its sandbox lease expired.",
+                                    ),
+                                },
+                            },
                         }
                     }
-                }
+                },
             },
         };
         match self
@@ -357,6 +414,7 @@ fn chrono_duration(duration: Duration) -> Result<chrono::Duration> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 
     use openwave_core::{
@@ -375,6 +433,52 @@ mod tests {
     struct FakeProvider {
         requests: Mutex<Vec<WebSearchRequest>>,
         response: WebSearchResponse,
+    }
+
+    struct DropMarker(Arc<AtomicBool>);
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct BlockingResolution {
+        entered: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl SandboxWebSearch for BlockingResolution {
+        async fn resolve(
+            &self,
+        ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, SandboxWebSearchError>
+        {
+            let _drop = DropMarker(self.dropped.clone());
+            self.entered.notify_one();
+            futures::future::pending().await
+        }
+    }
+
+    struct BlockingSearchProvider {
+        entered: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl WebSearchProvider for BlockingSearchProvider {
+        fn kind(&self) -> WebSearchProviderKind {
+            WebSearchProviderKind::Exa
+        }
+
+        async fn search(
+            &self,
+            _request: WebSearchRequest,
+        ) -> std::result::Result<WebSearchResponse, openwave_web_search::WebSearchError> {
+            let _drop = DropMarker(self.dropped.clone());
+            self.entered.notify_one();
+            futures::future::pending().await
+        }
     }
 
     #[async_trait]
@@ -643,6 +747,148 @@ mod tests {
             Some("web_search_output_invalid")
         );
         assert!(receipt.result.len() <= openwave_core::SandboxToolCall::MAX_RESULT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn local_signal_drops_web_search_resolution_and_late_work_stays_fenced() {
+        let (store, _dir) = test_store().await;
+        let call = checkpoint(
+            &store,
+            WEB_SEARCH_TOOL,
+            serde_json::json!({"query":"cancel resolution"}),
+        )
+        .await;
+        let lease = uuid::Uuid::new_v4();
+        let claimed = match store
+            .claim_sandbox_tool_call(call.id, lease, chrono::Duration::minutes(5))
+            .await
+            .unwrap()
+        {
+            ClaimSandboxToolCallOutcome::Claimed(call) => call,
+            outcome => panic!("unexpected claim: {outcome:?}"),
+        };
+        let entered = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(SandboxAttemptGuard::default());
+        let worker = SandboxWebSearchWorker::with_search_and_attempts(
+            store.clone(),
+            Arc::new(BlockingResolution {
+                entered: entered.clone(),
+                dropped: dropped.clone(),
+            }),
+            Arc::new(Notify::new()),
+            attempts.clone(),
+            SandboxWebSearchWorkerConfig::default(),
+        );
+        let entered_wait = entered.notified();
+        let execution = tokio::spawn(async move { worker.process(claimed, lease).await });
+        entered_wait.await;
+        assert!(matches!(
+            store
+                .request_agent_run_cancellation(call.agent_run_id)
+                .await
+                .unwrap(),
+            Some(RequestAgentRunCancellationOutcome::Cancelled(_))
+        ));
+        let receipt = store
+            .get_sandbox_tool_call_receipt(call.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(attempts.cancel_search(call.id, call.agent_run_id, receipt.executor_lease_token));
+        assert_eq!(
+            execution.await.unwrap().unwrap(),
+            SandboxWebSearchWorkerOutcome::LeaseLost(call.id)
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(matches!(
+            store
+                .resolve_sandbox_tool_call(
+                    call.id,
+                    lease,
+                    &ToolCallResolution::Completed {
+                        result: "late".into()
+                    }
+                )
+                .await
+                .unwrap(),
+            openwave_core::ResolveSandboxToolCallOutcome::LeaseLost
+                | openwave_core::ResolveSandboxToolCallOutcome::AlreadyTerminal
+        ));
+        assert_eq!(
+            store
+                .get_sandbox_tool_call_receipt(call.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            openwave_core::SandboxToolCallStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn local_signal_drops_web_search_http_and_late_work_stays_fenced() {
+        let (store, _dir) = test_store().await;
+        let call = checkpoint(
+            &store,
+            WEB_SEARCH_TOOL,
+            serde_json::json!({"query":"cancel HTTP"}),
+        )
+        .await;
+        let lease = uuid::Uuid::new_v4();
+        let claimed = match store
+            .claim_sandbox_tool_call(call.id, lease, chrono::Duration::minutes(5))
+            .await
+            .unwrap()
+        {
+            ClaimSandboxToolCallOutcome::Claimed(call) => call,
+            outcome => panic!("unexpected claim: {outcome:?}"),
+        };
+        let entered = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(SandboxAttemptGuard::default());
+        let worker = SandboxWebSearchWorker::with_search_and_attempts(
+            store.clone(),
+            Arc::new(FakeSearch {
+                resolution: Ok(Some(Arc::new(BlockingSearchProvider {
+                    entered: entered.clone(),
+                    dropped: dropped.clone(),
+                }))),
+            }),
+            Arc::new(Notify::new()),
+            attempts.clone(),
+            SandboxWebSearchWorkerConfig::default(),
+        );
+        let entered_wait = entered.notified();
+        let execution = tokio::spawn(async move { worker.process(claimed, lease).await });
+        entered_wait.await;
+        assert!(matches!(
+            store
+                .request_agent_run_cancellation(call.agent_run_id)
+                .await
+                .unwrap(),
+            Some(RequestAgentRunCancellationOutcome::Cancelled(_))
+        ));
+        let receipt = store
+            .get_sandbox_tool_call_receipt(call.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(attempts.cancel_search(call.id, call.agent_run_id, receipt.executor_lease_token));
+        assert_eq!(
+            execution.await.unwrap().unwrap(),
+            SandboxWebSearchWorkerOutcome::LeaseLost(call.id)
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(
+            store
+                .get_sandbox_tool_call_receipt(call.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            openwave_core::SandboxToolCallStatus::Cancelled
+        );
     }
 
     #[tokio::test]

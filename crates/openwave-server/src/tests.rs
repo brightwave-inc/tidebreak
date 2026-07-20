@@ -1797,6 +1797,42 @@ async fn test_app() -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
     test_app_with(Arc::new(FakeProvider)).await
 }
 
+async fn test_app_with_state() -> (
+    Router,
+    Arc<str>,
+    AppState,
+    Arc<dyn Store>,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("stateful-test.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    (app(state.clone()), token, state, store, dir)
+}
+
 async fn admit_sandbox_for_test(
     store: &Arc<dyn Store>,
     chat_id: ChatId,
@@ -6292,6 +6328,346 @@ async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
     assert_eq!(
         snapshot.get("activity"),
         Some(&serde_json::json!({"kind": "web_search", "status": "running"}))
+    );
+}
+
+#[tokio::test]
+async fn sandbox_cancel_route_is_authenticated_closed_and_idempotent() {
+    let (router, token, _state, store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let other_chat = make_chat(&router, &bearer).await;
+    let run = admit_sandbox_for_test(&store, chat.id, "cancel me").await;
+    let uri = format!("/chats/{}/agent-runs/{}/cancel", chat.id, run.id);
+
+    let unauthenticated = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let wrong_chat = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/agent-runs/{}/cancel", other_chat.id, run.id),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(wrong_chat.status(), StatusCode::CONFLICT);
+
+    let foreground = post_json(
+        &router,
+        &bearer,
+        &format!(
+            "/chats/{}/agent-runs/{}/cancel",
+            chat.id,
+            openwave_core::AgentRunId::foreground_for_chat(chat.id)
+        ),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(foreground.status(), StatusCode::CONFLICT);
+
+    for expected_status in ["cancelled", "cancelled"] {
+        let response = post_json(&router, &bearer, &uri, serde_json::json!({})).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(
+            body,
+            serde_json::json!({"id": run.id, "status": expected_status})
+        );
+        assert_eq!(body.as_object().unwrap().len(), 2);
+        let encoded = body.to_string();
+        for private in ["lease", "executor", "attempt", "claim", "reason"] {
+            assert!(!encoded.contains(private), "response leaked {private}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn sandbox_cancel_route_rejects_completed_and_failed_runs() {
+    let (router, token, _state, store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    let completed = admit_sandbox_for_test(&store, chat.id, "complete").await;
+    let completed_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(completed_lease, chrono::Duration::minutes(5), 1, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        completed.id
+    );
+    store
+        .submit_agent_run_result(completed.id, completed_lease, "done")
+        .await
+        .unwrap()
+        .expect("completion commits");
+
+    let failed_chat = make_chat(&router, &bearer).await;
+    let failed = admit_sandbox_for_test(&store, failed_chat.id, "fail").await;
+    for attempt in 1..=openwave_core::AgentRun::DEFAULT_MAX_ATTEMPTS {
+        let lease = uuid::Uuid::new_v4();
+        assert_eq!(
+            store
+                .claim_agent_run(lease, chrono::Duration::minutes(5), 1, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            failed.id
+        );
+        store
+            .fail_agent_run(
+                failed.id,
+                lease,
+                "test_failure",
+                "bounded detail",
+                chrono::Duration::milliseconds(1),
+            )
+            .await
+            .unwrap()
+            .expect("failure transition commits");
+        if attempt < openwave_core::AgentRun::DEFAULT_MAX_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+    assert_eq!(
+        store
+            .get_agent_run(failed.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AgentRunStatus::Failed
+    );
+
+    for (chat_id, run_id) in [(chat.id, completed.id), (failed_chat.id, failed.id)] {
+        let response = post_json(
+            &router,
+            &bearer,
+            &format!("/chats/{chat_id}/agent-runs/{run_id}/cancel"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+}
+
+#[tokio::test]
+async fn sandbox_cancel_route_signals_only_the_durable_model_receipt() {
+    let (router, token, state, store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let run = admit_sandbox_for_test(&store, chat.id, "running").await;
+    let lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(lease, chrono::Duration::minutes(5), 1, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        run.id
+    );
+    let active = state
+        .sandbox_attempts
+        .register_model(run.id, lease)
+        .expect("register exact model attempt");
+    let unrelated_run = openwave_core::AgentRunId::sandbox_for_spawn_call(CallId::new());
+    let unrelated = state
+        .sandbox_attempts
+        .register_model(unrelated_run, lease)
+        .expect("register unrelated model attempt");
+
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/agent-runs/{}/cancel", chat.id, run.id),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        json_body::<serde_json::Value>(response).await,
+        serde_json::json!({"id": run.id, "status": "cancelling"})
+    );
+    assert!(active.cancel_token().is_cancelled());
+    assert!(!unrelated.cancel_token().is_cancelled());
+    assert_eq!(
+        store.get_agent_run(run.id).await.unwrap().unwrap().status,
+        AgentRunStatus::Cancelling,
+        "the durable transition commits before the local accelerator is observable"
+    );
+
+    let retry = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/agent-runs/{}/cancel", chat.id, run.id),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(retry.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        json_body::<serde_json::Value>(retry).await,
+        serde_json::json!({"id": run.id, "status": "cancelling"})
+    );
+    assert!(!unrelated.cancel_token().is_cancelled());
+}
+
+#[tokio::test]
+async fn expired_model_cancellation_still_signals_its_immutable_receipt() {
+    let (router, token, state, store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let run = admit_sandbox_for_test(&store, chat.id, "expired").await;
+    let lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(lease, chrono::Duration::milliseconds(1), 1, 1)
+        .await
+        .unwrap()
+        .expect("claim run");
+    let active = state
+        .sandbox_attempts
+        .register_model(run.id, lease)
+        .expect("register expired model attempt");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/agent-runs/{}/cancel", chat.id, run.id),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        json_body::<serde_json::Value>(response).await["status"],
+        "cancelled"
+    );
+    assert!(active.cancel_token().is_cancelled());
+}
+
+#[tokio::test]
+async fn parent_turn_cancellation_signals_its_exact_running_child_model() {
+    let (router, token, state, store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let run = admit_sandbox_for_test(&store, chat.id, "parent-owned model").await;
+    let admission = store
+        .get_sandbox_agent_admission(run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(lease, chrono::Duration::minutes(5), 1, 1)
+        .await
+        .unwrap()
+        .expect("claim child");
+    let active = state
+        .sandbox_attempts
+        .register_model(run.id, lease)
+        .expect("register model");
+    let unrelated_run = openwave_core::AgentRunId::sandbox_for_spawn_call(CallId::new());
+    let unrelated = state
+        .sandbox_attempts
+        .register_model(unrelated_run, lease)
+        .expect("register unrelated model");
+
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/cancel", chat.id),
+        serde_json::json!({"turn_id": admission.origin_turn_id}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(active.cancel_token().is_cancelled());
+    assert!(!unrelated.cancel_token().is_cancelled());
+    assert_eq!(
+        store.get_agent_run(run.id).await.unwrap().unwrap().status,
+        AgentRunStatus::Cancelling
+    );
+}
+
+#[tokio::test]
+async fn parent_turn_cancellation_signals_its_exact_running_child_search() {
+    let (router, token, state, store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let run = admit_sandbox_for_test(&store, chat.id, "parent-owned search").await;
+    let admission = store
+        .get_sandbox_agent_admission(run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let model_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(model_lease, chrono::Duration::minutes(5), 1, 1)
+        .await
+        .unwrap()
+        .expect("claim child");
+    let request = SandboxToolCallRequest {
+        id: CallId::new(),
+        agent_run_id: run.id,
+        chat_id: chat.id,
+        provider_id: "provider-call".into(),
+        name: openwave_core::SANDBOX_WEB_SEARCH_TOOL.into(),
+        arguments: serde_json::json!({"query":"parent cancellation"}),
+    };
+    assert!(matches!(
+        store
+            .park_agent_run_for_sandbox_tool_call(run.id, model_lease, &request)
+            .await
+            .unwrap(),
+        ParkSandboxToolCallOutcome::Parked { .. }
+    ));
+    let search_lease = uuid::Uuid::new_v4();
+    assert!(matches!(
+        store
+            .claim_sandbox_tool_call(request.id, search_lease, chrono::Duration::minutes(5))
+            .await
+            .unwrap(),
+        openwave_core::ClaimSandboxToolCallOutcome::Claimed(_)
+    ));
+    let active = state
+        .sandbox_attempts
+        .register_search(request.id, run.id, search_lease)
+        .expect("register exact search");
+    let stale = state
+        .sandbox_attempts
+        .register_search(request.id, run.id, uuid::Uuid::new_v4())
+        .expect("register stale search identity");
+
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/cancel", chat.id),
+        serde_json::json!({"turn_id": admission.origin_turn_id}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(active.cancel_token().is_cancelled());
+    assert!(!stale.cancel_token().is_cancelled());
+    assert_eq!(
+        store
+            .get_sandbox_tool_call_receipt(request.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        openwave_core::SandboxToolCallStatus::Cancelled
     );
 }
 

@@ -6,8 +6,8 @@ use sea_orm::{
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, ChatId};
 use crate::model::{
-    AgentRunCancellationReason, AgentRunExecution, AgentRunInboxStatus, AgentRunResultPayload,
-    AgentRunStatus,
+    AgentRunCancellationReason, AgentRunCancellationSignal, AgentRunExecution, AgentRunInboxStatus,
+    AgentRunResultPayload, AgentRunStatus,
 };
 use crate::storage::{FinishAgentRunCancellationOutcome, RequestAgentRunCancellationOutcome};
 
@@ -30,6 +30,22 @@ struct CancellationIdentity {
 // claim. Operational run claim counts are schema-bounded below this sentinel,
 // so a terminal synthetic receipt can never be mistaken for scheduler state.
 const UNCLAIMED_CANCELLATION_CLAIM_COUNT: i32 = i32::MAX;
+
+pub(in crate::db) async fn get_agent_run_cancellation_signal(
+    store: &DbStore,
+    id: AgentRunId,
+) -> Result<Option<AgentRunCancellationSignal>> {
+    let receipt = entities::agent_run_cancellation::Entity::find_by_id(id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(receipt.map(|receipt| AgentRunCancellationSignal {
+        agent_run_id: AgentRunId(receipt.agent_run_id),
+        lease_token: receipt.lease_token,
+        attempt_count: receipt.attempt_count,
+        claim_count: receipt.claim_count,
+    }))
+}
 
 pub(in crate::db) async fn request_agent_run_cancellation(
     store: &DbStore,

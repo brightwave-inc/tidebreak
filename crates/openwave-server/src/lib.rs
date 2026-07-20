@@ -197,6 +197,10 @@ pub fn app(state: AppState) -> Router {
         .route("/chats/{id}/messages", get(routes::list_chat_messages))
         .route("/chats/{id}/agent-runs", get(routes::list_agent_runs))
         .route(
+            "/chats/{chat_id}/agent-runs/{run_id}/cancel",
+            post(routes::post_agent_run_cancel),
+        )
+        .route(
             "/settings/api-key",
             axum::routing::put(routes::put_api_key).delete(routes::delete_api_key),
         )
@@ -442,21 +446,24 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
         Some(state.config.data_dir.join("scratch")),
         turn_worker::TurnWorkerConfig::default(),
     );
-    let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::new(
+    let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
         state.store.clone(),
         state.resolver.clone(),
         state.agent_run_wake.clone(),
         state.turn_job_wake.clone(),
+        state.sandbox_attempts.clone(),
         state.agent_config.clone(),
         Some(state.config.data_dir.join("scratch")),
         sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default(),
     );
-    let sandbox_web_search_worker = sandbox_web_search_worker::SandboxWebSearchWorker::new(
-        state.store.clone(),
-        state.secrets.clone(),
-        state.agent_run_wake.clone(),
-        sandbox_web_search_worker::SandboxWebSearchWorkerConfig::default(),
-    );
+    let sandbox_web_search_worker =
+        sandbox_web_search_worker::SandboxWebSearchWorker::with_attempts(
+            state.store.clone(),
+            state.secrets.clone(),
+            state.agent_run_wake.clone(),
+            state.sandbox_attempts.clone(),
+            sandbox_web_search_worker::SandboxWebSearchWorkerConfig::default(),
+        );
     let server_store = state.store.clone();
     let router = app(state);
 
