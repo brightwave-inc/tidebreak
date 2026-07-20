@@ -19,6 +19,12 @@ function run(overrides: Partial<AgentRun>): AgentRun {
   };
 }
 
+const noStops = {
+  stoppingRunIds: new Set<string>(),
+  stopErrorRunIds: new Set<string>(),
+  onStop: vi.fn(),
+};
+
 describe("AgentActivityPanel", () => {
   it("shows snapshots only for the conversation that owns them", () => {
     const runs = [run({ id: "chat-a-run" })];
@@ -46,6 +52,7 @@ describe("AgentActivityPanel", () => {
         loading={false}
         error={null}
         onRetry={vi.fn()}
+        {...noStops}
       />,
     );
 
@@ -77,6 +84,7 @@ describe("AgentActivityPanel", () => {
         loading={false}
         error={null}
         onRetry={vi.fn()}
+        {...noStops}
       />,
     );
 
@@ -106,6 +114,7 @@ describe("AgentActivityPanel", () => {
         loading={false}
         error={null}
         onRetry={vi.fn()}
+        {...noStops}
       />,
     );
 
@@ -119,7 +128,13 @@ describe("AgentActivityPanel", () => {
   it("keeps load and retry states compact and accessible", () => {
     expect(
       renderToStaticMarkup(
-        <AgentActivityPanel runs={[]} loading error={null} onRetry={vi.fn()} />,
+        <AgentActivityPanel
+          runs={[]}
+          loading
+          error={null}
+          onRetry={vi.fn()}
+          {...noStops}
+        />,
       ),
     ).toContain("Loading activity…");
 
@@ -129,11 +144,57 @@ describe("AgentActivityPanel", () => {
         loading={false}
         error="private network detail"
         onRetry={vi.fn()}
+        {...noStops}
       />,
     );
     expect(failure).toContain('role="status"');
     expect(failure).toContain("Activity unavailable");
     expect(failure).toContain("Retry");
     expect(failure).not.toContain("private network detail");
+  });
+
+  it("offers exact active sandbox stops with safe pending and error copy", () => {
+    const markup = renderToStaticMarkup(
+      <AgentActivityPanel
+        runs={[
+          run({ id: "running" }),
+          run({ id: "pending", status: "waiting" }),
+          run({ id: "stopping", status: "cancelling" }),
+          run({ id: "recent", status: "completed" }),
+          run({ id: "foreground", execution: "foreground", status: "active" }),
+        ]}
+        loading={false}
+        error={null}
+        onRetry={vi.fn()}
+        stoppingRunIds={new Set(["pending"])}
+        stopErrorRunIds={new Set(["running"])}
+        onStop={vi.fn()}
+      />,
+    );
+
+    expect(markup.match(/>Stop<\/button>/g)).toHaveLength(1);
+    expect(markup).toContain("Stopping…");
+    expect(markup).toContain("disabled=\"\"");
+    expect(markup).toContain('role="status"');
+    expect(markup).toContain("Could not stop this task. Try again.");
+    expect(markup).not.toContain("private");
+  });
+
+  it("suppresses an ambiguous request error once polling confirms stopping", () => {
+    const markup = renderToStaticMarkup(
+      <AgentActivityPanel
+        runs={[run({ id: "stopping", status: "cancelling" })]}
+        loading={false}
+        error={null}
+        onRetry={vi.fn()}
+        stoppingRunIds={new Set()}
+        stopErrorRunIds={new Set(["stopping"])}
+        onStop={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain("Stopping");
+    expect(markup).not.toContain("Could not stop");
+    expect(markup).not.toContain(">Stop</button>");
   });
 });

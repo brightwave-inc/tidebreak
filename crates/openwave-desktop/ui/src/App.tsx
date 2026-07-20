@@ -49,6 +49,12 @@ import {
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
 import { AgentActivityPanel, agentRunsForChat } from "./AgentActivityPanel";
+import {
+  SandboxAgentStopFence,
+  canStopSandboxAgentRun,
+  reconcileSandboxAgentCancellation,
+  sandboxAgentStopKey,
+} from "./SandboxAgentStop";
 
 type Msg = ChatMessage;
 
@@ -74,6 +80,12 @@ export default function App() {
   const [agentRunsChatId, setAgentRunsChatId] = useState<string | null>(null);
   const [agentRunsLoading, setAgentRunsLoading] = useState(false);
   const [agentRunsError, setAgentRunsError] = useState<string | null>(null);
+  const [stoppingSandboxRunKeys, setStoppingSandboxRunKeys] = useState<Set<string>>(
+    new Set(),
+  );
+  const [sandboxStopErrorKeys, setSandboxStopErrorKeys] = useState<Set<string>>(
+    new Set(),
+  );
   const [folderAccessRequests, setFolderAccessRequests] = useState<
     PendingFolderAccessRequest[]
   >([]);
@@ -127,6 +139,7 @@ export default function App() {
   const draftRef = useRef("");
   const selectedChatIdRef = useRef<string | null>(null);
   const steerFenceRef = useRef(new ActiveTurnSteerFence());
+  const sandboxStopFenceRef = useRef(new SandboxAgentStopFence());
   const provisionalToolCallIdsRef = useRef<Set<string>>(new Set());
   const deletionInFlightRef = useRef(false);
 
@@ -147,6 +160,7 @@ export default function App() {
       cancelled = true;
       terminalHydrationGenerationRef.current += 1;
       steerFenceRef.current.invalidate();
+      sandboxStopFenceRef.current.invalidate();
     };
   }, []);
 
@@ -278,6 +292,20 @@ export default function App() {
   }, [client, chat?.id]);
 
   const visibleAgentRuns = agentRunsForChat(agentRunsChatId, chat?.id ?? null, agentRuns);
+  const visibleStoppingSandboxRunIds = new Set(
+    visibleAgentRuns
+      .filter((run) =>
+        stoppingSandboxRunKeys.has(sandboxAgentStopKey(chat?.id ?? "", run.id)),
+      )
+      .map((run) => run.id),
+  );
+  const visibleSandboxStopErrorRunIds = new Set(
+    visibleAgentRuns
+      .filter((run) =>
+        sandboxStopErrorKeys.has(sandboxAgentStopKey(chat?.id ?? "", run.id)),
+      )
+      .map((run) => run.id),
+  );
   const hasActiveSandboxRun = visibleAgentRuns.some(
     (run) =>
       run.execution === "sandbox" &&
@@ -294,6 +322,47 @@ export default function App() {
     );
     return () => window.clearInterval(interval);
   }, [hasActiveSandboxRun]);
+
+  async function onStopSandboxAgentRun(runId: string) {
+    if (!client || !chat || deletionInFlightRef.current) return;
+    const target = visibleAgentRuns.find((run) => run.id === runId);
+    if (!target || !canStopSandboxAgentRun(target)) return;
+
+    const chatId = chat.id;
+    const request = sandboxStopFenceRef.current.begin(chatId, runId);
+    if (!request) return;
+    const key = sandboxAgentStopKey(chatId, runId);
+    setStoppingSandboxRunKeys((current) => new Set(current).add(key));
+    setSandboxStopErrorKeys((current) => {
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+
+    try {
+      const cancellation = await client.cancelAgentRun(chatId, runId);
+      if (!sandboxStopFenceRef.current.isCurrent(request, selectedChatIdRef.current)) {
+        return;
+      }
+      setAgentRuns((current) =>
+        reconcileSandboxAgentCancellation(current, cancellation),
+      );
+      refreshAgentRunsRef.current?.();
+    } catch {
+      if (!sandboxStopFenceRef.current.isCurrent(request, selectedChatIdRef.current)) {
+        return;
+      }
+      setSandboxStopErrorKeys((current) => new Set(current).add(key));
+    } finally {
+      if (sandboxStopFenceRef.current.finish(request, selectedChatIdRef.current)) {
+        setStoppingSandboxRunKeys((current) => {
+          const next = new Set(current);
+          next.delete(key);
+          return next;
+        });
+      }
+    }
+  }
 
   useEffect(() => {
     if (!client || !chat) return;
@@ -845,6 +914,9 @@ export default function App() {
       // ref update also gates sends before the disabled composer renders.
       chatSelectionRef.current += 1;
       clearSteerRequestState();
+      sandboxStopFenceRef.current.invalidate();
+      setStoppingSandboxRunKeys(new Set());
+      setSandboxStopErrorKeys(new Set());
     }
     try {
       await client.deleteChat(target.id);
@@ -873,6 +945,9 @@ export default function App() {
     chatSelectionRef.current += 1;
     terminalHydrationGenerationRef.current += 1;
     selectedChatIdRef.current = next.id;
+    sandboxStopFenceRef.current.invalidate();
+    setStoppingSandboxRunKeys(new Set());
+    setSandboxStopErrorKeys(new Set());
     assistantMarkerScrubberRef.current =
       new AssistantSourceMarkerStreamScrubber();
     setChat(next);
@@ -1302,6 +1377,9 @@ export default function App() {
               loading={agentRunsChatId === chat.id ? agentRunsLoading : true}
               error={agentRunsChatId === chat.id ? agentRunsError : null}
               onRetry={() => refreshAgentRunsRef.current?.()}
+              stoppingRunIds={visibleStoppingSandboxRunIds}
+              stopErrorRunIds={visibleSandboxStopErrorRunIds}
+              onStop={(runId) => void onStopSandboxAgentRun(runId)}
             />
           </div>
 
