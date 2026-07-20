@@ -80,7 +80,7 @@ pub(crate) enum SandboxAgentRunWorkerOutcome {
 }
 
 enum RecoveryCandidate {
-    Delivery(AgentRunInboxEntry),
+    Delivery(Box<AgentRunInboxEntry>),
     WaitSet(openwave_core::AgentRunWaitSetCandidate),
 }
 
@@ -210,10 +210,16 @@ impl SandboxAgentRunWorker {
                 wait_sets
                     .next()
                     .map(RecoveryCandidate::WaitSet)
-                    .or_else(|| deliveries.next().map(RecoveryCandidate::Delivery))
+                    .or_else(|| {
+                        deliveries
+                            .next()
+                            .map(Box::new)
+                            .map(RecoveryCandidate::Delivery)
+                    })
             } else {
                 deliveries
                     .next()
+                    .map(Box::new)
                     .map(RecoveryCandidate::Delivery)
                     .or_else(|| wait_sets.next().map(RecoveryCandidate::WaitSet))
             };
@@ -222,7 +228,7 @@ impl SandboxAgentRunWorker {
             };
             next_is_wait_set = !next_is_wait_set;
             let outcome = match candidate {
-                RecoveryCandidate::Delivery(delivery) => self.resume_parent(delivery).await?,
+                RecoveryCandidate::Delivery(delivery) => self.resume_parent(*delivery).await?,
                 RecoveryCandidate::WaitSet(candidate) => {
                     self.resume_parent_wait_set(candidate.wait_id).await?
                 }
