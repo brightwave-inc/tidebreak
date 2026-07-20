@@ -34,7 +34,7 @@ use super::{
 mod cancellation;
 pub(in crate::db) use cancellation::{
     cancel_sandbox_children_for_origin_turn_on, finish_agent_run_cancellation,
-    request_agent_run_cancellation,
+    get_agent_run_cancellation_signal, request_agent_run_cancellation,
 };
 
 pub(in crate::db) async fn insert_foreground_agent_run_on<C>(

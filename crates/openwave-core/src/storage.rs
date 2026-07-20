@@ -1496,6 +1496,16 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Fetch the exact immutable worker identity retained by a cancellation
+    /// request. Trusted runtimes use this only for best-effort local wakeups;
+    /// the cancellation row and run state remain authoritative.
+    async fn get_agent_run_cancellation_signal(
+        &self,
+        _id: AgentRunId,
+    ) -> Result<Option<crate::model::AgentRunCancellationSignal>> {
+        agent_run_storage_unavailable()
+    }
+
     /// Acknowledge cancellation with one exact live sandbox lease.
     async fn finish_agent_run_cancellation(
         &self,

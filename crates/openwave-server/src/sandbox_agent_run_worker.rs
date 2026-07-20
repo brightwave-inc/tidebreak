@@ -23,6 +23,7 @@ use openwave_core::{
 use tokio::sync::Notify;
 
 use crate::resolver::ProviderResolver;
+use crate::state::SandboxAttemptGuard;
 
 /// Fixed instruction set for the initial isolated executor.
 ///
@@ -81,6 +82,7 @@ pub(crate) struct SandboxAgentRunWorker {
     resolver: Arc<dyn ProviderResolver>,
     wake: Arc<Notify>,
     turn_wake: Arc<Notify>,
+    attempts: Arc<SandboxAttemptGuard>,
     agent_config: AgentConfig,
     /// Each run receives a directory under this private root. The initial
     /// no-tools executor does not open it; retaining the boundary now means a
@@ -91,11 +93,35 @@ pub(crate) struct SandboxAgentRunWorker {
 }
 
 impl SandboxAgentRunWorker {
+    #[cfg(test)]
     pub(crate) fn new(
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
         wake: Arc<Notify>,
         turn_wake: Arc<Notify>,
+        agent_config: AgentConfig,
+        private_scratch_root: Option<PathBuf>,
+        config: SandboxAgentRunWorkerConfig,
+    ) -> Self {
+        Self::with_attempts(
+            store,
+            resolver,
+            wake,
+            turn_wake,
+            Arc::new(SandboxAttemptGuard::default()),
+            agent_config,
+            private_scratch_root,
+            config,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_attempts(
+        store: Arc<dyn Store>,
+        resolver: Arc<dyn ProviderResolver>,
+        wake: Arc<Notify>,
+        turn_wake: Arc<Notify>,
+        attempts: Arc<SandboxAttemptGuard>,
         agent_config: AgentConfig,
         private_scratch_root: Option<PathBuf>,
         config: SandboxAgentRunWorkerConfig,
@@ -111,6 +137,7 @@ impl SandboxAgentRunWorker {
             resolver,
             wake,
             turn_wake,
+            attempts,
             agent_config,
             private_scratch_root,
             config,
@@ -244,6 +271,21 @@ impl SandboxAgentRunWorker {
                 run.id
             )));
         }
+        let Some(active_attempt) = self.attempts.register_model(run.id, lease_token) else {
+            return Ok(SandboxAgentRunWorkerOutcome::LeaseLost(run.id));
+        };
+        let cancel = active_attempt.cancel_token();
+        // Close cancel-before-register: registration happens before resolver or
+        // provider work, then the durable lease is immediately revalidated.
+        if !self
+            .store
+            .heartbeat_agent_run(run.id, lease_token, chrono_duration(self.config.lease)?)
+            .await?
+        {
+            return self
+                .acknowledge_cancellation_or_lease_loss(run.id, lease_token)
+                .await;
+        }
         let task = run.input.clone().ok_or_else(|| {
             AgentError::msg(format!(
                 "claimed sandbox agent run {} has no delegated task",
@@ -258,9 +300,12 @@ impl SandboxAgentRunWorker {
             .await?;
         let request =
             sandbox_request(&self.agent_config, task, &previous_calls, &*self.store).await?;
-        let provider = match self.resolve_provider(run.id, lease_token).await? {
-            Ok(provider) => provider,
-            Err(outcome) => return Ok(outcome),
+        let Some(provider) = self.resolve_provider(run.id, lease_token, &cancel).await? else {
+            // `resolve_provider` has returned and dropped its resolver future
+            // before this durable acknowledgement can terminalize the run.
+            return self
+                .acknowledge_cancellation_or_lease_loss(run.id, lease_token)
+                .await;
         };
         // Resolve may have waited on credentials or provider configuration.
         // Extend and revalidate the exact live lease immediately before the
@@ -278,39 +323,51 @@ impl SandboxAgentRunWorker {
                 .acknowledge_cancellation_or_lease_loss(run.id, lease_token)
                 .await;
         }
-        let mut completion = Box::pin(complete_sandbox_task(provider, request));
-        let mut heartbeat = tokio::time::interval(self.config.heartbeat);
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        heartbeat.tick().await;
-
-        loop {
-            tokio::select! {
-                result = &mut completion => match result {
-                    Ok(SandboxCompletion::Final(text)) => return self.submit_result(run.id, lease_token, text).await,
-                    Ok(SandboxCompletion::WebSearch { provider_id, arguments }) => {
-                        return self.park_web_search(run, lease_token, provider_id, arguments).await;
+        let completion_result = {
+            let mut completion = Box::pin(complete_sandbox_task(provider, request));
+            let mut heartbeat = tokio::time::interval(self.config.heartbeat);
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            heartbeat.tick().await;
+            loop {
+                tokio::select! {
+                    result = &mut completion => break Some(result),
+                    _ = cancel.cancelled() => break None,
+                    _ = heartbeat.tick() => {
+                        if self
+                            .store
+                            .heartbeat_agent_run(run.id, lease_token, chrono_duration(self.config.lease)?)
+                            .await?
+                        {
+                            continue;
+                        }
+                        break None;
                     }
-                    Ok(SandboxCompletion::FolderAccessProposal { request }) => {
-                        return self.submit_folder_access_proposal(run.id, lease_token, request).await;
-                    }
-                    // No terminal failure transition exists yet. Keep the exact
-                    // lease alive only until its scheduler expiry; then the
-                    // durable claim state machine safely retries or exhausts
-                    // the bounded attempt budget. This avoids inventing an
-                    // unfenced failure path in the executor.
-                    Err(error) => return self.record_failure(run.id, lease_token, error).await,
-                },
-                _ = heartbeat.tick() => {
-                    if self
-                        .store
-                        .heartbeat_agent_run(run.id, lease_token, chrono_duration(self.config.lease)?)
-                        .await?
-                    {
-                        continue;
-                    }
-                    return self.acknowledge_cancellation_or_lease_loss(run.id, lease_token).await;
                 }
             }
+        };
+        // The outbound completion future is out of scope and quiesced before
+        // cancellation acknowledgement can commit a terminal durable state.
+        let Some(completion_result) = completion_result else {
+            return self
+                .acknowledge_cancellation_or_lease_loss(run.id, lease_token)
+                .await;
+        };
+        match completion_result {
+            Ok(SandboxCompletion::Final(text)) => {
+                self.submit_result(run.id, lease_token, text).await
+            }
+            Ok(SandboxCompletion::WebSearch {
+                provider_id,
+                arguments,
+            }) => {
+                self.park_web_search(run, lease_token, provider_id, arguments)
+                    .await
+            }
+            Ok(SandboxCompletion::FolderAccessProposal { request }) => {
+                self.submit_folder_access_proposal(run.id, lease_token, request)
+                    .await
+            }
+            Err(error) => self.record_failure(run.id, lease_token, error).await,
         }
     }
 
@@ -318,22 +375,24 @@ impl SandboxAgentRunWorker {
         &self,
         id: openwave_core::AgentRunId,
         lease_token: uuid::Uuid,
-    ) -> Result<std::result::Result<Arc<dyn ModelProvider>, SandboxAgentRunWorkerOutcome>> {
+        cancel: &openwave_core::CancelToken,
+    ) -> Result<Option<Arc<dyn ModelProvider>>> {
         let resolver = self.resolver.resolve();
         tokio::pin!(resolver);
         #[cfg(test)]
         if self.config.suppress_resolver_heartbeats {
-            return Ok(Ok(resolver.await));
+            return Ok(Some(resolver.await));
         }
         let mut heartbeat = tokio::time::interval(self.config.heartbeat);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         heartbeat.tick().await;
         loop {
             tokio::select! {
-                provider = &mut resolver => return Ok(Ok(provider)),
+                provider = &mut resolver => return Ok(Some(provider)),
+                _ = cancel.cancelled() => return Ok(None),
                 _ = heartbeat.tick() => {
                     if !self.store.heartbeat_agent_run(id, lease_token, chrono_duration(self.config.lease)?).await? {
-                        return Ok(Err(self.acknowledge_cancellation_or_lease_loss(id, lease_token).await?));
+                        return Ok(None);
                     }
                 }
             }
@@ -734,7 +793,10 @@ fn chrono_duration(duration: Duration) -> Result<chrono::Duration> {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
 
     use async_trait::async_trait;
     use chrono::Utc;
@@ -844,6 +906,73 @@ mod tests {
 
     struct BlockingProvider {
         started: Arc<Notify>,
+    }
+
+    struct DropMarker(Arc<AtomicBool>);
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct DropAwareResolver {
+        entered: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl ProviderResolver for DropAwareResolver {
+        async fn resolve(&self) -> Arc<dyn ModelProvider> {
+            let _drop = DropMarker(self.dropped.clone());
+            self.entered.notify_one();
+            futures::future::pending().await
+        }
+    }
+
+    struct DropAwareProvider {
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    struct DropAwareStream {
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+        announced: bool,
+    }
+
+    impl futures::Stream for DropAwareStream {
+        type Item = ProviderEvent;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if !self.announced {
+                self.announced = true;
+                self.started.notify_one();
+            }
+            Poll::Pending
+        }
+    }
+
+    impl Drop for DropAwareStream {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for DropAwareProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("drop-aware")
+        }
+
+        async fn stream(&self, _request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            Ok(DropAwareStream {
+                started: self.started.clone(),
+                dropped: self.dropped.clone(),
+                announced: false,
+            }
+            .boxed())
+        }
     }
 
     struct FailingProvider;
@@ -1566,6 +1695,136 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap(),
+            SandboxAgentRunWorkerOutcome::Cancelled(id)
+        );
+        assert!(provider.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_signal_drops_resolver_before_durable_cancellation_ack() {
+        let (_unused, store, _provider, chat, _dir) = fixture().await;
+        let call = CallId::new();
+        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
+        admit_sandbox(&store, chat.id, call, "cancel resolver").await;
+        let entered = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(SandboxAttemptGuard::default());
+        let worker = SandboxAgentRunWorker::with_attempts(
+            store.clone(),
+            Arc::new(DropAwareResolver {
+                entered: entered.clone(),
+                dropped: dropped.clone(),
+            }),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            attempts.clone(),
+            AgentConfig {
+                model: "m".into(),
+                ..AgentConfig::default()
+            },
+            None,
+            SandboxAgentRunWorkerConfig::default(),
+        );
+        let entered_wait = entered.notified();
+        let execution = tokio::spawn(async move { worker.run_once().await });
+        entered_wait.await;
+        assert!(matches!(
+            store.request_agent_run_cancellation(id).await.unwrap(),
+            Some(openwave_core::RequestAgentRunCancellationOutcome::Requested(_))
+        ));
+        let signal = store
+            .get_agent_run_cancellation_signal(id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(attempts.cancel_model(id, signal.lease_token));
+        assert_eq!(
+            execution.await.unwrap().unwrap(),
+            SandboxAgentRunWorkerOutcome::Cancelled(id)
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(
+            store.get_agent_run(id).await.unwrap().unwrap().status,
+            AgentRunStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn local_signal_drops_provider_stream_before_durable_cancellation_ack() {
+        let (_unused, store, _provider, chat, _dir) = fixture().await;
+        let call = CallId::new();
+        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
+        admit_sandbox(&store, chat.id, call, "cancel completion").await;
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(SandboxAttemptGuard::default());
+        let worker = SandboxAgentRunWorker::with_attempts(
+            store.clone(),
+            Arc::new(FixedResolver(Arc::new(DropAwareProvider {
+                started: started.clone(),
+                dropped: dropped.clone(),
+            }))),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            attempts.clone(),
+            AgentConfig {
+                model: "m".into(),
+                ..AgentConfig::default()
+            },
+            None,
+            SandboxAgentRunWorkerConfig::default(),
+        );
+        let started_wait = started.notified();
+        let execution = tokio::spawn(async move { worker.run_once().await });
+        started_wait.await;
+        assert!(matches!(
+            store.request_agent_run_cancellation(id).await.unwrap(),
+            Some(openwave_core::RequestAgentRunCancellationOutcome::Requested(_))
+        ));
+        let signal = store
+            .get_agent_run_cancellation_signal(id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(attempts.cancel_model(id, signal.lease_token));
+        assert_eq!(
+            execution.await.unwrap().unwrap(),
+            SandboxAgentRunWorkerOutcome::Cancelled(id)
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(
+            store.get_agent_run(id).await.unwrap().unwrap().status,
+            AgentRunStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_local_registration_is_closed_by_first_heartbeat() {
+        let (_unused, store, provider, chat, _dir) = fixture().await;
+        let call = CallId::new();
+        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
+        admit_sandbox(&store, chat.id, call, "cancel before register").await;
+        let claimed = store
+            .claim_agent_run(uuid::Uuid::new_v4(), chrono::Duration::minutes(5), 1, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        let lease = claimed.lease_token.unwrap();
+        assert!(matches!(
+            store.request_agent_run_cancellation(id).await.unwrap(),
+            Some(openwave_core::RequestAgentRunCancellationOutcome::Requested(_))
+        ));
+        let worker = SandboxAgentRunWorker::new(
+            store.clone(),
+            Arc::new(FixedResolver(provider.clone())),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            AgentConfig::default(),
+            None,
+            SandboxAgentRunWorkerConfig::default(),
+        );
+        assert_eq!(
+            worker.process(claimed, lease).await.unwrap(),
             SandboxAgentRunWorkerOutcome::Cancelled(id)
         );
         assert!(provider.requests.lock().unwrap().is_empty());

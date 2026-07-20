@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use openwave_core::{
-    AgentConfig, AgentError, BlobStore, CancelToken, ChatId, Config, DocumentId, FsBlobStore,
-    Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
+    AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config,
+    DocumentId, FsBlobStore, Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
 };
 use openwave_retrieval::Retriever;
 use tokio::sync::Notify;
@@ -68,6 +68,12 @@ pub struct AppState {
     pub(crate) root_attachment_routes_enabled: bool,
     /// Process-local cancel/steer handles for exact durably claimed attempts.
     pub active_turns: Arc<TurnGuard>,
+    /// Process-local, exact-attempt cancellation signals for sandbox work.
+    ///
+    /// Durable run and tool-call state remains authoritative. These handles
+    /// only let an authenticated cancellation request promptly drop provider
+    /// futures owned by this server process.
+    pub(crate) sandbox_attempts: Arc<SandboxAttemptGuard>,
     /// Live fan-out of turn events to connected WebSocket clients.
     pub events: Arc<EventBus>,
     /// Coordinates durable Sensitive-tool decisions and low-latency wakeups.
@@ -139,9 +145,145 @@ impl AppState {
             client_executor_id,
             root_attachment_routes_enabled: true,
             active_turns: Arc::new(TurnGuard::default()),
+            sandbox_attempts: Arc::new(SandboxAttemptGuard::default()),
             events: Arc::new(EventBus::default()),
             approvals: Arc::new(ApprovalBroker::new(store)),
         })
+    }
+}
+
+/// Exact local cancellation handles for sandbox model and web-search attempts.
+///
+/// Registration is RAII: stale permits cannot remove a newer lease for the
+/// same durable identity. The maps are intentionally process-local and never
+/// participate in admission or terminal decisions.
+#[derive(Default)]
+pub(crate) struct SandboxAttemptGuard {
+    models: Mutex<HashMap<(AgentRunId, Uuid), CancelToken>>,
+    searches: Mutex<HashMap<(CallId, AgentRunId, Uuid), CancelToken>>,
+}
+
+impl SandboxAttemptGuard {
+    pub(crate) fn register_model(
+        self: &Arc<Self>,
+        agent_run_id: AgentRunId,
+        lease_token: Uuid,
+    ) -> Option<ActiveSandboxModelAttempt> {
+        let mut models = self.models.lock().unwrap();
+        let identity = (agent_run_id, lease_token);
+        if models.contains_key(&identity) {
+            return None;
+        }
+        let cancel = CancelToken::new();
+        models.insert(identity, cancel.clone());
+        Some(ActiveSandboxModelAttempt {
+            guard: Arc::clone(self),
+            agent_run_id,
+            lease_token,
+            cancel,
+        })
+    }
+
+    pub(crate) fn register_search(
+        self: &Arc<Self>,
+        call_id: CallId,
+        agent_run_id: AgentRunId,
+        executor_lease_token: Uuid,
+    ) -> Option<ActiveSandboxSearchAttempt> {
+        let mut searches = self.searches.lock().unwrap();
+        let identity = (call_id, agent_run_id, executor_lease_token);
+        if searches.contains_key(&identity) {
+            return None;
+        }
+        let cancel = CancelToken::new();
+        searches.insert(identity, cancel.clone());
+        Some(ActiveSandboxSearchAttempt {
+            guard: Arc::clone(self),
+            call_id,
+            agent_run_id,
+            executor_lease_token,
+            cancel,
+        })
+    }
+
+    /// Signal only a model handle owned by the exact durable run lease.
+    pub(crate) fn cancel_model(&self, agent_run_id: AgentRunId, lease_token: Uuid) -> bool {
+        if let Some(cancel) = self
+            .models
+            .lock()
+            .unwrap()
+            .get(&(agent_run_id, lease_token))
+        {
+            cancel.cancel();
+            return true;
+        }
+        false
+    }
+
+    /// Signal only the exact sandbox call, run, and executor lease identity.
+    pub(crate) fn cancel_search(
+        &self,
+        call_id: CallId,
+        agent_run_id: AgentRunId,
+        executor_lease_token: Uuid,
+    ) -> bool {
+        if let Some(cancel) =
+            self.searches
+                .lock()
+                .unwrap()
+                .get(&(call_id, agent_run_id, executor_lease_token))
+        {
+            cancel.cancel();
+            return true;
+        }
+        false
+    }
+}
+
+pub(crate) struct ActiveSandboxModelAttempt {
+    guard: Arc<SandboxAttemptGuard>,
+    agent_run_id: AgentRunId,
+    lease_token: Uuid,
+    cancel: CancelToken,
+}
+
+impl ActiveSandboxModelAttempt {
+    pub(crate) fn cancel_token(&self) -> CancelToken {
+        self.cancel.clone()
+    }
+}
+
+impl Drop for ActiveSandboxModelAttempt {
+    fn drop(&mut self) {
+        self.guard
+            .models
+            .lock()
+            .unwrap()
+            .remove(&(self.agent_run_id, self.lease_token));
+    }
+}
+
+pub(crate) struct ActiveSandboxSearchAttempt {
+    guard: Arc<SandboxAttemptGuard>,
+    call_id: CallId,
+    agent_run_id: AgentRunId,
+    executor_lease_token: Uuid,
+    cancel: CancelToken,
+}
+
+impl ActiveSandboxSearchAttempt {
+    pub(crate) fn cancel_token(&self) -> CancelToken {
+        self.cancel.clone()
+    }
+}
+
+impl Drop for ActiveSandboxSearchAttempt {
+    fn drop(&mut self) {
+        self.guard.searches.lock().unwrap().remove(&(
+            self.call_id,
+            self.agent_run_id,
+            self.executor_lease_token,
+        ));
     }
 }
 
@@ -439,5 +581,83 @@ mod tests {
         assert!(guard.signal_steer(chat, turn, true));
         assert!(held.steer_inbox().interrupt_requested());
         assert!(held.steer_inbox().drain().is_empty());
+    }
+
+    #[test]
+    fn sandbox_model_signals_require_the_exact_run_lease() {
+        let guard = Arc::new(SandboxAttemptGuard::default());
+        let run = AgentRunId::sandbox_for_spawn_call(CallId::new());
+        let lease = Uuid::new_v4();
+        let held = guard.register_model(run, lease).expect("register model");
+
+        assert!(!guard.cancel_model(run, Uuid::new_v4()));
+        assert!(!held.cancel_token().is_cancelled());
+        assert!(!guard.cancel_model(AgentRunId::sandbox_for_spawn_call(CallId::new()), lease));
+        assert!(guard.cancel_model(run, lease));
+        assert!(held.cancel_token().is_cancelled());
+        assert!(
+            guard.cancel_model(run, lease),
+            "exact retry stays signalled"
+        );
+    }
+
+    #[test]
+    fn sandbox_search_signals_require_the_exact_call_run_and_lease() {
+        let guard = Arc::new(SandboxAttemptGuard::default());
+        let call = CallId::new();
+        let run = AgentRunId::sandbox_for_spawn_call(CallId::new());
+        let lease = Uuid::new_v4();
+        let held = guard
+            .register_search(call, run, lease)
+            .expect("register search");
+
+        assert!(!guard.cancel_search(CallId::new(), run, lease));
+        assert!(!guard.cancel_search(
+            call,
+            AgentRunId::sandbox_for_spawn_call(CallId::new()),
+            lease
+        ));
+        assert!(!guard.cancel_search(call, run, Uuid::new_v4()));
+        assert!(!held.cancel_token().is_cancelled());
+        assert!(guard.cancel_search(call, run, lease));
+        assert!(held.cancel_token().is_cancelled());
+    }
+
+    #[test]
+    fn stale_and_current_sandbox_attempts_are_exactly_isolated() {
+        let guard = Arc::new(SandboxAttemptGuard::default());
+        let run = AgentRunId::sandbox_for_spawn_call(CallId::new());
+        let old_lease = Uuid::new_v4();
+        let stale_model = guard
+            .register_model(run, old_lease)
+            .expect("register old model");
+        let new_lease = Uuid::new_v4();
+        let current_model = guard
+            .register_model(run, new_lease)
+            .expect("a distinct model lease may coexist until its heartbeat fences it");
+        assert!(!stale_model.cancel_token().is_cancelled());
+        assert!(!current_model.cancel_token().is_cancelled());
+        assert!(guard.register_model(run, new_lease).is_none());
+        drop(stale_model);
+        assert!(!current_model.cancel_token().is_cancelled());
+        assert!(guard.cancel_model(run, new_lease));
+        assert!(current_model.cancel_token().is_cancelled());
+
+        let call = CallId::new();
+        let old_search_lease = Uuid::new_v4();
+        let stale_search = guard
+            .register_search(call, run, old_search_lease)
+            .expect("register old search");
+        let new_search_lease = Uuid::new_v4();
+        let current_search = guard
+            .register_search(call, run, new_search_lease)
+            .expect("a distinct search lease may coexist until its heartbeat fences it");
+        assert!(!stale_search.cancel_token().is_cancelled());
+        assert!(!current_search.cancel_token().is_cancelled());
+        assert!(guard.register_search(call, run, new_search_lease).is_none());
+        drop(stale_search);
+        assert!(!current_search.cancel_token().is_cancelled());
+        assert!(guard.cancel_search(call, run, new_search_lease));
+        assert!(current_search.cancel_token().is_cancelled());
     }
 }

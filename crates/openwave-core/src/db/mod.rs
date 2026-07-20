@@ -1965,6 +1965,13 @@ impl Store for DbStore {
         ops::agent_run::request_agent_run_cancellation(self, id).await
     }
 
+    async fn get_agent_run_cancellation_signal(
+        &self,
+        id: AgentRunId,
+    ) -> Result<Option<crate::model::AgentRunCancellationSignal>> {
+        ops::agent_run::get_agent_run_cancellation_signal(self, id).await
+    }
+
     async fn finish_agent_run_cancellation(
         &self,
         id: AgentRunId,
