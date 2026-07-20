@@ -41,6 +41,19 @@ describe("ToolCallCard", () => {
     expect(markup).toContain("Document search complete");
   });
 
+  it("degrades an unknown runtime status without using it as copy or a class", () => {
+    const markup = renderToStaticMarkup(
+      <ToolCallCard
+        name="web_search"
+        status={"private-provider-diagnostic" as "completed"}
+      />,
+    );
+
+    expect(markup).toContain("Status unavailable");
+    expect(markup).toContain("is-unknown");
+    expect(markup).not.toContain("private-provider-diagnostic");
+  });
+
   it("allows approval only for a fixed action description", () => {
     expect(toolApprovalPresentation("search_may_share_query_and_excerpts")).toEqual({
       summary:

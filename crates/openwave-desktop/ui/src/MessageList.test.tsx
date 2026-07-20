@@ -118,13 +118,15 @@ describe("MessageBubble", () => {
       />,
     );
 
-    expect(markup).toContain('class="tool-activity-group"');
+    expect(markup).toContain('class="tool-activity-group is-settled"');
     expect(markup).toContain('aria-expanded="false"');
     expect(markup).toContain('aria-controls="tool-activity-group-0"');
     expect(markup).toContain('id="tool-activity-group-0" hidden=""');
-    expect(markup).toContain("2 tool activities");
-    expect(markup).toContain("Search the web: Web search complete");
-    expect(markup).toContain("Read a file: Tool could not complete");
+    expect(markup).toContain(
+      "2 tool activities · 1 completed · 1 failed",
+    );
+    expect(markup).toContain("Web search complete");
+    expect(markup).toContain("Tool could not complete");
     expect(markup.indexOf("Web search complete")).toBeLessThan(
       markup.indexOf("Done"),
     );
@@ -188,7 +190,9 @@ describe("MessageBubble", () => {
       />,
     );
 
-    expect(markup).toContain("Use a tool: Tool complete");
+    expect(markup).toContain("Used a tool and searched the web");
+    expect(markup).toContain("Use a tool");
+    expect(markup).toContain("Tool complete");
     expect(markup).not.toContain("private_server");
     expect(markup).not.toContain("sensitive_path");
   });

@@ -1307,6 +1307,7 @@ export default function App() {
 
           <div className="message-view">
             <MessageList
+              key={chat.id}
               messages={messages}
               folderAccessRequests={folderAccessRequests}
               nativeHost={hasNativeHost()}
