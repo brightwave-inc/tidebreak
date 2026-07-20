@@ -36,7 +36,8 @@ pub(in crate::db) use client_wait::{
     recover_turn_after_client_resolution_on,
 };
 pub(in crate::db) use multi_agent_run_wait::{
-    park_turn_for_agent_run_wait_set, resume_turn_for_agent_run_wait_set,
+    list_ready_agent_run_wait_set_candidates, park_turn_for_agent_run_wait_set,
+    resume_turn_for_agent_run_wait_set,
 };
 
 pub(in crate::db) use resolution::{

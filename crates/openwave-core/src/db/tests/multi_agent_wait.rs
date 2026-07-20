@@ -7,7 +7,7 @@ use crate::{
     TurnAgentRunWaitStatus, TurnRunStatus,
 };
 use chrono::{Duration, Utc};
-use sea_orm::EntityTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use sea_orm_migration::MigratorTrait;
 
 async fn complete_next_child(store: &crate::DbStore, text: &str) -> AgentRunId {
@@ -27,6 +27,207 @@ async fn complete_next_child(store: &crate::DbStore, text: &str) -> AgentRunId {
         outcome => panic!("unexpected submission outcome: {outcome:?}"),
     }
     child.id
+}
+
+#[tokio::test]
+async fn recovery_scan_becomes_ready_only_after_the_last_ordered_child() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (running, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child_a = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "a").await;
+    let child_b = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "b").await;
+    let wait_id = CallId::new();
+    store
+        .park_turn_for_agent_run_wait_set(
+            wait_id,
+            running.id,
+            &[child_b.id, child_a.id],
+            AgentRunWaitCondition::All,
+            lease,
+            running.steer_revision,
+            test_checkpoint_progress(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+    complete_next_child(&store, "first").await;
+    assert!(store
+        .list_ready_agent_run_wait_set_candidates(8)
+        .await
+        .unwrap()
+        .is_empty());
+    complete_next_child(&store, "second").await;
+    let candidates = store
+        .list_ready_agent_run_wait_set_candidates(8)
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].wait_id, wait_id);
+    let delivered_at = store
+        .list_agent_run_inbox(running.agent_run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.delivered_at)
+        .max()
+        .unwrap();
+    assert_eq!(candidates[0].ready_at, delivered_at);
+    assert!(store
+        .list_ready_agent_run_wait_set_candidates(0)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn recovery_scan_includes_children_delivered_before_the_wait_was_parked() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (running, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child_a = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "a").await;
+    let child_b = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "b").await;
+    assert_eq!(complete_next_child(&store, "first").await, child_a.id);
+    assert_eq!(complete_next_child(&store, "second").await, child_b.id);
+
+    let wait_id = CallId::new();
+    store
+        .park_turn_for_agent_run_wait_set(
+            wait_id,
+            running.id,
+            &[child_b.id, child_a.id],
+            AgentRunWaitCondition::All,
+            lease,
+            running.steer_revision,
+            test_checkpoint_progress(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .list_ready_agent_run_wait_set_candidates(1)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.wait_id)
+            .collect::<Vec<_>>(),
+        vec![wait_id]
+    );
+}
+
+#[tokio::test]
+async fn recovery_scan_excludes_malformed_member_ownership() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (running, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "child").await;
+    let wait_id = CallId::new();
+    store
+        .park_turn_for_agent_run_wait_set(
+            wait_id,
+            running.id,
+            &[child.id],
+            AgentRunWaitCondition::All,
+            lease,
+            running.steer_revision,
+            test_checkpoint_progress(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    complete_next_child(&store, "done").await;
+    crate::db::entities::turn_agent_run_wait_member::Entity::update_many()
+        .col_expr(
+            crate::db::entities::turn_agent_run_wait_member::Column::Position,
+            sea_orm::sea_query::Expr::value(1_i16),
+        )
+        .filter(crate::db::entities::turn_agent_run_wait_member::Column::WaitId.eq(wait_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+
+    // A corrupt older set must be removed before LIMIT, not consume the only
+    // recovery slot and starve a later coherent set.
+    let later_chat = sample_chat();
+    store.create_chat(&later_chat).await.unwrap();
+    let (later_turn, later_lease) = live_turn_for_sandbox_test(&store, later_chat.id).await;
+    let later_child =
+        admit_sandbox_call_for_test(&store, later_chat.id, CallId::new(), "later").await;
+    let later_wait_id = CallId::new();
+    store
+        .park_turn_for_agent_run_wait_set(
+            later_wait_id,
+            later_turn.id,
+            &[later_child.id],
+            AgentRunWaitCondition::All,
+            later_lease,
+            later_turn.steer_revision,
+            test_checkpoint_progress(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        complete_next_child(&store, "later done").await,
+        later_child.id
+    );
+
+    assert_eq!(
+        store
+            .list_ready_agent_run_wait_set_candidates(1)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.wait_id)
+            .collect::<Vec<_>>(),
+        vec![later_wait_id]
+    );
+}
+
+#[tokio::test]
+async fn concurrent_recovery_tokens_have_one_wait_set_winner() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (running, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "child").await;
+    let wait_id = CallId::new();
+    store
+        .park_turn_for_agent_run_wait_set(
+            wait_id,
+            running.id,
+            &[child.id],
+            AgentRunWaitCondition::All,
+            lease,
+            running.steer_revision,
+            test_checkpoint_progress(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    complete_next_child(&store, "done").await;
+
+    let first = store.clone();
+    let second = store.clone();
+    let (a, b) = tokio::join!(
+        first.resume_turn_for_agent_run_wait_set(wait_id, uuid::Uuid::new_v4()),
+        second.resume_turn_for_agent_run_wait_set(wait_id, uuid::Uuid::new_v4())
+    );
+    assert_eq!(
+        [a.unwrap(), b.unwrap()]
+            .into_iter()
+            .filter(|outcome| matches!(
+                outcome,
+                Some(ResumeTurnForAgentRunWaitSetOutcome::Resumed { .. })
+            ))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

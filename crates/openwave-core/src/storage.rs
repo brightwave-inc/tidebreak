@@ -27,13 +27,14 @@ use crate::id::{
     TurnId, TurnSteerId,
 };
 use crate::model::{
-    AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult, BeginRootAttachmentChange,
-    BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest, DocumentGeneration,
-    DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor, DocumentParseOutput,
-    DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,
-    Message, Project, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
-    ToolCallResolution, TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress,
-    TurnClientWait, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
+    AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult, AgentRunWaitSetCandidate,
+    BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
+    DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
+    DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceUpsert,
+    DocumentSummaryRecord, DocumentUpsert, Message, Project, RootAttachmentChange,
+    RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution, TurnAgentRunWait,
+    TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt,
+    TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
 
@@ -1571,6 +1572,16 @@ pub trait Store: Send + Sync {
         _limit: u64,
     ) -> Result<Vec<AgentRunInboxEntry>> {
         agent_run_storage_unavailable()
+    }
+
+    /// List a bounded set of ordered child waits for which every immutable
+    /// result appears ready. This scan is advisory and never claims member
+    /// inboxes; the exact wait-set resume transition remains authoritative.
+    async fn list_ready_agent_run_wait_set_candidates(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<AgentRunWaitSetCandidate>> {
+        turn_storage_unavailable()
     }
 
     /// Acquire an expiring, exact lease to advance one immutable parent inbox
