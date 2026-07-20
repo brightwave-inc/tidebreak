@@ -386,6 +386,43 @@ pub mod sandbox_agent_admission {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod sandbox_spawn_checkpoint {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "sandbox_spawn_checkpoint")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub call_id: Uuid,
+        pub child_run_id: Uuid,
+        pub parent_run_id: Uuid,
+        pub origin_turn_id: Uuid,
+        pub chat_id: Uuid,
+        pub lease_token: Uuid,
+        pub attempt_count: i32,
+        pub claim_count: i32,
+        pub provider_id: String,
+        pub history_order: i64,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub arguments: Json,
+        pub result: String,
+        pub steer_revision: i64,
+        pub event_ordinal: i32,
+        pub model_steps: i32,
+        pub input_tokens: i64,
+        pub output_tokens: i64,
+        pub cache_read_input_tokens: i64,
+        pub cache_creation_input_tokens: i64,
+        pub event_seq: i64,
+        pub committed_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod agent_run_claim {
     use sea_orm::entity::prelude::*;
 
@@ -844,6 +881,7 @@ pub mod tool_call {
         pub chat_id: Uuid,
         pub turn_id: Uuid,
         pub provider_id: String,
+        pub history_order: i64,
         pub name: String,
         #[sea_orm(column_type = "JsonBinary")]
         pub arguments: Json,

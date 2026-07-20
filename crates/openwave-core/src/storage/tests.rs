@@ -35,6 +35,7 @@ struct MemStore {
     settings: Mutex<HashMap<String, Value>>,
     events: Mutex<Vec<(ChatId, SequencedEvent)>>,
     tool_calls: Mutex<HashMap<crate::id::CallId, ToolCallRecord>>,
+    tool_history_order: Mutex<HashMap<crate::id::CallId, (ChatId, i64)>>,
     tool_call_lease_tokens: Mutex<HashMap<crate::id::CallId, uuid::Uuid>>,
 }
 
@@ -1676,6 +1677,11 @@ impl Store for MemStore {
         Ok(vec![])
     }
     async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome> {
+        if call.execution == ToolCallExecution::Orchestration {
+            return Err(AgentError::Store(
+                "orchestration tool calls require an atomic turn checkpoint".into(),
+            ));
+        }
         let mut calls = self.tool_calls.lock().unwrap();
         if let Some(existing) = calls.get(&call.id) {
             let matches = existing.chat_id == call.chat_id
@@ -1691,6 +1697,16 @@ impl Store for MemStore {
                 AcceptToolCallOutcome::IdentityConflict
             });
         }
+        let mut history = self.tool_history_order.lock().unwrap();
+        let next = history
+            .values()
+            .filter(|(chat_id, _)| *chat_id == call.chat_id)
+            .map(|(_, order)| *order)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| AgentError::Store("tool history exhausted".into()))?;
+        history.insert(call.id, (call.chat_id, next));
         calls.insert(call.id, call.clone());
         Ok(AcceptToolCallOutcome::Accepted(call.clone()))
     }
@@ -1880,7 +1896,8 @@ impl Store for MemStore {
             })
             .cloned()
             .collect();
-        calls.sort_by_key(|call| (call.created_at, call.id.0));
+        let history = self.tool_history_order.lock().unwrap();
+        calls.sort_by_key(|call| history.get(&call.id).map(|(_, order)| *order));
         Ok(calls)
     }
     async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
@@ -1892,7 +1909,8 @@ impl Store for MemStore {
             .filter(|call| call.chat_id == chat_id)
             .cloned()
             .collect();
-        calls.sort_by_key(|call| call.created_at);
+        let history = self.tool_history_order.lock().unwrap();
+        calls.sort_by_key(|call| history.get(&call.id).map(|(_, order)| *order));
         Ok(calls)
     }
     async fn get_setting(&self, key: &str) -> Result<Option<Value>> {

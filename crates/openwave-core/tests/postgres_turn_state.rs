@@ -8,18 +8,19 @@ use openwave_core::{
     AgentRunCancellationReason, AgentRunExecution, AgentRunId, AgentRunInboxStatus,
     AgentRunResultPayload, AgentRunStatus, AgentRunWaitCondition, ApplyTurnSteerOutcome,
     AssistantCitationReference, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome,
-    ByteSpan, CallId, Chat, ChatId, ChatRootAttachment, ChunkId, ClaimClientToolCallOutcome,
-    ClientToolCallRequest, CompleteTurnRunOutcome, DbStore, DeleteChatOutcome, DocumentGeneration,
-    DocumentId, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
-    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
+    ByteSpan, CallId, Chat, ChatId, ChatRootAttachment, CheckpointSandboxSpawnOutcome, ChunkId,
+    ClaimClientToolCallOutcome, ClientToolCallRequest, CompleteTurnRunOutcome, DbStore,
+    DeleteChatOutcome, DocumentGeneration, DocumentId, FinishAgentRunCancellationOutcome,
+    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
+    HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, Project, ProjectId,
     RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrievalEvidenceInput,
     RetrievalEvidenceSource, Role, RootAttachmentChangeAction, RootAttachmentChangeId,
-    RootAttachmentChangeTerminal, RootAttachmentOrigin, StopReason, Store,
-    SubmitAgentRunResultOutcome, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId,
-    TurnSteerStatus, Usage,
+    RootAttachmentChangeTerminal, RootAttachmentOrigin, SandboxSpawnCheckpointRequest,
+    SpawnSandboxAgentResult, StopReason, Store, SubmitAgentRunResultOutcome, ToolCallExecution,
+    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry,
+    TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement, TransactionTrait};
 
@@ -335,6 +336,235 @@ async fn cleanup_postgres_sandbox_chat(store: &DbStore, chat_id: ChatId) {
         store.delete_chat(chat_id).await.unwrap(),
         DeleteChatOutcome::Deleted
     );
+}
+
+fn postgres_spawn_checkpoint_request(
+    turn: &openwave_core::TurnRun,
+    lease_token: uuid::Uuid,
+    call_id: CallId,
+    task: &str,
+) -> SandboxSpawnCheckpointRequest {
+    SandboxSpawnCheckpointRequest {
+        origin_turn_id: turn.id,
+        lease_token,
+        expected_steer_revision: turn.steer_revision,
+        call_id,
+        provider_id: format!("postgres-{call_id}"),
+        arguments: serde_json::json!({"task": task}),
+        result: serde_json::to_string(&SpawnSandboxAgentResult {
+            agent_id: AgentRunId::sandbox_for_spawn_call(call_id),
+        })
+        .unwrap(),
+        event_ordinal: 2,
+        progress: TurnCheckpointProgress {
+            model_steps: 1,
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 3,
+                cache_read_input_tokens: 2,
+                cache_creation_input_tokens: 1,
+            },
+        },
+    }
+}
+
+async fn append_postgres_turn_started(
+    store: &DbStore,
+    turn: &openwave_core::TurnRun,
+    lease: uuid::Uuid,
+) {
+    store
+        .append_turn_event(
+            turn.chat_id,
+            turn.id,
+            lease,
+            1,
+            utc_now_at_postgres_precision(),
+            &AgentEvent::TurnStarted { turn_id: turn.id },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn postgres_concurrent_exact_nonblocking_spawn_checkpoint_converges_once() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = postgres_live_turn(store.as_ref(), chat.id).await;
+    append_postgres_turn_started(store.as_ref(), &turn, lease).await;
+    let request = postgres_spawn_checkpoint_request(&turn, lease, CallId::new(), "race exactly");
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        let request = request.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .checkpoint_sandbox_spawn(&request, utc_now_at_postgres_precision())
+                .await
+                .unwrap()
+                .unwrap()
+        }));
+    }
+    let mut committed = 0;
+    let mut existing = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            CheckpointSandboxSpawnOutcome::Checkpointed { .. } => committed += 1,
+            CheckpointSandboxSpawnOutcome::Existing { .. } => existing += 1,
+            outcome => panic!("unexpected concurrent postgres checkpoint: {outcome:?}"),
+        }
+    }
+    assert_eq!((committed, existing), (1, 1));
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
+    assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
+    cleanup_postgres_sandbox_chat(store.as_ref(), chat.id).await;
+}
+
+#[tokio::test]
+async fn postgres_cross_chat_spawn_call_collision_has_one_atomic_winner() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    let (first_turn, first_lease) = postgres_live_turn(store.as_ref(), first_chat.id).await;
+    let (second_turn, second_lease) = postgres_live_turn(store.as_ref(), second_chat.id).await;
+    append_postgres_turn_started(store.as_ref(), &first_turn, first_lease).await;
+    append_postgres_turn_started(store.as_ref(), &second_turn, second_lease).await;
+    let call_id = CallId::new();
+    let requests = [
+        postgres_spawn_checkpoint_request(&first_turn, first_lease, call_id, "first owner"),
+        postgres_spawn_checkpoint_request(&second_turn, second_lease, call_id, "second owner"),
+    ];
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut tasks = Vec::new();
+    for request in requests {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .checkpoint_sandbox_spawn(&request, utc_now_at_postgres_precision())
+                .await
+                .unwrap()
+                .unwrap()
+        }));
+    }
+    let outcomes = futures::future::join_all(tasks)
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, CheckpointSandboxSpawnOutcome::Checkpointed { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, CheckpointSandboxSpawnOutcome::IdentityConflict))
+            .count(),
+        1
+    );
+    assert_eq!(
+        store.list_tool_calls(first_chat.id).await.unwrap().len()
+            + store.list_tool_calls(second_chat.id).await.unwrap().len(),
+        1
+    );
+    cleanup_postgres_sandbox_chat(store.as_ref(), first_chat.id).await;
+    cleanup_postgres_sandbox_chat(store.as_ref(), second_chat.id).await;
+}
+
+#[tokio::test]
+async fn postgres_nonblocking_spawn_and_parent_cancellation_are_one_ordered_transition() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = postgres_live_turn(store.as_ref(), chat.id).await;
+    append_postgres_turn_started(store.as_ref(), &turn, lease).await;
+    let request =
+        postgres_spawn_checkpoint_request(&turn, lease, CallId::new(), "race cancellation");
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+    let checkpoint_task = {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .checkpoint_sandbox_spawn(&request, utc_now_at_postgres_precision())
+                .await
+                .unwrap()
+                .unwrap()
+        })
+    };
+    let cancellation_task = {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .request_turn_cancellation(turn.id, utc_now_at_postgres_precision())
+                .await
+                .unwrap()
+        })
+    };
+    let checkpoint = checkpoint_task.await.unwrap();
+    cancellation_task.await.unwrap();
+    let parent = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    let children = store
+        .list_agent_runs(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.execution == AgentRunExecution::Sandbox)
+        .collect::<Vec<_>>();
+    match checkpoint {
+        CheckpointSandboxSpawnOutcome::Checkpointed { .. } => {
+            assert_eq!(parent.status, TurnRunStatus::Cancelled);
+            assert_eq!(children.len(), 1);
+            assert_eq!(children[0].status, AgentRunStatus::Cancelled);
+            assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
+        }
+        CheckpointSandboxSpawnOutcome::LeaseLost => {
+            assert_eq!(parent.status, TurnRunStatus::Cancelling);
+            assert!(children.is_empty());
+            assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+        }
+        outcome => panic!("unexpected checkpoint/cancellation race outcome: {outcome:?}"),
+    }
+    cleanup_postgres_sandbox_chat(store.as_ref(), chat.id).await;
 }
 
 #[tokio::test]

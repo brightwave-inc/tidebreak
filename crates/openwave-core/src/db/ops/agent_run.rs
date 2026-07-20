@@ -341,7 +341,7 @@ pub(in crate::db) async fn get_sandbox_agent_admission(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn admit_sandbox_agent_run_on<C>(
+pub(in crate::db) async fn admit_sandbox_agent_run_on<C>(
     conn: &C,
     turn: &entities::turn_run::Model,
     spawn_call_id: CallId,

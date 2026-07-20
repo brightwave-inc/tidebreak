@@ -1,6 +1,6 @@
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder};
 
-use crate::error::Result;
+use crate::error::{AgentError, Result};
 use crate::id::{CallId, ChatId, TurnId};
 
 use super::{entities, store_err};
@@ -34,6 +34,22 @@ where
         .await
         .map_err(store_err)?;
     Ok(locked.rows_affected == 1)
+}
+
+/// Allocate the next stable tool-history position while the caller owns the
+/// chat write lock.
+pub(in crate::db) async fn next_tool_history_order_on<C>(conn: &C, chat_id: ChatId) -> Result<i64>
+where
+    C: ConnectionTrait,
+{
+    entities::tool_call::Entity::find()
+        .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
+        .order_by_desc(entities::tool_call::Column::HistoryOrder)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .map_or(Some(1), |call| call.history_order.checked_add(1))
+        .ok_or_else(|| AgentError::Store(format!("tool history exhausted for chat {chat_id}")))
 }
 
 /// Acquire the cross-backend write lock for one tool-call row.

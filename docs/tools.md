@@ -76,12 +76,14 @@ agents never receive this tool.
 
 That first implementation is durable but serial: spawning one child immediately
 parks the parent, so the coordinator cannot launch a group and then wait for the
-group. The next runtime sequence separates those concerns. A non-blocking spawn
-will first admit an exact child with origin-turn ownership and transactional
-outstanding-child limits. A separate `wait_for_agents` continuation will then
-park on an explicit bounded set and consume their immutable results in stable
-order. The model surface stays unchanged until both halves are available; this
-avoids advertising fan-out that cannot recover correctly after restart.
+group. The next runtime sequence separates those concerns. Core now has an
+inactive atomic checkpoint for non-blocking spawn: it admits the exact child,
+commits completed orchestration tool history and a journal event, applies usage
+once, and releases the foreground lease for a normal durable reclaim. A
+separate `wait_for_agents` continuation will then park on an explicit bounded
+set and consume their immutable results in stable order. The model surface stays
+unchanged until both halves are available; this avoids advertising fan-out that
+cannot recover correctly after restart.
 
 A background sandbox has no shared conversation, filesystem, network, or
 host-folder access. It receives one bounded task and may be offered exactly

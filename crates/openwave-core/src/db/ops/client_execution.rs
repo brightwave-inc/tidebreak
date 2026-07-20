@@ -17,7 +17,7 @@ use crate::storage::{
 
 use super::super::{entities, store_err, DbStore};
 use super::turn::canonical_db_timestamp;
-use super::{acquire_chat_write_lock, acquire_tool_call_write_lock};
+use super::{acquire_chat_write_lock, acquire_tool_call_write_lock, next_tool_history_order_on};
 
 pub(in crate::db) async fn accept_tool_call(
     store: &DbStore,
@@ -46,11 +46,13 @@ pub(in crate::db) async fn accept_tool_call(
         return Ok(outcome);
     }
 
+    let history_order = next_tool_history_order_on(&transaction, call.chat_id).await?;
     let inserted = entities::tool_call::ActiveModel {
         id: Set(call.id.0),
         chat_id: Set(call.chat_id.0),
         turn_id: Set(call.turn_id.0),
         provider_id: Set(call.provider_id.clone()),
+        history_order: Set(history_order),
         name: Set(call.name.clone()),
         arguments: Set(call.arguments.clone()),
         execution: Set(call.execution.as_str().into()),
@@ -304,8 +306,7 @@ pub(in crate::db) async fn list_pending_client_tool_calls(
         .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
         .filter(entities::tool_call::Column::Execution.eq(ToolCallExecution::Client.as_str()))
         .filter(entities::tool_call::Column::Status.eq(ToolCallStatus::Pending.as_str()))
-        .order_by_asc(entities::tool_call::Column::CreatedAt)
-        .order_by_asc(entities::tool_call::Column::Id)
+        .order_by_asc(entities::tool_call::Column::HistoryOrder)
         .all(&store.conn)
         .await
         .map_err(store_err)?;
@@ -736,6 +737,10 @@ fn validate_accept(call: &ToolCallRecord) -> Result<()> {
     if call.id.0.is_nil()
         || !labels_valid
         || args_len > ToolCallRecord::MAX_ARGUMENT_BYTES
+        || !matches!(
+            call.execution,
+            ToolCallExecution::Server | ToolCallExecution::Client
+        )
         || call.status != ToolCallStatus::Pending
         || call.result.is_some()
         || call.error_code.is_some()
@@ -869,6 +874,7 @@ fn execution_from_db(value: &str) -> Result<ToolCallExecution> {
     match value {
         "server" => Ok(ToolCallExecution::Server),
         "client" => Ok(ToolCallExecution::Client),
+        "orchestration" => Ok(ToolCallExecution::Orchestration),
         _ => Err(AgentError::Store(format!("invalid tool execution {value}"))),
     }
 }

@@ -85,13 +85,19 @@ foreground continue after spawning, but must earn the same checkpoint and
 replay rules.
 
 Core now prepares, but does not advertise, the typed boundary for that later
-cutover. A non-blocking spawn will return only its stable opaque child agent
-ID. The paired `wait_for_agents` call accepts one to four unique child IDs in
-caller order and has only `All` completion semantics; its result contains each
-typed terminal child payload in that same order. Durable runtime validation
-must still prove every ID is a depth-one child owned by the exact origin turn. No
-scheduler lease, executor identity, or continuation token crosses this
-model-facing boundary.
+cutover. Its inactive non-blocking spawn checkpoint atomically binds child
+admission, the completed orchestration tool history, one journal event, exact
+usage progress, and release of the foreground lease. Ambiguous retries recover
+that immutable receipt before consulting mutable turn state. The model-facing
+spawn result contains only the stable opaque child agent ID.
+
+The paired `wait_for_agents` call accepts one to four unique child IDs in caller
+order and has only `All` completion semantics; its result contains each typed
+terminal child payload in that same order. Durable runtime validation must still
+prove every ID is a depth-one child owned by the exact origin turn. No scheduler
+lease, executor identity, or continuation token crosses this model-facing
+boundary. The non-blocking spawn behavior and `wait_for_agents` tool remain
+inactive until the ordered wait owns the same atomic tool-history boundary.
 
 The current serial single-child wait also carries an immutable atomic-admission
 marker. Only that receipt allows a later retry to recover the combined
@@ -270,5 +276,7 @@ The implementation is intentionally incremental:
     attached; sandbox broker access remains deferred.
 13. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work.
-14. Add richer context lifecycle, parallel-safe tool groups, and further
+14. Persist the non-blocking spawn checkpoint without advertising it. *(Shipped.)*
+15. Activate non-blocking spawn and ordered multi-agent waits together.
+16. Add richer context lifecycle, parallel-safe tool groups, and further
    orchestration only after these recovery boundaries are proven.

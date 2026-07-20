@@ -42,9 +42,9 @@ use crate::provider::{StopReason, Usage};
 use crate::storage::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptToolCallOutcome,
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
-    BeginRootAttachmentChangeOutcome, ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome,
-    ClaimSandboxToolCallOutcome, ClaimTurnRunOutcome, CompleteTurnRunOutcome,
-    ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
+    BeginRootAttachmentChangeOutcome, CheckpointSandboxSpawnOutcome, ClaimAgentRunInboxOutcome,
+    ClaimClientToolCallOutcome, ClaimSandboxToolCallOutcome, ClaimTurnRunOutcome,
+    CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
     DecideToolApprovalOutcome, DeleteChatOutcome, DocumentIndexJobReason,
     EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FailAgentRunOutcome,
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
@@ -1800,6 +1800,14 @@ impl Store for DbStore {
             now,
         )
         .await
+    }
+
+    async fn checkpoint_sandbox_spawn(
+        &self,
+        request: &crate::model::SandboxSpawnCheckpointRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<CheckpointSandboxSpawnOutcome>> {
+        ops::turn::checkpoint_sandbox_spawn(self, request, now).await
     }
 
     async fn get_sandbox_agent_admission(

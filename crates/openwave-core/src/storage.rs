@@ -248,6 +248,40 @@ pub enum AdmitSandboxAgentRunOutcome {
     OutputSuperseded(TurnRun),
 }
 
+/// Result of atomically checkpointing one non-blocking sandbox spawn.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CheckpointSandboxSpawnOutcome {
+    /// Child admission, tool history, journal event, progress, and turn yield
+    /// committed together.
+    Checkpointed {
+        child: AgentRun,
+        turn: TurnRun,
+        call: ToolCallRecord,
+        checkpoint: crate::model::SandboxSpawnCheckpoint,
+        event: SequencedEvent,
+    },
+    /// An exact retry recovered the immutable committed transition.
+    Existing {
+        child: AgentRun,
+        call: ToolCallRecord,
+        checkpoint: crate::model::SandboxSpawnCheckpoint,
+        event: SequencedEvent,
+    },
+    /// This call or one of its bound identities was reused with different
+    /// provider output, accounting, provenance, or journal order.
+    IdentityConflict,
+    /// The origin turn does not have an eligible foreground coordinator.
+    ParentUnavailable,
+    /// The exact foreground claim is missing, stale, or no longer live.
+    LeaseLost,
+    /// Four nonterminal children already belong to this origin turn.
+    AtCapacity,
+    /// A durable steer won the checkpoint race and must be applied first.
+    SteerPending(TurnRun),
+    /// The model output belongs to an older steering generation.
+    OutputSuperseded(TurnRun),
+}
+
 /// Result of atomically parking a sandbox run on immutable tool work.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParkSandboxToolCallOutcome {
@@ -1302,6 +1336,22 @@ pub trait Store: Send + Sync {
         _max_outstanding_children: u32,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Atomically admit one depth-one sandbox child and yield the foreground
+    /// turn at a non-blocking spawn boundary.
+    ///
+    /// Exact receipt recovery runs before mutable lease and steering checks.
+    /// A successful transition writes one terminal, non-executable
+    /// orchestration tool call and its `ToolCallCompleted` event, applies one
+    /// progress delta, then moves `running` to `resuming` with no live lease.
+    /// This storage primitive is deliberately not advertised to models yet.
+    async fn checkpoint_sandbox_spawn(
+        &self,
+        _request: &crate::model::SandboxSpawnCheckpointRequest,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<CheckpointSandboxSpawnOutcome>> {
         agent_run_storage_unavailable()
     }
 
