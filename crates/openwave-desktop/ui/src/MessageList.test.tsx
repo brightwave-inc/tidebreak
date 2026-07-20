@@ -33,7 +33,7 @@ describe("MessageBubble", () => {
     expect(assistant).not.toContain("bubble");
   });
 
-  it("keeps tool cards, approvals, and active streaming placeholders in sequence", () => {
+  it("keeps tool cards and approvals in sequence without a duplicate worker status", () => {
     const messages: ChatMessage[] = [
       { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "running" },
       {
@@ -66,7 +66,33 @@ describe("MessageBubble", () => {
       markup.indexOf("Approval needed"),
     );
     expect(markup).toContain("message-approval");
-    expect(markup).toContain('aria-label="Thinking"');
+    expect(markup).not.toContain("Working");
+    expect(markup).toContain('aria-live="polite"');
+  });
+
+  it("replaces an empty active assistant placeholder with one worker status", () => {
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={[
+          { id: "assistant-active", role: "assistant", text: "", sources: [] },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        busy
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup.match(/>Working</g)).toHaveLength(1);
+    expect(markup).not.toContain('aria-label="Assistant"');
+    expect(markup).not.toContain("message-stream-placeholder");
   });
 
   it("does not offer approval for an action without a safe description", () => {

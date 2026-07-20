@@ -1,5 +1,6 @@
 import type { ReactNode, RefObject, UIEvent } from "react";
 import type { PendingFolderAccessRequest } from "./api";
+import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
 import { FolderAccessCard } from "./FolderAccessCard";
 import type { FolderAccessDecision } from "./host";
 import { MessageMarkdown } from "./MessageMarkdown";
@@ -91,6 +92,11 @@ export function MessageList({
           onCancel={() => onFolderAccessCancel(request.callId, request.turnId)}
         />
       ))}
+      {shouldShowAssistantWorking(
+        messages,
+        busy,
+        folderAccessRequests.length,
+      ) && <AssistantWorkingIndicator />}
     </div>
   );
 }
@@ -231,15 +237,11 @@ export function MessageBubble({
   }
 
   if (message.role === "assistant") {
+    if (!message.text && message.sources.length === 0) return null;
+
     return (
       <article className="message message-assistant" aria-label="Assistant">
-        {message.text ? (
-          <MessageMarkdown>{message.text}</MessageMarkdown>
-        ) : busy ? (
-          <span className="message-stream-placeholder" aria-label="Thinking">
-            …
-          </span>
-        ) : null}
+        {message.text && <MessageMarkdown>{message.text}</MessageMarkdown>}
         <AssistantSources sources={message.sources} />
         <MessageFooter
           role="assistant"
@@ -274,4 +276,32 @@ export function MessageBubble({
       {message.text}
     </div>
   );
+}
+
+/**
+ * The generic worker indicator fills only gaps where no more specific live or
+ * user-action status is already visible. All copy remains renderer-owned.
+ */
+export function shouldShowAssistantWorking(
+  messages: readonly ChatMessage[],
+  busy: boolean,
+  pendingFolderAccessCount: number,
+): boolean {
+  if (!busy || pendingFolderAccessCount > 0) return false;
+  const hasSpecificPendingStatus = messages.some(
+    (message) =>
+      (message.role === "tool" &&
+        message.status !== "completed" &&
+        message.status !== "failed" &&
+        message.status !== "cancelled") ||
+      (message.role === "approval" && !message.resolved),
+  );
+  if (hasSpecificPendingStatus) return false;
+
+  const latest = messages[messages.length - 1];
+  if (latest?.role === "assistant") {
+    return latest.text.trim().length === 0 && latest.sources.length === 0;
+  }
+  if (latest?.role === "system" || latest?.role === "error") return false;
+  return true;
 }

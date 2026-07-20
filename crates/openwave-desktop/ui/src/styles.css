@@ -812,11 +812,37 @@ button {
   text-align: left;
 }
 
-.message-stream-placeholder {
-  display: inline-block;
-  min-width: 1.2rem;
+.assistant-working {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-self: flex-start;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.2rem 0;
   color: var(--muted);
-  letter-spacing: 0.12em;
+  font-size: 0.8rem;
+  font-weight: 550;
+}
+
+.assistant-working-mark {
+  width: 1rem;
+  height: auto;
+  transform-origin: center;
+  animation: assistant-working-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes assistant-working-pulse {
+  0%,
+  100% {
+    opacity: 0.38;
+    transform: scale(0.92);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .message-approval {
@@ -1185,9 +1211,15 @@ button {
   .tool-call-spinner,
   .assistant-sources-chevron,
   .message-footer,
-  .tool-activity-group-chevron {
+  .tool-activity-group-chevron,
+  .assistant-working-mark {
     animation: none;
     transition: none;
+  }
+
+  .assistant-working-mark {
+    opacity: 0.72;
+    transform: none;
   }
 }
 
