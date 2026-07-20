@@ -12,6 +12,7 @@ use crate::storage::ParkTurnForAgentRunInboxOutcome;
 use crate::{AgentRunId, TurnId, TurnRun};
 
 use super::super::super::{entities, store_err, DbStore};
+use super::super::agent_run::database_now;
 use super::super::{acquire_chat_write_lock, acquire_turn_write_lock};
 use super::{canonical_db_timestamp, turn_run_from_model};
 
@@ -25,7 +26,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<ParkTurnForAgentRunInboxOutcome>> {
     validate_agent_run_inbox_park_request(turn_id, child_run_id, lease_token, progress)?;
-    let now = canonical_db_timestamp(now)?;
+    canonical_db_timestamp(now)?;
     let Some(scope) = entities::turn_run::Entity::find_by_id(turn_id.0)
         .one(&store.conn)
         .await
@@ -40,6 +41,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_inbox(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
+    let now = database_now(&transaction).await?;
 
     let outcome = park_turn_for_agent_run_inbox_on(
         &transaction,
@@ -86,7 +88,18 @@ where
                     "agent-run checkpoint for child {child_run_id} is missing its turn"
                 ))
             })?;
-        let exact = wait.turn_id == turn_id.0
+        let admission = entities::sandbox_agent_admission::Entity::find_by_id(child_run_id.0)
+            .one(conn)
+            .await
+            .map_err(store_err)?;
+        let exact_admission = admission.is_some_and(|admission| {
+            admission.child_run_id == child_run_id.0
+                && admission.origin_turn_id == turn_id.0
+                && admission.parent_run_id == turn.agent_run_id
+                && admission.chat_id == turn.chat_id
+        });
+        let exact = exact_admission
+            && wait.turn_id == turn_id.0
             && wait.parent_run_id == turn.agent_run_id
             && wait.chat_id == turn.chat_id
             && wait.park_lease_token == lease_token
@@ -136,8 +149,17 @@ where
         .one(conn)
         .await
         .map_err(store_err)?;
-    let valid_child = child.is_some_and(|child| {
-        child.chat_id == turn.chat_id
+    let admission = entities::sandbox_agent_admission::Entity::find_by_id(child_run_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    let valid_child = child.zip(admission).is_some_and(|(child, admission)| {
+        admission.child_run_id == child.id
+            && admission.origin_turn_id == turn_id.0
+            && admission.parent_run_id == turn.agent_run_id
+            && admission.chat_id == turn.chat_id
+            && child.spawn_call_id == Some(admission.spawn_call_id)
+            && child.chat_id == turn.chat_id
             && child.parent_id == Some(turn.agent_run_id)
             && child.depth == 1
             && child.execution == AgentRunExecution::Sandbox.as_str()
@@ -148,7 +170,7 @@ where
             )
     });
     if !valid_child {
-        return Ok(None);
+        return Ok(Some(ParkTurnForAgentRunInboxOutcome::IdentityConflict));
     }
     let totals = checked_checkpoint_totals(&turn, progress)?;
     let wait = entities::turn_agent_run_wait::ActiveModel {

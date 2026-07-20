@@ -365,6 +365,27 @@ pub mod agent_run {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod sandbox_agent_admission {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "sandbox_agent_admission")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub child_run_id: Uuid,
+        pub parent_run_id: Uuid,
+        pub origin_turn_id: Uuid,
+        pub chat_id: Uuid,
+        pub spawn_call_id: Uuid,
+        pub admitted_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod agent_run_claim {
     use sea_orm::entity::prelude::*;
 

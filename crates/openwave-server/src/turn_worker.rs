@@ -1206,6 +1206,19 @@ impl TurnWorker {
                             )) => {
                                 break;
                             }
+                            Ok(Some(AcceptSandboxAgentRunAndParkTurnOutcome::AtCapacity)) => {
+                                checkpoint_heartbeat.abort_and_wait().await;
+                                return self
+                                    .record_failure(
+                                        &turn,
+                                        lease_token,
+                                        total_model_steps,
+                                        total_usage,
+                                        "sandbox_agent_capacity_exceeded",
+                                        "sandbox delegation exceeds the bounded outstanding-child limit",
+                                    )
+                                    .await;
+                            }
                             Ok(Some(AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict))
                             | Ok(Some(
                                 AcceptSandboxAgentRunAndParkTurnOutcome::ParentUnavailable,

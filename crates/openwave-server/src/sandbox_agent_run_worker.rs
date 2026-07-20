@@ -737,11 +737,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use chrono::Utc;
     use futures::stream::{self, BoxStream};
     use openwave_core::{
-        AcceptAgentRunOutcome, AcceptTurnOutcome, AgentRunExecution, AgentRunInboxStatus, CallId,
-        Chat, ChatId, ChatRequest, DbStore, ModelProvider, ProviderId, Role, Store,
-        ToolCallResolution, TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
+        AcceptTurnOutcome, AgentRunInboxStatus, CallId, Chat, ChatId, ChatRequest, DbStore,
+        ModelProvider, ProviderId, Role, Store, ToolCallResolution, TurnCheckpointProgress, TurnId,
+        TurnRunStatus, Usage,
     };
 
     use super::*;
@@ -916,26 +917,74 @@ mod tests {
         (worker, store, provider, chat, dir)
     }
 
+    async fn admit_sandbox(
+        store: &Arc<dyn Store>,
+        chat_id: openwave_core::ChatId,
+        call: CallId,
+        input: &str,
+    ) -> openwave_core::AgentRun {
+        let running = store
+            .list_turn_runs(chat_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|turn| turn.status == openwave_core::TurnRunStatus::Running);
+        let (turn, lease) = if let Some(turn) = running {
+            let lease = turn.lease_token.expect("running test turn has lease");
+            (turn, lease)
+        } else {
+            let turn_id = openwave_core::TurnId::new();
+            store
+                .accept_turn(
+                    turn_id,
+                    chat_id,
+                    "sandbox-test-model",
+                    "sandbox test admission",
+                )
+                .await
+                .unwrap();
+            let lease = uuid::Uuid::new_v4();
+            let now = Utc::now();
+            let turn = store
+                .claim_turn_run(lease, now, now + chrono::Duration::hours(1))
+                .await
+                .unwrap()
+                .turn
+                .expect("sandbox test turn should claim");
+            (turn, lease)
+        };
+        match store
+            .admit_sandbox_agent_run(
+                turn.id,
+                call,
+                input,
+                lease,
+                turn.steer_revision,
+                openwave_core::AgentRun::MAX_CONCURRENCY_LIMIT,
+                Utc::now(),
+            )
+            .await
+            .unwrap()
+            .expect("sandbox test admission should resolve")
+        {
+            openwave_core::AdmitSandboxAgentRunOutcome::Accepted { child, .. }
+            | openwave_core::AdmitSandboxAgentRunOutcome::Existing { child, .. } => child,
+            outcome => panic!("unexpected sandbox admission: {outcome:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn completes_a_claimed_run_with_a_no_tools_private_request() {
         let (worker, store, provider, chat, dir) = fixture().await;
         let call = CallId::new();
         let id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
         let parent = openwave_core::AgentRunId::foreground_for_chat(chat.id);
-        assert!(matches!(
-            store
-                .accept_agent_run(
-                    id,
-                    chat.id,
-                    Some(parent),
-                    Some(call),
-                    AgentRunExecution::Sandbox,
-                    Some("Investigate this in isolation."),
-                )
+        assert_eq!(
+            admit_sandbox(&store, chat.id, call, "Investigate this in isolation.")
                 .await
-                .unwrap(),
-            AcceptAgentRunOutcome::Accepted(_)
-        ));
+                .id,
+            id
+        );
 
         assert_eq!(
             worker.run_once().await.unwrap(),
@@ -1012,17 +1061,7 @@ mod tests {
         );
         let spawn = CallId::new();
         let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
-        store
-            .accept_agent_run(
-                id,
-                chat.id,
-                Some(openwave_core::AgentRunId::foreground_for_chat(chat.id)),
-                Some(spawn),
-                AgentRunExecution::Sandbox,
-                Some("Research this."),
-            )
-            .await
-            .unwrap();
+        admit_sandbox(&store, chat.id, spawn, "Research this.").await;
 
         let call_id = match worker.run_once().await.unwrap() {
             SandboxAgentRunWorkerOutcome::ToolCheckpointed(call_id) => call_id,
@@ -1141,17 +1180,7 @@ mod tests {
         let (worker, store, _provider, chat, _dir) = fixture().await;
         let spawn = CallId::new();
         let id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn);
-        store
-            .accept_agent_run(
-                id,
-                chat.id,
-                Some(openwave_core::AgentRunId::foreground_for_chat(chat.id)),
-                Some(spawn),
-                AgentRunExecution::Sandbox,
-                Some("Research this."),
-            )
-            .await
-            .unwrap();
+        admit_sandbox(&store, chat.id, spawn, "Research this.").await;
         let lease = uuid::Uuid::new_v4();
         let run = store
             .claim_agent_run(lease, chrono::Duration::minutes(1), 4, 2)
@@ -1371,20 +1400,12 @@ mod tests {
         store.create_chat(&chat).await.unwrap();
         let call = CallId::new();
         let id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
-        assert!(matches!(
-            store
-                .accept_agent_run(
-                    id,
-                    chat.id,
-                    Some(openwave_core::AgentRunId::foreground_for_chat(chat.id)),
-                    Some(call),
-                    AgentRunExecution::Sandbox,
-                    Some("Wait until cancelled."),
-                )
+        assert_eq!(
+            admit_sandbox(&store, chat.id, call, "Wait until cancelled.")
                 .await
-                .unwrap(),
-            AcceptAgentRunOutcome::Accepted(_)
-        ));
+                .id,
+            id
+        );
         let started = Arc::new(Notify::new());
         let worker = SandboxAgentRunWorker::new(
             store.clone(),
@@ -1443,17 +1464,7 @@ mod tests {
             async move {
                 let call = CallId::new();
                 let id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
-                store
-                    .accept_agent_run(
-                        id,
-                        chat.id,
-                        Some(openwave_core::AgentRunId::foreground_for_chat(chat.id)),
-                        Some(call),
-                        AgentRunExecution::Sandbox,
-                        Some(&task),
-                    )
-                    .await
-                    .unwrap();
+                admit_sandbox(&store, chat.id, call, &task).await;
                 id
             }
         };
@@ -1522,17 +1533,7 @@ mod tests {
         let (_unused, store, provider, chat, _dir) = fixture().await;
         let call = CallId::new();
         let id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
-        store
-            .accept_agent_run(
-                id,
-                chat.id,
-                Some(openwave_core::AgentRunId::foreground_for_chat(chat.id)),
-                Some(call),
-                AgentRunExecution::Sandbox,
-                Some("do not call provider"),
-            )
-            .await
-            .unwrap();
+        admit_sandbox(&store, chat.id, call, "do not call provider").await;
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let worker = SandboxAgentRunWorker::new(
@@ -1574,18 +1575,7 @@ mod tests {
     async fn resolver_delay_past_the_database_lease_prevents_provider_egress() {
         let (_unused, store, provider, chat, _dir) = fixture().await;
         let call = CallId::new();
-        let id = openwave_core::AgentRunId::sandbox_for_spawn_call(call);
-        store
-            .accept_agent_run(
-                id,
-                chat.id,
-                Some(openwave_core::AgentRunId::foreground_for_chat(chat.id)),
-                Some(call),
-                AgentRunExecution::Sandbox,
-                Some("do not call provider after expiry"),
-            )
-            .await
-            .unwrap();
+        admit_sandbox(&store, chat.id, call, "do not call provider after expiry").await;
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let worker = SandboxAgentRunWorker::new(

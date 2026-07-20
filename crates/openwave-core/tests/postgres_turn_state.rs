@@ -4,8 +4,8 @@ use std::{sync::Arc, time::Duration as StdDuration};
 
 use chrono::{Duration, Utc};
 use openwave_core::{
-    AcceptAgentRunOutcome, AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome,
-    AgentEvent, AgentRunExecution, AgentRunId, AgentRunStatus, ApplyTurnSteerOutcome,
+    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent,
+    AgentRunExecution, AgentRunId, AgentRunStatus, ApplyTurnSteerOutcome,
     AssistantCitationReference, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome,
     ByteSpan, CallId, Chat, ChatId, ChatRootAttachment, ChunkId, ClaimClientToolCallOutcome,
     ClientToolCallRequest, CompleteTurnRunOutcome, DbStore, DocumentGeneration, DocumentId,
@@ -201,6 +201,70 @@ fn sample_chat() -> Chat {
     }
 }
 
+async fn postgres_live_turn(
+    store: &DbStore,
+    chat_id: ChatId,
+) -> (openwave_core::TurnRun, uuid::Uuid) {
+    if let Some(turn) = store
+        .list_turn_runs(chat_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|turn| turn.status == TurnRunStatus::Running)
+    {
+        return (
+            turn.clone(),
+            turn.lease_token.expect("running turn has lease"),
+        );
+    }
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(
+            turn_id,
+            chat_id,
+            "postgres-sandbox-test",
+            "sandbox admission",
+        )
+        .await
+        .unwrap();
+    let lease = uuid::Uuid::new_v4();
+    let now = utc_now_at_postgres_precision();
+    let turn = store
+        .claim_turn_run(lease, now, now + Duration::hours(1))
+        .await
+        .unwrap()
+        .turn
+        .expect("postgres sandbox test turn should claim");
+    (turn, lease)
+}
+
+async fn postgres_admit_sandbox(
+    store: &DbStore,
+    chat_id: ChatId,
+    call: CallId,
+    input: &str,
+) -> openwave_core::AgentRun {
+    let (turn, lease) = postgres_live_turn(store, chat_id).await;
+    match store
+        .admit_sandbox_agent_run(
+            turn.id,
+            call,
+            input,
+            lease,
+            turn.steer_revision,
+            openwave_core::AgentRun::MAX_CONCURRENCY_LIMIT,
+            utc_now_at_postgres_precision(),
+        )
+        .await
+        .unwrap()
+        .expect("postgres sandbox admission should resolve")
+    {
+        openwave_core::AdmitSandboxAgentRunOutcome::Accepted { child, .. }
+        | openwave_core::AdmitSandboxAgentRunOutcome::Existing { child, .. } => child,
+        outcome => panic!("unexpected postgres sandbox admission: {outcome:?}"),
+    }
+}
+
 #[tokio::test]
 async fn postgres_agent_runs_enforce_foreground_parentage_and_idempotency() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
@@ -223,53 +287,26 @@ async fn postgres_agent_runs_enforce_foreground_parentage_and_idempotency() {
     assert_eq!(foreground.depth, 0);
     assert_eq!(foreground.status, AgentRunStatus::Active);
 
-    let child_id = AgentRunId::new();
     let spawn_call_id = CallId::new();
-    let child = match store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(foreground_id),
-            Some(spawn_call_id),
-            AgentRunExecution::Sandbox,
-            Some("postgres child"),
-        )
-        .await
-        .unwrap()
-    {
-        AcceptAgentRunOutcome::Accepted(run) => run,
-        outcome => panic!("unexpected sandbox outcome: {outcome:?}"),
-    };
+    let child = postgres_admit_sandbox(&store, chat.id, spawn_call_id, "postgres child").await;
+    let child_id = child.id;
     assert_eq!(child.depth, 1);
     assert_eq!(child.status, AgentRunStatus::Queued);
-    assert!(matches!(
-        store
-            .accept_agent_run(
-                child_id,
-                chat.id,
-                Some(foreground_id),
-                Some(spawn_call_id),
-                AgentRunExecution::Sandbox,
-                Some("postgres child"),
-            )
-            .await
-            .unwrap(),
-        AcceptAgentRunOutcome::Existing(existing) if existing == child
-    ));
-    assert!(matches!(
-        store
-            .accept_agent_run(
-                AgentRunId::new(),
-                chat.id,
-                Some(child_id),
-                Some(CallId::new()),
-                AgentRunExecution::Sandbox,
-                Some("forbidden grandchild"),
-            )
-            .await
-            .unwrap(),
-        AcceptAgentRunOutcome::ParentUnavailable
-    ));
+    assert_eq!(
+        postgres_admit_sandbox(&store, chat.id, spawn_call_id, "postgres child").await,
+        child
+    );
+    assert!(store
+        .accept_agent_run(
+            AgentRunId::new(),
+            chat.id,
+            Some(child_id),
+            Some(CallId::new()),
+            AgentRunExecution::Sandbox,
+            Some("forbidden grandchild"),
+        )
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -287,28 +324,25 @@ async fn postgres_agent_run_identity_collision_recovers_exactly_across_chats() {
     let second_chat = sample_chat();
     store.create_chat(&first_chat).await.unwrap();
     store.create_chat(&second_chat).await.unwrap();
-    let first_parent = AgentRunId::foreground_for_chat(first_chat.id);
-    let second_parent = AgentRunId::foreground_for_chat(second_chat.id);
-
-    let collision_id = AgentRunId::new();
+    let (first_turn, first_lease) = postgres_live_turn(&store, first_chat.id).await;
+    let (second_turn, second_lease) = postgres_live_turn(&store, second_chat.id).await;
+    let collision_call = CallId::new();
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let mut tasks = Vec::new();
-    for (chat_id, parent_id) in [
-        (first_chat.id, first_parent),
-        (second_chat.id, second_parent),
-    ] {
+    for (turn, lease) in [(first_turn, first_lease), (second_turn, second_lease)] {
         let store = store.clone();
         let barrier = barrier.clone();
         tasks.push(tokio::spawn(async move {
             barrier.wait().await;
             store
-                .accept_agent_run(
-                    collision_id,
-                    chat_id,
-                    Some(parent_id),
-                    Some(CallId::new()),
-                    AgentRunExecution::Sandbox,
-                    Some("colliding child"),
+                .admit_sandbox_agent_run(
+                    turn.id,
+                    collision_call,
+                    "colliding child",
+                    lease,
+                    turn.steer_revision,
+                    1,
+                    utc_now_at_postgres_precision(),
                 )
                 .await
         }));
@@ -317,12 +351,200 @@ async fn postgres_agent_run_identity_collision_recovers_exactly_across_chats() {
     let mut conflicted = 0;
     for task in tasks {
         match task.await.unwrap() {
-            Ok(AcceptAgentRunOutcome::Accepted(_)) => accepted += 1,
-            Ok(AcceptAgentRunOutcome::IdentityConflict) => conflicted += 1,
+            Ok(Some(openwave_core::AdmitSandboxAgentRunOutcome::Accepted { .. })) => accepted += 1,
+            Ok(Some(openwave_core::AdmitSandboxAgentRunOutcome::IdentityConflict)) => {
+                conflicted += 1
+            }
             outcome => panic!("unexpected cross-chat collision outcome: {outcome:?}"),
         }
     }
     assert_eq!((accepted, conflicted), (1, 1));
+}
+
+#[tokio::test]
+async fn postgres_concurrent_sandbox_admission_respects_origin_turn_cap() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = postgres_live_turn(&store, chat.id).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for index in 0..8 {
+        let contender = DbStore::connect(&url).await.unwrap();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            contender
+                .admit_sandbox_agent_run(
+                    turn.id,
+                    CallId::new(),
+                    &format!("postgres concurrent admission {index}"),
+                    lease,
+                    turn.steer_revision,
+                    2,
+                    utc_now_at_postgres_precision(),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        }));
+    }
+    let outcomes = futures::future::join_all(tasks).await;
+    let accepted = outcomes
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|outcome| {
+            matches!(
+                outcome,
+                openwave_core::AdmitSandboxAgentRunOutcome::Accepted { .. }
+            )
+        })
+        .count();
+    assert_eq!(accepted, 2);
+    let sandbox_runs = store
+        .list_agent_runs(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.execution == AgentRunExecution::Sandbox)
+        .collect::<Vec<_>>();
+    assert_eq!(sandbox_runs.len(), 2);
+    for run in sandbox_runs {
+        store.request_agent_run_cancellation(run.id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn postgres_concurrent_exact_sandbox_admission_converges() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = postgres_live_turn(&store, chat.id).await;
+    let call = CallId::new();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let contender = DbStore::connect(&url).await.unwrap();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            contender
+                .admit_sandbox_agent_run(
+                    turn.id,
+                    call,
+                    "same postgres child",
+                    lease,
+                    turn.steer_revision,
+                    2,
+                    utc_now_at_postgres_precision(),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        }));
+    }
+    let outcomes = futures::future::join_all(tasks).await;
+    let accepted = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome.as_ref().unwrap(),
+                openwave_core::AdmitSandboxAgentRunOutcome::Accepted { .. }
+            )
+        })
+        .count();
+    let existing = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome.as_ref().unwrap(),
+                openwave_core::AdmitSandboxAgentRunOutcome::Existing { .. }
+            )
+        })
+        .count();
+    assert_eq!((accepted, existing), (1, 1));
+}
+
+#[tokio::test]
+async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = postgres_live_turn(&store, chat.id).await;
+    let setup_connection = Database::connect(&url).await.unwrap();
+    setup_connection
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!(
+                "UPDATE turn_run SET lease_expires_at = clock_timestamp() + interval '200 milliseconds' WHERE id = '{}'",
+                turn.id.0
+            ),
+        ))
+        .await
+        .unwrap();
+
+    let blocker_connection = Database::connect(&url).await.unwrap();
+    let blocker = blocker_connection.begin().await.unwrap();
+    blocker
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!("UPDATE chat SET title = title WHERE id = '{}'", chat.id.0),
+        ))
+        .await
+        .unwrap();
+
+    let contender = store.clone();
+    let call = CallId::new();
+    let stale_caller_now = utc_now_at_postgres_precision();
+    let admission = tokio::spawn(async move {
+        contender
+            .admit_sandbox_agent_run(
+                turn.id,
+                call,
+                "must not cross an expired lease",
+                lease,
+                turn.steer_revision,
+                2,
+                stale_caller_now,
+            )
+            .await
+    });
+    tokio::time::sleep(StdDuration::from_millis(350)).await;
+    blocker.commit().await.unwrap();
+
+    assert!(matches!(
+        admission.await.unwrap().unwrap(),
+        Some(openwave_core::AdmitSandboxAgentRunOutcome::LeaseLost)
+    ));
+    assert!(store
+        .get_agent_run(AgentRunId::sandbox_for_spawn_call(call))
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -341,21 +563,13 @@ async fn postgres_concurrent_sandbox_claims_respect_global_and_per_chat_limits()
     store.create_chat(&first_chat).await.unwrap();
     store.create_chat(&second_chat).await.unwrap();
     for chat_id in [first_chat.id, first_chat.id, second_chat.id, second_chat.id] {
-        let _accepted = match store
-            .accept_agent_run(
-                AgentRunId::new(),
-                chat_id,
-                Some(AgentRunId::foreground_for_chat(chat_id)),
-                Some(CallId::new()),
-                AgentRunExecution::Sandbox,
-                Some("postgres concurrent claim"),
-            )
-            .await
-            .unwrap()
-        {
-            AcceptAgentRunOutcome::Accepted(run) => run,
-            outcome => panic!("unexpected sandbox outcome: {outcome:?}"),
-        };
+        let _accepted = postgres_admit_sandbox(
+            store.as_ref(),
+            chat_id,
+            CallId::new(),
+            "postgres concurrent claim",
+        )
+        .await;
     }
     let barrier = Arc::new(tokio::sync::Barrier::new(8));
     let mut claimers = Vec::new();
@@ -395,18 +609,14 @@ async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() 
     let store = DbStore::connect(&url).await.unwrap();
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let child_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            child_id,
-            chat.id,
-            Some(AgentRunId::foreground_for_chat(chat.id)),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("scheduler lock clock regression"),
-        )
-        .await
-        .unwrap();
+    let child_id = postgres_admit_sandbox(
+        &store,
+        chat.id,
+        CallId::new(),
+        "scheduler lock clock regression",
+    )
+    .await
+    .id;
 
     let blocker = Database::connect(&url).await.unwrap();
     blocker
@@ -490,18 +700,10 @@ async fn postgres_sandbox_terminal_transitions_are_exact_and_fenced() {
     store.create_chat(&chat).await.unwrap();
     let parent_id = AgentRunId::foreground_for_chat(chat.id);
 
-    let completed_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            completed_id,
-            chat.id,
-            Some(parent_id),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("postgres terminal result"),
-        )
-        .await
-        .unwrap();
+    let completed_id =
+        postgres_admit_sandbox(&store, chat.id, CallId::new(), "postgres terminal result")
+            .await
+            .id;
     let prioritizer = Database::connect(&url).await.unwrap();
     prioritizer
         .execute(Statement::from_string(
@@ -544,18 +746,10 @@ async fn postgres_sandbox_terminal_transitions_are_exact_and_fenced() {
         Some(SubmitAgentRunResultOutcome::Existing(_))
     ));
 
-    let cancelling_id = AgentRunId::new();
-    store
-        .accept_agent_run(
-            cancelling_id,
-            chat.id,
-            Some(parent_id),
-            Some(CallId::new()),
-            AgentRunExecution::Sandbox,
-            Some("postgres cancellation"),
-        )
-        .await
-        .unwrap();
+    let cancelling_id =
+        postgres_admit_sandbox(&store, chat.id, CallId::new(), "postgres cancellation")
+            .await
+            .id;
     prioritizer
         .execute(Statement::from_string(
             DatabaseBackend::Postgres,

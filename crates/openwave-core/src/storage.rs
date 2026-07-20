@@ -220,6 +220,33 @@ pub enum AcceptAgentRunOutcome {
     ParentUnavailable,
 }
 
+/// Result of transactionally admitting one bounded sandbox child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmitSandboxAgentRunOutcome {
+    /// The child and immutable origin ownership were committed together.
+    Accepted {
+        child: AgentRun,
+        admission: crate::model::SandboxAgentAdmission,
+    },
+    /// An exact ambiguous retry recovered the committed child and ownership.
+    Existing {
+        child: AgentRun,
+        admission: crate::model::SandboxAgentAdmission,
+    },
+    /// The child or spawn-call identity is bound to different immutable input.
+    IdentityConflict,
+    /// The origin turn does not have an eligible foreground coordinator.
+    ParentUnavailable,
+    /// The origin turn is not owned by the supplied live worker lease.
+    LeaseLost,
+    /// This origin turn already owns the configured number of nonterminal children.
+    AtCapacity,
+    /// A durable steer won the admission race and must be applied first.
+    SteerPending(TurnRun),
+    /// The request came from provider output generated before an applied steer.
+    OutputSuperseded(TurnRun),
+}
+
 /// Result of atomically parking a sandbox run on immutable tool work.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParkSandboxToolCallOutcome {
@@ -276,6 +303,8 @@ pub enum AcceptSandboxAgentRunAndParkTurnOutcome {
     /// The turn's foreground coordinator is no longer an eligible sandbox
     /// parent.
     ParentUnavailable,
+    /// The origin turn already owns the configured number of nonterminal children.
+    AtCapacity,
     /// A durable steer won the checkpoint race and must be applied first.
     SteerPending(TurnRun),
     /// The request came from provider output generated before an applied steer.
@@ -1201,6 +1230,37 @@ pub trait Store: Send + Sync {
         _execution: AgentRunExecution,
         _input: Option<&str>,
     ) -> Result<AcceptAgentRunOutcome> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Admit one depth-one sandbox child without advancing its origin turn.
+    ///
+    /// The child id is derived from `spawn_call_id`; callers cannot choose a
+    /// second identity for the same model request. The origin turn, foreground
+    /// parent, child, and immutable admission receipt commit together under the
+    /// chat/turn write lock. Existing exact receipts are recovered before the
+    /// bounded outstanding-child check, making an ambiguous commit retry safe.
+    /// This is a persistence primitive only; the foreground agent does not yet
+    /// expose non-blocking fan-out behavior.
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_sandbox_agent_run(
+        &self,
+        _origin_turn_id: TurnId,
+        _spawn_call_id: CallId,
+        _input: &str,
+        _lease_token: uuid::Uuid,
+        _expected_steer_revision: i64,
+        _max_outstanding_children: u32,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Fetch immutable origin ownership for an admitted sandbox child.
+    async fn get_sandbox_agent_admission(
+        &self,
+        _child_run_id: AgentRunId,
+    ) -> Result<Option<crate::model::SandboxAgentAdmission>> {
         agent_run_storage_unavailable()
     }
 

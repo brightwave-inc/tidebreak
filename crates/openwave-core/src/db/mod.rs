@@ -41,12 +41,13 @@ use crate::model::{
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptToolCallOutcome,
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, BeginRootAttachmentChangeOutcome,
-    ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome, ClaimSandboxToolCallOutcome,
-    ClaimTurnRunOutcome, CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
-    ConsumeAgentRunInboxOutcome, DecideToolApprovalOutcome, DeleteChatOutcome,
-    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
-    FailAgentRunOutcome, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
+    BeginRootAttachmentChangeOutcome, ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome,
+    ClaimSandboxToolCallOutcome, ClaimTurnRunOutcome, CompleteTurnRunOutcome,
+    ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
+    DecideToolApprovalOutcome, DeleteChatOutcome, DocumentIndexJobReason,
+    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FailAgentRunOutcome,
+    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
     JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
     ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForClientCallOutcome,
@@ -1774,6 +1775,37 @@ impl Store for DbStore {
             input,
         )
         .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_sandbox_agent_run(
+        &self,
+        origin_turn_id: TurnId,
+        spawn_call_id: CallId,
+        input: &str,
+        lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
+        max_outstanding_children: u32,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<AdmitSandboxAgentRunOutcome>> {
+        ops::agent_run::admit_sandbox_agent_run(
+            self,
+            origin_turn_id,
+            spawn_call_id,
+            input,
+            lease_token,
+            expected_steer_revision,
+            max_outstanding_children,
+            now,
+        )
+        .await
+    }
+
+    async fn get_sandbox_agent_admission(
+        &self,
+        child_run_id: AgentRunId,
+    ) -> Result<Option<crate::model::SandboxAgentAdmission>> {
+        ops::agent_run::get_sandbox_agent_admission(self, child_run_id).await
     }
 
     #[allow(clippy::too_many_arguments)] // Mirrors the Store checkpoint contract.
