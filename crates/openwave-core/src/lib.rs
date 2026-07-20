@@ -43,8 +43,11 @@ pub use agent::{
 };
 pub use agent_tools::{
     sandbox_web_search_tool_spec, spawn_sandbox_agent_tool_spec,
-    validate_spawn_sandbox_agent_arguments, SpawnSandboxAgentArgs, MAX_SANDBOX_AGENT_TASK_CHARS,
-    SANDBOX_WEB_SEARCH_TOOL, SPAWN_SANDBOX_AGENT_TOOL,
+    validate_spawn_sandbox_agent_arguments, validate_wait_for_agents_arguments,
+    wait_for_agents_tool_spec, SpawnSandboxAgentArgs, SpawnSandboxAgentResult, WaitForAgentResult,
+    WaitForAgentsArgs, WaitForAgentsResult, MAX_SANDBOX_AGENT_TASK_CHARS,
+    MAX_WAIT_FOR_AGENTS_CHILDREN, SANDBOX_WEB_SEARCH_TOOL, SPAWN_SANDBOX_AGENT_TOOL,
+    WAIT_FOR_AGENTS_TOOL,
 };
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
