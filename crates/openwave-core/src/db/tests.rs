@@ -11,6 +11,7 @@ use crate::{ApprovalClass, ChunkId, ToolApprovalStatus};
 use chrono::{DateTime, Utc};
 
 mod agent_run;
+mod multi_agent_wait;
 mod root_attachment;
 mod turn_steer;
 

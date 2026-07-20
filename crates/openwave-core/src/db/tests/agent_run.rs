@@ -17,7 +17,7 @@ async fn accepted_sandbox_for_tool_test(store: &DbStore, chat_id: ChatId) -> Age
     admit_sandbox_for_test(store, chat_id, "Use the durable sandbox tool checkpoint").await
 }
 
-async fn live_turn_for_sandbox_test(
+pub(super) async fn live_turn_for_sandbox_test(
     store: &DbStore,
     chat_id: ChatId,
 ) -> (crate::TurnRun, uuid::Uuid) {
@@ -55,7 +55,7 @@ async fn live_turn_for_sandbox_test(
     (turn, lease)
 }
 
-async fn admit_sandbox_call_for_test(
+pub(super) async fn admit_sandbox_call_for_test(
     store: &DbStore,
     chat_id: ChatId,
     call_id: CallId,

@@ -5,16 +5,18 @@ use std::{sync::Arc, time::Duration as StdDuration};
 use chrono::{Duration, Utc};
 use openwave_core::{
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent,
-    AgentRunExecution, AgentRunId, AgentRunStatus, ApplyTurnSteerOutcome,
-    AssistantCitationReference, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome,
-    ByteSpan, CallId, Chat, ChatId, ChatRootAttachment, ChunkId, ClaimClientToolCallOutcome,
-    ClientToolCallRequest, CompleteTurnRunOutcome, DbStore, DeleteChatOutcome, DocumentGeneration,
-    DocumentId, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
-    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
-    ParkTurnForClientCallOutcome, Project, ProjectId, RecordTurnFailureOutcome,
-    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, ResolveToolCallOutcome,
-    RetrievalEvidenceInput, RetrievalEvidenceSource, Role, RootAttachmentChangeAction,
-    RootAttachmentChangeId, RootAttachmentChangeTerminal, RootAttachmentOrigin, StopReason, Store,
+    AgentRunExecution, AgentRunId, AgentRunInboxStatus, AgentRunStatus, AgentRunWaitCondition,
+    ApplyTurnSteerOutcome, AssistantCitationReference, BeginRootAttachmentChange,
+    BeginRootAttachmentChangeOutcome, ByteSpan, CallId, Chat, ChatId, ChatRootAttachment, ChunkId,
+    ClaimClientToolCallOutcome, ClientToolCallRequest, CompleteTurnRunOutcome, DbStore,
+    DeleteChatOutcome, DocumentGeneration, DocumentId, FinishAgentRunCancellationOutcome,
+    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
+    HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
+    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, Project, ProjectId,
+    RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
+    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrievalEvidenceInput,
+    RetrievalEvidenceSource, Role, RootAttachmentChangeAction, RootAttachmentChangeId,
+    RootAttachmentChangeTerminal, RootAttachmentOrigin, StopReason, Store,
     SubmitAgentRunResultOutcome, ToolCallExecution, ToolCallRecord, ToolCallResolution,
     ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRunStatus, TurnSteerId,
     TurnSteerStatus, Usage,
@@ -263,6 +265,25 @@ async fn postgres_admit_sandbox(
         | openwave_core::AdmitSandboxAgentRunOutcome::Existing { child, .. } => child,
         outcome => panic!("unexpected postgres sandbox admission: {outcome:?}"),
     }
+}
+
+async fn postgres_complete_next_child(store: &DbStore, text: &str) -> AgentRunId {
+    let lease = uuid::Uuid::new_v4();
+    let child = store
+        .claim_agent_run(lease, Duration::minutes(5), 4, 4)
+        .await
+        .unwrap()
+        .expect("postgres sandbox child should claim");
+    match store
+        .submit_agent_run_result(child.id, lease, text)
+        .await
+        .unwrap()
+        .expect("postgres sandbox result should commit")
+    {
+        SubmitAgentRunResultOutcome::Completed(result) => assert_eq!(result.text, text),
+        outcome => panic!("unexpected postgres sandbox submission: {outcome:?}"),
+    }
+    child.id
 }
 
 async fn cleanup_postgres_sandbox_chat(store: &DbStore, chat_id: ChatId) {
@@ -599,6 +620,173 @@ async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
         .unwrap()
         .is_none());
     cleanup_postgres_sandbox_chat(&store, chat.id).await;
+}
+
+#[tokio::test]
+async fn postgres_multi_child_wait_resumes_in_request_order_exactly_once() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = postgres_live_turn(&store, chat.id).await;
+    let first = postgres_admit_sandbox(&store, chat.id, CallId::new(), "postgres first").await;
+    let second = postgres_admit_sandbox(&store, chat.id, CallId::new(), "postgres second").await;
+    let requested = [second.id, first.id];
+    let wait_id = CallId::new();
+    let progress = TurnCheckpointProgress {
+        model_steps: 1,
+        usage: Usage {
+            input_tokens: 3,
+            output_tokens: 2,
+            cache_read_input_tokens: 1,
+            cache_creation_input_tokens: 0,
+        },
+    };
+    assert!(matches!(
+        store
+            .park_turn_for_agent_run_wait_set(
+                wait_id,
+                turn.id,
+                &requested,
+                AgentRunWaitCondition::All,
+                lease,
+                turn.steer_revision,
+                progress,
+                utc_now_at_postgres_precision(),
+            )
+            .await
+            .unwrap(),
+        Some(ParkTurnForAgentRunWaitSetOutcome::Parked { .. })
+    ));
+    postgres_complete_next_child(&store, "postgres completion one").await;
+    let resume_token = uuid::Uuid::new_v4();
+    assert!(matches!(
+        store
+            .resume_turn_for_agent_run_wait_set(wait_id, resume_token)
+            .await
+            .unwrap(),
+        Some(ResumeTurnForAgentRunWaitSetOutcome::NotReady(_))
+    ));
+    postgres_complete_next_child(&store, "postgres completion two").await;
+    let results = match store
+        .resume_turn_for_agent_run_wait_set(wait_id, resume_token)
+        .await
+        .unwrap()
+        .expect("postgres all wait should resume")
+    {
+        ResumeTurnForAgentRunWaitSetOutcome::Resumed { results, .. } => results,
+        outcome => panic!("unexpected postgres multi-wait resume: {outcome:?}"),
+    };
+    assert_eq!(
+        results
+            .iter()
+            .map(|entry| entry.child_run_id)
+            .collect::<Vec<_>>(),
+        requested
+    );
+    assert!(results.iter().all(|entry| {
+        entry.status == AgentRunInboxStatus::Consumed
+            && entry.consumed_lease_token == Some(resume_token)
+    }));
+    assert!(matches!(
+        store
+            .resume_turn_for_agent_run_wait_set(wait_id, resume_token)
+            .await
+            .unwrap(),
+        Some(ResumeTurnForAgentRunWaitSetOutcome::Existing { .. })
+    ));
+    cleanup_postgres_sandbox_chat(&store, chat.id).await;
+}
+
+#[tokio::test]
+async fn postgres_concurrent_cross_chat_wait_identity_converges_to_typed_conflict() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    let (first_turn, first_lease) = postgres_live_turn(&store, first_chat.id).await;
+    let (second_turn, second_lease) = postgres_live_turn(&store, second_chat.id).await;
+    let first_child = postgres_admit_sandbox(
+        &store,
+        first_chat.id,
+        CallId::new(),
+        "postgres collision first",
+    )
+    .await;
+    let second_child = postgres_admit_sandbox(
+        &store,
+        second_chat.id,
+        CallId::new(),
+        "postgres collision second",
+    )
+    .await;
+    let wait_id = CallId::new();
+    let first_members = [first_child.id];
+    let second_members = [second_child.id];
+    let first_store = store.clone();
+    let second_store = store.clone();
+    let progress = TurnCheckpointProgress {
+        model_steps: 1,
+        usage: Usage::default(),
+    };
+    let (first, second) = tokio::join!(
+        first_store.park_turn_for_agent_run_wait_set(
+            wait_id,
+            first_turn.id,
+            &first_members,
+            AgentRunWaitCondition::All,
+            first_lease,
+            first_turn.steer_revision,
+            progress,
+            utc_now_at_postgres_precision(),
+        ),
+        second_store.park_turn_for_agent_run_wait_set(
+            wait_id,
+            second_turn.id,
+            &second_members,
+            AgentRunWaitCondition::All,
+            second_lease,
+            second_turn.steer_revision,
+            progress,
+            utc_now_at_postgres_precision(),
+        )
+    );
+    let outcomes = [first.unwrap().unwrap(), second.unwrap().unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, ParkTurnForAgentRunWaitSetOutcome::Parked { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                ParkTurnForAgentRunWaitSetOutcome::IdentityConflict
+            ))
+            .count(),
+        1
+    );
+    cleanup_postgres_sandbox_chat(&store, first_chat.id).await;
+    cleanup_postgres_sandbox_chat(&store, second_chat.id).await;
 }
 
 #[tokio::test]

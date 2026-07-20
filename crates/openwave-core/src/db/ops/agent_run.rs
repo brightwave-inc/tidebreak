@@ -3024,7 +3024,7 @@ where
         .map_err(store_err)
 }
 
-async fn load_agent_run_inbox_by_ids_on<C>(
+pub(in crate::db) async fn load_agent_run_inbox_by_ids_on<C>(
     conn: &C,
     parent_run_id: AgentRunId,
     child_run_id: AgentRunId,
@@ -3075,7 +3075,7 @@ where
 /// message id makes an ambiguous commit retry safe without relying on worker
 /// memory: the next foreground provider request rebuilds this message from the
 /// ordinary transcript after any restart.
-async fn ensure_sandbox_result_message_on<C>(
+pub(in crate::db) async fn ensure_sandbox_result_message_on<C>(
     conn: &C,
     entry: &AgentRunInboxEntry,
     turn: &TurnRun,
@@ -3106,6 +3106,10 @@ where
     let disposition = match agent_run_status_from_db(&child.status)? {
         AgentRunStatus::Completed => "completed",
         AgentRunStatus::Failed => "failed",
+        // Cancellation delivery is introduced by a later coordinated slice.
+        // Accepting its eventual immutable receipt here keeps ordered multi-
+        // child transcript assembly additive without synthesizing context.
+        AgentRunStatus::Cancelled => "cancelled",
         status => {
             return Err(AgentError::Store(format!(
                 "agent-run inbox child {} is not terminal ({})",

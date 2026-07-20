@@ -579,6 +579,77 @@ pub mod turn_agent_run_wait {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod turn_agent_run_wait_set {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "turn_agent_run_wait_set")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub parent_run_id: Uuid,
+        pub turn_id: Uuid,
+        pub chat_id: Uuid,
+        pub condition: String,
+        pub park_lease_token: Uuid,
+        pub expected_steer_revision: i64,
+        pub attempt_count: i32,
+        pub claim_count: i32,
+        pub model_steps: i32,
+        pub input_tokens: i64,
+        pub output_tokens: i64,
+        pub cache_read_input_tokens: i64,
+        pub cache_creation_input_tokens: i64,
+        pub status: String,
+        pub parked_at: DateTimeUtc,
+        pub closed_at: Option<DateTimeUtc>,
+        pub resume_token: Option<Uuid>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod turn_agent_run_wait_lock {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "turn_agent_run_wait_lock")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod turn_agent_run_wait_member {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "turn_agent_run_wait_member")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub wait_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub position: i16,
+        pub child_run_id: Uuid,
+        pub parent_run_id: Uuid,
+        pub origin_turn_id: Uuid,
+        pub chat_id: Uuid,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod turn_run {
     use sea_orm::entity::prelude::*;
 

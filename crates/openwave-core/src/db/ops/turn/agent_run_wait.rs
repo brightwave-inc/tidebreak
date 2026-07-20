@@ -115,6 +115,16 @@ where
         return Ok(Some(outcome));
     }
 
+    if entities::turn_agent_run_wait_member::Entity::find()
+        .filter(entities::turn_agent_run_wait_member::Column::ChildRunId.eq(child_run_id.0))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some()
+    {
+        return Ok(Some(ParkTurnForAgentRunInboxOutcome::IdentityConflict));
+    }
+
     let turn = entities::turn_run::Entity::find_by_id(turn_id.0)
         .one(conn)
         .await
