@@ -591,19 +591,6 @@ where
     }
     let members = load_members(conn, CallId(wait.id)).await?;
     let _validated = wait_from_models(wait.clone(), members.clone())?;
-    for member in members {
-        if !super::super::agent_run::cancel_sandbox_child_for_parked_turn_on(
-            conn,
-            AgentRunId(wait.parent_run_id),
-            AgentRunId(member.child_run_id),
-            crate::ChatId(wait.chat_id),
-            now,
-        )
-        .await?
-        {
-            return Ok(false);
-        }
-    }
     let closed = entities::turn_agent_run_wait_set::Entity::update_many()
         .col_expr(
             entities::turn_agent_run_wait_set::Column::Status,

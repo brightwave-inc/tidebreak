@@ -1252,6 +1252,39 @@ pub enum AgentRunResultPayload {
         /// Non-authoritative, validated request arguments.
         request: crate::RequestFolderAccessArgs,
     },
+    /// The sandbox was durably stopped before producing an ordinary result.
+    Cancelled {
+        /// Stable reason recorded by the cancellation state machine.
+        reason: AgentRunCancellationReason,
+    },
+}
+
+/// Durable reason a sandbox child was cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunCancellationReason {
+    /// Cancellation was requested for this child directly.
+    Requested,
+    /// The exact foreground turn that admitted the child was cancelled.
+    ParentTurnCancelled,
+}
+
+impl AgentRunCancellationReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::ParentTurnCancelled => "parent_turn_cancelled",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "requested" => Some(Self::Requested),
+            "parent_turn_cancelled" => Some(Self::ParentTurnCancelled),
+            _ => None,
+        }
+    }
 }
 
 /// One immutable result delivered from a sandbox child to its foreground parent.

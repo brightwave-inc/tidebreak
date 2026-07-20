@@ -24,7 +24,7 @@ async fn request_turn_cancellation_inner(
     now: chrono::DateTime<Utc>,
     journal_terminal_event: bool,
 ) -> Result<Option<JournaledTurnOutcome<RequestTurnCancellationOutcome>>> {
-    let now = canonical_db_timestamp(now)?;
+    let requested_at = canonical_db_timestamp(now)?;
     // Client claiming/resolution also takes this chat lock before its call and
     // turn locks. Take it even for the non-journaling Store API so cancellation
     // cannot invert that order while inspecting a parked client call.
@@ -33,6 +33,13 @@ async fn request_turn_cancellation_inner(
         return Ok(None);
     }
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    // Sandbox scheduling, direct child cancellation, inbox continuation, and
+    // foreground cancellation share this outer lock order: scheduler first,
+    // then chat and turn. This lets parent cancellation mint terminal child
+    // provenance without racing a first worker claim or a direct cancellation
+    // request, while avoiding the scheduler/turn inversion that would arise
+    // from taking this lock after the turn lock.
+    super::super::super::agent_run::acquire_agent_run_claim_lock(&transaction).await?;
     if let Some(chat_id) = journal_chat_id {
         if !acquire_chat_write_lock(&transaction, chat_id).await? {
             return Err(AgentError::Store(format!(
@@ -44,6 +51,14 @@ async fn request_turn_cancellation_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
+    // The caller timestamp is request intent, not an operational clock. Lock
+    // acquisition may wait behind admission, heartbeat, or tool resolution;
+    // take authoritative statement time after every cancellation lock so no
+    // child or turn timestamp can move backwards.
+    let now = std::cmp::max(
+        requested_at,
+        super::super::super::agent_run::database_now(&transaction).await?,
+    );
     let Some(turn) = entities::turn_run::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
@@ -82,8 +97,24 @@ async fn request_turn_cancellation_inner(
         | TurnRunStatus::Resuming
         | TurnRunStatus::RetryWait => {}
     }
-    if turn.updated_at > now {
+    if turn.updated_at > requested_at {
         transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    // Every sandbox admitted by this exact turn is part of its cancellation
+    // boundary, including children that were spawned before the turn parked
+    // (or that the turn never chose to await). The outer scheduler lock makes
+    // this enumeration serial with claims, direct cancellation, and terminal
+    // worker acknowledgement.
+    if !super::super::super::agent_run::cancel_sandbox_children_for_origin_turn_on(
+        &transaction,
+        &turn,
+        now,
+    )
+    .await?
+    {
+        transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
 
@@ -178,18 +209,6 @@ async fn request_turn_cancellation_inner(
                 return Err(AgentError::Store(format!(
                     "waiting turn {id} has a mismatched child receipt"
                 )));
-            }
-            if !super::super::super::agent_run::cancel_sandbox_child_for_parked_turn_on(
-                &transaction,
-                crate::AgentRunId(wait.parent_run_id),
-                crate::AgentRunId(wait.child_run_id),
-                ChatId(turn.chat_id),
-                now,
-            )
-            .await?
-            {
-                transaction.rollback().await.map_err(store_err)?;
-                return Ok(None);
             }
             let closed = entities::turn_agent_run_wait::Entity::update_many()
                 .col_expr(

@@ -185,7 +185,7 @@ async fn ordered_all_wait_consumes_once_and_exactly_recovers_after_reclaim() {
 }
 
 #[tokio::test]
-async fn terminal_child_without_inbox_fails_closed_instead_of_waiting_forever() {
+async fn cancelled_child_is_a_terminal_multi_wait_delivery() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
@@ -211,16 +211,21 @@ async fn terminal_child_without_inbox_fails_closed_instead_of_waiting_forever() 
         .unwrap()
         .expect("queued child should cancel");
 
+    let outcome = store
+        .resume_turn_for_agent_run_wait_set(wait_id, uuid::Uuid::new_v4())
+        .await
+        .unwrap()
+        .expect("cancelled child delivery completes the All wait");
+    let ResumeTurnForAgentRunWaitSetOutcome::Resumed { results, .. } = outcome else {
+        panic!("unexpected cancellation resume outcome: {outcome:?}")
+    };
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].child_run_id, child.id);
     assert!(matches!(
-        store
-            .resume_turn_for_agent_run_wait_set(wait_id, uuid::Uuid::new_v4())
-            .await
-            .unwrap(),
-        Some(ResumeTurnForAgentRunWaitSetOutcome::TerminalDeliveryMissing {
-            child_run_id,
-            child_status: AgentRunStatus::Cancelled,
-            ..
-        }) if child_run_id == child.id
+        results[0].result.payload,
+        crate::AgentRunResultPayload::Cancelled {
+            reason: crate::AgentRunCancellationReason::Requested
+        }
     ));
 }
 
