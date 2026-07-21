@@ -5,6 +5,7 @@ import {
   type Chat,
   type ModelInfo,
   type PendingFolderAccessRequest,
+  type Project,
   type ProviderInfo,
   type ProviderKind,
   type SequencedEvent,
@@ -56,6 +57,7 @@ import {
   reconcileSandboxAgentCancellation,
   sandboxAgentStopKey,
 } from "./SandboxAgentStop";
+import { ProjectNavigation } from "./ProjectNavigation";
 
 type Msg = ChatMessage;
 
@@ -74,6 +76,10 @@ export default function App() {
   const [hydratedChatId, setHydratedChatId] = useState<string | null>(null);
   const [chats, setChats] = useState<Chat[]>([]);
   const [chatsError, setChatsError] = useState<string | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -109,6 +115,7 @@ export default function App() {
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
   const [creatingChat, setCreatingChat] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
   const [deletingChatId, setDeletingChatId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -142,6 +149,7 @@ export default function App() {
   const steerFenceRef = useRef(new ActiveTurnSteerFence());
   const sandboxStopFenceRef = useRef(new SandboxAgentStopFence());
   const provisionalToolCallIdsRef = useRef<Set<string>>(new Set());
+  const creationInFlightRef = useRef(false);
   const deletionInFlightRef = useRef(false);
 
   useEffect(() => {
@@ -170,6 +178,16 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
+        void (async () => {
+          try {
+            const existingProjects = await client.listProjects();
+            if (!cancelled) setProjects(existingProjects);
+          } catch {
+            if (!cancelled) setProjectsError("Could not load projects.");
+          } finally {
+            if (!cancelled) setProjectsLoading(false);
+          }
+        })();
         const [catalog, providerList, existingChats] = await Promise.all([
           client.listModels(),
           client.listProviders(),
@@ -858,38 +876,16 @@ export default function App() {
   }
 
   async function onNewChat() {
-    if (!client || creatingChat || deletionInFlightRef.current) return;
+    if (!client || creationInFlightRef.current || deletionInFlightRef.current) return;
+    creationInFlightRef.current = true;
     setCreatingChat(true);
     setPrimaryView("chat");
     try {
-      const created = await client.createChat(chat?.model ?? models[0]?.id);
-      socketGenerationRef.current += 1;
-      socketRef.current?.close();
-      socketRef.current = null;
-      assistantBufRef.current = "";
-      assistantMarkerScrubberRef.current =
-        new AssistantSourceMarkerStreamScrubber();
-      provisionalToolCallIdsRef.current = new Set();
-      lastSeqRef.current = 0;
-      followsLatestRef.current = true;
-      setHasUnreadActivity(false);
-      setMessages([]);
-      hydratedMessageIdsRef.current = new Set();
-      setAgentRuns([]);
-      setAgentRunsError(null);
-      setFolderAccessRequests([]);
-      setFolderAccessErrors({});
-      setComposerDraft("");
-      setBusy(false);
-      setCurrentActiveTurnId(null);
-      setCancelPendingTurnId(null);
-      setCancelError(null);
-      cancelRequestTurnRef.current = null;
-      clearSteerRequestState();
-      activateChat(created);
-      setChats((current) => [created, ...current]);
-      setChatsError(null);
-      setStatus(`chat ${created.id.slice(0, 8)}…`);
+      const created = await client.createChat(
+        chat?.model ?? models[0]?.id,
+        selectedProjectId,
+      );
+      openCreatedChat(created);
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -900,12 +896,117 @@ export default function App() {
         },
       ]);
     } finally {
+      creationInFlightRef.current = false;
       setCreatingChat(false);
     }
   }
 
+  function openCreatedChat(created: Chat) {
+    setPrimaryView("chat");
+    socketGenerationRef.current += 1;
+    socketRef.current?.close();
+    socketRef.current = null;
+    assistantBufRef.current = "";
+    assistantMarkerScrubberRef.current =
+      new AssistantSourceMarkerStreamScrubber();
+    provisionalToolCallIdsRef.current = new Set();
+    lastSeqRef.current = 0;
+    followsLatestRef.current = true;
+    setHasUnreadActivity(false);
+    setMessages([]);
+    hydratedMessageIdsRef.current = new Set();
+    setAgentRuns([]);
+    setAgentRunsError(null);
+    setFolderAccessRequests([]);
+    setFolderAccessErrors({});
+    setComposerDraft("");
+    setBusy(false);
+    setCurrentActiveTurnId(null);
+    setCancelPendingTurnId(null);
+    setCancelError(null);
+    cancelRequestTurnRef.current = null;
+    clearSteerRequestState();
+    activateChat(created);
+    setChats((current) => [created, ...current]);
+    setChatsError(null);
+    setProjectsError(null);
+    setStatus(`chat ${created.id.slice(0, 8)}…`);
+  }
+
+  async function onSelectProject(projectId: string | null) {
+    if (
+      !client ||
+      projectsLoading ||
+      creationInFlightRef.current ||
+      deletionInFlightRef.current
+    ) {
+      return;
+    }
+    const existing = chats.find((item) => item.project_id === projectId);
+    if (existing) {
+      setProjectsError(null);
+      selectChat(existing);
+      return;
+    }
+
+    creationInFlightRef.current = true;
+    setCreatingChat(true);
+    setProjectsError(null);
+    try {
+      const created = await client.createChat(
+        chat?.model ?? models[0]?.id,
+        projectId,
+      );
+      openCreatedChat(created);
+    } catch (err) {
+      setProjectsError(`Could not open project: ${String(err)}`);
+    } finally {
+      creationInFlightRef.current = false;
+      setCreatingChat(false);
+    }
+  }
+
+  async function onCreateProject(title: string): Promise<boolean> {
+    if (
+      !client ||
+      projectsLoading ||
+      creationInFlightRef.current ||
+      deletionInFlightRef.current
+    ) {
+      return false;
+    }
+    creationInFlightRef.current = true;
+    setCreatingProject(true);
+    setProjectsError(null);
+    let project: Project;
+    try {
+      project = await client.createProject(title);
+      setProjects((current) => [project, ...current]);
+    } catch (err) {
+      setProjectsError(`Could not create project: ${String(err)}`);
+      creationInFlightRef.current = false;
+      setCreatingProject(false);
+      return false;
+    }
+
+    try {
+      const created = await client.createChat(
+        chat?.model ?? models[0]?.id,
+        project.id,
+      );
+      openCreatedChat(created);
+      return true;
+    } catch (err) {
+      setProjectsError(`Project created, but its first chat could not start: ${String(err)}`);
+      return true;
+    } finally {
+      creationInFlightRef.current = false;
+      setCreatingProject(false);
+    }
+  }
+
   async function onDeleteChat(target: Chat) {
-    if (!client || deletionInFlightRef.current || creatingChat) return;
+    if (!client || deletionInFlightRef.current || creationInFlightRef.current) return;
     const label = target.title?.trim() || "this conversation";
     if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
 
@@ -930,9 +1031,9 @@ export default function App() {
         return;
       }
 
-      let next = refreshed[0];
+      let next = refreshed.find((item) => item.project_id === target.project_id);
       if (!next) {
-        next = await client.createChat(models[0]?.id);
+        next = await client.createChat(models[0]?.id, target.project_id);
         refreshed = await client.listChats();
       }
       setChats(refreshed);
@@ -955,12 +1056,19 @@ export default function App() {
     assistantMarkerScrubberRef.current =
       new AssistantSourceMarkerStreamScrubber();
     setChat(next);
+    setSelectedProjectId(next.project_id);
   }
 
   function selectChat(next: Chat, force = false) {
     setPrimaryView("chat");
     setSettingsPanel(null);
-    if (next.id === chat?.id || creatingChat || (!force && deletionInFlightRef.current)) return;
+    if (
+      next.id === chat?.id ||
+      creatingChat ||
+      (!force && (creationInFlightRef.current || deletionInFlightRef.current))
+    ) {
+      return;
+    }
     socketGenerationRef.current += 1;
     socketRef.current?.close();
     socketRef.current = null;
@@ -1120,6 +1228,13 @@ export default function App() {
     );
   }
 
+  const visibleChats = chats.filter(
+    (item) => item.project_id === selectedProjectId,
+  );
+  const activeProject = selectedProjectId
+    ? projects.find((project) => project.id === selectedProjectId) ?? null
+    : null;
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1132,11 +1247,22 @@ export default function App() {
           type="button"
           className="new-chat"
           onClick={() => void onNewChat()}
-          disabled={creatingChat || deletingChatId !== null}
+          disabled={creatingChat || creatingProject || deletingChatId !== null}
         >
           <span aria-hidden="true">+</span>
           {creatingChat ? "Starting…" : deletingChatId ? "Deleting…" : "New chat"}
         </button>
+
+        <ProjectNavigation
+          projects={projects}
+          selectedProjectId={selectedProjectId}
+          disabled={
+            projectsLoading || creatingChat || creatingProject || deletingChatId !== null
+          }
+          error={projectsError}
+          onSelect={(projectId) => void onSelectProject(projectId)}
+          onCreate={onCreateProject}
+        />
 
         {hasNativeHost() && (
           <button
@@ -1155,7 +1281,7 @@ export default function App() {
         <div className="sidebar-section">
           <span className="sidebar-label">Conversations</span>
           <div className="conversation-list" aria-label="Conversations">
-            {chats.map((item) => (
+            {visibleChats.map((item) => (
               <div
                 key={item.id}
                 className={`conversation-row${primaryView === "chat" && item.id === chat.id ? " is-active" : ""}`}
@@ -1164,7 +1290,7 @@ export default function App() {
                   type="button"
                   className="conversation-item"
                   aria-current={primaryView === "chat" && item.id === chat.id ? "page" : undefined}
-                  disabled={deletingChatId !== null || creatingChat}
+                  disabled={deletingChatId !== null || creatingChat || creatingProject}
                   onClick={() => selectChat(item)}
                 >
                   <span className="conversation-dot" aria-hidden="true" />
@@ -1175,7 +1301,7 @@ export default function App() {
                   className="conversation-delete"
                   aria-label={`Delete ${item.title?.trim() || "conversation"}`}
                   title="Delete conversation"
-                  disabled={deletingChatId !== null || creatingChat}
+                  disabled={deletingChatId !== null || creatingChat || creatingProject}
                   onClick={() => void onDeleteChat(item)}
                 >
                   ×
@@ -1238,7 +1364,10 @@ export default function App() {
         <section className="chat-pane">
           <header className="conversation-header">
             <div>
-              <p className="eyebrow">Conversation</p>
+              <p className="eyebrow">
+                {activeProject?.title?.trim() ||
+                  (selectedProjectId ? "Untitled project" : "Loose conversation")}
+              </p>
               {editingTitle ? (
                 <form
                   className="conversation-title-editor"
