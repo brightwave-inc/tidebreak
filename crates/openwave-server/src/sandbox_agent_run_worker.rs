@@ -109,6 +109,7 @@ pub(crate) struct SandboxAgentRunWorker {
 
 impl SandboxAgentRunWorker {
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
