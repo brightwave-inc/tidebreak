@@ -10,10 +10,18 @@ The initial design is deliberately bounded:
 - the foreground agent may start background agents;
 - every background agent runs in a sandbox;
 - background agents cannot start more agents (`depth <= 1`);
-- configurable global and per-chat limits bound queued and running agents.
+- at most four children from one foreground turn may remain unsettled;
+- configurable global and per-chat limits bound actively running agents.
 
 This is enough for useful parallel research and production work without needing
 a recursive fleet scheduler.
+
+From the user's point of view, the foreground assistant can hand several
+independent jobs to background workers, continue organizing the task, and then
+pause at one explicit join point. Results return together in the order the
+assistant requested, even if the workers actually finished in another order.
+Closing the app or restarting the server does not lose the accepted jobs or
+their place in the conversation.
 
 ## The execution hierarchy
 
@@ -46,7 +54,7 @@ differ:
 | --- | --- |
 | Responds directly in the chat | Works on one delegated task |
 | Final assistant text completes a turn | An explicit result submission completes the run |
-| Uses conversation-facing tools | Starts with no tools or shared conversation context |
+| Uses conversation-facing tools | May make at most one web-search or folder-access proposal call; has no shared conversation context |
 | Usually short-lived work | May park and resume over a longer period |
 | Streams answer content | Publishes bounded progress and a final result |
 
@@ -62,8 +70,8 @@ spawn:
 2. The tool-call identity is stored as the child's unique spawn identity, so an
    ambiguous retry recovers the original run instead of creating a duplicate.
 3. A bounded scheduler claims the child with an exact renewable lease.
-4. The scheduler gives the child private scratch and advances its isolated
-   no-tools task loop.
+4. The scheduler gives the child private scratch and advances its isolated task
+   loop with only the narrow sandbox-safe tool surface.
 5. The child submits an immutable terminal result. Provider failures leave the
    exact lease for the bounded scheduler retry/reap path; they do not create an
    unfenced executor-side failure transition.
@@ -71,38 +79,54 @@ spawn:
    together. A later wait transition may consume that entry and wake a parent.
 
 The bounded `spawn_sandbox_agent` contract is available only to a durably
-claimed foreground turn. It is a wait-form tool: one bounded `task` derives a
-child identity from its exact tool call, then commits the queued child, durable
-wait, and release of the foreground lease in one transaction. Only after that
-commit does the server wake the bounded sandbox worker. The notification is a
-latency hint, not a correctness dependency: the worker polls durable child and
-inbox state, so a missed wake or restart cannot lose accepted work. A sandbox
-result is delivered, claimed under an exact continuation lease, consumed, and
-turns the parked foreground turn into a fresh durably claimable `resuming`
-attempt. The tool is never advertised to sandbox workers, and the store
-independently enforces depth one. A later non-blocking spawn tool can let the
-foreground continue after spawning, but must earn the same checkpoint and
-replay rules.
+claimed foreground turn. One bounded `task` derives a child identity from its
+exact tool call. In one transaction, OpenWave admits the queued child, records
+the completed orchestration tool result containing its opaque `agent_id`,
+journals that completion, applies model progress once, and releases the
+foreground lease into `resuming`. The foreground can therefore be reclaimed
+and continue while the child runs. Only after the commit does the server wake
+the foreground and sandbox workers. Those notifications reduce latency; their
+durable scans remain the correctness path after a missed wake or restart.
 
-Core now prepares, but does not advertise, the typed boundary for that later
-cutover. Its inactive non-blocking spawn checkpoint atomically binds child
-admission, the completed orchestration tool history, one journal event, exact
-usage progress, and release of the foreground lease. Ambiguous retries recover
-that immutable receipt before consulting mutable turn state. The model-facing
-spawn result contains only the stable opaque child agent ID.
+Each spawn call is made alone and returns one ID for the foreground agent to
+retain. Up to four children from the exact origin turn may be unsettled at once.
+"Unsettled" includes both live work and a terminal result that has not yet been
+consumed, so finishing quickly does not accidentally open an unbounded queue.
+A consumed result, or one explicitly retired by cancellation, releases its
+slot. Sandbox workers never receive either orchestration tool, and storage also
+enforces depth one.
 
 The paired `wait_for_agents` call accepts one to four unique child IDs in caller
-order and has only `All` completion semantics; its result contains each typed
-terminal child payload in that same order. Durable runtime validation must still
-prove every ID is a depth-one child owned by the exact origin turn. No scheduler
-lease, executor identity, or continuation token crosses this model-facing
-boundary. The non-blocking spawn behavior and `wait_for_agents` tool remain
-inactive until the ordered wait owns the same atomic tool-history boundary.
+order and has only `All` completion semantics. The call is also made alone. Its
+park transaction proves every ID belongs to the exact origin turn, records the
+pending orchestration tool call and ordered membership, applies model progress
+once, and moves the foreground turn to `waiting_for_agent_run`. Scheduler
+leases, executor identities, and continuation tokens never cross this
+model-facing boundary.
 
-The current serial single-child wait also carries an immutable atomic-admission
-marker. Only that receipt allows a later retry to recover the combined
-transition; an older path that accepted a child and parked a turn in separate
-commits is never mistaken for proof that both effects committed together.
+When every child has a terminal inbox delivery, one resume transaction consumes
+all of them exactly once, completes the same tool call with typed results in
+request order, appends the exact `ToolCallCompleted` journal event, and changes
+the foreground turn to `resuming`. A child may finish before the wait is parked;
+the durable readiness scan still finds it. If a steer interrupts an open wait,
+the wait call closes but the children and their deliveries remain available for
+a later wait. Parent cancellation instead fences its owned children and retires
+unconsumed delivery.
+
+Foreground completion has a final storage guard. If the model tries to return a
+final answer while any admitted child remains unsettled, the completion does
+not commit. The worker continues with the complete ordered ID list and directs
+the model to issue one valid wait. This prevents a prompt mistake or premature
+provider response from orphaning background work.
+
+Ambiguous responses keep the original identity. Spawn recovery reads its
+immutable checkpoint before mutable lease or steer state, so a lost response
+cannot create a second child or apply usage twice. Ordered-wait recovery keeps
+one resume token across transient adapter errors; if the first response was
+lost after commit, the exact retry recovers the already-consumed results and
+the same journal event. That event may be published live again, but it retains
+its durable sequence number. Reconnecting clients replay the journal, and live
+clients deduplicate by sequence cursor.
 
 ## One continuation model
 
@@ -122,11 +146,13 @@ notification may reduce latency, but it is never the source of truth.
 
 ## Sandbox and host-access boundary
 
-A background agent has private runtime scratch, but the initial executor has no
-tools and cannot access that scratch, projects, host folders, the network, or
-the parent conversation. Foreground chats may inspect already attached roots,
-but sandbox agents do not receive the broker transport or these tool contracts.
-Future sandbox folder access must use the parent-mediated consent and
+A background agent has private runtime scratch but cannot access that scratch,
+projects, host folders, the general network, or the parent conversation. Its
+current narrow exceptions are one checkpointed public web search or a typed
+folder-access proposal that grants no access. It never receives the foreground
+spawn/wait or broker tool contracts. Foreground chats may inspect already
+attached roots, but sandbox agents do not receive the broker transport. Future
+sandbox folder access must use the parent-mediated consent and
 durable-receipt protocol described in [Host access and connected folders](host-access.md),
 never absolute paths.
 
@@ -141,8 +167,9 @@ keeping one chat from monopolizing it, and preventing an agent from creating an
 unbounded queue. The scheduler therefore applies configurable limits to:
 
 - background agents running across the installation;
-- running and outstanding children per chat or foreground run;
-- total children created by one foreground run;
+- running children per chat;
+- four unsettled children per foreground turn, including delivered results
+  that have not yet been consumed;
 - wall-clock time, model steps, tool calls, and other resource budgets.
 
 When a running slot is unavailable, accepted work remains durably queued. A
@@ -174,34 +201,28 @@ host path, root identity, broker grant, or client-call identity; it only tells
 the foreground parent to decide whether the existing foreground consent tool is
 appropriate. The receipt, `completed` state, and one parent inbox entry commit
 together, so an ambiguous worker retry can recover its original result but
-cannot overwrite or double-deliver it. Each inbox entry
-then advances through its own fenced continuation state machine:
-`pending -> claimed -> consumed` (or `cancelled` when its parked parent is
-cancelled). A parent continuation claims one exact child
-result only after the matching foreground checkpoint has committed, with a
-database-clock lease, and only that live lease can consume it. A result that
-arrives first remains pending; it is never leased merely because a process saw
-it before the parent reached its durable boundary.
-An expired claim can be reclaimed; a consumed entry retains the exact consuming
-lease as an immutable receipt, so an ambiguous consume retry recovers the same
-boundary without processing the child result twice. Consumption also persists
-the exact terminal child text as a deterministic system transcript message, so
-the resumed model request sees it after a restart. A foreground worker can
-checkpoint its exact turn against a known child, releasing its turn lease and
-preserving model progress. Consumption then closes that checkpoint and moves
-the turn to `resuming` in the same transaction. `resuming` is the durable wake
-signal: any worker can claim it after restart, without relying on an in-memory
-notification. Queued, waiting,
-and retry-wait work cancels
-immediately; a running worker first enters `cancelling` and must acknowledge its
-exact live lease. That acknowledgement writes its own immutable receipt, so only
-the worker that actually committed terminal cancellation can recover an
-ambiguous retry. An expired running lease is cancelled immediately on request
-rather than reclaimed. Cancelling a parked parent fences its owned sandbox
-child in the same durable transition: queued work is cancelled, running work
-is asked to acknowledge cancellation, and a delivered inbox receipt is retired.
-Parent inbox delivery is intentionally the next transition, not a process-local
+cannot overwrite or double-deliver it. Each inbox entry advances through a
+fenced lifecycle: `pending -> consumed`, with a stable resume token proving the
+consumer, or `cancelled` when the parent retires the delivery. The ordered wait
+consumes all named entries in one transaction only after the matching
+foreground checkpoint exists. A result that arrives first remains pending; it
+is never treated as parent-visible merely because a process noticed it early.
+
+The completed wait tool result is the model-facing delivery. It contains each
+typed child result in the caller's original order and is reconstructed from the
+same immutable receipts after restart. `resuming` is the durable wake signal:
+any foreground worker can claim it without relying on an in-memory
 notification.
+
+Queued, waiting, and retry-wait child work cancels immediately. A running child
+first enters `cancelling` and must acknowledge its exact live lease. That
+acknowledgement writes its own immutable receipt, so only the worker that
+committed terminal cancellation can recover an ambiguous retry. An expired
+running lease is cancelled immediately on request rather than reclaimed.
+Cancelling a foreground turn fences its owned children in the same ordered
+transition: queued work is cancelled, running work is asked to acknowledge,
+and delivered inbox receipts are retired. Inbox delivery and consumption are
+always durable state transitions, never process-local notifications.
 
 ## Observing execution
 
@@ -227,6 +248,12 @@ provider identifiers, executor leases, and raw failures remain server-side.
 New tools are invisible to the renderer until they receive their own safe
 activity projection.
 
+The desktop Agent activity panel turns that projection into foreground and
+background status rows. It offers Stop only for sandbox states that can still
+be cancelled, binds each request to the exact chat and run, and keeps a pending
+or retryable error state until polling confirms the durable transition. The
+panel never receives a worker lease or direct scheduler control.
+
 ## Reliability contract
 
 The agent hierarchy preserves the runtime's existing rules:
@@ -239,11 +266,11 @@ The agent hierarchy preserves the runtime's existing rules:
 5. Waits release workers and resume from committed checkpoints.
 6. Steering and cancellation are resolved at explicit boundaries.
 7. A final result, terminal run state, and immutable parent inbox entry are
-   committed atomically. A foreground turn may checkpoint against one exact
-   inbox delivery. When the child is spawned from a wait boundary, that
-   checkpoint commits with child admission and releases the foreground lease;
-   consuming the delivery under an exact expiring continuation lease also wakes
-   the checkpointed turn to `resuming`, with exact retry recovery.
+   committed atomically. Spawn separately commits child admission with its
+   completed orchestration result and foreground `resuming` transition. An
+   ordered wait checkpoints one to four exact child IDs; consuming all matching
+   deliveries completes that same tool call and wakes the foreground turn to
+   `resuming`, with exact retry recovery at both boundaries.
 8. Clients recover from a durable snapshot plus ordered event replay.
 
 Until a tool satisfies the side-effect receipt contract, OpenWave continues to
@@ -265,18 +292,19 @@ The implementation is intentionally incremental:
    durable `resuming` wake signal. *(Shipped.)*
 8. Run isolated sandbox tasks with no shared conversation context, over the
    durable lease/result boundary. *(Shipped.)*
-9. Enable the bounded foreground-only `spawn_sandbox_agent` contract, wake the
-   sandbox worker after its atomic checkpoint, and resume the parked turn from
-   the already-delivered inbox receipt. *(Shipped.)*
+9. Prove the bounded foreground-only spawn path with atomic child admission,
+   sandbox wake-up, immutable delivery, and parent resume. *(Shipped.)*
 10. Add the one-call sandbox `web_search` checkpoint, host executor, and
     receipt-backed model resume. *(Shipped.)*
 11. Let a sandbox relay a typed folder-consent proposal to its foreground
     parent, without host access or a picker. *(Shipped.)*
-12. Add a fenced read-only proxy for roots the foreground chat already
-    attached; sandbox broker access remains deferred.
+12. Add fenced read-only tools to the foreground turn for roots its chat already
+    attached; sandbox broker access remains deferred. *(Shipped.)*
 13. Add desktop surfaces for queued, running, waiting, failed, and completed
-   background work.
-14. Persist the non-blocking spawn checkpoint without advertising it. *(Shipped.)*
+   background work, including exact sandbox stop controls. *(Shipped.)*
+14. Persist the non-blocking spawn checkpoint and ordered wait receipts.
+    *(Shipped.)*
 15. Activate non-blocking spawn and ordered multi-agent waits together.
+    *(Shipped.)*
 16. Add richer context lifecycle, parallel-safe tool groups, and further
    orchestration only after these recovery boundaries are proven.
