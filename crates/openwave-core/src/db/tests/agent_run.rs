@@ -465,7 +465,7 @@ async fn sandbox_spawn_checkpoint_never_retrofits_a_separately_accepted_child() 
 }
 
 #[tokio::test]
-async fn sandbox_admission_is_exact_bounded_and_releases_terminal_capacity() {
+async fn sandbox_admission_is_exact_bounded_and_releases_consumed_terminal_capacity() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
@@ -531,24 +531,37 @@ async fn sandbox_admission_is_exact_bounded_and_releases_terminal_capacity() {
         Some(crate::AdmitSandboxAgentRunOutcome::AtCapacity)
     ));
 
-    let finished_at = Utc::now();
-    crate::db::entities::agent_run::Entity::update_many()
-        .col_expr(
-            crate::db::entities::agent_run::Column::Status,
-            sea_orm::sea_query::Expr::value(AgentRunStatus::Cancelled.as_str()),
-        )
-        .col_expr(
-            crate::db::entities::agent_run::Column::FinishedAt,
-            sea_orm::sea_query::Expr::value(Some(finished_at)),
-        )
-        .col_expr(
-            crate::db::entities::agent_run::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(finished_at),
-        )
-        .filter(crate::db::entities::agent_run::Column::Id.eq(first_child.id.0))
-        .exec(&store.conn)
+    let child_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(child_lease, Duration::minutes(1), 1, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        first_child.id
+    );
+    store
+        .submit_agent_run_result(first_child.id, child_lease, "first child finished")
         .await
+        .unwrap()
         .unwrap();
+    assert!(matches!(
+        store
+            .admit_sandbox_agent_run(
+                turn.id,
+                first_call,
+                "first bounded child",
+                lease,
+                turn.steer_revision,
+                1,
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
+        Some(crate::AdmitSandboxAgentRunOutcome::Existing { child, .. })
+            if child.id == first_child.id
+    ));
     assert!(store
         .get_sandbox_agent_admission(first_child.id)
         .await
@@ -567,9 +580,116 @@ async fn sandbox_admission_is_exact_bounded_and_releases_terminal_capacity() {
             )
             .await
             .unwrap(),
+        Some(crate::AdmitSandboxAgentRunOutcome::AtCapacity)
+    ));
+
+    let parked = park_foreground_turn_on_child(&store, chat.id, first_child.id).await;
+    assert_eq!(parked.id, turn.id);
+    let continuation = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run_inbox_entry(
+            turn.agent_run_id,
+            first_child.id,
+            continuation,
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .consume_agent_run_inbox_entry_and_resume_turn(
+            turn.agent_run_id,
+            first_child.id,
+            continuation,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let resumed_lease = uuid::Uuid::new_v4();
+    let resumed = store
+        .claim_turn_run(resumed_lease, Utc::now(), Utc::now() + Duration::minutes(5))
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    assert_eq!(resumed.id, turn.id);
+    assert!(matches!(
+        store
+            .admit_sandbox_agent_run(
+                resumed.id,
+                second_call,
+                "second bounded child",
+                resumed_lease,
+                resumed.steer_revision,
+                1,
+                Utc::now(),
+            )
+            .await
+            .unwrap(),
         Some(crate::AdmitSandboxAgentRunOutcome::Accepted { child, .. })
             if child.id == AgentRunId::sandbox_for_spawn_call(second_call)
     ));
+}
+
+#[tokio::test]
+async fn sandbox_admission_fails_closed_on_a_terminal_child_without_delivery() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let first_call = CallId::new();
+    let first_child = match store
+        .admit_sandbox_agent_run(
+            turn.id,
+            first_call,
+            "first bounded child",
+            lease,
+            turn.steer_revision,
+            1,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        crate::AdmitSandboxAgentRunOutcome::Accepted { child, .. } => child,
+        outcome => panic!("unexpected admission outcome: {outcome:?}"),
+    };
+    let child_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(child_lease, Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .submit_agent_run_result(first_child.id, child_lease, "first child finished")
+        .await
+        .unwrap()
+        .unwrap();
+    crate::db::entities::agent_run_inbox::Entity::delete_by_id(first_child.id.0)
+        .exec(&store.conn)
+        .await
+        .unwrap();
+
+    let second_call = CallId::new();
+    let error = store
+        .admit_sandbox_agent_run(
+            turn.id,
+            second_call,
+            "second bounded child",
+            lease,
+            turn.steer_revision,
+            1,
+            Utc::now(),
+        )
+        .await
+        .expect_err("missing terminal delivery must fail closed");
+    assert!(matches!(error, crate::AgentError::Store(_)));
+    assert!(store
+        .get_agent_run(AgentRunId::sandbox_for_spawn_call(second_call))
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
