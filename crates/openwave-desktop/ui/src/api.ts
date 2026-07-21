@@ -18,6 +18,14 @@ export type ModelInfo = {
   provider: string;
 };
 
+export type Project = {
+  id: string;
+  title: string | null;
+  attachment_revision: number;
+  root_attachments: string[];
+  created_at: string;
+};
+
 /** The fixed, host-owned search providers supported by this build. */
 export type WebSearchProviderKind = "exa" | "tavily";
 
@@ -328,11 +336,26 @@ export class ApiClient {
     });
   }
 
-  createChat(model?: string): Promise<Chat> {
+  createProject(title: string): Promise<Project> {
+    return this.json("/projects", {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({ title }),
+    });
+  }
+
+  listProjects(): Promise<Project[]> {
+    return this.json("/projects", { headers: this.headers() });
+  }
+
+  createChat(model?: string, projectId?: string | null): Promise<Chat> {
     return this.json("/chats", {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ model: model || undefined }),
+      body: JSON.stringify({
+        model: model || undefined,
+        project_id: projectId || undefined,
+      }),
     });
   }
 

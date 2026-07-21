@@ -211,6 +211,85 @@ describe("active turn steering", () => {
   });
 });
 
+describe("project-scoped conversation API", () => {
+  it("creates a named project and a chat in that exact scope", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "project-1",
+            title: "Research",
+            attachment_revision: 0,
+            root_attachments: [],
+            created_at: "2026-07-21T12:00:00Z",
+          }),
+          { status: 201 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "chat-1",
+            title: null,
+            model: "model-1",
+            attachment_revision: 0,
+            root_attachments: [],
+            project_id: "project-1",
+            created_at: "2026-07-21T12:00:00Z",
+          }),
+          { status: 201 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await client.createProject("Research");
+    await client.createChat("model-1", "project-1");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1/projects",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ title: "Research" }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1/chats",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ model: "model-1", project_id: "project-1" }),
+      }),
+    );
+  });
+
+  it("keeps a loose chat explicitly outside project scope", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "chat-1",
+          title: null,
+          model: null,
+          attachment_revision: 0,
+          root_attachments: [],
+          project_id: null,
+          created_at: "2026-07-21T12:00:00Z",
+        }),
+        { status: 201 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await client.createChat(undefined, null);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({});
+  });
+});
+
 describe("sandbox agent cancellation", () => {
   it("accepts only the closed cancellation projection", () => {
     expect(
