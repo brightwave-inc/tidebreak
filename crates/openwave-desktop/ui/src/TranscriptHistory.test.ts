@@ -42,6 +42,29 @@ describe("hydrateTranscriptHistory", () => {
     ]);
   });
 
+  it("hydrates background delegation and wait activity with fixed tool kinds", () => {
+    const entries = hydrateTranscriptHistory([], [
+      {
+        title: "Delegate a task",
+        status: "completed",
+        started_at: "2026-07-16T10:00:00Z",
+        finished_at: "2026-07-16T10:00:00Z",
+      },
+      {
+        title: "Wait for background agents",
+        status: "completed",
+        started_at: "2026-07-16T10:00:01Z",
+        finished_at: "2026-07-16T10:00:02Z",
+      },
+    ]);
+
+    expect(entries).toEqual([
+      expect.objectContaining({ name: "spawn_sandbox_agent" }),
+      expect.objectContaining({ name: "wait_for_agents" }),
+    ]);
+    expect(JSON.stringify(entries)).not.toContain("finished_at");
+  });
+
   it("attaches sources only to their exact owning assistant message", () => {
     const entries = hydrateTranscriptHistory(
       [

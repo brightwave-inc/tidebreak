@@ -97,8 +97,14 @@ const TOOL_PRESENTATIONS: Record<string, ToolPresentation> = {
   spawn_sandbox_agent: {
     label: "Delegate a task",
     active: "Delegating a task",
-    complete: "Delegated task complete",
-    settled: "Delegated a task",
+    complete: "Task delegated",
+    settled: "Task delegated",
+  },
+  wait_for_agents: {
+    label: "Wait for background agents",
+    active: "Waiting for background agents",
+    complete: "Background agents finished",
+    settled: "Background agents finished",
   },
 };
 

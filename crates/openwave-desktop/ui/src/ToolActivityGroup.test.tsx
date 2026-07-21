@@ -50,6 +50,20 @@ describe("ToolActivityGroup", () => {
     });
   });
 
+  it("uses the dedicated active copy while background agents are pending", () => {
+    expect(
+      toolActivityGroupPresentation([
+        { name: "spawn_sandbox_agent", status: "completed" },
+        { name: "wait_for_agents", status: "running" },
+      ]),
+    ).toEqual({
+      phase: "active",
+      tone: "running",
+      icon: "↗",
+      label: "Waiting for background agents",
+    });
+  });
+
   it("renders a native disclosure with a hidden ordered timeline", () => {
     const markup = renderToStaticMarkup(
       <ToolActivityGroup

@@ -41,6 +41,35 @@ describe("ToolCallCard", () => {
     expect(markup).toContain("Document search complete");
   });
 
+  it("distinguishes delegation from waiting for the child results", () => {
+    const delegated = renderToStaticMarkup(
+      <ToolCallCard name="spawn_sandbox_agent" status="completed" />,
+    );
+    const waiting = renderToStaticMarkup(
+      <ToolCallCard name="wait_for_agents" status="running" />,
+    );
+    const finished = renderToStaticMarkup(
+      <ToolCallCard name="wait_for_agents" status="completed" />,
+    );
+
+    expect(delegated).toContain("Task delegated");
+    expect(delegated).not.toContain("task complete");
+    expect(waiting).toContain("Waiting for background agents");
+    expect(finished).toContain("Background agents finished");
+  });
+
+  it("uses fixed terminal failure copy for background-agent waits", () => {
+    const failed = renderToStaticMarkup(
+      <ToolCallCard name="wait_for_agents" status="failed" />,
+    );
+    const cancelled = renderToStaticMarkup(
+      <ToolCallCard name="wait_for_agents" status="cancelled" />,
+    );
+
+    expect(failed).toContain("Tool could not complete");
+    expect(cancelled).toContain("Not run");
+  });
+
   it("degrades an unknown runtime status without using it as copy or a class", () => {
     const markup = renderToStaticMarkup(
       <ToolCallCard

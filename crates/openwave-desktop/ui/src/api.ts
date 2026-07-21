@@ -78,6 +78,7 @@ export type ChatToolActivity = {
     | "Connect a folder"
     | "Check connected folders"
     | "Delegate a task"
+    | "Wait for background agents"
     | "Use a tool";
   status: "completed" | "failed" | "cancelled";
   started_at: string;
@@ -178,6 +179,7 @@ export type RendererToolName =
   | "list_folder"
   | "read_connected_file"
   | "spawn_sandbox_agent"
+  | "wait_for_agents"
   | "other";
 
 export type RendererApprovalKind =
@@ -603,6 +605,7 @@ function isRendererToolName(value: unknown): value is RendererToolName {
     value === "list_folder" ||
     value === "read_connected_file" ||
     value === "spawn_sandbox_agent" ||
+    value === "wait_for_agents" ||
     value === "other"
   );
 }

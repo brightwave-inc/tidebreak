@@ -95,6 +95,37 @@ describe("MessageBubble", () => {
     expect(markup).not.toContain("message-stream-placeholder");
   });
 
+  it("shows a specific background wait instead of the generic worker status", () => {
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={[
+          {
+            id: "wait-1",
+            role: "tool",
+            callId: "call-1",
+            name: "wait_for_agents",
+            status: "running",
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        busy
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup).toContain("Waiting for background agents");
+    expect(markup).not.toContain(">Working<");
+    expect(markup).not.toContain("call-1");
+  });
+
   it("does not offer approval for an action without a safe description", () => {
     const markup = renderToStaticMarkup(
       <MessageBubble
