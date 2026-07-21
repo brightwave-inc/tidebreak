@@ -54,7 +54,7 @@ differ:
 | --- | --- |
 | Responds directly in the chat | Works on one delegated task |
 | Final assistant text completes a turn | An explicit result submission completes the run |
-| Uses conversation-facing tools | Starts with no tools or shared conversation context |
+| Uses conversation-facing tools | May make at most one web-search or folder-access proposal call; has no shared conversation context |
 | Usually short-lived work | May park and resume over a longer period |
 | Streams answer content | Publishes bounded progress and a final result |
 
@@ -248,6 +248,12 @@ provider identifiers, executor leases, and raw failures remain server-side.
 New tools are invisible to the renderer until they receive their own safe
 activity projection.
 
+The desktop Agent activity panel turns that projection into foreground and
+background status rows. It offers Stop only for sandbox states that can still
+be cancelled, binds each request to the exact chat and run, and keeps a pending
+or retryable error state until polling confirms the durable transition. The
+panel never receives a worker lease or direct scheduler control.
+
 ## Reliability contract
 
 The agent hierarchy preserves the runtime's existing rules:
@@ -293,9 +299,9 @@ The implementation is intentionally incremental:
 11. Let a sandbox relay a typed folder-consent proposal to its foreground
     parent, without host access or a picker. *(Shipped.)*
 12. Add a fenced read-only proxy for roots the foreground chat already
-    attached; sandbox broker access remains deferred.
+    attached; sandbox broker access remains deferred. *(Shipped.)*
 13. Add desktop surfaces for queued, running, waiting, failed, and completed
-   background work.
+   background work, including exact sandbox stop controls. *(Shipped.)*
 14. Persist the non-blocking spawn checkpoint and ordered wait receipts.
     *(Shipped.)*
 15. Activate non-blocking spawn and ordered multi-agent waits together.

@@ -594,24 +594,28 @@ The browser-facing API is not exposed on a public network interface.
 The current UI is a workspace-style conversation shell, not the complete
 product. It reopens durable chats and supports conversation create/list/switch/
 rename/delete, transcript hydration, Markdown messages, live and historical
-tool activity, reconnectable streaming, provider and web-search setup, model
-selection, a foreground-turn stop control, approval prompts, native
-connected-folder pick/list/revoke, and a concise foreground/background
-agent-status surface. The stop control sends cancellation for the exact active
-turn, prevents duplicate requests, and stays in a pending state until an
-authoritative terminal event arrives; it never treats a request as a locally
-completed cancellation.
+tool-call rendering, reconnectable streaming, provider and web-search setup,
+model selection, a foreground-turn stop control, approval prompts, native
+connected-folder pick/list/revoke, and a dedicated foreground/background agent
+activity panel. That panel renders safe lifecycle and activity status and can
+stop an eligible sandbox task through its exact run identity. The foreground
+stop control sends cancellation for the exact active turn, prevents duplicate
+requests, and stays in a pending state until an authoritative terminal event
+arrives; neither control treats a request as a locally completed cancellation.
 That surface reads a redacted durable snapshot and is only an observer: worker
 leases, delegated inputs, and scheduler control remain server-private.
 OpenWave's operational scratch stays in private app storage; user-selected paths
 cross only the native host-to-broker control boundary, while the renderer sees
 opaque folder summaries. Projects and chats store only ordered opaque root IDs
-and attachment revisions—never host paths or grants. Built-in agent file tools
-still use a server-derived per-chat private scratch directory and are not yet
-routed through connected roots; that scratch path is neither persisted nor
-returned to the renderer. The UI does not yet provide projects or steer
-controls. Completed assistant messages render the closed structured source cards
-described above. The Documents surface derives scope from the
+and attachment revisions—never host paths or grants. Built-in scratch tools
+remain confined to a server-derived per-chat directory whose path is neither
+persisted nor returned to the renderer. Foreground agents separately have a
+fenced read-only proxy for roots already attached to the chat:
+`list_connected_folders`, `list_folder`, and `read_connected_file` carry only
+opaque root IDs and bounded relative paths through the trusted native broker.
+The UI does not yet provide projects or steer controls. Completed assistant
+messages render the closed structured source cards described above. The
+Documents surface derives scope from the
 authoritative current chat: project chats use that project's corpus and loose
 chats use the unscoped corpus. It lists the catalog, imports a user-picked text
 or Markdown file, polls durable processing status, and searches ready passages.
@@ -717,21 +721,18 @@ document pipeline, generation-aware Lance publication, durable turn acceptance
 and ownership, atomic client-wait checkpoints, terminal turn commits,
 cancellation, reconnectable event stream, durable foreground/sandbox agent-run
 leases and result delivery, bounded non-blocking child admission, ordered
-multi-child waits, the foreground terminal guard, and fail-closed provider
-routing.
+multi-child waits, the foreground terminal guard, Markdown and tool-call
+transcript rendering, the agent activity/status-and-stop surface, and
+fail-closed provider routing.
 
 The main next steps are:
 
-- surface the activated non-blocking spawn and ordered wait lifecycle clearly
-  in desktop message history and background-agent status/cancel views;
 - extend the bounded depth-one hierarchy with carefully scoped sandbox-safe
   capabilities without widening its spawn or host-access authority;
 - continue unifying client execution, folder consent, user questions, and
   resource waits around durable continuations that release workers;
 - persist model/tool step boundaries and side-effect receipts so sandbox and
   foreground runs can resume safely after process loss;
-- route built-in file tools through explicit broker roots while keeping private
-  per-chat scratch separate;
 - add resumable checkpoints and explicit idempotency policy around remaining
   server-side tool effects;
 - expose the remaining backend capabilities through the desktop information
