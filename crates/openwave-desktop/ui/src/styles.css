@@ -166,6 +166,70 @@ button {
   text-align: left;
 }
 
+.project-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  border-radius: 7px;
+}
+
+.project-row .project-item {
+  flex: 1 1 auto;
+}
+
+.project-row.is-active {
+  background: var(--sidebar-active);
+}
+
+.project-rename-action {
+  width: 1.8rem;
+  height: 1.65rem;
+  flex: 0 0 auto;
+  margin-right: 0.2rem;
+  border: 0;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+  line-height: 1;
+}
+
+.project-rename-action:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--bg-elevated);
+}
+
+.project-rename {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.25rem;
+  align-items: center;
+  padding: 0.15rem 0.2rem;
+}
+
+.project-rename input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0.35rem 0.4rem;
+  background: var(--bg-elevated);
+  font-size: 0.8rem;
+}
+
+.project-rename button {
+  width: 1.6rem;
+  height: 1.6rem;
+  border: 0;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.project-rename button:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--sidebar-active);
+}
+
 .project-item:hover:not(:disabled),
 .project-item.is-active {
   color: var(--ink);

@@ -446,6 +446,38 @@ async fn list_projects_is_newest_first() {
 }
 
 #[tokio::test]
+async fn project_title_update_sets_clears_and_reports_missing_identity() {
+    let (_dir, store) = temp_store().await;
+    let project = sample_project();
+    store.create_project(&project).await.unwrap();
+
+    assert!(store
+        .update_project_title(project.id, Some("Renamed".into()))
+        .await
+        .unwrap());
+    assert_eq!(
+        store
+            .get_project(project.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("Renamed")
+    );
+
+    assert!(store.update_project_title(project.id, None).await.unwrap());
+    assert_eq!(
+        store.get_project(project.id).await.unwrap().unwrap().title,
+        None
+    );
+    assert!(!store
+        .update_project_title(ProjectId::new(), Some("missing".into()))
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
 async fn documents_roundtrip_and_list_by_corpus_scope() {
     let (_dir, store) = temp_store().await;
     let project_a = sample_project();

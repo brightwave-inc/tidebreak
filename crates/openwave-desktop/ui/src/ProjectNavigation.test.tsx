@@ -23,6 +23,7 @@ describe("ProjectNavigation", () => {
         error={null}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
+        onRename={vi.fn()}
       />,
     );
 
@@ -32,6 +33,7 @@ describe("ProjectNavigation", () => {
     expect(markup).toContain("Untitled project");
     expect(markup).toContain('aria-current="page"');
     expect(markup.match(/aria-current="page"/g)).toHaveLength(1);
+    expect(markup).toContain('aria-label="Rename Research"');
   });
 
   it("keeps project failures bounded to the sidebar", () => {
@@ -43,6 +45,7 @@ describe("ProjectNavigation", () => {
         error="Could not load projects."
         onSelect={vi.fn()}
         onCreate={vi.fn()}
+        onRename={vi.fn()}
       />,
     );
 

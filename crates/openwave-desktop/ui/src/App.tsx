@@ -1005,6 +1005,27 @@ export default function App() {
     }
   }
 
+  async function onRenameProject(
+    projectId: string,
+    title: string | null,
+  ): Promise<boolean> {
+    if (!client) return false;
+    setProjectsError(null);
+    try {
+      const updated = await client.patchProjectTitle(projectId, title);
+      if (updated.id !== projectId) {
+        throw new Error("project rename response has the wrong identity");
+      }
+      setProjects((current) =>
+        current.map((project) => (project.id === updated.id ? updated : project)),
+      );
+      return true;
+    } catch (err) {
+      setProjectsError(`Could not rename project: ${String(err)}`);
+      return false;
+    }
+  }
+
   async function onDeleteChat(target: Chat) {
     if (!client || deletionInFlightRef.current || creationInFlightRef.current) return;
     const label = target.title?.trim() || "this conversation";
@@ -1262,6 +1283,7 @@ export default function App() {
           error={projectsError}
           onSelect={(projectId) => void onSelectProject(projectId)}
           onCreate={onCreateProject}
+          onRename={onRenameProject}
         />
 
         {hasNativeHost() && (

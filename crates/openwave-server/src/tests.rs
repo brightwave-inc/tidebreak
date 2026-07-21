@@ -7340,6 +7340,102 @@ async fn project_create_get_and_list() {
     assert_eq!(listed, vec![created]);
 }
 
+async fn patch_project(
+    router: &Router,
+    bearer: &str,
+    project: ProjectId,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/projects/{project}"))
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn project_title_patch_is_trimmed_bounded_and_clearable() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let project = make_project(&router, &bearer).await;
+
+    let oversized_create = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/projects")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"title": "x".repeat(121)}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oversized_create.status(), StatusCode::BAD_REQUEST);
+
+    let renamed = patch_project(
+        &router,
+        &bearer,
+        project.id,
+        serde_json::json!({"title": "  Research workspace  "}),
+    )
+    .await;
+    assert_eq!(renamed.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<Project>(renamed).await.title.as_deref(),
+        Some("Research workspace")
+    );
+
+    let oversized = patch_project(
+        &router,
+        &bearer,
+        project.id,
+        serde_json::json!({"title": "x".repeat(121)}),
+    )
+    .await;
+    assert_eq!(oversized.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        store
+            .get_project(project.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("Research workspace")
+    );
+
+    let cleared = patch_project(
+        &router,
+        &bearer,
+        project.id,
+        serde_json::json!({"title": null}),
+    )
+    .await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    assert_eq!(json_body::<Project>(cleared).await.title, None);
+
+    let missing = patch_project(
+        &router,
+        &bearer,
+        ProjectId::new(),
+        serde_json::json!({"title": "missing"}),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn chat_can_be_filed_under_a_project() {
     let (router, token, _store, _dir) = test_app().await;
