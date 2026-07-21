@@ -8753,7 +8753,7 @@ async fn foreground_spawn_is_nonblocking_and_ordered_wait_resumes_with_child_res
         turn.claim_count, 4,
         "two spawn continuations and ordered wait each require a fresh lease"
     );
-    let requests = provider.requests.lock().unwrap();
+    let requests = provider.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 7);
     let foreground = requests
         .iter()
@@ -8808,7 +8808,6 @@ async fn foreground_spawn_is_nonblocking_and_ordered_wait_resumes_with_child_res
             )
         })
     }));
-    drop(requests);
     let calls = store.list_tool_calls(chat.id).await.unwrap();
     assert_eq!(calls.len(), 3);
     assert!(calls.iter().all(|call| {
