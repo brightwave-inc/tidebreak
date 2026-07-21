@@ -8,6 +8,8 @@
 //! claim, heartbeat, cancellation, and replay mechanics as other workers.
 
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +26,7 @@ use openwave_core::{
 };
 use tokio::sync::Notify;
 
+use crate::bus::EventBus;
 use crate::resolver::ProviderResolver;
 use crate::state::SandboxAttemptGuard;
 
@@ -90,8 +93,11 @@ pub(crate) struct SandboxAgentRunWorker {
     resolver: Arc<dyn ProviderResolver>,
     wake: Arc<Notify>,
     turn_wake: Arc<Notify>,
+    events: Arc<EventBus>,
     attempts: Arc<SandboxAttemptGuard>,
     recovery_prefer_wait_sets: Arc<AtomicBool>,
+    #[cfg(test)]
+    fail_wait_set_resume_responses: Arc<AtomicUsize>,
     agent_config: AgentConfig,
     /// Each run receives a directory under this private root. The initial
     /// no-tools executor does not open it; retaining the boundary now means a
@@ -108,6 +114,7 @@ impl SandboxAgentRunWorker {
         resolver: Arc<dyn ProviderResolver>,
         wake: Arc<Notify>,
         turn_wake: Arc<Notify>,
+        events: Arc<EventBus>,
         agent_config: AgentConfig,
         private_scratch_root: Option<PathBuf>,
         config: SandboxAgentRunWorkerConfig,
@@ -117,6 +124,7 @@ impl SandboxAgentRunWorker {
             resolver,
             wake,
             turn_wake,
+            events,
             Arc::new(SandboxAttemptGuard::default()),
             agent_config,
             private_scratch_root,
@@ -130,6 +138,7 @@ impl SandboxAgentRunWorker {
         resolver: Arc<dyn ProviderResolver>,
         wake: Arc<Notify>,
         turn_wake: Arc<Notify>,
+        events: Arc<EventBus>,
         attempts: Arc<SandboxAttemptGuard>,
         agent_config: AgentConfig,
         private_scratch_root: Option<PathBuf>,
@@ -146,8 +155,11 @@ impl SandboxAgentRunWorker {
             resolver,
             wake,
             turn_wake,
+            events,
             attempts,
             recovery_prefer_wait_sets: Arc::new(AtomicBool::new(true)),
+            #[cfg(test)]
+            fail_wait_set_resume_responses: Arc::new(AtomicUsize::new(0)),
             agent_config,
             private_scratch_root,
             config,
@@ -260,19 +272,45 @@ impl SandboxAgentRunWorker {
         wait_id: CallId,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
         let resume_token = uuid::Uuid::new_v4();
-        let Some(outcome) = self
-            .store
-            .resume_turn_for_agent_run_wait_set(wait_id, resume_token)
-            .await?
-        else {
+        self.resume_parent_wait_set_with_token(wait_id, resume_token)
+            .await
+    }
+
+    async fn resume_parent_wait_set_with_token(
+        &self,
+        wait_id: CallId,
+        resume_token: uuid::Uuid,
+    ) -> Result<SandboxAgentRunWorkerOutcome> {
+        let mut recovering_ambiguous_commit = false;
+        let outcome = loop {
+            match self
+                .resume_parent_wait_set_once(wait_id, resume_token)
+                .await
+            {
+                Ok(outcome) => break outcome,
+                Err(error) => {
+                    recovering_ambiguous_commit = true;
+                    eprintln!(
+                        "openwave: wait-set {wait_id} resume failed; retrying exact request: {error}"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(self.config.failure_delay) => {}
+                        _ = self.wake.notified() => {}
+                    }
+                }
+            }
+        };
+        let Some(outcome) = outcome else {
             return Ok(SandboxAgentRunWorkerOutcome::Idle);
         };
         match outcome {
-            ResumeTurnForAgentRunWaitSetOutcome::Resumed { .. } => {
-                // The database transition is authoritative; notification only
-                // shortens the ordinary turn worker's next durable scan.
-                self.turn_wake.notify_one();
-                Ok(SandboxAgentRunWorkerOutcome::ParentWaitSetResumed(wait_id))
+            ResumeTurnForAgentRunWaitSetOutcome::Resumed { turn, event, .. } => {
+                self.publish_parent_wait_set_resume(wait_id, turn.chat_id, event)
+            }
+            ResumeTurnForAgentRunWaitSetOutcome::Existing { turn, event, .. }
+                if recovering_ambiguous_commit =>
+            {
+                self.publish_parent_wait_set_resume(wait_id, turn.chat_id, event)
             }
             ResumeTurnForAgentRunWaitSetOutcome::Existing { .. }
             | ResumeTurnForAgentRunWaitSetOutcome::NotReady(_)
@@ -280,6 +318,50 @@ impl SandboxAgentRunWorker {
                 Ok(SandboxAgentRunWorkerOutcome::Idle)
             }
         }
+    }
+
+    fn publish_parent_wait_set_resume(
+        &self,
+        wait_id: CallId,
+        chat_id: openwave_core::ChatId,
+        event: openwave_core::SequencedEvent,
+    ) -> Result<SandboxAgentRunWorkerOutcome> {
+        // The journal remains authoritative for replay. Publish its exact
+        // committed event before shortening the ordinary turn worker's next
+        // durable scan.
+        let _ = self.events.sender(chat_id).send(event);
+        self.turn_wake.notify_one();
+        Ok(SandboxAgentRunWorkerOutcome::ParentWaitSetResumed(wait_id))
+    }
+
+    async fn resume_parent_wait_set_once(
+        &self,
+        wait_id: CallId,
+        resume_token: uuid::Uuid,
+    ) -> Result<Option<ResumeTurnForAgentRunWaitSetOutcome>> {
+        let outcome = self
+            .store
+            .resume_turn_for_agent_run_wait_set(wait_id, resume_token)
+            .await?;
+        #[cfg(test)]
+        if matches!(
+            outcome,
+            Some(
+                ResumeTurnForAgentRunWaitSetOutcome::Resumed { .. }
+                    | ResumeTurnForAgentRunWaitSetOutcome::Existing { .. }
+            )
+        ) && self
+            .fail_wait_set_resume_responses
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(AgentError::Store(
+                "injected ambiguous wait-set resume response".into(),
+            ));
+        }
+        Ok(outcome)
     }
 
     /// Advance one immutable child delivery to a durably resumable parent turn.
@@ -1109,6 +1191,7 @@ mod tests {
             Arc::new(FixedResolver(provider.clone())),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
             AgentConfig {
                 model: "sandbox-model".into(),
                 ..AgentConfig::default()
@@ -1173,6 +1256,73 @@ mod tests {
             | openwave_core::AdmitSandboxAgentRunOutcome::Existing { child, .. } => child,
             outcome => panic!("unexpected sandbox admission: {outcome:?}"),
         }
+    }
+
+    async fn ready_wait_set_for_test(
+        store: &Arc<dyn Store>,
+        chat_id: openwave_core::ChatId,
+    ) -> (TurnId, CallId) {
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat_id, "sandbox-model", "wait for one child")
+            .await
+            .unwrap();
+        let foreground_lease = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        let foreground = store
+            .claim_turn_run(foreground_lease, now, now + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .turn
+            .unwrap();
+        let child = admit_sandbox(store, chat_id, CallId::new(), "child").await;
+        let wait_id = CallId::new();
+        store
+            .append_turn_event(
+                chat_id,
+                foreground.id,
+                foreground_lease,
+                1,
+                Utc::now(),
+                &openwave_core::AgentEvent::TurnStarted {
+                    turn_id: foreground.id,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .park_turn_for_agent_run_wait_set(
+                &openwave_core::AgentRunWaitSetCheckpointRequest {
+                    call_id: wait_id,
+                    origin_turn_id: foreground.id,
+                    child_run_ids: vec![child.id],
+                    condition: openwave_core::AgentRunWaitCondition::All,
+                    lease_token: foreground_lease,
+                    expected_steer_revision: foreground.steer_revision,
+                    provider_id: format!("provider-{wait_id}"),
+                    arguments: serde_json::json!({"agent_ids": [child.id]}),
+                    event_ordinal: 2,
+                    progress: TurnCheckpointProgress {
+                        model_steps: 1,
+                        usage: Usage::default(),
+                    },
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        let child_lease = uuid::Uuid::new_v4();
+        let claimed = store
+            .claim_agent_run(child_lease, chrono::Duration::minutes(1), 4, 4)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, child.id);
+        store
+            .submit_agent_run_result(child.id, child_lease, "child result")
+            .await
+            .unwrap();
+        (turn_id, wait_id)
     }
 
     #[tokio::test]
@@ -1253,6 +1403,7 @@ mod tests {
             Arc::new(FixedResolver(provider.clone())),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
             AgentConfig {
                 model: "sandbox-model".into(),
                 max_steps: 2,
@@ -1483,79 +1634,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_wait_set_scan_resumes_after_the_last_child_without_a_wake() {
+    async fn durable_wait_set_scan_resumes_and_publishes_without_a_wake() {
         let (worker, store, _provider, chat, _dir) = fixture().await;
-        let turn_id = TurnId::new();
-        store
-            .accept_turn(turn_id, chat.id, "sandbox-model", "delegate twice")
-            .await
-            .unwrap();
-        let foreground_lease = uuid::Uuid::new_v4();
-        let now = Utc::now();
-        let foreground = store
-            .claim_turn_run(foreground_lease, now, now + chrono::Duration::minutes(1))
-            .await
-            .unwrap()
-            .turn
-            .unwrap();
-        let child_a = admit_sandbox(&store, chat.id, CallId::new(), "a").await;
-        let child_b = admit_sandbox(&store, chat.id, CallId::new(), "b").await;
-        let wait_id = CallId::new();
-        store
-            .append_turn_event(
-                chat.id,
-                foreground.id,
-                foreground_lease,
-                1,
-                Utc::now(),
-                &openwave_core::AgentEvent::TurnStarted {
-                    turn_id: foreground.id,
-                },
-            )
-            .await
-            .unwrap();
-        store
-            .park_turn_for_agent_run_wait_set(
-                &openwave_core::AgentRunWaitSetCheckpointRequest {
-                    call_id: wait_id,
-                    origin_turn_id: foreground.id,
-                    child_run_ids: vec![child_b.id, child_a.id],
-                    condition: openwave_core::AgentRunWaitCondition::All,
-                    lease_token: foreground_lease,
-                    expected_steer_revision: foreground.steer_revision,
-                    provider_id: format!("provider-{wait_id}"),
-                    arguments: serde_json::json!({"agent_ids": [child_b.id, child_a.id]}),
-                    event_ordinal: 2,
-                    progress: TurnCheckpointProgress {
-                        model_steps: 1,
-                        usage: Usage::default(),
-                    },
-                },
-                Utc::now(),
-            )
-            .await
-            .unwrap();
-        for expected in [child_a.id, child_b.id] {
-            let child_lease = uuid::Uuid::new_v4();
-            let claimed = store
-                .claim_agent_run(child_lease, chrono::Duration::minutes(1), 4, 4)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(claimed.id, expected);
-            store
-                .submit_agent_run_result(claimed.id, child_lease, "child result")
-                .await
-                .unwrap();
-        }
+        let mut live_events = worker.events.subscribe(chat.id);
+        let (turn_id, wait_id) = ready_wait_set_for_test(&store, chat.id).await;
 
         assert_eq!(
             worker.run_once().await.unwrap(),
             SandboxAgentRunWorkerOutcome::ParentWaitSetResumed(wait_id)
         );
+        let published = tokio::time::timeout(Duration::from_secs(1), live_events.recv())
+            .await
+            .expect("committed wait event should publish live")
+            .expect("live wait event channel should remain open");
+        let durable = store.list_events(chat.id, 1).await.unwrap();
+        assert_eq!(durable, vec![published]);
+        tokio::time::timeout(Duration::from_secs(1), worker.turn_wake.notified())
+            .await
+            .expect("resumed wait should wake the turn worker");
         assert_eq!(
             store.get_turn_run(turn_id).await.unwrap().unwrap().status,
             TurnRunStatus::Resuming
+        );
+
+        let resume_token = store
+            .list_agent_run_inbox(openwave_core::AgentRunId::foreground_for_chat(chat.id))
+            .await
+            .unwrap()
+            .into_iter()
+            .find_map(|entry| entry.consumed_lease_token)
+            .expect("resumed wait should preserve its exact resume token");
+        assert_eq!(
+            worker
+                .resume_parent_wait_set_with_token(wait_id, resume_token)
+                .await
+                .unwrap(),
+            SandboxAgentRunWorkerOutcome::Idle
+        );
+        assert!(matches!(
+            live_events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_wait_set_resume_retries_exactly_then_publishes_and_wakes() {
+        let (worker, store, _provider, chat, _dir) = fixture().await;
+        let mut live_events = worker.events.subscribe(chat.id);
+        let (turn_id, wait_id) = ready_wait_set_for_test(&store, chat.id).await;
+        worker
+            .fail_wait_set_resume_responses
+            .store(2, Ordering::SeqCst);
+        // Let the first exact retry skip its backoff after the injected error.
+        worker.wake.notify_one();
+
+        assert_eq!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::ParentWaitSetResumed(wait_id)
+        );
+        let published = tokio::time::timeout(Duration::from_secs(1), live_events.recv())
+            .await
+            .expect("ambiguous wait recovery should publish live")
+            .expect("live wait event channel should remain open");
+        assert_eq!(
+            store.list_events(chat.id, 1).await.unwrap(),
+            vec![published]
+        );
+        tokio::time::timeout(Duration::from_secs(1), worker.turn_wake.notified())
+            .await
+            .expect("ambiguous wait recovery should wake the turn worker");
+        assert_eq!(
+            store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+            TurnRunStatus::Resuming
+        );
+        assert_eq!(
+            worker.fail_wait_set_resume_responses.load(Ordering::SeqCst),
+            0
         );
     }
 
@@ -1749,6 +1903,7 @@ mod tests {
             Arc::new(FixedResolver(provider)),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
             AgentConfig {
                 model: "sandbox-model".into(),
                 max_steps: 2,
@@ -1818,6 +1973,7 @@ mod tests {
             }))),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
             AgentConfig {
                 model: "sandbox-model".into(),
                 ..AgentConfig::default()
@@ -1878,6 +2034,7 @@ mod tests {
             Arc::new(FixedResolver(Arc::new(FailingProvider))),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
             AgentConfig {
                 model: "m".into(),
                 ..AgentConfig::default()
@@ -1949,6 +2106,7 @@ mod tests {
             }),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
             AgentConfig {
                 model: "m".into(),
                 ..AgentConfig::default()
@@ -1992,6 +2150,7 @@ mod tests {
             }),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
             attempts.clone(),
             AgentConfig {
                 model: "m".into(),
@@ -2041,6 +2200,7 @@ mod tests {
             }))),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
             attempts.clone(),
             AgentConfig {
                 model: "m".into(),
@@ -2094,6 +2254,7 @@ mod tests {
             Arc::new(FixedResolver(provider.clone())),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
             AgentConfig::default(),
             None,
             SandboxAgentRunWorkerConfig::default(),
@@ -2121,6 +2282,7 @@ mod tests {
             }),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
             AgentConfig {
                 model: "m".into(),
                 ..AgentConfig::default()
