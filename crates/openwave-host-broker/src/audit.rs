@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn audit_targets_never_include_an_absolute_path() {
-        let target = AuditTarget::selected_folder(Path::new("/Users/thet/Documents/private"));
+        let target = AuditTarget::selected_folder(Path::new("/fixtures/private"));
         let encoded = serde_json::to_string(&event(target)).unwrap();
         assert!(encoded.contains("private"));
         assert!(!encoded.contains("Users"));
