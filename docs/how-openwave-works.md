@@ -662,9 +662,11 @@ foreground spawn delegated. It receives an argument-free tool, while the native
 executor privately performs claim, final attachment revalidation, one broker
 read, and fenced resolution. The renderer never receives that target or the
 file contents from the executor control plane.
-The UI does not yet provide projects or steer controls. Completed assistant
-messages render the closed structured source cards described above. The
-Documents surface derives scope from the
+The UI does not yet provide project navigation. It does provide a durable
+active-turn redirect control: guidance is admitted with a stable identity and
+the composer waits for authoritative events rather than treating the request as
+locally applied. Completed assistant messages render the closed structured
+source cards described above. The Documents surface derives scope from the
 authoritative current chat: project chats use that project's corpus and loose
 chats use the unscoped corpus. It lists the catalog, imports a user-picked text
 or Markdown file, polls durable processing status, and searches ready passages.
@@ -776,16 +778,17 @@ fail-closed provider routing.
 
 The main next steps are:
 
-- extend the bounded depth-one hierarchy with carefully scoped sandbox-safe
-  capabilities without widening the exact delegated-file or spawn authority;
+- add resumable dispatch receipts and explicit replay policy around remaining
+  foreground server-tool effects;
+- add durable user-question continuations that release workers while awaiting
+  an exact answer;
+- expose project CRUD and navigation through the desktop so project-scoped
+  document workflows are reachable;
 - continue unifying client execution, folder consent, user questions, and
   resource waits around durable continuations that release workers;
-- persist model/tool step boundaries and side-effect receipts so sandbox and
-  foreground runs can resume safely after process loss;
-- add resumable checkpoints and explicit idempotency policy around remaining
-  server-side tool effects;
-- expose the remaining backend capabilities through the desktop information
-  architecture, especially projects and steer controls;
+- only then extend the bounded depth-one hierarchy with carefully scoped
+  sandbox-safe capabilities without widening exact delegated-file or spawn
+  authority;
 - add richer parsers and wire indexed search into MCP;
 - build the MCP client and connector surfaces;
 - finish the self-host profile rather than only testing Postgres state logic;
