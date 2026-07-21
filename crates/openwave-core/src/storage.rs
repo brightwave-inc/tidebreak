@@ -255,7 +255,7 @@ pub enum CheckpointSandboxSpawnOutcome {
     /// committed together.
     Checkpointed {
         child: AgentRun,
-        turn: TurnRun,
+        turn: Box<TurnRun>,
         call: ToolCallRecord,
         checkpoint: crate::model::SandboxSpawnCheckpoint,
         event: SequencedEvent,

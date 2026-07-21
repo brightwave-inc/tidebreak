@@ -340,7 +340,7 @@ where
     let checkpoint = checkpoint_from_model(checkpoint_model)?;
     Ok(CheckpointSandboxSpawnOutcome::Checkpointed {
         child,
-        turn: turn_run_from_model(turn)?,
+        turn: Box::new(turn_run_from_model(turn)?),
         call,
         checkpoint,
         event: SequencedEvent {
