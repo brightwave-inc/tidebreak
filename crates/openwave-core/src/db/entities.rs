@@ -377,6 +377,8 @@ pub mod sandbox_agent_admission {
         pub origin_turn_id: Uuid,
         pub chat_id: Uuid,
         pub spawn_call_id: Uuid,
+        pub delegated_root_id: Option<Uuid>,
+        pub delegated_relative_path: Option<String>,
         pub admitted_at: DateTimeUtc,
     }
 

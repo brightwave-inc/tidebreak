@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use crate::error::{AgentError, Result};
-use crate::id::AgentRunId;
+use crate::id::{AgentRunId, HostRootId};
 use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResultPayload, ToolCallRecord, TurnAgentRunWaitSet,
 };
@@ -50,6 +50,30 @@ pub(crate) const WAIT_CANCELLED_WITH_TURN_RESULT: &str =
 pub struct SpawnSandboxAgentArgs {
     /// A self-contained task for the isolated child. It cannot spawn children.
     pub task: String,
+    /// Optional exact file the child may receive through a later capability.
+    ///
+    /// Persisting this delegation grants no file access by itself. The initial
+    /// runtime deliberately advertises no sandbox file-read tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<SandboxAgentFileResource>,
+}
+
+/// One exact, pathless-root file identity delegated to a sandbox child.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxAgentFileResource {
+    /// Opaque host-broker root identity attached to the foreground chat.
+    pub root_id: HostRootId,
+    /// Nonempty path relative to that root; absolute and parent paths are invalid.
+    pub relative_path: String,
+}
+
+impl SandboxAgentFileResource {
+    /// Whether this is a bounded, canonical root-relative file identity.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        crate::client_tools::valid_connected_folder_path(&self.relative_path, false)
+    }
 }
 
 /// Closed model-facing acknowledgement for a non-blocking sandbox spawn.
@@ -199,14 +223,25 @@ impl SpawnSandboxAgentArgs {
             && !self.task.contains('\0')
             && self.task.chars().count() <= MAX_SANDBOX_AGENT_TASK_CHARS
             && self.task.len() <= AgentRun::MAX_INPUT_LEN
+            && self
+                .resource
+                .as_ref()
+                .is_none_or(SandboxAgentFileResource::is_well_formed)
     }
 }
 
 /// Validate one canonical model payload before the foreground worker parks.
 #[must_use]
 pub fn validate_spawn_sandbox_agent_arguments(arguments: &Value) -> bool {
-    serde_json::from_value::<SpawnSandboxAgentArgs>(arguments.clone())
-        .is_ok_and(|arguments| arguments.is_well_formed())
+    parse_canonical_spawn_sandbox_agent_arguments(arguments).is_some()
+}
+
+pub(crate) fn parse_canonical_spawn_sandbox_agent_arguments(
+    arguments: &Value,
+) -> Option<SpawnSandboxAgentArgs> {
+    let decoded = serde_json::from_value::<SpawnSandboxAgentArgs>(arguments.clone()).ok()?;
+    (decoded.is_well_formed() && serde_json::to_value(&decoded).ok().as_ref() == Some(arguments))
+        .then_some(decoded)
 }
 
 /// Validate one canonical ordered all-children wait proposal.
@@ -235,6 +270,21 @@ pub fn spawn_sandbox_agent_tool_spec() -> ToolSpec {
                     "minLength": 1,
                     "maxLength": MAX_SANDBOX_AGENT_TASK_CHARS,
                     "description": "A concise, self-contained task for one isolated background agent."
+                },
+                "resource": {
+                    "type": "object",
+                    "description": "Optional exact file identity within a folder already connected to this conversation. This delegates only its identity; the sandbox currently has no file-read tool.",
+                    "properties": {
+                        "root_id": { "type": "string", "format": "uuid" },
+                        "relative_path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": crate::client_tools::MAX_CONNECTED_FOLDER_PATH_BYTES,
+                            "description": "Nonempty root-relative file path."
+                        }
+                    },
+                    "required": ["root_id", "relative_path"],
+                    "additionalProperties": false
                 }
             },
             "required": ["task"],
@@ -335,7 +385,35 @@ mod tests {
         assert!(validate_spawn_sandbox_agent_arguments(&valid));
         assert!(!validate_spawn_sandbox_agent_arguments(
             &serde_json::json!({
+                "task": "Research without a delegated file.",
+                "resource": null
+            })
+        ));
+        assert!(validate_spawn_sandbox_agent_arguments(&serde_json::json!({
+            "task": "Inspect the exact report.",
+            "resource": {
+                "root_id": uuid::Uuid::new_v4(),
+                "relative_path": "reports/summary.md"
+            }
+        })));
+        assert!(!validate_spawn_sandbox_agent_arguments(
+            &serde_json::json!({
                 "task": "",
+            })
+        ));
+        assert!(!validate_spawn_sandbox_agent_arguments(
+            &serde_json::json!({
+                "task": "Escape the connected root.",
+                "resource": {
+                    "root_id": uuid::Uuid::new_v4(),
+                    "relative_path": "../private.txt"
+                }
+            })
+        ));
+        assert!(!validate_spawn_sandbox_agent_arguments(
+            &serde_json::json!({
+                "task": "Use a partial resource.",
+                "resource": { "root_id": uuid::Uuid::new_v4() }
             })
         ));
         assert!(!validate_spawn_sandbox_agent_arguments(
@@ -358,6 +436,10 @@ mod tests {
         assert_eq!(spec.input_schema["additionalProperties"], false);
         assert_eq!(spec.input_schema["required"], serde_json::json!(["task"]));
         assert_eq!(spec.input_schema["properties"]["task"]["maxLength"], 16_000);
+        assert_eq!(
+            spec.input_schema["properties"]["resource"]["required"],
+            serde_json::json!(["root_id", "relative_path"])
+        );
         assert!(spec.description.contains("do not ask it to spawn"));
     }
 

@@ -276,7 +276,7 @@ pub fn read_connected_file_tool_spec() -> ToolSpec {
     }
 }
 
-fn valid_connected_folder_path(path: &str, allow_root: bool) -> bool {
+pub(crate) fn valid_connected_folder_path(path: &str, allow_root: bool) -> bool {
     if path.len() > MAX_CONNECTED_FOLDER_PATH_BYTES
         || path.contains('\0')
         || path.contains('\\')

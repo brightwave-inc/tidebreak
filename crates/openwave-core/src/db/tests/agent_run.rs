@@ -909,6 +909,8 @@ async fn sandbox_admission_rejects_cross_turn_identity_and_fk_corruption() {
         origin_turn_id: Set(second_turn.id.0),
         chat_id: Set(second_chat.id.0),
         spawn_call_id: Set(CallId::new().0),
+        delegated_root_id: Set(None),
+        delegated_relative_path: Set(None),
         admitted_at: Set(Utc::now()),
     };
     assert!(malformed.insert(&store.conn).await.is_err());
