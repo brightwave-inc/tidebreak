@@ -451,6 +451,7 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
         state.resolver.clone(),
         state.agent_run_wake.clone(),
         state.turn_job_wake.clone(),
+        state.events.clone(),
         state.sandbox_attempts.clone(),
         state.agent_config.clone(),
         Some(state.config.data_dir.join("scratch")),

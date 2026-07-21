@@ -8592,6 +8592,7 @@ async fn foreground_sandbox_spawn_parks_executes_delivers_and_resumes() {
         state.resolver.clone(),
         state.agent_run_wake.clone(),
         state.turn_job_wake.clone(),
+        state.events.clone(),
         state.agent_config.clone(),
         None,
         sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default(),
