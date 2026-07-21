@@ -31,6 +31,7 @@ const HISTORY_TOOL_NAMES: Record<ChatToolActivity["title"], string> = {
   "Connect a folder": "connect_folder",
   "Check connected folders": "list_connected_folders",
   "Delegate a task": "spawn_sandbox_agent",
+  "Wait for background agents": "wait_for_agents",
   "Use a tool": "historical_unknown_tool",
 };
 

@@ -622,6 +622,7 @@ fn historical_tool_title(name: &str) -> &'static str {
         "connect_folder" => "Connect a folder",
         "list_connected_folders" => "Check connected folders",
         "spawn_sandbox_agent" => "Delegate a task",
+        "wait_for_agents" => "Wait for background agents",
         _ => "Use a tool",
     }
 }

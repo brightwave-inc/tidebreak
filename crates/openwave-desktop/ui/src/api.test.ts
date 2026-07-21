@@ -122,6 +122,25 @@ describe("pending approval recovery", () => {
     expect(parsePendingToolApproval({ ...safe, action: "private_plugin" })).toBeNull();
   });
 
+  it("recognizes the fixed background wait name without accepting extensions", () => {
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "wait_for_agents",
+        approval: "unsupported",
+        can_approve: false,
+      }),
+    ).toMatchObject({ action: "wait_for_agents", canApprove: false });
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "wait_for_agents_with_private_results",
+        approval: "unsupported",
+        can_approve: false,
+      }),
+    ).toBeNull();
+  });
+
   it("fails closed on malformed, duplicate, or cross-turn pages", async () => {
     const client = new ApiClient("http://127.0.0.1", "token");
     for (const body of [

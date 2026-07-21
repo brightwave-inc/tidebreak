@@ -81,6 +81,7 @@ pub(crate) enum RendererToolName {
     ListFolder,
     ReadConnectedFile,
     SpawnSandboxAgent,
+    WaitForAgents,
     Other,
 }
 
@@ -105,6 +106,7 @@ impl From<&str> for RendererToolName {
             "list_folder" => Self::ListFolder,
             "read_connected_file" => Self::ReadConnectedFile,
             "spawn_sandbox_agent" => Self::SpawnSandboxAgent,
+            "wait_for_agents" => Self::WaitForAgents,
             _ => Self::Other,
         }
     }
@@ -314,5 +316,23 @@ mod tests {
         assert!(json.contains("search_may_share_query_and_excerpts"));
         assert!(!json.contains("private query"));
         assert!(!json.contains("document title"));
+    }
+
+    #[test]
+    fn background_agent_tools_use_fixed_renderer_names() {
+        for (name, expected) in [
+            ("spawn_sandbox_agent", r#""name":"spawn_sandbox_agent""#),
+            ("wait_for_agents", r#""name":"wait_for_agents""#),
+        ] {
+            let projected = RendererSequencedEvent::from(&SequencedEvent {
+                seq: 1,
+                event: AgentEvent::ToolCallStarted {
+                    call_id: CallId::new(),
+                    name: name.into(),
+                },
+            });
+            let json = serde_json::to_string(&projected).unwrap();
+            assert!(json.contains(expected));
+        }
     }
 }
