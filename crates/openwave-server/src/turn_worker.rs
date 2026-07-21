@@ -1247,6 +1247,15 @@ impl TurnWorker {
                                 );
                                 break;
                             }
+                            Ok(Some(
+                                CheckpointSandboxSpawnOutcome::DelegatedResourceUnavailable,
+                            )) => {
+                                continuation_instruction = Some(
+                                    "That delegated file is no longer connected to this conversation. Continue without it or choose a currently connected file."
+                                        .into(),
+                                );
+                                break;
+                            }
                             Ok(Some(CheckpointSandboxSpawnOutcome::IdentityConflict))
                             | Ok(Some(CheckpointSandboxSpawnOutcome::ParentUnavailable)) => {
                                 checkpoint_heartbeat.abort_and_wait().await;

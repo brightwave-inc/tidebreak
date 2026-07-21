@@ -1,10 +1,14 @@
 use super::{sample_chat, temp_store};
-use crate::agent_tools::{SpawnSandboxAgentResult, SPAWN_SANDBOX_AGENT_TOOL};
+use crate::agent_tools::{
+    SandboxAgentFileResource, SpawnSandboxAgentResult, SPAWN_SANDBOX_AGENT_TOOL,
+};
 use crate::provider::ContentBlock;
 use crate::{
-    AgentEvent, AgentRun, AgentRunId, AgentRunStatus, CallId, CheckpointSandboxSpawnOutcome,
-    ResolveToolCallOutcome, SandboxSpawnCheckpointRequest, Store, ToolCallExecution,
-    ToolCallRecord, ToolCallStatus, TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
+    AgentEvent, AgentRun, AgentRunId, AgentRunStatus, CallId, ChatRootAttachment,
+    CheckpointSandboxSpawnOutcome, HostRootId, ResolveToolCallOutcome, RootAttachmentChangeAction,
+    RootAttachmentChangeId, RootAttachmentChangeTerminal, RootAttachmentOrigin,
+    SandboxSpawnCheckpointRequest, Store, ToolCallExecution, ToolCallRecord, ToolCallStatus,
+    TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
 };
 use chrono::{Duration, Utc};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -68,6 +72,21 @@ fn request(
     }
 }
 
+fn resource_request(
+    turn: &crate::TurnRun,
+    lease_token: uuid::Uuid,
+    call_id: CallId,
+    task: &str,
+    resource: &SandboxAgentFileResource,
+) -> SandboxSpawnCheckpointRequest {
+    let mut request = request(turn, lease_token, call_id, task, 2, progress());
+    request.arguments = serde_json::json!({
+        "task": task,
+        "resource": resource,
+    });
+    request
+}
+
 fn progress() -> TurnCheckpointProgress {
     TurnCheckpointProgress {
         model_steps: 1,
@@ -78,6 +97,47 @@ fn progress() -> TurnCheckpointProgress {
             cache_creation_input_tokens: 2,
         },
     }
+}
+
+async fn detach_conversation_root(
+    store: &crate::DbStore,
+    chat_id: crate::ChatId,
+    root_id: HostRootId,
+) {
+    let executor_id = uuid::Uuid::new_v4();
+    let created_at =
+        chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
+    let change_id = RootAttachmentChangeId::new();
+    let revision = store
+        .get_chat(chat_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .attachment_revision;
+    store
+        .begin_root_attachment_change(&crate::BeginRootAttachmentChange {
+            id: change_id,
+            chat_id,
+            executor_id,
+            root_id,
+            action: RootAttachmentChangeAction::Detach,
+            expected_attachment_revision: revision,
+            created_at,
+        })
+        .await
+        .unwrap();
+    store
+        .finish_root_attachment_change(
+            change_id,
+            executor_id,
+            &RootAttachmentChangeTerminal::Completed {
+                broker_changed: true,
+                broker_currently_attached: false,
+            },
+            created_at + Duration::seconds(1),
+        )
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -197,6 +257,220 @@ async fn nonblocking_spawn_commits_one_atomic_yield_and_exact_retry_survives_rec
     assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
     assert_eq!(store.list_tool_calls(chat.id).await.unwrap(), vec![call]);
     assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 2);
+    assert_eq!(
+        store
+            .get_sandbox_agent_admission(child.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .resource,
+        None
+    );
+}
+
+#[tokio::test]
+async fn exact_file_delegation_commits_with_admission_and_fences_retries() {
+    let (_dir, store) = temp_store().await;
+    let resource = SandboxAgentFileResource {
+        root_id: HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap(),
+        relative_path: "reports/summary.md".into(),
+    };
+    let mut chat = sample_chat();
+    chat.attachment_revision = 1;
+    chat.root_attachments.push(ChatRootAttachment {
+        root_id: resource.root_id,
+        origin: RootAttachmentOrigin::Conversation,
+    });
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = running_turn(&store, chat.id).await;
+    let request = resource_request(&turn, lease, CallId::new(), "inspect one report", &resource);
+
+    let child = match store
+        .checkpoint_sandbox_spawn(&request, Utc::now())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        CheckpointSandboxSpawnOutcome::Checkpointed { child, .. } => child,
+        outcome => panic!("unexpected resource spawn outcome: {outcome:?}"),
+    };
+    assert_eq!(
+        store
+            .get_sandbox_agent_admission(child.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .resource,
+        Some(resource.clone())
+    );
+    detach_conversation_root(&store, chat.id, resource.root_id).await;
+    assert!(matches!(
+        store
+            .checkpoint_sandbox_spawn(&request, Utc::now())
+            .await
+            .unwrap(),
+        Some(CheckpointSandboxSpawnOutcome::Existing { child: existing, .. }) if existing == child
+    ));
+
+    let mut changed = request;
+    changed.arguments["resource"]["relative_path"] = serde_json::json!("reports/other.md");
+    assert!(matches!(
+        store
+            .checkpoint_sandbox_spawn(&changed, Utc::now())
+            .await
+            .unwrap(),
+        Some(CheckpointSandboxSpawnOutcome::IdentityConflict)
+    ));
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
+    assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unattached_file_delegation_rejects_without_partial_writes() {
+    let (_dir, store) = temp_store().await;
+    let resource = SandboxAgentFileResource {
+        root_id: HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap(),
+        relative_path: "reports/missing.md".into(),
+    };
+    let mut chat = sample_chat();
+    chat.attachment_revision = 1;
+    chat.root_attachments.push(ChatRootAttachment {
+        root_id: resource.root_id,
+        origin: RootAttachmentOrigin::Conversation,
+    });
+    store.create_chat(&chat).await.unwrap();
+    detach_conversation_root(&store, chat.id, resource.root_id).await;
+    assert!(store
+        .get_chat(chat.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .root_attachments
+        .is_empty());
+
+    let (turn, lease) = running_turn(&store, chat.id).await;
+    let request = resource_request(
+        &turn,
+        lease,
+        CallId::new(),
+        "inspect a detached report",
+        &resource,
+    );
+
+    assert!(matches!(
+        store
+            .checkpoint_sandbox_spawn(&request, Utc::now())
+            .await
+            .unwrap(),
+        Some(CheckpointSandboxSpawnOutcome::DelegatedResourceUnavailable)
+    ));
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+    assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+    assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
+    assert_eq!(
+        store.get_turn_run(turn.id).await.unwrap().unwrap().status,
+        TurnRunStatus::Running
+    );
+}
+
+#[tokio::test]
+async fn concurrent_detach_and_file_delegation_serialize_to_one_coherent_snapshot() {
+    let (_dir, store) = temp_store().await;
+    let resource = SandboxAgentFileResource {
+        root_id: HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap(),
+        relative_path: "reports/race.md".into(),
+    };
+    let mut chat = sample_chat();
+    chat.attachment_revision = 1;
+    chat.root_attachments.push(ChatRootAttachment {
+        root_id: resource.root_id,
+        origin: RootAttachmentOrigin::Conversation,
+    });
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = running_turn(&store, chat.id).await;
+    let request = resource_request(
+        &turn,
+        lease,
+        CallId::new(),
+        "inspect while the root detaches",
+        &resource,
+    );
+
+    let executor_id = uuid::Uuid::new_v4();
+    let change_id = RootAttachmentChangeId::new();
+    let created_at =
+        chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
+    store
+        .begin_root_attachment_change(&crate::BeginRootAttachmentChange {
+            id: change_id,
+            chat_id: chat.id,
+            executor_id,
+            root_id: resource.root_id,
+            action: RootAttachmentChangeAction::Detach,
+            expected_attachment_revision: 1,
+            created_at,
+        })
+        .await
+        .unwrap();
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let spawn_store = store.clone();
+    let spawn_barrier = barrier.clone();
+    let spawn = tokio::spawn(async move {
+        spawn_barrier.wait().await;
+        spawn_store
+            .checkpoint_sandbox_spawn(&request, Utc::now())
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    let detach_store = store.clone();
+    let detach = tokio::spawn(async move {
+        barrier.wait().await;
+        detach_store
+            .finish_root_attachment_change(
+                change_id,
+                executor_id,
+                &RootAttachmentChangeTerminal::Completed {
+                    broker_changed: true,
+                    broker_currently_attached: false,
+                },
+                created_at + Duration::seconds(1),
+            )
+            .await
+            .unwrap();
+    });
+    let (spawn, detach) = tokio::join!(spawn, detach);
+    let spawn = spawn.expect("concurrent spawn task panicked");
+    detach.expect("concurrent detach task panicked");
+
+    assert!(store
+        .get_chat(chat.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .root_attachments
+        .is_empty());
+    match spawn {
+        CheckpointSandboxSpawnOutcome::Checkpointed { child, .. } => {
+            assert_eq!(
+                store
+                    .get_sandbox_agent_admission(child.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .resource,
+                Some(resource)
+            );
+            assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
+            assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
+        }
+        CheckpointSandboxSpawnOutcome::DelegatedResourceUnavailable => {
+            assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+            assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+        }
+        outcome => panic!("unexpected concurrent delegation outcome: {outcome:?}"),
+    }
 }
 
 #[tokio::test]

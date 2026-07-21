@@ -238,6 +238,8 @@ pub enum AdmitSandboxAgentRunOutcome {
     IdentityConflict,
     /// The origin turn does not have an eligible foreground coordinator.
     ParentUnavailable,
+    /// The delegated file root is not attached to the foreground chat.
+    DelegatedResourceUnavailable,
     /// The origin turn is not owned by the supplied live worker lease.
     LeaseLost,
     /// This origin turn already owns the configured number of nonterminal children.
@@ -272,6 +274,8 @@ pub enum CheckpointSandboxSpawnOutcome {
     IdentityConflict,
     /// The origin turn does not have an eligible foreground coordinator.
     ParentUnavailable,
+    /// The delegated file root is not attached to the foreground chat.
+    DelegatedResourceUnavailable,
     /// The exact foreground claim is missing, stale, or no longer live.
     LeaseLost,
     /// Four nonterminal children already belong to this origin turn.
@@ -1337,6 +1341,9 @@ pub trait Store: Send + Sync {
     /// parent, child, and immutable admission receipt commit together under the
     /// chat/turn write lock. Existing exact receipts are recovered before the
     /// bounded outstanding-child check, making an ambiguous commit retry safe.
+    /// A non-blocking checkpoint may additionally bind one exact root-relative
+    /// file identity after validating its root against the locked chat
+    /// attachment projection; the receipt itself grants no host authority.
     /// The stronger checkpoint boundary below composes this admission with the
     /// foreground transcript, progress, event, and immediate continuation.
     #[allow(clippy::too_many_arguments)]

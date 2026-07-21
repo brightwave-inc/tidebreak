@@ -5,7 +5,8 @@ use sea_orm::{
 };
 
 use crate::agent_tools::{
-    SpawnSandboxAgentArgs, SpawnSandboxAgentResult, SPAWN_SANDBOX_AGENT_TOOL,
+    parse_canonical_spawn_sandbox_agent_arguments, SpawnSandboxAgentArgs, SpawnSandboxAgentResult,
+    SPAWN_SANDBOX_AGENT_TOOL,
 };
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
@@ -167,12 +168,13 @@ where
         return Ok(CheckpointSandboxSpawnOutcome::IdentityConflict);
     }
 
-    let task = canonical_task(request)?;
+    let arguments = canonical_arguments(request)?;
     let admission = admit_sandbox_agent_run_on(
         conn,
         turn,
         request.call_id,
-        &task,
+        &arguments.task,
+        arguments.resource.as_ref(),
         request.lease_token,
         request.expected_steer_revision,
         AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,
@@ -189,6 +191,9 @@ where
         }
         AdmitSandboxAgentRunOutcome::ParentUnavailable => {
             return Ok(CheckpointSandboxSpawnOutcome::ParentUnavailable)
+        }
+        AdmitSandboxAgentRunOutcome::DelegatedResourceUnavailable => {
+            return Ok(CheckpointSandboxSpawnOutcome::DelegatedResourceUnavailable)
         }
         AdmitSandboxAgentRunOutcome::LeaseLost => {
             return Ok(CheckpointSandboxSpawnOutcome::LeaseLost)
@@ -402,7 +407,7 @@ where
         output: ToolOutput::text(checkpoint.result.clone()),
     };
     let stored_event: AgentEvent = serde_json::from_value(event.payload)?;
-    let task = canonical_task(request)?;
+    let arguments = canonical_arguments(request)?;
     let raw_call_valid = call_model.error_code.is_none()
         && call_model.error_detail.is_none()
         && call_model.approval_status.is_none()
@@ -430,7 +435,17 @@ where
         || child.spawn_call_id != Some(checkpoint.call_id.0)
         || child.execution != crate::AgentRunExecution::Sandbox.as_str()
         || child.depth != i16::from(AgentRun::MAX_DEPTH)
-        || child.input.as_deref() != Some(task.as_str())
+        || child.input.as_deref() != Some(arguments.task.as_str())
+        || admission.delegated_root_id
+            != arguments
+                .resource
+                .as_ref()
+                .map(|resource| *resource.root_id.as_uuid())
+        || admission.delegated_relative_path.as_deref()
+            != arguments
+                .resource
+                .as_ref()
+                .map(|resource| resource.relative_path.as_str())
         || child.created_at > checkpoint.committed_at
         || call.id != checkpoint.call_id
         || call.chat_id != checkpoint.chat_id
@@ -487,18 +502,13 @@ fn validate_request(request: &SandboxSpawnCheckpointRequest) -> Result<()> {
             "invalid non-blocking sandbox spawn checkpoint".into(),
         ));
     }
-    canonical_task(request)?;
+    canonical_arguments(request)?;
     Ok(())
 }
 
-fn canonical_task(request: &SandboxSpawnCheckpointRequest) -> Result<String> {
-    let arguments: SpawnSandboxAgentArgs = serde_json::from_value(request.arguments.clone())
-        .map_err(|_| AgentError::Store("invalid sandbox spawn arguments".into()))?;
-    if !arguments.is_well_formed() || serde_json::to_value(&arguments)? != request.arguments {
-        return Err(AgentError::Store(
-            "sandbox spawn arguments are not canonical".into(),
-        ));
-    }
+fn canonical_arguments(request: &SandboxSpawnCheckpointRequest) -> Result<SpawnSandboxAgentArgs> {
+    let arguments = parse_canonical_spawn_sandbox_agent_arguments(&request.arguments)
+        .ok_or_else(|| AgentError::Store("sandbox spawn arguments are not canonical".into()))?;
     let child_run_id = AgentRunId::sandbox_for_spawn_call(request.call_id);
     let canonical_result = serde_json::to_string(&SpawnSandboxAgentResult {
         agent_id: child_run_id,
@@ -508,7 +518,7 @@ fn canonical_task(request: &SandboxSpawnCheckpointRequest) -> Result<String> {
             "sandbox spawn result is not canonical".into(),
         ));
     }
-    Ok(arguments.task)
+    Ok(arguments)
 }
 
 struct CheckpointTotals {

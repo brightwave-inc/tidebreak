@@ -4,6 +4,7 @@ use sea_orm::{
     QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
 };
 
+use crate::agent_tools::SandboxAgentFileResource;
 use crate::error::{AgentError, Result};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::model::{
@@ -299,6 +300,7 @@ pub(in crate::db) async fn admit_sandbox_agent_run(
         &turn,
         spawn_call_id,
         input,
+        None,
         lease_token,
         expected_steer_revision,
         max_outstanding_children,
@@ -322,6 +324,7 @@ pub(in crate::db) async fn admit_sandbox_agent_run(
                 AgentRunId(turn.agent_run_id),
                 spawn_call_id,
                 input,
+                None,
             )
             .await?
             {
@@ -351,6 +354,7 @@ pub(in crate::db) async fn admit_sandbox_agent_run_on<C>(
     turn: &entities::turn_run::Model,
     spawn_call_id: CallId,
     input: &str,
+    resource: Option<&SandboxAgentFileResource>,
     lease_token: uuid::Uuid,
     expected_steer_revision: i64,
     max_outstanding_children: u32,
@@ -371,6 +375,7 @@ where
         parent_id,
         spawn_call_id,
         input,
+        resource,
     )
     .await?
     {
@@ -418,6 +423,19 @@ where
     if !parent_available {
         return Ok(AdmitSandboxAgentRunOutcome::ParentUnavailable);
     }
+    if let Some(resource) = resource {
+        let attached = entities::chat_root_attachment::Entity::find_by_id((
+            chat_id.0,
+            *resource.root_id.as_uuid(),
+        ))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some();
+        if !attached {
+            return Ok(AdmitSandboxAgentRunOutcome::DelegatedResourceUnavailable);
+        }
+    }
 
     // A terminal child remains outstanding until its immutable delivery has
     // been consumed or explicitly retired. Counting only live run rows would
@@ -464,6 +482,8 @@ where
         origin_turn_id: Set(origin_turn_id.0),
         chat_id: Set(chat_id.0),
         spawn_call_id: Set(spawn_call_id.0),
+        delegated_root_id: Set(resource.map(|resource| *resource.root_id.as_uuid())),
+        delegated_relative_path: Set(resource.map(|resource| resource.relative_path.clone())),
         admitted_at: Set(created_at),
     }
     .insert(conn)
@@ -482,6 +502,7 @@ async fn resolve_existing_sandbox_admission_on<C>(
     parent_id: AgentRunId,
     spawn_call_id: CallId,
     input: &str,
+    resource: Option<&SandboxAgentFileResource>,
 ) -> Result<Option<AdmitSandboxAgentRunOutcome>>
 where
     C: sea_orm::ConnectionTrait,
@@ -503,6 +524,9 @@ where
             && admission.origin_turn_id == origin_turn_id.0
             && admission.chat_id == chat_id.0
             && admission.spawn_call_id == spawn_call_id.0
+            && admission.delegated_root_id == resource.map(|resource| *resource.root_id.as_uuid())
+            && admission.delegated_relative_path.as_deref()
+                == resource.map(|resource| resource.relative_path.as_str())
             && child.as_ref().is_some_and(|child| {
                 child.chat_id == chat_id.0
                     && child.parent_id == Some(parent_id.0)
@@ -584,6 +608,7 @@ pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
         &turn,
         spawn_call_id,
         input,
+        None,
         lease_token,
         expected_steer_revision,
         AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN,
@@ -603,6 +628,7 @@ pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
                 parent_id,
                 spawn_call_id,
                 input,
+                None,
             )
             .await?
             .is_some()
@@ -639,6 +665,12 @@ pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
             transaction.commit().await.map_err(store_err)?;
             return Ok(Some(
                 AcceptSandboxAgentRunAndParkTurnOutcome::ParentUnavailable,
+            ));
+        }
+        AdmitSandboxAgentRunOutcome::DelegatedResourceUnavailable => {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(
+                AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict,
             ));
         }
         AdmitSandboxAgentRunOutcome::LeaseLost => {
@@ -2409,18 +2441,37 @@ pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> 
 fn sandbox_agent_admission_from_model(
     model: entities::sandbox_agent_admission::Model,
 ) -> Result<SandboxAgentAdmission> {
+    let resource = match (model.delegated_root_id, model.delegated_relative_path) {
+        (Some(root_id), Some(relative_path)) => Some(SandboxAgentFileResource {
+            root_id: crate::HostRootId::from_uuid(root_id).map_err(|error| {
+                AgentError::Store(format!("invalid delegated root id: {error}"))
+            })?,
+            relative_path,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(AgentError::Store(
+                "stored sandbox delegation has a partial file identity".into(),
+            ));
+        }
+    };
     let admission = SandboxAgentAdmission {
         child_run_id: AgentRunId(model.child_run_id),
         parent_run_id: AgentRunId(model.parent_run_id),
         origin_turn_id: TurnId(model.origin_turn_id),
         chat_id: ChatId(model.chat_id),
         spawn_call_id: CallId(model.spawn_call_id),
+        resource,
         admitted_at: model.admitted_at,
     };
     if admission.child_run_id != AgentRunId::sandbox_for_spawn_call(admission.spawn_call_id)
         || admission.parent_run_id.0.is_nil()
         || admission.origin_turn_id.0.is_nil()
         || admission.chat_id.0.is_nil()
+        || admission
+            .resource
+            .as_ref()
+            .is_some_and(|resource| !resource.is_well_formed())
     {
         return Err(AgentError::Store(
             "invalid stored sandbox agent admission".into(),

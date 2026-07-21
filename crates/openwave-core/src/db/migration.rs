@@ -2034,6 +2034,8 @@ impl MigrationTrait for Init {
                             .not_null()
                             .unique_key(),
                     )
+                    .col(ColumnDef::new(SandboxAgentAdmission::DelegatedRootId).uuid())
+                    .col(ColumnDef::new(SandboxAgentAdmission::DelegatedRelativePath).text())
                     .col(
                         ColumnDef::new(SandboxAgentAdmission::AdmittedAt)
                             .timestamp_with_time_zone()
@@ -2066,6 +2068,17 @@ impl MigrationTrait for Init {
                             .to_col(TurnRun::ChatId)
                             .to_col(TurnRun::AgentRunId)
                             .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(
+                        Expr::col(SandboxAgentAdmission::DelegatedRootId)
+                            .is_null()
+                            .and(Expr::col(SandboxAgentAdmission::DelegatedRelativePath).is_null())
+                            .or(Expr::col(SandboxAgentAdmission::DelegatedRootId)
+                                .is_not_null()
+                                .and(
+                                    Expr::col(SandboxAgentAdmission::DelegatedRelativePath)
+                                        .is_not_null(),
+                                )),
                     )
                     .to_owned(),
             )
@@ -5011,6 +5024,8 @@ enum SandboxAgentAdmission {
     OriginTurnId,
     ChatId,
     SpawnCallId,
+    DelegatedRootId,
+    DelegatedRelativePath,
     AdmittedAt,
 }
 

@@ -1205,7 +1205,7 @@ impl Agent {
                     transcript.push(ChatMessage {
                         role: Role::User,
                         content: vec![ContentBlock::Text {
-                            text: "The sandbox task must be one non-empty, bounded `task` field with no extra properties. Retry with that exact shape.".into(),
+                            text: "The sandbox task needs one non-empty, bounded `task`. It may also include one `resource` object containing only `root_id` and `relative_path`; omit `resource` entirely when unused rather than sending null. Retry with that exact shape.".into(),
                         }],
                     });
                     continue;
@@ -2455,6 +2455,10 @@ mod tests {
         arguments: &'static str,
     }
 
+    struct SandboxCorrectionProvider {
+        calls: AtomicUsize,
+    }
+
     struct ContextRecordingTool {
         observed_project: Arc<Mutex<Option<Option<ProjectId>>>>,
     }
@@ -2729,6 +2733,46 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ModelProvider for SandboxCorrectionProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("sandbox-correction")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+            let arguments = if first {
+                r#"{"task":"Research the error handling options.","resource":null}"#
+            } else {
+                r#"{"task":"Research the error handling options."}"#
+            };
+            Ok(stream::iter(vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: if first {
+                        "sandbox_null".into()
+                    } else {
+                        "sandbox_omitted".into()
+                    },
+                    name: crate::SPAWN_SANDBOX_AGENT_TOOL.into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: arguments.into(),
+                },
+                ProviderEvent::Usage(Usage {
+                    input_tokens: 5,
+                    output_tokens: 2,
+                    ..Usage::default()
+                }),
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ])
+            .boxed())
+        }
+    }
+
     #[tokio::test]
     async fn claimed_agent_returns_a_client_tool_checkpoint_without_executing_it() {
         let db = tempfile::tempdir().unwrap();
@@ -2958,6 +3002,49 @@ mod tests {
             AgentEvent::ToolCallStarted { name, .. }
                 if name == crate::SPAWN_SANDBOX_AGENT_TOOL
         )));
+
+        let mut correction_registry = ToolRegistry::new();
+        correction_registry.register_foreground_agent_orchestration();
+        let correction_provider = Arc::new(SandboxCorrectionProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let correction_agent = Agent::new(
+            correction_provider.clone(),
+            Arc::new(correction_registry),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        )
+        .with_durable_steer(lease_token)
+        .with_foreground_agent_orchestration();
+        let (correction_tx, correction_rx) = unbounded();
+        let corrected = correction_agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &correction_tx)
+            .await
+            .unwrap();
+        drop(correction_tx);
+        let correction_events = emitted_events(correction_rx.collect().await);
+        let AgentTurnOutcome::SandboxAgentSpawn {
+            request,
+            model_steps,
+            ..
+        } = corrected
+        else {
+            panic!("foreground agent should correct a noncanonical sandbox resource");
+        };
+        assert_eq!(correction_provider.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(model_steps, 2);
+        assert_eq!(
+            request.arguments,
+            serde_json::json!({"task": "Research the error handling options."})
+        );
+        assert!(request.is_well_formed());
+        assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+        assert!(correction_events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::StreamInterrupted)));
     }
 
     #[tokio::test]

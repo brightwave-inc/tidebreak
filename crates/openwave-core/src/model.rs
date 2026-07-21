@@ -1212,6 +1212,11 @@ pub struct SandboxAgentAdmission {
     pub chat_id: ChatId,
     /// Exact model call that requested the child.
     pub spawn_call_id: crate::id::CallId,
+    /// Optional exact file identity delegated only to this child.
+    ///
+    /// This immutable receipt is not host authority and does not imply that a
+    /// sandbox file-read capability exists.
+    pub resource: Option<crate::agent_tools::SandboxAgentFileResource>,
     /// Database time at which admission committed.
     pub admitted_at: DateTime<Utc>,
 }
