@@ -85,6 +85,57 @@ or detach identity only when it is unknown, and then supplies the terminal
 observation to the product state machine. Startup recovery is sequential and
 bounded to 64 oldest pending changes per pass.
 
+### Exact files delegated to a background agent
+
+Foreground folder tools can browse roots already attached to their chat. A
+background sandbox receives a much narrower capability: when spawning the
+child, the foreground agent may name one already attached opaque root ID and
+one root-relative file path. That exact pair is stored immutably in the child's
+admission. It does not attach a root, create a broker grant, or expose a host
+path.
+
+Only the embedded desktop advertises `read_delegated_file`, and only to the
+depth-one child whose admission has that exact resource while the root remains
+attached. The tool takes an empty argument object, so the child cannot replace
+the target or discover other roots and files. It shares the sandbox's one total
+tool-call budget with web search and the typed folder-access proposal. It is not
+a picker, directory listing, write, shell, or general filesystem capability.
+
+The read crosses the trust boundaries as a durable continuation:
+
+1. The sandbox parks one argument-free call and releases its worker lease.
+2. The desktop polls a native-only pending route that reveals only call IDs.
+   Pending, claim, heartbeat, and resolve require both the ordinary loopback
+   bearer and a separate native-executor credential withheld from the renderer.
+3. Claim installs an exact executor lease and revalidates the immutable child
+   admission plus the chat's current attachment before returning the opaque
+   root and relative path to native code.
+4. Native code durably records a private dispatch fence, then sends a final
+   specialized heartbeat. That heartbeat revalidates the admission and
+   attachment immediately before broker admission.
+5. The host broker performs one bounded UTF-8 `ReadFile` under the
+   server-derived conversation context. It checks its own live attachment and
+   grant and reauthorizes before releasing bytes.
+6. Resolve revalidates the executor lease and current product attachment before
+   committing bounded content. If a detach or cancellation won the race, the
+   content is discarded and the sandbox resumes with a neutral terminal result.
+
+The app-private recovery receipt contains the call identity, stable executor,
+secret lease, dispatch phase, and bounded terminal resolution, but not the root
+or relative path. A receipt recorded after dispatch began is never dispatched
+again after a crash: if no terminal result was durably stored, recovery resolves
+the call as unavailable. This conservative no-replay rule treats even a
+privacy-sensitive read as an effect whose ambiguous dispatch must not be
+repeated. An expired claim whose private receipt was lost is likewise
+cleanup-only, never authority for another read. A target that cannot be
+represented by the broker's stricter relative-path contract fails neutrally
+before host I/O.
+
+The headless server does not have the embedded native executor or its stable
+private credential, so it never advertises this tool. Future self-hosted or
+managed deployments will need an equivalent explicitly trusted host executor;
+the current implementation does not claim that support.
+
 ## The four layers
 
 ```text

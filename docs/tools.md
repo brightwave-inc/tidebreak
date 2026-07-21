@@ -97,23 +97,39 @@ child or consuming a result twice. Live event delivery uses the exact journaled
 sequence; reconnecting clients replay the journal, and cursor-based consumers
 can ignore a repeated live publication after commit-response loss.
 
-A background sandbox has no shared conversation, filesystem, general network,
-or host-folder access. It receives one bounded task and may be offered exactly
-one tool call: `web_search` when its remaining model-step budget can also
-consume the result, or a sandbox-only `request_folder_access` proposal. The
-proposal is a typed terminal child result, not a client call: it cannot open a
+A background sandbox has no shared conversation, general filesystem, general
+network, or broad host-folder access. It receives one bounded task and has one
+total tool-call budget. Depending on its remaining model-step budget and exact
+admission, it may be offered `web_search`, a sandbox-only
+`request_folder_access` proposal, or the desktop-only
+`read_delegated_file`. The delegated read is available only when the foreground
+spawn named one exact `{root_id, relative_path}` that was attached to the chat
+and remains attached. It accepts no model arguments: the sandbox cannot choose
+a root or path, discover neighboring files, or broaden the delegation.
+
+The desktop executor discovers only the parked call identity. Its native-only
+claim recovers the server-owned chat, root, and relative path after revalidating
+the immutable child admission and current attachment. Immediately before one
+bounded UTF-8 broker read, it performs a final authority-checking heartbeat;
+the broker independently reauthorizes the chat context and root. Resolution
+checks the same authority again, so a detach that wins while bytes are in
+flight discards the content and resumes the child with a neutral failure.
+Headless servers have no embedded native executor and never advertise this
+tool.
+
+The folder-access proposal is a typed terminal child result, not a client call:
+it cannot open a
 picker, name a root, expose a path, or grant access. Its foreground parent
 receives deterministic system context and independently decides whether to
 issue the ordinary foreground `request_folder_access` client tool. The worker
-atomically parks only web search under its exact lease; a separate host-owned
-executor performs that bounded search and writes an immutable receipt. On a
-later claim, the sandbox reconstructs the matching `ToolUse`/`ToolResult` from
-that receipt before it can finalize. Sandboxes do not receive
+atomically parks web search or the delegated read under its exact lease; a
+separate host-owned executor performs the bounded operation and writes a
+durable receipt. The desktop also persists an app-private delegated-read
+receipt before broker dispatch. If a crash makes dispatch ambiguous, recovery
+publishes a safe failure instead of reading the file again. On a later claim,
+the sandbox reconstructs the matching `ToolUse`/`ToolResult` from the terminal
+receipt before it can finalize. Sandboxes do not receive
 `spawn_sandbox_agent` or `wait_for_agents` and cannot create further agents.
-
-Future sandbox-safe capabilities, such as broker-mediated folder reads, must
-be added one at a time behind the same durable continuation and consent
-boundaries.
 
 Later additions may include a scratchpad, pinned context, plan/execution modes,
 deliverable export, clipboard operations, generated images, and connected apps.

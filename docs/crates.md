@@ -100,7 +100,9 @@ A runnable sidecar exposes the same core over bounded, strict JSONL stdio,
 resynchronizes after oversized input, and protects its own app-data directory
 from ever becoming a connected root. The Tauri host owns its lifecycle and
 native folder consent behind narrow pick/list/revoke commands; the renderer sees
-only opaque summaries. Existing agent file tools do not use this boundary yet.
+only opaque summaries. Foreground connected-folder tools and the desktop-only
+sandbox read of one exact delegated file use this operation boundary; private
+scratch tools remain separate and confined to app storage.
 See [Host access and connected folders](host-access.md).
 
 **Depends on:** no OpenWave client crate.
@@ -151,7 +153,10 @@ that mounts external MCP servers remains planned.
 
 The Tauri application: it compiles the server in-process, hosts the chat UI, and
 talks to it over an ephemeral loopback HTTP/WebSocket surface. This is the
-primary way most people will run OpenWave. See
+primary way most people will run OpenWave. Its private native executor also
+recovers exact delegated-file checkpoints, revalidates product attachment
+authority, and sends one bounded read through the host broker without exposing
+the target or executor credentials to the renderer. See
 [`crates/openwave-desktop/README.md`](../crates/openwave-desktop/README.md) for
 local run instructions.
 
@@ -168,6 +173,12 @@ Client-owned tool work is exposed through authenticated per-chat polling,
 claim, heartbeat, and resolution routes. General records show visible lease
 metadata but never the secret claim token; only the claim response returns that
 receipt.
+
+The embedded-desktop profile additionally enables the argument-free
+`read_delegated_file` checkpoint for a depth-one child with one immutable exact
+file delegation. Native-only pending/claim/heartbeat/resolve routes drive it;
+the headless profile does not advertise the tool because it has no embedded
+executor.
 
 **Depends on:** `openwave-core`, `openwave-router`, `openwave-retrieval`.
 
