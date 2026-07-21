@@ -19,7 +19,10 @@ use crate::{AgentRunId, ChatId, ToolOutput};
 use super::super::super::{entities, store_err, DbStore};
 use super::super::{
     acquire_chat_write_lock,
-    agent_run::{admit_sandbox_agent_run_on, agent_run_from_model, database_now},
+    agent_run::{
+        acquire_agent_run_claim_lock, admit_sandbox_agent_run_on, agent_run_from_model,
+        database_now,
+    },
     client_execution::tool_call_from_model,
     conversation::append_event_on,
     next_tool_history_order_on,
@@ -53,6 +56,10 @@ pub(in crate::db) async fn checkpoint_sandbox_spawn(
         return Ok(None);
     };
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    // Match every child terminal/delivery path: scheduler first, then chat and
+    // turn. The exact checkpoint recovery above intentionally remains before
+    // these mutable locks.
+    acquire_agent_run_claim_lock(&transaction).await?;
     if !acquire_chat_write_lock(&transaction, ChatId(scope.chat_id)).await?
         || !super::super::acquire_turn_write_lock(&transaction, request.origin_turn_id).await?
     {

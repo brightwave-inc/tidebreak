@@ -1,7 +1,7 @@
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, QueryTrait, Set, Statement, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
 };
 
 use crate::error::{AgentError, Result};
@@ -278,6 +278,10 @@ pub(in crate::db) async fn admit_sandbox_agent_run(
         return Ok(None);
     };
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    // Admission and terminal child delivery share the scheduler lock before
+    // chat and turn ownership. This gives the unsettled-child classifier one
+    // stable snapshot and preserves the global scheduler -> chat -> turn order.
+    acquire_agent_run_claim_lock(&transaction).await?;
     if !acquire_chat_write_lock(&transaction, ChatId(scope.chat_id)).await?
         || !acquire_turn_write_lock(&transaction, origin_turn_id).await?
     {
@@ -415,28 +419,14 @@ where
         return Ok(AdmitSandboxAgentRunOutcome::ParentUnavailable);
     }
 
-    let outstanding = entities::agent_run::Entity::find()
-        .filter(
-            entities::agent_run::Column::Id.in_subquery(
-                entities::sandbox_agent_admission::Entity::find()
-                    .select_only()
-                    .column(entities::sandbox_agent_admission::Column::ChildRunId)
-                    .filter(
-                        entities::sandbox_agent_admission::Column::OriginTurnId
-                            .eq(origin_turn_id.0),
-                    )
-                    .into_query(),
-            ),
-        )
-        .filter(entities::agent_run::Column::Status.is_not_in([
-            AgentRunStatus::Completed.as_str(),
-            AgentRunStatus::Failed.as_str(),
-            AgentRunStatus::Cancelled.as_str(),
-        ]))
-        .count(conn)
-        .await
-        .map_err(store_err)?;
-    if outstanding >= u64::from(max_outstanding_children) {
+    // A terminal child remains outstanding until its immutable delivery has
+    // been consumed or explicitly retired. Counting only live run rows would
+    // let fast children fall out of this bound before the foreground model can
+    // wait on them, eventually producing more IDs than one ordered wait can
+    // consume. The shared classifier also validates admission and terminal
+    // receipt provenance before capacity can be released.
+    let outstanding = unsettled_sandbox_children_for_origin_turn_on(conn, turn).await?;
+    if outstanding.len() >= max_outstanding_children as usize {
         return Ok(AdmitSandboxAgentRunOutcome::AtCapacity);
     }
 
@@ -561,6 +551,9 @@ pub(in crate::db) async fn accept_sandbox_agent_run_and_park_turn(
     };
 
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    // Legacy atomic spawn uses the same scheduler -> chat -> turn order as the
+    // nonblocking checkpoint so the shared unsettled classifier is stable.
+    acquire_agent_run_claim_lock(&transaction).await?;
     if !acquire_chat_write_lock(&transaction, ChatId(scope.chat_id)).await?
         || !acquire_turn_write_lock(&transaction, turn_id).await?
     {

@@ -1180,9 +1180,12 @@ impl AgentRun {
     pub const DEFAULT_MAX_DURATION: chrono::Duration = chrono::Duration::hours(1);
     /// Largest accepted scheduler concurrency bound.
     pub const MAX_CONCURRENCY_LIMIT: u32 = 1_024;
-    /// Default maximum children from one foreground turn that may remain
-    /// nonterminal at once. Admission enforces this independently from worker
-    /// concurrency so queued work is bounded before it reaches the scheduler.
+    /// Default maximum unsettled children from one foreground turn.
+    ///
+    /// A child remains unsettled while it is running or while its terminal
+    /// delivery is still pending or claimed. Admission enforces this
+    /// independently from worker concurrency so both queued work and unread
+    /// results stay bounded.
     pub const DEFAULT_MAX_OUTSTANDING_CHILDREN: u32 = 4;
     /// Maximum stable failure-category length.
     pub const MAX_ERROR_CODE_LEN: usize = 128;
@@ -1864,8 +1867,9 @@ pub struct AgentRunWaitSetCandidate {
 }
 
 impl TurnAgentRunWaitSet {
-    /// The admission layer already caps outstanding children at four. Keeping
-    /// the wait bound equal prevents an oversized continuation checkpoint.
+    /// The admission layer caps unsettled children at four, including terminal
+    /// deliveries that have not been consumed or retired. Keeping the wait
+    /// bound equal prevents an oversized continuation checkpoint.
     pub const MAX_CHILDREN: usize = AgentRun::DEFAULT_MAX_OUTSTANDING_CHILDREN as usize;
 }
 
