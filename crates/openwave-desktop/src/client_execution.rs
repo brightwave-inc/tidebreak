@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::host_access::{pick_folder, AuthoritativeContext, HostAccess};
 
 mod control_plane;
+pub(crate) mod delegated_file_read;
 pub(crate) mod folder_operations;
 mod product_sync;
 mod receipt_store;
@@ -32,8 +33,10 @@ pub(crate) use control_plane::ControlPlaneClient;
 use control_plane::ControlPlaneError;
 pub(crate) use receipt_store::ReceiptStore;
 use receipt_store::{
-    FolderAccessIntent, FolderAccessReceipt, FolderOperationPhase, FolderOperationReceipt,
-    ManualFolderConnectReceipt, ProductRootAttachmentSync, RegistrationPhase, StoredResolution,
+    delegated_file_content_fits_server, DelegatedFileFailureReason, DelegatedFileReadReceipt,
+    DelegatedFileResolution, FolderAccessIntent, FolderAccessReceipt, FolderOperationPhase,
+    FolderOperationReceipt, ManualFolderConnectReceipt, ProductRootAttachmentSync,
+    RegistrationPhase, StoredResolution,
 };
 
 const RECOVERY_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);

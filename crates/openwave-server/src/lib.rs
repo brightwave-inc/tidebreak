@@ -376,7 +376,7 @@ pub async fn bind(config: Config) -> Result<Server> {
 ///
 /// The desktop persists this identity outside renderer-visible state so pending
 /// attachment work remains recoverable across launches.
-pub async fn bind_with_client_executor_id(
+pub async fn bind_with_desktop_executor(
     config: Config,
     client_executor_id: Uuid,
 ) -> Result<Server> {
@@ -465,6 +465,8 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
         Some(state.config.data_dir.join("scratch")),
         turn_worker::TurnWorkerConfig::default(),
     );
+    let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()
+        .with_delegated_file_executor(client_executor_id.is_some());
     let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
         state.store.clone(),
         state.resolver.clone(),
@@ -474,7 +476,7 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
         state.sandbox_attempts.clone(),
         state.agent_config.clone(),
         Some(state.config.data_dir.join("scratch")),
-        sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default(),
+        sandbox_worker_config,
     );
     let sandbox_web_search_worker =
         sandbox_web_search_worker::SandboxWebSearchWorker::with_attempts(

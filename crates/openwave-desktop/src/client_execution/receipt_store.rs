@@ -24,6 +24,7 @@ const MAX_EXECUTOR_BYTES: usize = 128;
 const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 const MAX_RECEIPTS: usize = 1_024;
 const FOLDER_OPERATION_PREFIX: &str = "folder-operation-";
+const DELEGATED_FILE_READ_PREFIX: &str = "delegated-file-read-";
 const MANUAL_FOLDER_CONNECT_PREFIX: &str = "manual-folder-connect-";
 const MAX_SAFE_ROOT_DISPLAY_BYTES: usize = 1_024;
 
@@ -67,6 +68,41 @@ pub(super) struct FolderOperationReceipt {
     pub(super) phase: FolderOperationPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) resolution: Option<StoredResolution>,
+}
+
+/// Native-only recovery state for one exact sandbox delegated-file read.
+///
+/// Host root and relative path are deliberately absent. They are returned only
+/// by the native claim and are revalidated again by the final heartbeat.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(super) struct DelegatedFileReadReceipt {
+    version: u32,
+    pub(super) call_id: CallId,
+    pub(super) executor_id: Uuid,
+    pub(super) lease_token: Uuid,
+    #[serde(default)]
+    pub(super) phase: FolderOperationPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) resolution: Option<DelegatedFileResolution>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DelegatedFileFailureReason {
+    NotFound,
+    NotUtf8,
+    TooLarge,
+    PermissionDenied,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum DelegatedFileResolution {
+    Completed { content: String },
+    Failed { reason: DelegatedFileFailureReason },
+    Cancelled,
 }
 
 /// App-private recovery state for a folder selected from the manual connected
@@ -195,6 +231,23 @@ impl std::fmt::Debug for FolderOperationReceipt {
             .field("lease_token", &"[redacted]")
             .field("phase", &self.phase)
             .field("resolution", &self.resolution)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for DelegatedFileReadReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DelegatedFileReadReceipt")
+            .field("version", &self.version)
+            .field("call_id", &self.call_id)
+            .field("executor_id", &self.executor_id)
+            .field("lease_token", &"[redacted]")
+            .field("phase", &self.phase)
+            .field(
+                "resolution",
+                &self.resolution.as_ref().map(|_| "[redacted]"),
+            )
             .finish()
     }
 }
@@ -374,6 +427,54 @@ impl FolderOperationReceipt {
     }
 }
 
+impl DelegatedFileReadReceipt {
+    pub(super) fn new(call_id: CallId, executor_id: Uuid) -> Self {
+        Self {
+            version: RECEIPT_VERSION,
+            call_id,
+            executor_id,
+            lease_token: Uuid::new_v4(),
+            phase: FolderOperationPhase::NotStarted,
+            resolution: None,
+        }
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if self.version != RECEIPT_VERSION
+            || self.call_id.0.is_nil()
+            || self.executor_id.is_nil()
+            || self.lease_token.is_nil()
+            || matches!(
+                &self.resolution,
+                Some(DelegatedFileResolution::Completed { content })
+                    if !delegated_file_content_fits_server(content)
+            )
+            || (self.resolution.is_some() && self.phase != FolderOperationPhase::DispatchStarted)
+        {
+            return Err(invalid_data("invalid delegated-file receipt"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn set_bounded_resolution(&mut self, resolution: DelegatedFileResolution) {
+        self.resolution = Some(resolution);
+        let fits = serde_json::to_vec(self)
+            .map(|bytes| bytes.len() <= MAX_RECEIPT_BYTES)
+            .unwrap_or(false);
+        if !fits {
+            self.resolution = Some(DelegatedFileResolution::Failed {
+                reason: DelegatedFileFailureReason::TooLarge,
+            });
+        }
+    }
+}
+
+pub(super) fn delegated_file_content_fits_server(content: &str) -> bool {
+    !content.contains('\0')
+        && serde_json::to_string(&serde_json::json!({"content": content}))
+            .is_ok_and(|encoded| encoded.len() <= openwave_core::SandboxToolCall::MAX_RESULT_BYTES)
+}
+
 impl ReceiptStore {
     pub(crate) fn open(data_dir: &Path) -> io::Result<Self> {
         let directory = data_dir.join(RECEIPT_DIRECTORY);
@@ -416,6 +517,9 @@ impl ReceiptStore {
             _lock: lock,
         };
         store.load_all()?;
+        store.load_operations()?;
+        store.load_delegated_file_reads()?;
+        store.load_manual_connects()?;
         Ok(store)
     }
 
@@ -441,6 +545,22 @@ impl ReceiptStore {
         write_atomically(
             &self.directory,
             &self.operation_receipt_path(receipt.call_id),
+            &bytes,
+        )
+    }
+
+    pub(super) fn save_delegated_file_read(
+        &self,
+        receipt: &DelegatedFileReadReceipt,
+    ) -> io::Result<()> {
+        receipt.validate()?;
+        let bytes = serde_json::to_vec(receipt).map_err(invalid_data)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(invalid_data("delegated-file receipt is too large"));
+        }
+        write_atomically(
+            &self.directory,
+            &self.delegated_file_read_receipt_path(receipt.call_id),
             &bytes,
         )
     }
@@ -477,6 +597,14 @@ impl ReceiptStore {
         }
     }
 
+    pub(super) fn remove_delegated_file_read(&self, call_id: CallId) -> io::Result<()> {
+        match fs::remove_file(self.delegated_file_read_receipt_path(call_id)) {
+            Ok(()) => sync_directory(&self.directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(super) fn remove_manual_connect(
         &self,
         change_id: RootAttachmentChangeId,
@@ -500,6 +628,9 @@ impl ReceiptStore {
                 continue;
             }
             if file_name.starts_with(FOLDER_OPERATION_PREFIX) {
+                continue;
+            }
+            if file_name.starts_with(DELEGATED_FILE_READ_PREFIX) {
                 continue;
             }
             if file_name.starts_with(MANUAL_FOLDER_CONNECT_PREFIX) {
@@ -583,6 +714,48 @@ impl ReceiptStore {
         Ok(receipts)
     }
 
+    pub(super) fn load_delegated_file_reads(&self) -> io::Result<Vec<DelegatedFileReadReceipt>> {
+        let mut receipts = Vec::new();
+        let mut call_ids = HashSet::new();
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                return Err(invalid_data("invalid client-execution receipt name"));
+            };
+            let Some(call_id) = file_name
+                .strip_prefix(DELEGATED_FILE_READ_PREFIX)
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if receipts.len() >= MAX_RECEIPTS {
+                return Err(invalid_data("too many pending delegated-file receipts"));
+            }
+            let call_id = call_id
+                .parse::<Uuid>()
+                .map(CallId::from)
+                .map_err(invalid_data)?;
+            validate_private_file(&entry.path(), MAX_RECEIPT_BYTES)?;
+            let mut bytes = Vec::new();
+            File::open(entry.path())?
+                .take((MAX_RECEIPT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_RECEIPT_BYTES {
+                return Err(invalid_data("delegated-file receipt is too large"));
+            }
+            let receipt: DelegatedFileReadReceipt =
+                serde_json::from_slice(&bytes).map_err(invalid_data)?;
+            receipt.validate()?;
+            if receipt.call_id != call_id || !call_ids.insert(call_id) {
+                return Err(invalid_data("delegated-file receipt identity mismatch"));
+            }
+            receipts.push(receipt);
+        }
+        receipts.sort_by_key(|receipt| receipt.call_id.to_string());
+        Ok(receipts)
+    }
+
     pub(super) fn load_manual_connects(&self) -> io::Result<Vec<ManualFolderConnectReceipt>> {
         let mut receipts = Vec::new();
         let mut change_ids = HashSet::new();
@@ -634,6 +807,11 @@ impl ReceiptStore {
     fn operation_receipt_path(&self, call_id: CallId) -> PathBuf {
         self.directory
             .join(format!("{FOLDER_OPERATION_PREFIX}{call_id}.json"))
+    }
+
+    fn delegated_file_read_receipt_path(&self, call_id: CallId) -> PathBuf {
+        self.directory
+            .join(format!("{DELEGATED_FILE_READ_PREFIX}{call_id}.json"))
     }
 
     fn manual_connect_receipt_path(&self, change_id: RootAttachmentChangeId) -> PathBuf {
@@ -806,6 +984,29 @@ mod tests {
 
         let reopened = ReceiptStore::open(temp.path()).unwrap();
         assert_eq!(reopened.executor_id(), executor_id);
+    }
+
+    #[test]
+    fn delegated_file_receipts_are_pathless_private_and_never_log_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(temp.path()).unwrap();
+        let mut receipt = DelegatedFileReadReceipt::new(CallId::new(), store.executor_id());
+        store.save_delegated_file_read(&receipt).unwrap();
+        assert_eq!(
+            store.load_delegated_file_reads().unwrap(),
+            vec![receipt.clone()]
+        );
+
+        receipt.phase = FolderOperationPhase::DispatchStarted;
+        receipt.resolution = Some(DelegatedFileResolution::Completed {
+            content: "private-content-sentinel".to_owned(),
+        });
+        store.save_delegated_file_read(&receipt).unwrap();
+        let debug = format!("{receipt:?}");
+        assert!(!debug.contains("private-content-sentinel"));
+        assert!(!debug.contains("relative_path"));
+        store.remove_delegated_file_read(receipt.call_id).unwrap();
+        assert!(store.load_delegated_file_reads().unwrap().is_empty());
     }
 
     #[test]
