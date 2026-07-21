@@ -802,6 +802,7 @@ struct PauseTerminalStore {
     fail_after_park_commit: std::sync::atomic::AtomicBool,
     fail_after_apply_steer_commit: std::sync::atomic::AtomicBool,
     cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool,
+    apply_steer_cancellation_committed: Arc<Notify>,
     pause_before_steer_read: std::sync::atomic::AtomicBool,
     advance_before_steer_read: std::sync::atomic::AtomicBool,
     fail_terminal_recovery: std::sync::atomic::AtomicBool,
@@ -830,6 +831,7 @@ impl PauseTerminalStore {
             fail_after_park_commit: std::sync::atomic::AtomicBool::new(false),
             fail_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
             cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
+            apply_steer_cancellation_committed: Arc::new(Notify::new()),
             pause_before_steer_read: std::sync::atomic::AtomicBool::new(false),
             advance_before_steer_read: std::sync::atomic::AtomicBool::new(false),
             fail_terminal_recovery: std::sync::atomic::AtomicBool::new(false),
@@ -882,9 +884,10 @@ impl PauseTerminalStore {
             .store(true, Ordering::SeqCst);
     }
 
-    fn cancel_after_next_apply_steer_commit(&self) {
+    fn cancel_after_next_apply_steer_commit(&self) -> Arc<Notify> {
         self.cancel_after_apply_steer_commit
             .store(true, Ordering::SeqCst);
+        self.apply_steer_cancellation_committed.clone()
     }
 
     fn pause_before_next_steer_read(&self) {
@@ -1270,6 +1273,7 @@ impl Store for PauseTerminalStore {
                         "injected cancellation could not follow steer application".into(),
                     )
                 })?;
+            self.apply_steer_cancellation_committed.notify_one();
             return Err(AgentError::Store(
                 "injected cancelled ambiguous steer application response".into(),
             ));
@@ -2957,7 +2961,7 @@ async fn committed_steer_event_recovers_when_cancellation_wins_ambiguous_respons
         Arc::new(Notify::new()),
     ));
     injected.do_not_pause_terminal();
-    injected.cancel_after_next_apply_steer_commit();
+    let cancellation_committed = injected.cancel_after_next_apply_steer_commit();
     let store: Arc<dyn Store> = injected;
     let entered = Arc::new(Notify::new());
     let (retrieval, _search) = build_retrieval(
@@ -3017,6 +3021,9 @@ async fn committed_steer_event_recovers_when_cancellation_wins_ambiguous_respons
         .await,
         StatusCode::ACCEPTED
     );
+    tokio::time::timeout(Duration::from_secs(5), cancellation_committed.notified())
+        .await
+        .expect("steer application committed before the injected cancellation");
 
     let events = wait_for_turn(&store, chat.id).await;
     assert_eq!(
