@@ -17,6 +17,7 @@ mod auth;
 mod blob_orphan_auditor;
 mod blob_retirement_worker;
 mod bus;
+mod desktop_schema;
 mod document_auditor;
 mod document_stage;
 mod document_worker;
@@ -46,11 +47,13 @@ use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
+#[cfg(test)]
+use openwave_core::DbStore;
 use openwave_core::{
     list_connected_folders_tool_spec, list_folder_tool_spec, read_connected_file_tool_spec,
     request_folder_access_tool_spec, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments,
-    validate_request_folder_access_arguments, AgentConfig, AgentError, Config, DbStore,
+    validate_request_folder_access_arguments, AgentConfig, AgentError, Config,
     KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store,
     ToolRegistry, WriteFile,
 };
@@ -626,7 +629,7 @@ async fn connect_store(config: &Config) -> Result<Arc<dyn Store>> {
         Profile::Desktop => {
             std::fs::create_dir_all(&config.data_dir)
                 .map_err(|e| AgentError::config(format!("failed to create data dir: {e}")))?;
-            let store = DbStore::connect(&config.database_url()?).await?;
+            let store = desktop_schema::connect(config).await?;
             Ok(Arc::new(store))
         }
         _ => Err(AgentError::config(
