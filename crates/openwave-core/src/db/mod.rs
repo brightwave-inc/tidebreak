@@ -46,11 +46,12 @@ use crate::storage::{
     ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome,
     ClaimTurnRunOutcome, CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
     ConsumeAgentRunInboxOutcome, DecideToolApprovalOutcome, DeleteChatOutcome,
-    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
-    FailAgentRunOutcome, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
-    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
-    JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
-    ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
+    DeleteProjectOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
+    EnsureDocumentParseJobOutcome, FailAgentRunOutcome, FinishAgentRunCancellationOutcome,
+    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
+    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledToolApprovalOutcome,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkSandboxToolCallOutcome,
+    ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
     ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
     RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Store,
@@ -183,6 +184,50 @@ impl Store for DbStore {
         Ok(result.rows_affected == 1)
     }
 
+    async fn delete_project(&self, id: ProjectId) -> Result<DeleteProjectOutcome> {
+        let transaction = self.conn.begin().await.map_err(store_err)?;
+        if !ops::acquire_project_write_lock(&transaction, id).await? {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(DeleteProjectOutcome::NotFound);
+        }
+
+        let has_chats = entities::chat::Entity::find()
+            .filter(entities::chat::Column::ProjectId.eq(id.0))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some();
+        let has_documents = entities::document::Entity::find()
+            .filter(entities::document::Column::ProjectId.eq(id.0))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some();
+        let has_roots = entities::project_root_attachment::Entity::find()
+            .filter(entities::project_root_attachment::Column::ProjectId.eq(id.0))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some();
+        if has_chats || has_documents || has_roots {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(DeleteProjectOutcome::NotEmpty);
+        }
+
+        let deleted = entities::project::Entity::delete_by_id(id.0)
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+        if deleted.rows_affected != 1 {
+            transaction.rollback().await.map_err(store_err)?;
+            return Err(AgentError::Store(format!(
+                "project {id} disappeared while locked"
+            )));
+        }
+        transaction.commit().await.map_err(store_err)?;
+        Ok(DeleteProjectOutcome::Deleted)
+    }
+
     async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
         validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
         let source_byte_len = document
@@ -192,6 +237,7 @@ impl Store for DbStore {
             .transpose()?;
         let transaction = self.conn.begin().await.map_err(store_err)?;
         acquire_document_write_lock(&transaction, document.id).await?;
+        ops::require_project_write_lock(&transaction, document.project_id).await?;
         let revision_token = uuid::Uuid::new_v4();
         entities::document_generation::ActiveModel {
             document_id: Set(document.id.0),
@@ -590,6 +636,7 @@ impl Store for DbStore {
         loop {
             let transaction = self.conn.begin().await.map_err(store_err)?;
             acquire_document_write_lock(&transaction, document.id).await?;
+            ops::require_project_write_lock(&transaction, document.project_id).await?;
             match try_upsert_document_on(&transaction, document).await? {
                 Some(record) => {
                     transaction.commit().await.map_err(store_err)?;
@@ -625,6 +672,7 @@ impl Store for DbStore {
         loop {
             let transaction = self.conn.begin().await.map_err(store_err)?;
             acquire_document_write_lock(&transaction, document.id).await?;
+            ops::require_project_write_lock(&transaction, document.project_id).await?;
             if let Some(current) = entities::document::Entity::find_by_id(document.id.0)
                 .one(&transaction)
                 .await

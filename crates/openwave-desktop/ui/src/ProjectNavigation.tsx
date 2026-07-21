@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type Ref } from "react";
 import type { Project } from "./api";
 
 type Props = {
@@ -9,6 +9,7 @@ type Props = {
   onSelect: (projectId: string | null) => void;
   onCreate: (title: string) => Promise<boolean>;
   onRename: (projectId: string, title: string | null) => Promise<boolean>;
+  onDelete: (project: Project) => Promise<boolean>;
 };
 
 export function ProjectNavigation({
@@ -19,6 +20,7 @@ export function ProjectNavigation({
   onSelect,
   onCreate,
   onRename,
+  onDelete,
 }: Props) {
   const [adding, setAdding] = useState(false);
   const [title, setTitle] = useState("");
@@ -27,6 +29,7 @@ export function ProjectNavigation({
   const [savingRename, setSavingRename] = useState(false);
   const renameInFlightRef = useRef(false);
   const renameActionRefs = useRef(new Map<string, HTMLButtonElement>());
+  const looseChatsRef = useRef<HTMLButtonElement>(null);
   const renaming = editingProjectId !== null;
 
   useEffect(() => {
@@ -67,6 +70,12 @@ export function ProjectNavigation({
     setEditingProjectId(null);
     setRenameTitle("");
     requestAnimationFrame(() => renameActionRefs.current.get(projectId)?.focus());
+  }
+
+  async function deleteProject(project: Project) {
+    if (await onDelete(project)) {
+      requestAnimationFrame(() => looseChatsRef.current?.focus());
+    }
   }
 
   return (
@@ -122,6 +131,7 @@ export function ProjectNavigation({
 
       <div className="project-list">
         <ProjectButton
+          buttonRef={looseChatsRef}
           title="Loose chats"
           selected={selectedProjectId === null}
           disabled={disabled || renaming}
@@ -196,6 +206,16 @@ export function ProjectNavigation({
                   ···
                 </button>
               )}
+              <button
+                type="button"
+                className="project-delete-action"
+                aria-label={`Delete ${projectTitle}`}
+                title="Delete project"
+                disabled={disabled || savingRename || renaming || adding}
+                onClick={() => void deleteProject(project)}
+              >
+                ×
+              </button>
             </div>
           );
         })}
@@ -206,11 +226,13 @@ export function ProjectNavigation({
 }
 
 function ProjectButton({
+  buttonRef,
   title,
   selected,
   disabled,
   onClick,
 }: {
+  buttonRef?: Ref<HTMLButtonElement>;
   title: string;
   selected: boolean;
   disabled: boolean;
@@ -218,6 +240,7 @@ function ProjectButton({
 }) {
   return (
     <button
+      ref={buttonRef}
       type="button"
       className={`project-item${selected ? " is-active" : ""}`}
       aria-current={selected ? "page" : undefined}

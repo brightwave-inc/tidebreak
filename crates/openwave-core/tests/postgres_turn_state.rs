@@ -4,15 +4,16 @@ use std::{sync::Arc, time::Duration as StdDuration};
 
 use chrono::{Duration, Utc};
 use openwave_core::{
-    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent,
+    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentEvent,
     AgentRunCancellationReason, AgentRunExecution, AgentRunId, AgentRunInboxStatus,
     AgentRunResultPayload, AgentRunStatus, AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest,
     ApplyTurnSteerOutcome, AssistantCitationReference, BeginRootAttachmentChange,
     BeginRootAttachmentChangeOutcome, ByteSpan, CallId, Chat, ChatId, ChatRootAttachment,
     CheckpointSandboxSpawnOutcome, ChunkId, ClaimClientToolCallOutcome, ClientToolCallRequest,
-    CompleteTurnRunOutcome, DbStore, DeleteChatOutcome, DocumentGeneration, DocumentId,
-    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
-    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
+    CompleteTurnRunOutcome, DbStore, DeleteChatOutcome, DeleteProjectOutcome, DocumentGeneration,
+    DocumentId, DocumentSourceBlob, DocumentSourceUpsert, FinishAgentRunCancellationOutcome,
+    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
+    HeartbeatClientToolCallOutcome, HostRootId, Message, MessageId,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, Project, ProjectId,
     RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrievalEvidenceInput,
@@ -1942,6 +1943,73 @@ async fn postgres_ordered_root_projection_roundtrips_and_snapshots_atomically() 
         ]
     );
     assert_eq!(store.get_chat(chat.id).await.unwrap(), Some(chat));
+}
+
+#[tokio::test]
+async fn postgres_project_deletion_serializes_with_staged_source_ingestion() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let project = Project {
+        id: ProjectId::new(),
+        title: Some("postgres deletion race".into()),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        created_at: utc_now_at_postgres_precision(),
+    };
+    store.create_project(&project).await.unwrap();
+    let source = DocumentSourceUpsert {
+        id: DocumentId::new(),
+        project_id: Some(project.id),
+        source_uri: Some("file:///postgres-project-race.bin".into()),
+        media_type: "application/octet-stream".into(),
+        title: None,
+        source_blob: DocumentSourceBlob::from_digest([0x7a; 32], 1),
+        updated_at: utc_now_at_postgres_precision(),
+    };
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let delete_store = store.clone();
+    let delete_barrier = barrier.clone();
+    let delete = tokio::spawn(async move {
+        delete_barrier.wait().await;
+        delete_store.delete_project(project.id).await
+    });
+    let ingest_store = store.clone();
+    let ingest_barrier = barrier.clone();
+    let ingest_source = source.clone();
+    let ingest = tokio::spawn(async move {
+        ingest_barrier.wait().await;
+        ingest_store
+            .accept_document_source_and_enqueue_parse(&ingest_source, "parser-v1", 3)
+            .await
+    });
+    barrier.wait().await;
+
+    let deleted = delete.await.unwrap().unwrap();
+    let ingested = ingest.await.unwrap();
+    match (deleted, ingested) {
+        (DeleteProjectOutcome::Deleted, Err(AgentError::ProjectNotFound(missing_project))) => {
+            assert_eq!(missing_project, project.id);
+        }
+        (DeleteProjectOutcome::NotEmpty, Ok((record, _))) => {
+            assert_eq!(record.project_id, Some(project.id));
+            store.delete_document(record.id).await.unwrap();
+            assert_eq!(
+                store.delete_project(project.id).await.unwrap(),
+                DeleteProjectOutcome::Deleted
+            );
+        }
+        (outcome, result) => {
+            panic!("unexpected deletion/ingestion race result: {outcome:?}, {result:?}")
+        }
+    }
 }
 
 #[tokio::test]

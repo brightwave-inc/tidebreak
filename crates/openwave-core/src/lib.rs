@@ -119,7 +119,7 @@ pub use storage::{
     ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome,
     ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim, CompleteTurnRunOutcome,
     ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
-    DecideToolApprovalOutcome, DeleteChatOutcome, DocumentIndexJobReason,
+    DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome, DocumentIndexJobReason,
     EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FailAgentRunOutcome,
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,

@@ -315,6 +315,21 @@ describe("project-scoped conversation API", () => {
       }),
     );
   });
+
+  it("deletes the exact project without a request body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await client.deleteProject("project/1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1/projects/project%2F1",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBeUndefined();
+  });
 });
 
 describe("sandbox agent cancellation", () => {

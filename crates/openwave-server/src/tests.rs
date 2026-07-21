@@ -11,13 +11,13 @@ use futures::stream::{self, BoxStream, StreamExt};
 use openwave_core::{
     Agent, AgentConfig, AgentErrorInfo, AgentEvent, AgentRunInboxStatus, AgentRunStatus,
     ApprovalClass, BeginRootAttachmentChange, BlobStore, CallId, Chat, ChatId, ChatRequest,
-    ChatRootAttachment, ClaimedAgentEvent, ClientToolCallRequest, ContentBlock, HostRootId,
-    Message, MessageId, ModelProvider, ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome,
-    Project, ProjectId, ProviderEvent, ProviderId, Role, RootAttachmentChangeAction,
-    RootAttachmentChangeId, RootAttachmentOrigin, SandboxToolCallRequest, SecretProvider,
-    SequencedEvent, StopReason, Tool, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, ToolCtx, ToolOutput, ToolRegistry, ToolSpec, TurnCheckpointProgress, TurnId,
-    TurnRunStatus, TurnSteerId, Usage,
+    ChatRootAttachment, ClaimedAgentEvent, ClientToolCallRequest, ContentBlock,
+    DeleteProjectOutcome, HostRootId, Message, MessageId, ModelProvider,
+    ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent,
+    ProviderId, Role, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentOrigin,
+    SandboxToolCallRequest, SecretProvider, SequencedEvent, StopReason, Tool, ToolCallExecution,
+    ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput, ToolRegistry,
+    ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
 };
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
@@ -812,6 +812,7 @@ struct PauseTerminalStore {
     pause_nonterminal_event: std::sync::atomic::AtomicBool,
     pause_accept: std::sync::atomic::AtomicBool,
     fail_document_delete: std::sync::atomic::AtomicBool,
+    delete_project_after_get: std::sync::atomic::AtomicBool,
 }
 
 impl PauseTerminalStore {
@@ -841,6 +842,7 @@ impl PauseTerminalStore {
             pause_nonterminal_event: std::sync::atomic::AtomicBool::new(false),
             pause_accept: std::sync::atomic::AtomicBool::new(false),
             fail_document_delete: std::sync::atomic::AtomicBool::new(false),
+            delete_project_after_get: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -928,6 +930,10 @@ impl PauseTerminalStore {
         self.fail_document_delete.store(true, Ordering::SeqCst);
     }
 
+    fn delete_project_after_next_get(&self) {
+        self.delete_project_after_get.store(true, Ordering::SeqCst);
+    }
+
     async fn terminalize_expired_turn(&self, id: TurnId) -> Result<()> {
         let turn = self
             .inner
@@ -961,7 +967,14 @@ impl Store for PauseTerminalStore {
         self.inner.create_project(project).await
     }
     async fn get_project(&self, id: ProjectId) -> Result<Option<Project>> {
-        self.inner.get_project(id).await
+        let project = self.inner.get_project(id).await?;
+        if project.is_some() && self.delete_project_after_get.swap(false, Ordering::SeqCst) {
+            assert_eq!(
+                self.inner.delete_project(id).await?,
+                DeleteProjectOutcome::Deleted
+            );
+        }
+        Ok(project)
     }
     async fn list_projects(&self) -> Result<Vec<Project>> {
         self.inner.list_projects().await
@@ -7437,6 +7450,76 @@ async fn project_title_patch_is_trimmed_bounded_and_clearable() {
 }
 
 #[tokio::test]
+async fn delete_project_removes_only_an_empty_project() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let empty = make_project(&router, &bearer).await;
+    let deleted = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/projects/{}", empty.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert!(store.get_project(empty.id).await.unwrap().is_none());
+
+    let missing = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/projects/{}", empty.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let nonempty = make_project(&router, &bearer).await;
+    let chat_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"project_id": nonempty.id}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chat_response.status(), StatusCode::CREATED);
+
+    let blocked = router
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/projects/{}", nonempty.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::CONFLICT);
+    let info: AgentErrorInfo = json_body(blocked).await;
+    assert_eq!(info.kind, "project_not_empty");
+    assert!(store.get_project(nonempty.id).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn chat_can_be_filed_under_a_project() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
@@ -7525,9 +7608,63 @@ async fn chat_referencing_an_unknown_project_is_rejected() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let info: AgentErrorInfo = json_body(response).await;
-    assert_eq!(info.kind, "bad_request");
+    assert_eq!(info.kind, "not_found");
+}
+
+#[tokio::test]
+async fn chat_creation_reports_not_found_when_project_deletion_wins_after_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("project-chat-race.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let project = Project {
+        id: ProjectId::new(),
+        title: Some("delete during chat creation".into()),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        created_at: chrono::Utc::now(),
+    };
+    database.create_project(&project).await.unwrap();
+    let injected = Arc::new(PauseTerminalStore::new(
+        database.clone(),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+    ));
+    injected.do_not_pause_terminal();
+    injected.delete_project_after_next_get();
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let (router, token, _store, _dir) =
+        test_app_from_parts(Arc::new(FakeProvider), retrieval, injected, dir);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"project_id": project.id}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "not_found");
+    assert!(database.get_project(project.id).await.unwrap().is_none());
+    assert!(database.list_chats().await.unwrap().is_empty());
 }
 
 #[tokio::test]

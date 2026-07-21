@@ -14,10 +14,11 @@ use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
-    ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome, Message as StoredMessage, MessageId,
-    Project, ProjectId, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Role,
-    SandboxToolCall, SandboxToolCallStatus, SecretProvider, SequencedEvent, Store,
-    ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
+    ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome, DeleteProjectOutcome,
+    Message as StoredMessage, MessageId, Project, ProjectId, RequestAgentRunCancellationOutcome,
+    RequestTurnCancellationOutcome, Role, SandboxToolCall, SandboxToolCallStatus, SecretProvider,
+    SequencedEvent, Store, ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer,
+    TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -448,6 +449,25 @@ pub async fn get_project(
         .ok_or_else(|| ServerError::not_found(format!("project {id} not found")))
 }
 
+/// `DELETE /projects/{id}` — remove an empty project. Owned conversations,
+/// documents, and root defaults must be removed through their explicit
+/// lifecycle APIs first; this boundary never cascades them.
+pub async fn delete_project(
+    State(state): State<AppState>,
+    Path(id): Path<ProjectId>,
+) -> Result<StatusCode, ServerError> {
+    match state.store.delete_project(id).await? {
+        DeleteProjectOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteProjectOutcome::NotFound => {
+            Err(ServerError::not_found(format!("project {id} not found")))
+        }
+        DeleteProjectOutcome::NotEmpty => Err(ServerError::conflict_kind(
+            "project_not_empty",
+            "remove the project's conversations, documents, and connected folders before deleting it",
+        )),
+    }
+}
+
 /// Body of `POST /chats`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -475,7 +495,7 @@ pub async fn create_chat(
             .store
             .get_project(project_id)
             .await?
-            .ok_or_else(|| ServerError::bad_request(format!("project {project_id} not found")))?;
+            .ok_or_else(|| ServerError::not_found(format!("project {project_id} not found")))?;
     }
     if body.model.as_deref().is_some_and(str::is_empty) {
         return Err(ServerError::bad_request("model must not be empty"));

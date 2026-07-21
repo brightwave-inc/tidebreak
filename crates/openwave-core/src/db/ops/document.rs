@@ -17,6 +17,7 @@ use super::super::{
     validate_document_source_blob, validate_document_source_regions, DbStore,
 };
 use super::blob as blob_ops;
+use super::require_project_write_lock;
 
 pub(in crate::db) async fn accept_source_and_enqueue_parse(
     store: &DbStore,
@@ -29,6 +30,7 @@ pub(in crate::db) async fn accept_source_and_enqueue_parse(
     loop {
         let transaction = store.conn.begin().await.map_err(store_err)?;
         acquire_document_write_lock(&transaction, source.id).await?;
+        require_project_write_lock(&transaction, source.project_id).await?;
         let existing = entities::document::Entity::find_by_id(source.id.0)
             .one(&transaction)
             .await

@@ -58,6 +58,7 @@ import {
   sandboxAgentStopKey,
 } from "./SandboxAgentStop";
 import { ProjectNavigation } from "./ProjectNavigation";
+import { existingChatAfterDeletion, prependReplacementChat } from "./ChatDeletion";
 
 type Msg = ChatMessage;
 
@@ -117,6 +118,7 @@ export default function App() {
   const [creatingChat, setCreatingChat] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
   const [deletingChatId, setDeletingChatId] = useState<string | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
@@ -1026,6 +1028,33 @@ export default function App() {
     }
   }
 
+  async function onDeleteProject(target: Project): Promise<boolean> {
+    if (!client || deletionInFlightRef.current || creationInFlightRef.current) return false;
+    const label = target.title?.trim() || "Untitled project";
+    if (
+      !window.confirm(
+        `Delete ${label}? Remove its conversations, documents, and connected folders first. This cannot be undone.`,
+      )
+    ) {
+      return false;
+    }
+
+    deletionInFlightRef.current = true;
+    setDeletingProjectId(target.id);
+    setProjectsError(null);
+    try {
+      await client.deleteProject(target.id);
+      setProjects((current) => current.filter((project) => project.id !== target.id));
+      return true;
+    } catch (err) {
+      setProjectsError(`Could not delete project: ${String(err)}`);
+      return false;
+    } finally {
+      deletionInFlightRef.current = false;
+      setDeletingProjectId(null);
+    }
+  }
+
   async function onDeleteChat(target: Chat) {
     if (!client || deletionInFlightRef.current || creationInFlightRef.current) return;
     const label = target.title?.trim() || "this conversation";
@@ -1052,10 +1081,10 @@ export default function App() {
         return;
       }
 
-      let next = refreshed.find((item) => item.project_id === target.project_id);
+      let next = existingChatAfterDeletion(refreshed, target.project_id);
       if (!next) {
-        next = await client.createChat(models[0]?.id, target.project_id);
-        refreshed = await client.listChats();
+        next = await client.createChat(models[0]?.id, null);
+        refreshed = prependReplacementChat(refreshed, next);
       }
       setChats(refreshed);
       selectChat(next, true);
@@ -1268,22 +1297,36 @@ export default function App() {
           type="button"
           className="new-chat"
           onClick={() => void onNewChat()}
-          disabled={creatingChat || creatingProject || deletingChatId !== null}
+          disabled={
+            creatingChat ||
+            creatingProject ||
+            deletingChatId !== null ||
+            deletingProjectId !== null
+          }
         >
           <span aria-hidden="true">+</span>
-          {creatingChat ? "Starting…" : deletingChatId ? "Deleting…" : "New chat"}
+          {creatingChat
+            ? "Starting…"
+            : deletingChatId || deletingProjectId
+              ? "Deleting…"
+              : "New chat"}
         </button>
 
         <ProjectNavigation
           projects={projects}
           selectedProjectId={selectedProjectId}
           disabled={
-            projectsLoading || creatingChat || creatingProject || deletingChatId !== null
+            projectsLoading ||
+            creatingChat ||
+            creatingProject ||
+            deletingChatId !== null ||
+            deletingProjectId !== null
           }
           error={projectsError}
           onSelect={(projectId) => void onSelectProject(projectId)}
           onCreate={onCreateProject}
           onRename={onRenameProject}
+          onDelete={onDeleteProject}
         />
 
         {hasNativeHost() && (
@@ -1312,7 +1355,12 @@ export default function App() {
                   type="button"
                   className="conversation-item"
                   aria-current={primaryView === "chat" && item.id === chat.id ? "page" : undefined}
-                  disabled={deletingChatId !== null || creatingChat || creatingProject}
+                  disabled={
+                    deletingChatId !== null ||
+                    deletingProjectId !== null ||
+                    creatingChat ||
+                    creatingProject
+                  }
                   onClick={() => selectChat(item)}
                 >
                   <span className="conversation-dot" aria-hidden="true" />
@@ -1323,7 +1371,12 @@ export default function App() {
                   className="conversation-delete"
                   aria-label={`Delete ${item.title?.trim() || "conversation"}`}
                   title="Delete conversation"
-                  disabled={deletingChatId !== null || creatingChat || creatingProject}
+                  disabled={
+                    deletingChatId !== null ||
+                    deletingProjectId !== null ||
+                    creatingChat ||
+                    creatingProject
+                  }
                   onClick={() => void onDeleteChat(item)}
                 >
                   ×
@@ -1410,7 +1463,9 @@ export default function App() {
                   <button
                     type="submit"
                     className="btn"
-                    disabled={savingTitle || deletingChatId !== null}
+                    disabled={
+                      savingTitle || deletingChatId !== null || deletingProjectId !== null
+                    }
                   >
                     {savingTitle ? "Saving…" : "Save"}
                   </button>
@@ -1421,7 +1476,7 @@ export default function App() {
                   <button
                     type="button"
                     className="title-action"
-                    disabled={deletingChatId !== null}
+                    disabled={deletingChatId !== null || deletingProjectId !== null}
                     onClick={() => {
                       setTitleDraft(chat.title ?? "");
                       setEditingTitle(true);
@@ -1493,7 +1548,7 @@ export default function App() {
               Model{" "}
               <select
                 value={chat.model ?? ""}
-                disabled={deletingChatId !== null}
+                disabled={deletingChatId !== null || deletingProjectId !== null}
                 onChange={(e) => void onModelChange(e.target.value)}
               >
                 <option value="">default</option>
@@ -1584,7 +1639,7 @@ export default function App() {
             cancelPending={
               activeTurnId !== null && cancelPendingTurnId === activeTurnId
             }
-            disabled={deletingChatId !== null}
+            disabled={deletingChatId !== null || deletingProjectId !== null}
             draft={draft}
             onDraftChange={onComposerDraftChange}
             onSend={onSend}

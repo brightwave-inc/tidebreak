@@ -356,6 +356,13 @@ export class ApiClient {
     });
   }
 
+  deleteProject(projectId: string): Promise<void> {
+    return this.json(`/projects/${encodeURIComponent(projectId)}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
   createChat(model?: string, projectId?: string | null): Promise<Chat> {
     return this.json("/chats", {
       method: "POST",

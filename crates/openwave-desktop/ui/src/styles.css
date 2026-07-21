@@ -181,7 +181,8 @@ button {
   background: var(--sidebar-active);
 }
 
-.project-rename-action {
+.project-rename-action,
+.project-delete-action {
   width: 1.8rem;
   height: 1.65rem;
   flex: 0 0 auto;
@@ -196,6 +197,23 @@ button {
 .project-rename-action:hover:not(:disabled) {
   color: var(--ink);
   background: var(--bg-elevated);
+}
+
+.project-delete-action {
+  margin-right: 0.2rem;
+  font-size: 1.1rem;
+  opacity: 0;
+}
+
+.project-row:hover .project-delete-action,
+.project-row.is-active .project-delete-action,
+.project-delete-action:focus-visible {
+  opacity: 1;
+}
+
+.project-delete-action:hover:not(:disabled) {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
 .project-rename {
