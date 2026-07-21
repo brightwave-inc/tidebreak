@@ -170,6 +170,19 @@ impl Store for DbStore {
         Ok(projects)
     }
 
+    async fn update_project_title(&self, id: ProjectId, title: Option<String>) -> Result<bool> {
+        let result = entities::project::Entity::update_many()
+            .set(entities::project::ActiveModel {
+                title: Set(title),
+                ..Default::default()
+            })
+            .filter(entities::project::Column::Id.eq(id.0))
+            .exec(&self.conn)
+            .await
+            .map_err(store_err)?;
+        Ok(result.rows_affected == 1)
+    }
+
     async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
         validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
         let source_byte_len = document

@@ -178,9 +178,20 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/projects",
-            post(routes::create_project).get(routes::list_projects),
+            post(routes::create_project)
+                .get(routes::list_projects)
+                .layer(DefaultBodyLimit::max(
+                    routes::MAX_PROJECT_METADATA_BODY_BYTES,
+                )),
         )
-        .route("/projects/{id}", get(routes::get_project))
+        .route(
+            "/projects/{id}",
+            get(routes::get_project)
+                .patch(routes::patch_project)
+                .layer(DefaultBodyLimit::max(
+                    routes::MAX_PROJECT_METADATA_BODY_BYTES,
+                )),
+        )
         .route("/models", get(routes::list_models))
         .route(
             "/web-search",

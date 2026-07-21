@@ -288,6 +288,33 @@ describe("project-scoped conversation API", () => {
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(String(init.body))).toEqual({});
   });
+
+  it("renames the exact project with a bounded metadata patch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "project-1",
+          title: "Renamed",
+          attachment_revision: 0,
+          root_attachments: [],
+          created_at: "2026-07-21T12:00:00Z",
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await client.patchProjectTitle("project-1", "Renamed");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1/projects/project-1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ title: "Renamed" }),
+      }),
+    );
+  });
 });
 
 describe("sandbox agent cancellation", () => {

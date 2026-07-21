@@ -348,6 +348,14 @@ export class ApiClient {
     return this.json("/projects", { headers: this.headers() });
   }
 
+  patchProjectTitle(projectId: string, title: string | null): Promise<Project> {
+    return this.json(`/projects/${encodeURIComponent(projectId)}`, {
+      method: "PATCH",
+      headers: this.headers(true),
+      body: JSON.stringify({ title }),
+    });
+  }
+
   createChat(model?: string, projectId?: string | null): Promise<Chat> {
     return this.json("/chats", {
       method: "POST",

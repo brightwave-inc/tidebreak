@@ -815,6 +815,16 @@ pub trait Store: Send + Sync {
     /// List projects, most-recently-created first.
     async fn list_projects(&self) -> Result<Vec<Project>>;
 
+    /// Replace one project's human-facing title.
+    ///
+    /// Returns `false` when the project does not exist. Product adapters own
+    /// title normalization and bounds before calling this storage primitive.
+    async fn update_project_title(&self, _id: ProjectId, _title: Option<String>) -> Result<bool> {
+        Err(AgentError::Store(
+            "project metadata storage is not implemented by this Store".into(),
+        ))
+    }
+
     /// Persist a new authoritative document record.
     ///
     /// `project_id`, when present, must identify an existing project. The default

@@ -43,6 +43,11 @@ pub use root_attachment::*;
 /// The store-settings key for the selected model.
 const MODEL_SETTING: &str = "model";
 
+/// Product-facing project names stay compact across desktop and API clients.
+pub const MAX_PROJECT_TITLE_CHARS: usize = 120;
+/// Project metadata requests need only a compact JSON object.
+pub const MAX_PROJECT_METADATA_BODY_BYTES: usize = 1_024;
+
 /// Runtime settings a client can read. The API key itself is never returned —
 /// it lives in the `SecretProvider`, not the store — only whether one is set.
 #[derive(Debug, Serialize, Deserialize)]
@@ -363,6 +368,30 @@ pub struct CreateProject {
     pub title: Option<String>,
 }
 
+/// Body of `PATCH /projects/{id}`. An explicit `null` clears the title, while
+/// an absent field leaves it unchanged.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectUpdate {
+    #[serde(default, deserialize_with = "double_option")]
+    pub title: Option<Option<String>>,
+}
+
+fn normalize_project_title(title: Option<String>) -> Result<Option<String>, ServerError> {
+    let title = title
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if title
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > MAX_PROJECT_TITLE_CHARS)
+    {
+        return Err(ServerError::bad_request(format!(
+            "project title must not exceed {MAX_PROJECT_TITLE_CHARS} characters"
+        )));
+    }
+    Ok(title)
+}
+
 /// `POST /projects` — create a project and return it (`201 Created`).
 pub async fn create_project(
     State(state): State<AppState>,
@@ -370,13 +399,33 @@ pub async fn create_project(
 ) -> Result<impl IntoResponse, ServerError> {
     let project = Project {
         id: ProjectId::new(),
-        title: body.title,
+        title: normalize_project_title(body.title)?,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: Utc::now(),
     };
     state.store.create_project(&project).await?;
     Ok((StatusCode::CREATED, Json(project)))
+}
+
+/// `PATCH /projects/{id}` — update bounded human-facing project metadata.
+pub async fn patch_project(
+    State(state): State<AppState>,
+    Path(id): Path<ProjectId>,
+    Json(body): Json<ProjectUpdate>,
+) -> Result<Json<Project>, ServerError> {
+    let title = body.title.map(normalize_project_title).transpose()?;
+    if let Some(title) = title {
+        if !state.store.update_project_title(id, title).await? {
+            return Err(ServerError::not_found(format!("project {id} not found")));
+        }
+    }
+    state
+        .store
+        .get_project(id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ServerError::not_found(format!("project {id} not found")))
 }
 
 /// `GET /projects` — list projects, most-recently-created first.
