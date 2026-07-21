@@ -298,6 +298,7 @@ pub enum ParkSandboxToolCallOutcome {
         call: crate::model::SandboxToolCall,
     },
     IdentityConflict,
+    DelegatedResourceUnavailable,
     LeaseLost,
 }
 
@@ -306,6 +307,15 @@ pub enum ParkSandboxToolCallOutcome {
 pub enum ClaimSandboxToolCallOutcome {
     Claimed(crate::model::SandboxToolCall),
     Existing(crate::model::SandboxToolCall),
+    Unavailable,
+}
+
+/// Result of claiming a native delegated-file read after revalidating its
+/// immutable child admission and the chat's current root projection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaimDelegatedFileReadOutcome {
+    Claimed(crate::model::DelegatedFileReadClaim),
+    Existing(crate::model::DelegatedFileReadClaim),
     Unavailable,
 }
 
@@ -1481,6 +1491,37 @@ pub trait Store: Send + Sync {
         _lease_token: uuid::Uuid,
         _lease_duration: chrono::Duration,
     ) -> Result<ClaimSandboxToolCallOutcome> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Claim only the fixed delegated-file tool and atomically recover its
+    /// pathless-root authority from a still-attached immutable admission.
+    async fn claim_delegated_file_read(
+        &self,
+        _id: CallId,
+        _lease_token: uuid::Uuid,
+        _lease_duration: chrono::Duration,
+    ) -> Result<ClaimDelegatedFileReadOutcome> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Extend a live executor lease only for the fixed delegated-file lane.
+    async fn heartbeat_delegated_file_read(
+        &self,
+        _id: CallId,
+        _lease_token: uuid::Uuid,
+        _lease_duration: chrono::Duration,
+    ) -> Result<Option<chrono::Duration>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Resolve a live executor lease only for the fixed delegated-file lane.
+    async fn resolve_delegated_file_read(
+        &self,
+        _id: CallId,
+        _lease_token: uuid::Uuid,
+        _resolution: &ToolCallResolution,
+    ) -> Result<ResolveSandboxToolCallOutcome> {
         agent_run_storage_unavailable()
     }
 

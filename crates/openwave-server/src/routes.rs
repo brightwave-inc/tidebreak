@@ -32,9 +32,11 @@ use crate::web_search::{
 };
 
 mod client_execution;
+mod delegated_file_execution;
 mod document;
 mod root_attachment;
 pub use client_execution::*;
+pub use delegated_file_execution::*;
 pub use document::*;
 pub use root_attachment::*;
 
@@ -664,6 +666,7 @@ impl AgentRunSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum AgentActivityKind {
     WebSearch,
+    ReadDelegatedFile,
     ListConnectedFolders,
     ListFolder,
     ReadConnectedFile,
@@ -694,6 +697,7 @@ fn sandbox_activity(calls: &[SandboxToolCall]) -> Option<AgentActivitySnapshot> 
     let call = calls.iter().rev().find(|call| !call.status.is_terminal())?;
     let kind = match call.name.as_str() {
         "web_search" => AgentActivityKind::WebSearch,
+        openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL => AgentActivityKind::ReadDelegatedFile,
         // Unknown tool names are executor data, not a renderer API contract.
         _ => return None,
     };

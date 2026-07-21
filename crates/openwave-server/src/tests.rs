@@ -6426,6 +6426,259 @@ async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
 }
 
 #[tokio::test]
+async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_authority() {
+    let (router, token, _state, store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let root_id = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let resource = openwave_core::SandboxAgentFileResource {
+        root_id,
+        relative_path: "reports/private-summary.md".into(),
+    };
+    let chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: Some("delegated read".into()),
+        model: None,
+        attachment_revision: 1,
+        root_attachments: vec![ChatRootAttachment {
+            root_id,
+            origin: RootAttachmentOrigin::Conversation,
+        }],
+        created_at: chrono::Utc::now(),
+    };
+    store.create_chat(&chat).await.unwrap();
+    store
+        .accept_turn(
+            TurnId::new(),
+            chat.id,
+            "test-model",
+            "private delegated task",
+        )
+        .await
+        .unwrap();
+    let turn_lease = uuid::Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let turn = store
+        .claim_turn_run(turn_lease, now, now + chrono::Duration::minutes(5))
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    store
+        .append_turn_event(
+            chat.id,
+            turn.id,
+            turn_lease,
+            1,
+            chrono::Utc::now(),
+            &AgentEvent::TurnStarted { turn_id: turn.id },
+        )
+        .await
+        .unwrap();
+    let spawn_call_id = CallId::new();
+    let child_id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn_call_id);
+    let child = match store
+        .checkpoint_sandbox_spawn(
+            &openwave_core::SandboxSpawnCheckpointRequest {
+                origin_turn_id: turn.id,
+                lease_token: turn_lease,
+                expected_steer_revision: turn.steer_revision,
+                call_id: spawn_call_id,
+                provider_id: "private-spawn-provider-id".into(),
+                arguments: serde_json::json!({
+                    "task": "private delegated task",
+                    "resource": resource,
+                }),
+                result: serde_json::to_string(&openwave_core::SpawnSandboxAgentResult {
+                    agent_id: child_id,
+                })
+                .unwrap(),
+                event_ordinal: 2,
+                progress: TurnCheckpointProgress {
+                    model_steps: 1,
+                    usage: Usage::default(),
+                },
+            },
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        openwave_core::CheckpointSandboxSpawnOutcome::Checkpointed { child, .. } => child,
+        outcome => panic!("unexpected spawn checkpoint: {outcome:?}"),
+    };
+    let worker_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(worker_lease, chrono::Duration::minutes(5), 1, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        child.id
+    );
+    let call = SandboxToolCallRequest {
+        id: CallId::new(),
+        agent_run_id: child.id,
+        chat_id: chat.id,
+        provider_id: "private-read-provider-id".into(),
+        name: openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL.into(),
+        arguments: serde_json::json!({}),
+    };
+    store
+        .park_agent_run_for_sandbox_tool_call(child.id, worker_lease, &call)
+        .await
+        .unwrap();
+
+    let renderer_pending = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/sandbox-file-reads/pending")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renderer_pending.status(), StatusCode::UNAUTHORIZED);
+    let native_pending = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/sandbox-file-reads/pending")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(
+                    crate::auth::CLIENT_EXECUTOR_HEADER,
+                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(native_pending.status(), StatusCode::OK);
+    let pending: serde_json::Value = json_body(native_pending).await;
+    assert_eq!(
+        pending,
+        serde_json::json!([{"call_id": call.id, "claimed": false}])
+    );
+
+    let activity = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/agent-runs", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let snapshots: Vec<serde_json::Value> = json_body(activity).await;
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot["id"] == serde_json::json!(child.id))
+        .unwrap();
+    assert_eq!(
+        snapshot["activity"],
+        serde_json::json!({"kind": "read_delegated_file", "status": "waiting"})
+    );
+    let lease = uuid::Uuid::new_v4();
+    let claim_uri = format!("/sandbox-file-reads/{}/claim", call.id);
+    let claim_body = serde_json::json!({"lease_token": lease});
+    let claimed = post_native_json(&router, &bearer, &claim_uri, claim_body.clone()).await;
+    assert_eq!(claimed.status(), StatusCode::OK);
+    let claimed: serde_json::Value = json_body(claimed).await;
+    assert_eq!(
+        claimed,
+        serde_json::json!({
+            "disposition": "claimed",
+            "call_id": call.id,
+            "chat_id": chat.id,
+            "root_id": root_id,
+            "relative_path": resource.relative_path,
+        })
+    );
+    let encoded = claimed.to_string();
+    for forbidden in [
+        "private delegated task",
+        "private-spawn-provider-id",
+        "private-read-provider-id",
+        &lease.to_string(),
+        "agent_run_id",
+    ] {
+        assert!(!encoded.contains(forbidden), "claim leaked {forbidden}");
+    }
+    let retry = post_native_json(&router, &bearer, &claim_uri, claim_body).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<serde_json::Value>(retry).await["disposition"],
+        "existing"
+    );
+    let heartbeat_uri = format!("/sandbox-file-reads/{}/heartbeat", call.id);
+    assert_eq!(
+        post_native_json(
+            &router,
+            &bearer,
+            &heartbeat_uri,
+            serde_json::json!({"lease_token": uuid::Uuid::new_v4()}),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        post_native_json(
+            &router,
+            &bearer,
+            &heartbeat_uri,
+            serde_json::json!({"lease_token": lease}),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let resolve_uri = format!("/sandbox-file-reads/{}/resolve", call.id);
+    let resolution = serde_json::json!({
+        "lease_token": lease,
+        "resolution": {"status": "failed", "reason": "not_found"},
+    });
+    let resolved = post_native_json(&router, &bearer, &resolve_uri, resolution.clone()).await;
+    assert_eq!(resolved.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<serde_json::Value>(resolved).await,
+        serde_json::json!({"disposition": "resolved"})
+    );
+    let retried = post_native_json(&router, &bearer, &resolve_uri, resolution).await;
+    assert_eq!(retried.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<serde_json::Value>(retried).await["disposition"],
+        "existing"
+    );
+    let receipt = store
+        .get_sandbox_tool_call_receipt(call.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receipt.error_code.as_deref(),
+        Some("delegated_file_not_found")
+    );
+    assert_eq!(receipt.error_detail, None);
+    let encoded = serde_json::to_string(&receipt).unwrap();
+    for forbidden in [
+        resource.relative_path.as_str(),
+        &root_id.to_string(),
+        "private-read-provider-id",
+        "private delegated task",
+    ] {
+        assert!(!encoded.contains(forbidden), "receipt leaked {forbidden}");
+    }
+}
+
+#[tokio::test]
 async fn sandbox_cancel_route_is_authenticated_closed_and_idempotent() {
     let (router, token, _state, store, _dir) = test_app_with_state().await;
     let bearer = format!("Bearer {token}");
