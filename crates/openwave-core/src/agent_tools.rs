@@ -20,13 +20,9 @@ use crate::tool::ToolSpec;
 pub const SPAWN_SANDBOX_AGENT_TOOL: &str = "spawn_sandbox_agent";
 /// Stable name for the prepared foreground-only multi-child wait tool.
 pub const WAIT_FOR_AGENTS_TOOL: &str = "wait_for_agents";
-/// The only tool a depth-one sandbox may receive.
+/// Public-web tool a depth-one sandbox may receive.
 pub const SANDBOX_WEB_SEARCH_TOOL: &str = "web_search";
-/// Stable name for the future native-executed delegated file read.
-///
-/// The primitive is intentionally not included in the sandbox provider tool
-/// list yet. It exists so the durable checkpoint and trusted-host control
-/// plane can be built and tested before a broker executor is wired in.
+/// Stable name for the native-executed exact delegated file read.
 pub const SANDBOX_READ_DELEGATED_FILE_TOOL: &str = "read_delegated_file";
 
 /// Maximum task length in Unicode scalar values advertised to a model.
@@ -56,10 +52,11 @@ pub(crate) const WAIT_CANCELLED_WITH_TURN_RESULT: &str =
 pub struct SpawnSandboxAgentArgs {
     /// A self-contained task for the isolated child. It cannot spawn children.
     pub task: String,
-    /// Optional exact file the child may receive through a later capability.
+    /// Optional exact file a compatible native executor may make available.
     ///
-    /// Persisting this delegation grants no file access by itself. The initial
-    /// runtime deliberately advertises no sandbox file-read tool.
+    /// Persisting this delegation grants no file access by itself. A compatible
+    /// executor advertises the read only while the root remains attached, then
+    /// revalidates authority with the host broker before bytes move.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<SandboxAgentFileResource>,
 }
@@ -279,7 +276,7 @@ pub fn spawn_sandbox_agent_tool_spec() -> ToolSpec {
                 },
                 "resource": {
                     "type": "object",
-                    "description": "Optional exact file identity within a folder already connected to this conversation. This delegates only its identity; the sandbox currently has no file-read tool.",
+                    "description": "Optional exact file identity within a folder already connected to this conversation. This delegates only its identity; a compatible native executor must revalidate current access before any read.",
                     "properties": {
                         "root_id": { "type": "string", "format": "uuid" },
                         "relative_path": {

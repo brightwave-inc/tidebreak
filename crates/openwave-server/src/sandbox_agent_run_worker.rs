@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use openwave_core::{
-    sandbox_folder_access_proposal_tool_spec, sandbox_web_search_tool_spec, AgentConfig,
+    sandbox_folder_access_proposal_tool_spec, sandbox_read_delegated_file_tool_spec,
+    sandbox_web_search_tool_spec, validate_sandbox_read_delegated_file_arguments, AgentConfig,
     AgentError, AgentRun, AgentRunInboxEntry, AgentRunStatus, CallId, ChatMessage, ChatRequest,
     ClaimAgentRunInboxOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome, ContentBlock,
     FailAgentRunOutcome, ModelProvider, ParkSandboxToolCallOutcome, ProviderEvent,
@@ -36,7 +37,8 @@ use crate::state::SandboxAttemptGuard;
 /// interactive tools or conversation-wide responsibilities that are outside a
 /// depth-one child run's authority.
 const SANDBOX_SYSTEM_PROMPT: &str = "You are a sandboxed background agent. Work only on the delegated task below and return a concise, self-contained result for your parent agent. You cannot access the conversation, filesystem, connected folders, or other agents. You may use at most one tool: web_search when current public-web information is necessary, or request_folder_access only to propose that your foreground parent decide whether to ask the user. The proposal grants no access and cannot open a picker. Otherwise finish directly.";
-const SANDBOX_WEB_SEARCH_TOOL_LIMIT: usize = 1;
+const SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT: &str = "You are a sandboxed background agent. Work only on the delegated task below and return a concise, self-contained result for your parent agent. You cannot access the conversation, filesystem, connected folders, or other agents except for the one exact file explicitly delegated to this run. You may use at most one tool: read_delegated_file to read that exact file, web_search when current public-web information is necessary, or request_folder_access only to propose that your foreground parent decide whether to ask the user. The proposal grants no access and cannot open a picker. Otherwise finish directly.";
+const SANDBOX_TOOL_LIMIT: usize = 1;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SandboxAgentRunWorkerConfig {
@@ -48,6 +50,7 @@ pub(crate) struct SandboxAgentRunWorkerConfig {
     max_concurrency: usize,
     max_running_global: u32,
     max_running_per_chat: u32,
+    delegated_file_executor_enabled: bool,
     #[cfg(test)]
     suppress_resolver_heartbeats: bool,
 }
@@ -63,9 +66,18 @@ impl Default for SandboxAgentRunWorkerConfig {
             max_concurrency: 4,
             max_running_global: 4,
             max_running_per_chat: 2,
+            delegated_file_executor_enabled: false,
             #[cfg(test)]
             suppress_resolver_heartbeats: false,
         }
+    }
+}
+
+impl SandboxAgentRunWorkerConfig {
+    #[must_use]
+    pub(crate) const fn with_delegated_file_executor(mut self, enabled: bool) -> Self {
+        self.delegated_file_executor_enabled = enabled;
+        self
     }
 }
 
@@ -454,8 +466,27 @@ impl SandboxAgentRunWorker {
             .store
             .list_sandbox_tool_calls_for_agent_run(run.id)
             .await?;
-        let request =
-            sandbox_request(&self.agent_config, task, &previous_calls, &*self.store).await?;
+        let delegated_file_available = if self.config.delegated_file_executor_enabled {
+            match (
+                self.store.get_sandbox_agent_admission(run.id).await?,
+                self.store.get_chat(run.chat_id).await?,
+            ) {
+                (Some(admission), Some(chat)) => {
+                    delegated_file_admission_matches(&run, &admission, &chat)
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        let request = sandbox_request(
+            &self.agent_config,
+            task,
+            &previous_calls,
+            &*self.store,
+            delegated_file_available,
+        )
+        .await?;
         let Some(provider) = self.resolve_provider(run.id, lease_token, &cancel).await? else {
             // `resolve_provider` has returned and dropped its resolver future
             // before this durable acknowledgement can terminalize the run.
@@ -521,6 +552,13 @@ impl SandboxAgentRunWorker {
             }
             Ok(SandboxCompletion::FolderAccessProposal { request }) => {
                 self.submit_folder_access_proposal(run.id, lease_token, request)
+                    .await
+            }
+            Ok(SandboxCompletion::DelegatedFileRead {
+                provider_id,
+                arguments,
+            }) => {
+                self.park_delegated_file_read(run, lease_token, provider_id, arguments)
                     .await
             }
             Err(error) => self.record_failure(run.id, lease_token, error).await,
@@ -710,6 +748,75 @@ impl SandboxAgentRunWorker {
         }
     }
 
+    async fn park_delegated_file_read(
+        &self,
+        run: AgentRun,
+        lease_token: uuid::Uuid,
+        provider_id: String,
+        arguments: serde_json::Value,
+    ) -> Result<SandboxAgentRunWorkerOutcome> {
+        let call = SandboxToolCallRequest {
+            id: CallId::new(),
+            agent_run_id: run.id,
+            chat_id: run.chat_id,
+            provider_id,
+            name: openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL.into(),
+            arguments,
+        };
+        let outcome = match self
+            .store
+            .park_agent_run_for_sandbox_tool_call(run.id, lease_token, &call)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let recovered = self
+                    .store
+                    .list_sandbox_tool_calls_for_agent_run(run.id)
+                    .await?
+                    .into_iter()
+                    .find(|existing| {
+                        existing.park_lease_token == lease_token
+                            && existing.provider_id == call.provider_id
+                            && existing.name == call.name
+                            && existing.arguments == call.arguments
+                    });
+                if let Some(call) = recovered {
+                    self.wake.notify_one();
+                    return Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(call.id));
+                }
+                return Err(error);
+            }
+        };
+        match outcome {
+            ParkSandboxToolCallOutcome::Parked { call, .. }
+            | ParkSandboxToolCallOutcome::Existing { call, .. } => {
+                self.wake.notify_one();
+                Ok(SandboxAgentRunWorkerOutcome::ToolCheckpointed(call.id))
+            }
+            ParkSandboxToolCallOutcome::IdentityConflict => {
+                self.record_failure(
+                    run.id,
+                    lease_token,
+                    AgentError::msg("sandbox delegated-file checkpoint identity conflict"),
+                )
+                .await
+            }
+            ParkSandboxToolCallOutcome::DelegatedResourceUnavailable => {
+                self.record_failure(
+                    run.id,
+                    lease_token,
+                    AgentError::msg("sandbox delegated resource is unavailable"),
+                )
+                .await
+            }
+            ParkSandboxToolCallOutcome::LeaseLost => {
+                self.acknowledge_cancellation_or_lease_loss(run.id, lease_token)
+                    .await
+            }
+        }
+    }
+
     async fn acknowledge_cancellation_or_lease_loss(
         &self,
         id: openwave_core::AgentRunId,
@@ -758,21 +865,44 @@ impl SandboxAgentRunWorker {
     }
 }
 
+fn delegated_file_admission_matches(
+    run: &AgentRun,
+    admission: &openwave_core::SandboxAgentAdmission,
+    chat: &openwave_core::Chat,
+) -> bool {
+    admission.child_run_id == run.id
+        && admission.chat_id == run.chat_id
+        && chat.id == run.chat_id
+        && admission.resource.as_ref().is_some_and(|resource| {
+            resource.is_well_formed()
+                && chat
+                    .root_attachments
+                    .iter()
+                    .any(|attachment| attachment.root_id == resource.root_id)
+        })
+}
+
 async fn sandbox_request(
     config: &AgentConfig,
     task: String,
     calls: &[SandboxToolCall],
     store: &dyn Store,
+    delegated_file_available: bool,
 ) -> Result<ChatRequest> {
-    if calls.len() > SANDBOX_WEB_SEARCH_TOOL_LIMIT {
-        return Err(AgentError::msg("sandbox web-search tool budget exceeded"));
+    if calls.len() > SANDBOX_TOOL_LIMIT {
+        return Err(AgentError::msg("sandbox tool budget exceeded"));
     }
     if config.max_steps == 0 || calls.len().saturating_add(1) > config.max_steps {
         return Err(AgentError::msg("sandbox model-step budget exceeded"));
     }
     let mut messages = vec![ChatMessage::text(Role::User, task)];
     for call in calls {
-        if call.name != openwave_core::SANDBOX_WEB_SEARCH_TOOL || !call.status.is_terminal() {
+        if !matches!(
+            call.name.as_str(),
+            openwave_core::SANDBOX_WEB_SEARCH_TOOL
+                | openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
+        ) || !call.status.is_terminal()
+        {
             return Err(AgentError::msg("sandbox checkpoint cannot be resumed"));
         }
         let receipt = store
@@ -798,7 +928,14 @@ async fn sandbox_request(
     }
     Ok(ChatRequest {
         model: config.model.clone(),
-        system: Some(SANDBOX_SYSTEM_PROMPT.into()),
+        system: Some(
+            if delegated_file_available {
+                SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT
+            } else {
+                SANDBOX_SYSTEM_PROMPT
+            }
+            .into(),
+        ),
         messages,
         // Once a receipt exists, omit the tool definition. This makes the
         // depth-one sandbox's one-call budget visible to the model and turns a
@@ -807,10 +944,14 @@ async fn sandbox_request(
         // completion. Never advertise work that the remaining model budget
         // cannot consume after its durable receipt arrives.
         tools: if calls.is_empty() && config.max_steps >= 2 {
-            vec![
+            let mut tools = vec![
                 sandbox_web_search_tool_spec(),
                 sandbox_folder_access_proposal_tool_spec(),
-            ]
+            ];
+            if delegated_file_available {
+                tools.push(sandbox_read_delegated_file_tool_spec());
+            }
+            tools
         } else if calls.is_empty() && config.max_steps >= 1 {
             vec![sandbox_folder_access_proposal_tool_spec()]
         } else {
@@ -830,6 +971,10 @@ enum SandboxCompletion {
     FolderAccessProposal {
         request: RequestFolderAccessArgs,
     },
+    DelegatedFileRead {
+        provider_id: String,
+        arguments: serde_json::Value,
+    },
 }
 
 async fn complete_sandbox_task(
@@ -844,6 +989,10 @@ async fn complete_sandbox_task(
         .tools
         .iter()
         .any(|tool| tool.name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL);
+    let delegated_file_advertised = request
+        .tools
+        .iter()
+        .any(|tool| tool.name == openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL);
     let mut stream = provider.stream(request).await?;
     let mut text = String::new();
     let mut calls = std::collections::BTreeMap::<u32, (String, String, String)>::new();
@@ -920,6 +1069,24 @@ async fn complete_sandbox_task(
                             ));
                         }
                         return Ok(SandboxCompletion::FolderAccessProposal { request });
+                    }
+                    if name == openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
+                        && delegated_file_advertised
+                    {
+                        let arguments = serde_json::from_str(&arguments).map_err(|_| {
+                            AgentError::msg(
+                                "sandbox agent emitted invalid delegated-file arguments",
+                            )
+                        })?;
+                        if !validate_sandbox_read_delegated_file_arguments(&arguments) {
+                            return Err(AgentError::msg(
+                                "sandbox agent emitted invalid delegated-file arguments",
+                            ));
+                        }
+                        return Ok(SandboxCompletion::DelegatedFileRead {
+                            provider_id,
+                            arguments,
+                        });
                     }
                     return Err(AgentError::msg(
                         "sandbox agent requested an unadvertised tool",
@@ -2342,6 +2509,7 @@ mod tests {
             "task".into(),
             &[],
             &store,
+            false,
         )
         .await
         .unwrap();
@@ -2377,6 +2545,7 @@ mod tests {
             "task".into(),
             &[],
             &store,
+            false,
         )
         .await
         .unwrap();
@@ -2399,6 +2568,241 @@ mod tests {
             },
         ]));
         assert!(complete_sandbox_task(provider, request).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn desktop_delegation_advertises_one_canonical_file_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap();
+        let request = sandbox_request(
+            &AgentConfig {
+                model: "m".into(),
+                ..AgentConfig::default()
+            },
+            "task".into(),
+            &[],
+            &store,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            request.system.as_deref(),
+            Some(SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT)
+        );
+        assert_eq!(
+            request
+                .tools
+                .iter()
+                .filter(|tool| tool.name == openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL)
+                .count(),
+            1
+        );
+
+        let provider = Arc::new(EventProvider(vec![
+            ProviderEvent::ToolCallStarted {
+                index: 0,
+                id: "read_1".into(),
+                name: openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL.into(),
+            },
+            ProviderEvent::ToolCallArgsDelta {
+                index: 0,
+                fragment: "{}".into(),
+            },
+            ProviderEvent::Stop {
+                reason: StopReason::ToolUse,
+            },
+        ]));
+        assert!(matches!(
+            complete_sandbox_task(provider, request).await.unwrap(),
+            SandboxCompletion::DelegatedFileRead { arguments, .. }
+                if arguments == serde_json::json!({})
+        ));
+    }
+
+    #[tokio::test]
+    async fn delegated_file_read_rejects_nonempty_arguments() {
+        let request = ChatRequest {
+            model: "m".into(),
+            system: Some(SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT.into()),
+            messages: vec![ChatMessage::text(Role::User, "task")],
+            tools: vec![sandbox_read_delegated_file_tool_spec()],
+            max_tokens: Some(100),
+            temperature: Some(0.0),
+        };
+        let provider = Arc::new(EventProvider(vec![
+            ProviderEvent::ToolCallStarted {
+                index: 0,
+                id: "read_1".into(),
+                name: openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL.into(),
+            },
+            ProviderEvent::ToolCallArgsDelta {
+                index: 0,
+                fragment: r#"{"path":"secret"}"#.into(),
+            },
+            ProviderEvent::Stop {
+                reason: StopReason::ToolUse,
+            },
+        ]));
+        assert!(complete_sandbox_task(provider, request).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delegated_file_advertisement_requires_exact_current_attachment() {
+        let (_worker, store, _provider, mut chat, _dir) = fixture().await;
+        let run = admit_sandbox(&store, chat.id, CallId::new(), "inspect file").await;
+        let mut admission = store
+            .get_sandbox_agent_admission(run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!delegated_file_admission_matches(&run, &admission, &chat));
+
+        let root_id = openwave_core::HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+        admission.resource = Some(openwave_core::SandboxAgentFileResource {
+            root_id,
+            relative_path: "reports/summary.md".into(),
+        });
+        assert!(!delegated_file_admission_matches(&run, &admission, &chat));
+        chat.root_attachments
+            .push(openwave_core::ChatRootAttachment {
+                root_id,
+                origin: openwave_core::RootAttachmentOrigin::Conversation,
+            });
+        assert!(delegated_file_admission_matches(&run, &admission, &chat));
+
+        admission.chat_id = ChatId::new();
+        assert!(!delegated_file_admission_matches(&run, &admission, &chat));
+    }
+
+    #[tokio::test]
+    async fn desktop_worker_checkpoints_one_exact_delegated_file_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let root_id = openwave_core::HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+        let mut chat = sandbox_chat();
+        chat.attachment_revision = 1;
+        chat.root_attachments
+            .push(openwave_core::ChatRootAttachment {
+                root_id,
+                origin: openwave_core::RootAttachmentOrigin::Conversation,
+            });
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "model", "spawn delegated child")
+            .await
+            .unwrap();
+        let foreground_lease = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        let turn = store
+            .claim_turn_run(foreground_lease, now, now + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .turn
+            .unwrap();
+        store
+            .append_turn_event(
+                chat.id,
+                turn.id,
+                foreground_lease,
+                1,
+                Utc::now(),
+                &openwave_core::AgentEvent::TurnStarted { turn_id: turn.id },
+            )
+            .await
+            .unwrap();
+        let spawn_call_id = CallId::new();
+        let child_id = openwave_core::AgentRunId::sandbox_for_spawn_call(spawn_call_id);
+        let outcome = store
+            .checkpoint_sandbox_spawn(
+                &openwave_core::SandboxSpawnCheckpointRequest {
+                    origin_turn_id: turn.id,
+                    lease_token: foreground_lease,
+                    expected_steer_revision: turn.steer_revision,
+                    call_id: spawn_call_id,
+                    provider_id: "spawn_1".into(),
+                    arguments: serde_json::json!({
+                        "task": "inspect the report",
+                        "resource": {
+                            "root_id": root_id,
+                            "relative_path": "reports/summary.md"
+                        }
+                    }),
+                    result: serde_json::to_string(&openwave_core::SpawnSandboxAgentResult {
+                        agent_id: child_id,
+                    })
+                    .unwrap(),
+                    event_ordinal: 2,
+                    progress: TurnCheckpointProgress {
+                        model_steps: 1,
+                        usage: Usage::default(),
+                    },
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            openwave_core::CheckpointSandboxSpawnOutcome::Checkpointed { .. }
+                | openwave_core::CheckpointSandboxSpawnOutcome::Existing { .. }
+        ));
+
+        let provider = Arc::new(EventProvider(vec![
+            ProviderEvent::ToolCallStarted {
+                index: 0,
+                id: "read_1".into(),
+                name: openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL.into(),
+            },
+            ProviderEvent::ToolCallArgsDelta {
+                index: 0,
+                fragment: "{}".into(),
+            },
+            ProviderEvent::Stop {
+                reason: StopReason::ToolUse,
+            },
+        ]));
+        let worker = SandboxAgentRunWorker::new(
+            store.clone(),
+            Arc::new(FixedResolver(provider)),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
+            AgentConfig {
+                model: "model".into(),
+                ..AgentConfig::default()
+            },
+            Some(dir.path().join("scratch")),
+            SandboxAgentRunWorkerConfig::default().with_delegated_file_executor(true),
+        );
+        assert!(matches!(
+            worker.run_once().await.unwrap(),
+            SandboxAgentRunWorkerOutcome::ToolCheckpointed(_)
+        ));
+        let calls = store
+            .list_sandbox_tool_calls_for_agent_run(child_id)
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].name,
+            openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL
+        );
+        assert_eq!(calls[0].arguments, serde_json::json!({}));
     }
 
     fn sandbox_chat() -> Chat {

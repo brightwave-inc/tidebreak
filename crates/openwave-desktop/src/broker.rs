@@ -10,8 +10,8 @@ use std::{
 
 use openwave_host_broker::{
     sidecar::{SidecarRequest, SidecarResponse, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES},
-    ControlEnvelope, ControlRequest, ControlResult, OperationEnvelope, OperationResult, RequestId,
-    Response, PROTOCOL_VERSION,
+    ControlEnvelope, ControlRequest, ControlResult, ErrorCode, OperationEnvelope, OperationResult,
+    RequestId, Response, PROTOCOL_VERSION,
 };
 use tauri::{async_runtime::JoinHandle, AppHandle};
 use tauri_plugin_shell::ShellExt;
@@ -421,6 +421,7 @@ fn decode_response(
             match envelope.response {
                 Response::Ok(result) => Ok(ExchangeResult::Control(result)),
                 Response::Error(error) => Err(BrokerClientError::Broker {
+                    code: error.code,
                     message: error.message,
                     retryable: error.retryable,
                 }),
@@ -431,6 +432,7 @@ fn decode_response(
             match envelope.response {
                 Response::Ok(result) => Ok(ExchangeResult::Operation(result)),
                 Response::Error(error) => Err(BrokerClientError::Broker {
+                    code: error.code,
                     message: error.message,
                     retryable: error.retryable,
                 }),
@@ -518,7 +520,11 @@ pub(crate) enum BrokerClientError {
     #[error("host broker transport error: {0}")]
     Transport(String),
     #[error("{message}")]
-    Broker { message: String, retryable: bool },
+    Broker {
+        code: ErrorCode,
+        message: String,
+        retryable: bool,
+    },
 }
 
 impl BrokerClientError {

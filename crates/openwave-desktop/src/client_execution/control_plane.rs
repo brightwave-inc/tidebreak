@@ -11,7 +11,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::receipt_store::StoredResolution;
+use super::receipt_store::{DelegatedFileResolution, StoredResolution};
 
 const MAX_EXACT_ATTEMPTS: usize = 3;
 const CLIENT_EXECUTOR_HEADER: &str = "x-openwave-client-executor";
@@ -82,6 +82,56 @@ struct BeginRootAttachmentRequest {
 #[derive(Serialize)]
 struct FinishRootAttachmentRequest<'a> {
     terminal: &'a RootAttachmentChangeTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub(super) struct PendingDelegatedFileRead {
+    pub(super) call_id: CallId,
+    pub(super) claimed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DelegatedFileClaimDisposition {
+    Claimed,
+    Existing,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ClaimedDelegatedFileRead {
+    pub(super) disposition: DelegatedFileClaimDisposition,
+    pub(super) call_id: CallId,
+    pub(super) chat_id: ChatId,
+    pub(super) root_id: HostRootId,
+    pub(super) relative_path: String,
+}
+
+#[derive(Serialize)]
+struct DelegatedFileLeaseRequest {
+    lease_token: Uuid,
+}
+
+#[derive(Serialize)]
+struct ResolveDelegatedFileReadRequest<'a> {
+    lease_token: Uuid,
+    resolution: &'a DelegatedFileResolution,
+}
+
+#[derive(Deserialize)]
+struct DelegatedFileHeartbeat {
+    extended: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DelegatedFileResolutionDisposition {
+    Resolved,
+    Existing,
+}
+
+#[derive(Deserialize)]
+struct ResolvedDelegatedFileRead {
+    disposition: DelegatedFileResolutionDisposition,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +233,62 @@ impl ControlPlaneClient {
     ) -> Result<Vec<ToolCallRecord>, ControlPlaneError> {
         self.get(&format!("/chats/{chat_id}/client-executions/pending/raw"))
             .await
+    }
+
+    pub(super) async fn pending_delegated_file_reads(
+        &self,
+    ) -> Result<Vec<PendingDelegatedFileRead>, ControlPlaneError> {
+        self.get("/sandbox-file-reads/pending").await
+    }
+
+    pub(super) async fn claim_delegated_file_read(
+        &self,
+        call_id: CallId,
+        lease_token: Uuid,
+    ) -> Result<ClaimedDelegatedFileRead, ControlPlaneError> {
+        self.post(
+            &format!("/sandbox-file-reads/{call_id}/claim"),
+            &DelegatedFileLeaseRequest { lease_token },
+        )
+        .await
+    }
+
+    pub(super) async fn heartbeat_delegated_file_read(
+        &self,
+        call_id: CallId,
+        lease_token: Uuid,
+    ) -> Result<(), ControlPlaneError> {
+        let heartbeat: DelegatedFileHeartbeat = self
+            .post(
+                &format!("/sandbox-file-reads/{call_id}/heartbeat"),
+                &DelegatedFileLeaseRequest { lease_token },
+            )
+            .await?;
+        if !heartbeat.extended {
+            return Err(ControlPlaneError::Protocol);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn resolve_delegated_file_read(
+        &self,
+        call_id: CallId,
+        lease_token: Uuid,
+        resolution: &DelegatedFileResolution,
+    ) -> Result<(), ControlPlaneError> {
+        let response: ResolvedDelegatedFileRead = self
+            .post(
+                &format!("/sandbox-file-reads/{call_id}/resolve"),
+                &ResolveDelegatedFileReadRequest {
+                    lease_token,
+                    resolution,
+                },
+            )
+            .await?;
+        match response.disposition {
+            DelegatedFileResolutionDisposition::Resolved
+            | DelegatedFileResolutionDisposition::Existing => Ok(()),
+        }
     }
 
     pub(super) async fn heartbeat(
