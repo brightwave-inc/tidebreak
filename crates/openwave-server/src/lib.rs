@@ -530,10 +530,10 @@ fn agent_deps(
         read_connected_file_tool_spec(),
         validate_read_connected_file_arguments,
     );
-    // The foreground worker parks atomically with child acceptance, and the
-    // bounded sandbox worker is started from the same state below. Sandboxed
-    // requests deliberately never receive this foreground-only definition.
-    tools.register_foreground_sandbox_spawn();
+    // Foreground spawn checkpoints child acceptance and immediately resumes;
+    // an explicit ordered wait parks only when results are needed. The bounded
+    // sandbox worker below never receives either orchestration definition.
+    tools.register_foreground_agent_orchestration();
     let tools = Arc::new(tools);
     let model = std::env::var("OPENWAVE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let agent_config = AgentConfig {
