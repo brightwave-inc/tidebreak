@@ -298,7 +298,7 @@ The implementation is intentionally incremental:
     receipt-backed model resume. *(Shipped.)*
 11. Let a sandbox relay a typed folder-consent proposal to its foreground
     parent, without host access or a picker. *(Shipped.)*
-12. Add a fenced read-only proxy for roots the foreground chat already
+12. Add fenced read-only tools to the foreground turn for roots its chat already
     attached; sandbox broker access remains deferred. *(Shipped.)*
 13. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work, including exact sandbox stop controls. *(Shipped.)*
