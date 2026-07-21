@@ -52,6 +52,12 @@ const TOOL_PRESENTATIONS: Record<string, ToolPresentation> = {
     complete: "Web search complete",
     settled: "Searched the web",
   },
+  read_delegated_file: {
+    label: "Read a delegated file",
+    active: "Reading a delegated file",
+    complete: "Delegated file read complete",
+    settled: "Read a delegated file",
+  },
   read_file: {
     label: "Read a file",
     active: "Reading a file",

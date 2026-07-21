@@ -615,6 +615,7 @@ fn tool_activity_from_call(call: ToolCallRecord) -> ChatToolActivitySnapshot {
 fn historical_tool_title(name: &str) -> &'static str {
     match name {
         "web_search" => "Search the web",
+        crate::SANDBOX_READ_DELEGATED_FILE_TOOL => "Read a delegated file",
         "read_file" | "read_connected_file" => "Read a file",
         "list_dir" => "Browse files",
         "write_file" => "Update a file",
@@ -624,6 +625,20 @@ fn historical_tool_title(name: &str) -> &'static str {
         "spawn_sandbox_agent" => "Delegate a task",
         "wait_for_agents" => "Wait for background agents",
         _ => "Use a tool",
+    }
+}
+
+#[cfg(test)]
+mod historical_tool_title_tests {
+    use super::historical_tool_title;
+
+    #[test]
+    fn delegated_file_reads_have_a_fixed_renderer_title() {
+        assert_eq!(
+            historical_tool_title(crate::SANDBOX_READ_DELEGATED_FILE_TOOL),
+            "Read a delegated file"
+        );
+        assert_eq!(historical_tool_title("private_read_variant"), "Use a tool");
     }
 }
 

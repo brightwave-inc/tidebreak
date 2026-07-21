@@ -96,6 +96,32 @@ describe("AgentActivityPanel", () => {
     expect(markup).not.toContain("Reading a file");
   });
 
+  it("uses fixed waiting and running copy for delegated file reads", () => {
+    const markup = renderToStaticMarkup(
+      <AgentActivityPanel
+        runs={[
+          run({
+            id: "waiting-read",
+            activity: { kind: "read_delegated_file", status: "waiting" },
+          }),
+          run({
+            id: "running-read",
+            activity: { kind: "read_delegated_file", status: "running" },
+          }),
+        ]}
+        loading={false}
+        error={null}
+        onRetry={vi.fn()}
+        {...noStops}
+      />,
+    );
+
+    expect(markup).toContain("Waiting to read a delegated file");
+    expect(markup).toContain("Reading a delegated file");
+    expect(markup).not.toContain("waiting-read");
+    expect(markup).not.toContain("running-read");
+  });
+
   it("falls back safely for malformed future activity projections", () => {
     const malformedRuns = [
       run({

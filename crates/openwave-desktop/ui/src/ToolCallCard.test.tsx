@@ -41,6 +41,17 @@ describe("ToolCallCard", () => {
     expect(markup).toContain("Document search complete");
   });
 
+  it("renders a fixed delegated-file presentation without resource details", () => {
+    const markup = renderToStaticMarkup(
+      <ToolCallCard name="read_delegated_file" status="running" />,
+    );
+
+    expect(markup).toContain("Read a delegated file");
+    expect(markup).toContain("Reading a delegated file");
+    expect(markup).not.toContain("path");
+    expect(markup).not.toContain("root");
+  });
+
   it("distinguishes delegation from waiting for the child results", () => {
     const delegated = renderToStaticMarkup(
       <ToolCallCard name="spawn_sandbox_agent" status="completed" />,
