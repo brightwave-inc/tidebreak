@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::ProjectId;
+
 /// Shorthand for results across the core crate.
 pub type Result<T, E = AgentError> = std::result::Result<T, E>;
 
@@ -22,6 +24,10 @@ pub enum AgentError {
     /// A persistence failure from the `Store` / `BlobStore`.
     #[error("store error: {0}")]
     Store(String),
+
+    /// A project-scoped atomic write lost a concurrent project deletion race.
+    #[error("project {0} not found")]
+    ProjectNotFound(ProjectId),
 
     /// A failure reaching the secret store (keychain / KMS).
     #[error("secret error: {0}")]
@@ -64,6 +70,7 @@ impl AgentError {
         match self {
             Self::Config(_) => "config",
             Self::Store(_) => "store",
+            Self::ProjectNotFound(_) => "not_found",
             Self::Secret(_) => "secret",
             Self::Provider(_) => "provider",
             Self::PromptTooLong(_) => "prompt_too_long",

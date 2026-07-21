@@ -22,7 +22,8 @@ use crate::storage::{
 use super::super::{entities, project_from_models, store_err, DbStore};
 use super::turn::canonical_db_timestamp;
 use super::{
-    acquire_chat_write_lock, acquire_turn_write_lock, agent_run::insert_foreground_agent_run_on,
+    acquire_chat_write_lock, acquire_project_write_lock, acquire_turn_write_lock,
+    agent_run::insert_foreground_agent_run_on,
 };
 
 pub(in crate::db) const MESSAGE_IDENTITY_OWNER_MESSAGE: &str = "message";
@@ -147,6 +148,9 @@ where
     let Some(project_id) = project_id else {
         return Ok(Vec::new());
     };
+    if !acquire_project_write_lock(conn, project_id).await? {
+        return Err(AgentError::ProjectNotFound(project_id));
+    }
     let mut rows = entities::project::Entity::find_by_id(project_id.0)
         .find_with_related(entities::project_root_attachment::Entity)
         .order_by_asc(entities::project_root_attachment::Column::Position)

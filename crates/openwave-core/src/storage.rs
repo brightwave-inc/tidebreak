@@ -77,6 +77,21 @@ pub enum DeleteChatOutcome {
     RootAttachmentStateUnresolved,
 }
 
+/// Result of a fail-closed project deletion request.
+///
+/// Project deletion never cascades conversations, documents, or host-root
+/// projections. Callers must explicitly remove each owned resource through its
+/// lifecycle-aware API before the empty project record can be removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteProjectOutcome {
+    /// The empty project was removed.
+    Deleted,
+    /// No project owns this id.
+    NotFound,
+    /// Conversations, documents, or host-root defaults still belong to it.
+    NotEmpty,
+}
+
 /// Fixed lifecycle vocabulary exposed for a historical tool card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -822,6 +837,13 @@ pub trait Store: Send + Sync {
     async fn update_project_title(&self, _id: ProjectId, _title: Option<String>) -> Result<bool> {
         Err(AgentError::Store(
             "project metadata storage is not implemented by this Store".into(),
+        ))
+    }
+
+    /// Remove one empty project without cascading owned product state.
+    async fn delete_project(&self, _id: ProjectId) -> Result<DeleteProjectOutcome> {
+        Err(AgentError::Store(
+            "project deletion is not implemented by this Store".into(),
         ))
     }
 

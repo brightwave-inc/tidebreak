@@ -24,6 +24,7 @@ describe("ProjectNavigation", () => {
         onSelect={vi.fn()}
         onCreate={vi.fn()}
         onRename={vi.fn()}
+        onDelete={vi.fn().mockResolvedValue(true)}
       />,
     );
 
@@ -34,6 +35,8 @@ describe("ProjectNavigation", () => {
     expect(markup).toContain('aria-current="page"');
     expect(markup.match(/aria-current="page"/g)).toHaveLength(1);
     expect(markup).toContain('aria-label="Rename Research"');
+    expect(markup).toContain('aria-label="Delete Research"');
+    expect(markup).toContain('aria-label="Delete Untitled project"');
   });
 
   it("keeps project failures bounded to the sidebar", () => {
@@ -46,6 +49,7 @@ describe("ProjectNavigation", () => {
         onSelect={vi.fn()}
         onCreate={vi.fn()}
         onRename={vi.fn()}
+        onDelete={vi.fn().mockResolvedValue(false)}
       />,
     );
 

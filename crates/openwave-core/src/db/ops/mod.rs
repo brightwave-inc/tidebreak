@@ -1,7 +1,7 @@
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::error::{AgentError, Result};
-use crate::id::{CallId, ChatId, TurnId};
+use crate::id::{CallId, ChatId, ProjectId, TurnId};
 
 use super::{entities, store_err};
 
@@ -34,6 +34,47 @@ where
         .await
         .map_err(store_err)?;
     Ok(locked.rows_affected == 1)
+}
+
+/// Acquire the shared cross-backend write lock for one project row.
+///
+/// Project-scoped child insertion and deletion take this same lock so an empty
+/// project cannot gain a conversation or document between its emptiness check
+/// and deletion.
+pub(in crate::db) async fn acquire_project_write_lock<C>(
+    conn: &C,
+    project_id: ProjectId,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let locked = entities::project::Entity::update_many()
+        .col_expr(
+            entities::project::Column::Title,
+            sea_orm::sea_query::Expr::col(entities::project::Column::Title).into(),
+        )
+        .filter(entities::project::Column::Id.eq(project_id.0))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(locked.rows_affected == 1)
+}
+
+/// Fence a project-scoped child write and report a concurrent deletion with a
+/// typed error that product adapters can map without parsing database text.
+pub(in crate::db) async fn require_project_write_lock<C>(
+    conn: &C,
+    project_id: Option<ProjectId>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    if let Some(project_id) = project_id {
+        if !acquire_project_write_lock(conn, project_id).await? {
+            return Err(AgentError::ProjectNotFound(project_id));
+        }
+    }
+    Ok(())
 }
 
 /// Allocate the next stable tool-history position while the caller owns the

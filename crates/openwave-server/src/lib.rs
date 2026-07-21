@@ -188,6 +188,7 @@ pub fn app(state: AppState) -> Router {
             "/projects/{id}",
             get(routes::get_project)
                 .patch(routes::patch_project)
+                .delete(routes::delete_project)
                 .layer(DefaultBodyLimit::max(
                     routes::MAX_PROJECT_METADATA_BODY_BYTES,
                 )),

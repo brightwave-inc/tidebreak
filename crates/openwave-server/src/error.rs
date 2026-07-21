@@ -92,12 +92,19 @@ impl ServerError {
     }
 }
 
-/// Core errors surfacing from a handler are internal failures (a store write
-/// failed, a provider errored); map them to `500` with their info preserved.
+/// Core errors surfacing from a handler are normally internal failures. The
+/// typed missing-project result is the deliberate exception: a project-scoped
+/// write may lose a concurrent deletion race after an adapter's preflight, and
+/// that remains a product-facing `404` rather than a database failure.
 impl From<AgentError> for ServerError {
     fn from(err: AgentError) -> Self {
+        let status = if matches!(err, AgentError::ProjectNotFound(_)) {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
         Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
+            status,
             info: (&err).into(),
         }
     }
@@ -106,5 +113,19 @@ impl From<AgentError> for ServerError {
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
         (self.status, Json(self.info)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_project_write_that_loses_deletion_maps_to_not_found() {
+        let project_id = openwave_core::ProjectId::new();
+        let error = ServerError::from(AgentError::ProjectNotFound(project_id));
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.info.kind, "not_found");
+        assert!(error.info.message.contains(&project_id.to_string()));
     }
 }

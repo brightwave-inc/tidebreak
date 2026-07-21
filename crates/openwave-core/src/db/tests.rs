@@ -478,6 +478,180 @@ async fn project_title_update_sets_clears_and_reports_missing_identity() {
 }
 
 #[tokio::test]
+async fn project_deletion_requires_an_empty_project_and_reports_missing_identity() {
+    let (_dir, store) = temp_store().await;
+
+    let empty = sample_project();
+    store.create_project(&empty).await.unwrap();
+    assert_eq!(
+        store.delete_project(empty.id).await.unwrap(),
+        DeleteProjectOutcome::Deleted
+    );
+    assert_eq!(
+        store.delete_project(empty.id).await.unwrap(),
+        DeleteProjectOutcome::NotFound
+    );
+
+    let with_chat = sample_project();
+    store.create_project(&with_chat).await.unwrap();
+    let mut chat = sample_chat();
+    chat.project_id = Some(with_chat.id);
+    store.create_chat(&chat).await.unwrap();
+    assert_eq!(
+        store.delete_project(with_chat.id).await.unwrap(),
+        DeleteProjectOutcome::NotEmpty
+    );
+    assert!(store.get_project(with_chat.id).await.unwrap().is_some());
+    assert_eq!(
+        store.delete_chat(chat.id).await.unwrap(),
+        DeleteChatOutcome::Deleted
+    );
+    assert_eq!(
+        store.delete_project(with_chat.id).await.unwrap(),
+        DeleteProjectOutcome::Deleted
+    );
+
+    let with_document = sample_project();
+    store.create_project(&with_document).await.unwrap();
+    let document = sample_document(Some(with_document.id));
+    store.create_document(&document).await.unwrap();
+    assert_eq!(
+        store.delete_project(with_document.id).await.unwrap(),
+        DeleteProjectOutcome::NotEmpty
+    );
+    store.delete_document(document.id).await.unwrap();
+    assert_eq!(
+        store.delete_project(with_document.id).await.unwrap(),
+        DeleteProjectOutcome::Deleted
+    );
+
+    let root = HostRootId::from_uuid(uuid::Uuid::new_v4()).unwrap();
+    let mut with_root = sample_project();
+    with_root.attachment_revision = 1;
+    with_root.root_attachments = vec![root];
+    store.create_project(&with_root).await.unwrap();
+    assert_eq!(
+        store.delete_project(with_root.id).await.unwrap(),
+        DeleteProjectOutcome::NotEmpty
+    );
+    entities::project_root_attachment::Entity::delete_many()
+        .filter(entities::project_root_attachment::Column::ProjectId.eq(with_root.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.delete_project(with_root.id).await.unwrap(),
+        DeleteProjectOutcome::Deleted
+    );
+}
+
+#[tokio::test]
+async fn project_deletion_serializes_with_staged_source_ingestion() {
+    let (_dir, store) = temp_store().await;
+
+    for attempt in 0..16_u8 {
+        let project = sample_project();
+        store.create_project(&project).await.unwrap();
+        let mut source = sample_raw_source(
+            DocumentId::new(),
+            &format!("file:///project-race-{attempt}.bin"),
+            DocumentSourceBlob::from_digest([attempt.saturating_add(1); 32], 1),
+        );
+        source.project_id = Some(project.id);
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let delete_store = store.clone();
+        let delete_barrier = barrier.clone();
+        let delete = tokio::spawn(async move {
+            delete_barrier.wait().await;
+            delete_store.delete_project(project.id).await
+        });
+        let ingest_store = store.clone();
+        let ingest_barrier = barrier.clone();
+        let ingest_source = source.clone();
+        let ingest = tokio::spawn(async move {
+            ingest_barrier.wait().await;
+            ingest_store
+                .accept_document_source_and_enqueue_parse(&ingest_source, "parser-v1", 3)
+                .await
+        });
+        barrier.wait().await;
+
+        let deleted = delete.await.unwrap().unwrap();
+        let ingested = ingest.await.unwrap();
+        match (deleted, ingested) {
+            (DeleteProjectOutcome::Deleted, Err(AgentError::ProjectNotFound(missing_project))) => {
+                assert_eq!(missing_project, project.id)
+            }
+            (DeleteProjectOutcome::NotEmpty, Ok((record, _))) => {
+                assert_eq!(record.project_id, Some(project.id));
+                store.delete_document(record.id).await.unwrap();
+                assert_eq!(
+                    store.delete_project(project.id).await.unwrap(),
+                    DeleteProjectOutcome::Deleted
+                );
+            }
+            (outcome, result) => {
+                panic!("unexpected deletion/ingestion race result: {outcome:?}, {result:?}")
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_project_scoped_first_write_reports_a_typed_missing_project() {
+    let (_dir, store) = temp_store().await;
+    let missing = ProjectId::new();
+
+    let legacy = sample_document(Some(missing));
+    assert!(matches!(
+        store.create_document(&legacy).await,
+        Err(AgentError::ProjectNotFound(id)) if id == missing
+    ));
+
+    let canonical = DocumentUpsert {
+        id: DocumentId::new(),
+        project_id: Some(missing),
+        source_uri: Some("file:///missing-project.txt".into()),
+        media_type: "text/plain".into(),
+        title: None,
+        canonical_text: "missing project".into(),
+        source_regions: Vec::new(),
+        updated_at: Utc::now(),
+    };
+    assert!(matches!(
+        store.upsert_document(&canonical).await,
+        Err(AgentError::ProjectNotFound(id)) if id == missing
+    ));
+    assert!(matches!(
+        store
+            .upsert_document_and_enqueue_index(&canonical, "pipeline-v1", 3)
+            .await,
+        Err(AgentError::ProjectNotFound(id)) if id == missing
+    ));
+
+    let mut staged = sample_raw_source(
+        DocumentId::new(),
+        "file:///missing-project.bin",
+        DocumentSourceBlob::from_digest([0x41; 32], 1),
+    );
+    staged.project_id = Some(missing);
+    assert!(matches!(
+        store
+            .accept_document_source_and_enqueue_parse(&staged, "parser-v1", 3)
+            .await,
+        Err(AgentError::ProjectNotFound(id)) if id == missing
+    ));
+
+    let mut chat = sample_chat();
+    chat.project_id = Some(missing);
+    assert!(matches!(
+        store.create_chat_with_project_defaults(&chat).await,
+        Err(AgentError::ProjectNotFound(id)) if id == missing
+    ));
+}
+
+#[tokio::test]
 async fn documents_roundtrip_and_list_by_corpus_scope() {
     let (_dir, store) = temp_store().await;
     let project_a = sample_project();
