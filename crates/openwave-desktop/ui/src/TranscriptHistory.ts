@@ -24,6 +24,7 @@ export type HydratedTranscriptEntry =
 // cannot become a display path for provider names, arguments, or output.
 const HISTORY_TOOL_NAMES: Record<ChatToolActivity["title"], string> = {
   "Search the web": "web_search",
+  "Read a delegated file": "read_delegated_file",
   "Read a file": "read_file",
   "Browse files": "list_dir",
   "Update a file": "write_file",

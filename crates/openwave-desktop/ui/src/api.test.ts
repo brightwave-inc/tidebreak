@@ -141,6 +141,25 @@ describe("pending approval recovery", () => {
     ).toBeNull();
   });
 
+  it("recognizes only the fixed delegated-file renderer name", () => {
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "read_delegated_file",
+        approval: "unsupported",
+        can_approve: false,
+      }),
+    ).toMatchObject({ action: "read_delegated_file", canApprove: false });
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "read_delegated_file:/Users/private/document.txt",
+        approval: "unsupported",
+        can_approve: false,
+      }),
+    ).toBeNull();
+  });
+
   it("fails closed on malformed, duplicate, or cross-turn pages", async () => {
     const client = new ApiClient("http://127.0.0.1", "token");
     for (const body of [

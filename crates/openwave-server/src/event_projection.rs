@@ -72,6 +72,7 @@ pub(crate) enum RendererAgentEvent {
 pub(crate) enum RendererToolName {
     Search,
     WebSearch,
+    ReadDelegatedFile,
     ReadFile,
     ListDir,
     WriteFile,
@@ -97,6 +98,7 @@ impl From<&str> for RendererToolName {
         match name {
             "search" => Self::Search,
             "web_search" => Self::WebSearch,
+            openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL => Self::ReadDelegatedFile,
             "read_file" => Self::ReadFile,
             "list_dir" => Self::ListDir,
             "write_file" => Self::WriteFile,
@@ -323,6 +325,10 @@ mod tests {
         for (name, expected) in [
             ("spawn_sandbox_agent", r#""name":"spawn_sandbox_agent""#),
             ("wait_for_agents", r#""name":"wait_for_agents""#),
+            (
+                openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL,
+                r#""name":"read_delegated_file""#,
+            ),
         ] {
             let projected = RendererSequencedEvent::from(&SequencedEvent {
                 seq: 1,

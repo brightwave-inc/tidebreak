@@ -71,6 +71,7 @@ export type ChatMessageCitation = {
 export type ChatToolActivity = {
   title:
     | "Search the web"
+    | "Read a delegated file"
     | "Read a file"
     | "Browse files"
     | "Update a file"
@@ -129,6 +130,7 @@ export type SandboxAgentCancellation = {
 export type AgentActivity = {
   kind:
     | "web_search"
+    | "read_delegated_file"
     | "list_connected_folders"
     | "list_folder"
     | "read_connected_file";
@@ -170,6 +172,7 @@ export type AgentEvent =
 export type RendererToolName =
   | "search"
   | "web_search"
+  | "read_delegated_file"
   | "read_file"
   | "list_dir"
   | "write_file"
@@ -596,6 +599,7 @@ function isRendererToolName(value: unknown): value is RendererToolName {
   return (
     value === "search" ||
     value === "web_search" ||
+    value === "read_delegated_file" ||
     value === "read_file" ||
     value === "list_dir" ||
     value === "write_file" ||

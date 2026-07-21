@@ -213,6 +213,12 @@ function agentActivityPresentation(
       running: "Searching the web",
       activeStatus: "searching",
     },
+    read_delegated_file: {
+      label: "Delegated file",
+      waiting: "Waiting to read a delegated file",
+      running: "Reading a delegated file",
+      activeStatus: "reading",
+    },
     list_connected_folders: {
       label: "Connected folders",
       waiting: "Waiting to check connected folders",
