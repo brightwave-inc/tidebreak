@@ -1312,6 +1312,8 @@ pub enum AgentRunCancellationReason {
     Requested,
     /// The exact foreground turn that admitted the child was cancelled.
     ParentTurnCancelled,
+    /// The exact foreground turn that admitted the child failed permanently.
+    ParentTurnFailed,
 }
 
 /// Immutable executor identity retained by a sandbox cancellation request.
@@ -1332,6 +1334,7 @@ impl AgentRunCancellationReason {
         match self {
             Self::Requested => "requested",
             Self::ParentTurnCancelled => "parent_turn_cancelled",
+            Self::ParentTurnFailed => "parent_turn_failed",
         }
     }
 
@@ -1339,6 +1342,7 @@ impl AgentRunCancellationReason {
         match value {
             "requested" => Some(Self::Requested),
             "parent_turn_cancelled" => Some(Self::ParentTurnCancelled),
+            "parent_turn_failed" => Some(Self::ParentTurnFailed),
             _ => None,
         }
     }

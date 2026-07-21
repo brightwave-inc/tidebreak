@@ -112,6 +112,7 @@ async fn request_turn_cancellation_inner(
         &transaction,
         &turn,
         now,
+        crate::model::AgentRunCancellationReason::ParentTurnCancelled,
     )
     .await?
     {
