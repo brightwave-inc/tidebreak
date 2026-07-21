@@ -49,6 +49,7 @@ import {
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
 import { AgentActivityPanel, agentRunsForChat } from "./AgentActivityPanel";
+import { shouldRefreshAgentRunsAfterToolEvent } from "./AgentRunRefresh";
 import {
   SandboxAgentStopFence,
   canStopSandboxAgentRun,
@@ -429,6 +430,10 @@ export default function App() {
     lastSeqRef.current = framed.seq;
     const event = framed.event;
 
+    if (shouldRefreshAgentRunsAfterToolEvent(event)) {
+      refreshAgentRunsRef.current?.();
+    }
+
     if (event.type === "turn_started") {
       const startsDifferentTurn = activeTurnIdRef.current !== event.turn_id;
       refreshAgentRunsRef.current?.();
@@ -504,7 +509,6 @@ export default function App() {
         assistantMarkerScrubberRef.current =
           new AssistantSourceMarkerStreamScrubber();
       }
-      refreshAgentRunsRef.current?.();
       if (event.name === "request_folder_access") {
         refreshFolderAccessRef.current?.();
       }
