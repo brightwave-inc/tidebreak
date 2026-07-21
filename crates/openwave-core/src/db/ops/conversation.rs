@@ -628,20 +628,6 @@ fn historical_tool_title(name: &str) -> &'static str {
     }
 }
 
-#[cfg(test)]
-mod historical_tool_title_tests {
-    use super::historical_tool_title;
-
-    #[test]
-    fn delegated_file_reads_have_a_fixed_renderer_title() {
-        assert_eq!(
-            historical_tool_title(crate::SANDBOX_READ_DELEGATED_FILE_TOOL),
-            "Read a delegated file"
-        );
-        assert_eq!(historical_tool_title("private_read_variant"), "Use a tool");
-    }
-}
-
 async fn terminal_event_cursor_on<C>(conn: &C, chat_id: ChatId) -> Result<i64>
 where
     C: ConnectionTrait,
@@ -1047,5 +1033,19 @@ fn role_from_db(text: &str) -> Result<Role> {
         "assistant" => Ok(Role::Assistant),
         "tool" => Ok(Role::Tool),
         other => Err(AgentError::Store(format!("unknown role: {other}"))),
+    }
+}
+
+#[cfg(test)]
+mod historical_tool_title_tests {
+    use super::historical_tool_title;
+
+    #[test]
+    fn delegated_file_reads_have_a_fixed_renderer_title() {
+        assert_eq!(
+            historical_tool_title(crate::SANDBOX_READ_DELEGATED_FILE_TOOL),
+            "Read a delegated file"
+        );
+        assert_eq!(historical_tool_title("private_read_variant"), "Use a tool");
     }
 }
