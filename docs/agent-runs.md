@@ -70,8 +70,8 @@ spawn:
 2. The tool-call identity is stored as the child's unique spawn identity, so an
    ambiguous retry recovers the original run instead of creating a duplicate.
 3. A bounded scheduler claims the child with an exact renewable lease.
-4. The scheduler gives the child private scratch and advances its isolated
-   no-tools task loop.
+4. The scheduler gives the child private scratch and advances its isolated task
+   loop with only the narrow sandbox-safe tool surface.
 5. The child submits an immutable terminal result. Provider failures leave the
    exact lease for the bounded scheduler retry/reap path; they do not create an
    unfenced executor-side failure transition.
