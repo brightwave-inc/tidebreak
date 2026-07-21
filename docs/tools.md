@@ -7,7 +7,7 @@ identity.
 
 ## What exists today
 
-The current foreground agent surface contains nine tools:
+The current foreground agent surface contains ten tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
@@ -19,14 +19,14 @@ The current foreground agent surface contains nine tools:
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
 | `list_folder` | List one directory below an attached root | Native client continuation |
 | `read_connected_file` | Read bounded UTF-8 text below an attached root | Native client continuation |
-| `spawn_sandbox_agent` | Delegate one bounded task and wait for its durable result | Foreground-only durable continuation |
+| `spawn_sandbox_agent` | Start one isolated background task and immediately continue | Foreground-only durable checkpoint |
+| `wait_for_agents` | Wait for one to four spawned agents and return their results in request order | Foreground-only durable continuation |
 
-The core also contains an inactive `wait_for_agents` definition for the next
-orchestration cutover. It accepts one to four unique depth-one child agent IDs,
-waits for all of them, and preserves request order in its result. The strict
-arguments and closed spawn/wait result shapes are prepared now so the runtime
-does not invent ad hoc JSON later, but neither the wait definition nor the
-future non-blocking spawn wording is advertised yet.
+The two background-agent tools are a closed pair. A spawn returns only an opaque
+`agent_id`; a wait accepts one to four unique IDs returned by spawns from the
+same foreground turn. Both calls must be made alone, without assistant text or
+sibling tool calls. Sandbox agents receive neither definition, so they cannot
+create or wait on other agents.
 
 The connected-folder calls are foreground-only. Their arguments contain only
 an opaque root ID and a bounded root-relative path; native code recovers the
@@ -66,27 +66,39 @@ The foreground coordinator needs tools for:
 - web search and page retrieval;
 - connected-root list/read/import and explicit export;
 - asking the user a structured question;
-- spawning, inspecting, messaging, waiting for, cancelling, and reviewing
-  depth-one sandbox agents.
+- spawning and waiting for depth-one sandbox agents.
 
-`spawn_sandbox_agent` is enabled only for a claimed foreground turn. It
-atomically admits a depth-one child and parks that turn; the child result is
-persisted as a system transcript message before the parent can resume. Sandbox
-agents never receive this tool.
+`spawn_sandbox_agent` and `wait_for_agents` are enabled only for a durably
+claimed foreground turn. A spawn atomically admits the depth-one child,
+records the completed tool result containing its `agent_id`, journals that
+completion, applies model usage once, and moves the foreground turn to
+`resuming`. A fresh worker claim then continues the conversation while the
+child runs independently. The notification that wakes each worker is only a
+latency hint; the committed state is sufficient after a restart.
 
-That first implementation is durable but serial: spawning one child immediately
-parks the parent, so the coordinator cannot launch a group and then wait for the
-group. The next runtime sequence separates those concerns. Core now has an
-inactive atomic checkpoint for non-blocking spawn: it admits the exact child,
-commits completed orchestration tool history and a journal event, applies usage
-once, and releases the foreground lease for a normal durable reclaim. A
-separate `wait_for_agents` continuation will then park on an explicit bounded
-set and consume their immutable results in stable order. The model surface stays
-unchanged until both halves are available; this avoids advertising fan-out that
-cannot recover correctly after restart.
+One foreground turn may have at most four unsettled children. A child remains
+unsettled while it is still running or while its terminal delivery is waiting
+to be consumed. The model can launch independent tasks one at a time, retaining
+each returned ID, and then make one ordered `wait_for_agents` call. That call
+uses `All` semantics: it atomically records the pending tool call and exact
+ordered child set, applies progress once, and releases the foreground lease.
+After every child has a terminal delivery, recovery consumes all deliveries,
+completes the same tool call with results in request order, journals the exact
+completion event, and moves the turn to `resuming`.
 
-A background sandbox has no shared conversation, filesystem, network, or
-host-folder access. It receives one bounded task and may be offered exactly
+The foreground turn cannot silently finish while one of its children is still
+unsettled. If the model tries, the completion boundary keeps the turn alive and
+gives the next model call the complete ordered ID list it must wait for. This is
+a storage-backed correctness guard, not merely a prompt convention.
+
+All orchestration identities are stable across ambiguous responses. An exact
+spawn or wait retry recovers its prior receipt rather than creating another
+child or consuming a result twice. Live event delivery uses the exact journaled
+sequence; reconnecting clients replay the journal, and cursor-based consumers
+can ignore a repeated live publication after commit-response loss.
+
+A background sandbox has no shared conversation, filesystem, general network,
+or host-folder access. It receives one bounded task and may be offered exactly
 one tool call: `web_search` when its remaining model-step budget can also
 consume the result, or a sandbox-only `request_folder_access` proposal. The
 proposal is a typed terminal child result, not a client call: it cannot open a
@@ -97,7 +109,7 @@ atomically parks only web search under its exact lease; a separate host-owned
 executor performs that bounded search and writes an immutable receipt. On a
 later claim, the sandbox reconstructs the matching `ToolUse`/`ToolResult` from
 that receipt before it can finalize. Sandboxes do not receive
-`spawn_sandbox_agent` and cannot create further agents.
+`spawn_sandbox_agent` or `wait_for_agents` and cannot create further agents.
 
 Future sandbox-safe capabilities, such as broker-mediated folder reads, must
 be added one at a time behind the same durable continuation and consent

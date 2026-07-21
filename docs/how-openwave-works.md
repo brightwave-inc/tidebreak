@@ -716,20 +716,18 @@ The strongest parts today are the core seams, database constraints, durable
 document pipeline, generation-aware Lance publication, durable turn acceptance
 and ownership, atomic client-wait checkpoints, terminal turn commits,
 cancellation, reconnectable event stream, durable foreground/sandbox agent-run
-leases and result delivery, and fail-closed provider routing.
+leases and result delivery, bounded non-blocking child admission, ordered
+multi-child waits, the foreground terminal guard, and fail-closed provider
+routing.
 
 The main next steps are:
 
-- split sandbox delegation into exact non-blocking child admission followed by
-  a durable multi-child wait, so one depth-zero coordinator can fan out bounded
-  parallel work without allowing recursive agents;
-- enforce transactional outstanding-child caps and origin-turn ownership in
-  addition to the existing global/per-chat running caps;
-- extend the resulting durable agent-run hierarchy with carefully scoped
-  sandbox-safe capabilities and small UI status/cancel surfaces;
-- unify client execution, folder consent, user questions, resource waits, and
-  child-agent waits with the durable approval pattern as continuations that
-  release workers;
+- surface the activated non-blocking spawn and ordered wait lifecycle clearly
+  in desktop message history and background-agent status/cancel views;
+- extend the bounded depth-one hierarchy with carefully scoped sandbox-safe
+  capabilities without widening its spawn or host-access authority;
+- continue unifying client execution, folder consent, user questions, and
+  resource waits around durable continuations that release workers;
 - persist model/tool step boundaries and side-effect receipts so sandbox and
   foreground runs can resume safely after process loss;
 - route built-in file tools through explicit broker roots while keeping private
