@@ -357,13 +357,13 @@ impl ModelProvider for FakeProvider {
     }
 }
 
-/// Drives the complete foreground-child-foreground round trip. The sandbox
-/// request is identified by its absence of the foreground delegation contract;
-/// its fixed web-search capability is deliberately separate.
+/// Drives non-blocking spawn, premature completion correction, ordered wait,
+/// and final foreground completion. The sandbox surface remains independent.
 #[derive(Default)]
 struct SandboxRoundTripProvider {
     foreground_calls: AtomicUsize,
     requests: std::sync::Mutex<Vec<ChatRequest>>,
+    second_child_started: tokio::sync::Notify,
 }
 
 #[async_trait]
@@ -373,44 +373,127 @@ impl ModelProvider for SandboxRoundTripProvider {
     }
 
     async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let sandbox = !request
-            .tools
-            .iter()
-            .any(|tool| tool.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL);
+        let sandbox = !request.tools.iter().any(|tool| {
+            matches!(
+                tool.name.as_str(),
+                openwave_core::SPAWN_SANDBOX_AGENT_TOOL | openwave_core::WAIT_FOR_AGENTS_TOOL
+            )
+        });
+        let delegated_task = sandbox.then(|| {
+            request
+                .messages
+                .first()
+                .and_then(|message| message.content.first())
+                .and_then(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        });
         self.requests.lock().unwrap().push(request);
         let events = if sandbox {
+            let first = delegated_task
+                .as_deref()
+                .is_some_and(|task| task.contains("first child"));
+            if first {
+                self.second_child_started.notified().await;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            } else {
+                self.second_child_started.notify_one();
+            }
             vec![
                 ProviderEvent::TextDelta {
-                    text: "child result".into(),
+                    text: if first {
+                        "first child result".into()
+                    } else {
+                        "second child result".into()
+                    },
                 },
                 ProviderEvent::Stop {
                     reason: StopReason::EndTurn,
-                },
-            ]
-        } else if self.foreground_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            vec![
-                ProviderEvent::ToolCallStarted {
-                    index: 0,
-                    id: "delegate-1".into(),
-                    name: openwave_core::SPAWN_SANDBOX_AGENT_TOOL.into(),
-                },
-                ProviderEvent::ToolCallArgsDelta {
-                    index: 0,
-                    fragment: r#"{"task":"Return a concise child result."}"#.into(),
-                },
-                ProviderEvent::Stop {
-                    reason: StopReason::ToolUse,
                 },
             ]
         } else {
-            vec![
-                ProviderEvent::TextDelta {
-                    text: "parent resumed".into(),
-                },
-                ProviderEvent::Stop {
-                    reason: StopReason::EndTurn,
-                },
-            ]
+            let foreground_call = self.foreground_calls.fetch_add(1, Ordering::SeqCst);
+            match foreground_call {
+                0 => vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "delegate-1".into(),
+                        name: openwave_core::SPAWN_SANDBOX_AGENT_TOOL.into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: r#"{"task":"Return the first child result."}"#.into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ],
+                1 => vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "delegate-2".into(),
+                        name: openwave_core::SPAWN_SANDBOX_AGENT_TOOL.into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: r#"{"task":"Return the second child result."}"#.into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ],
+                // The worker must reject this terminal answer while children
+                // remains unsettled, then inject a fixed wait correction.
+                2 => vec![
+                    ProviderEvent::TextDelta {
+                        text: "premature parent answer".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ],
+                3 => {
+                    let request = self.requests.lock().unwrap().last().unwrap().clone();
+                    let agent_ids = request
+                        .messages
+                        .iter()
+                        .flat_map(|message| &message.content)
+                        .filter_map(|block| match block {
+                            ContentBlock::ToolResult { content, .. } => {
+                                serde_json::from_str::<serde_json::Value>(content)
+                                    .ok()
+                                    .and_then(|value| value["agent_id"].as_str().map(str::to_owned))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(agent_ids.len(), 2);
+                    vec![
+                        ProviderEvent::ToolCallStarted {
+                            index: 0,
+                            id: "wait-1".into(),
+                            name: openwave_core::WAIT_FOR_AGENTS_TOOL.into(),
+                        },
+                        ProviderEvent::ToolCallArgsDelta {
+                            index: 0,
+                            fragment: serde_json::json!({"agent_ids":agent_ids}).to_string(),
+                        },
+                        ProviderEvent::Stop {
+                            reason: StopReason::ToolUse,
+                        },
+                    ]
+                }
+                _ => vec![
+                    ProviderEvent::TextDelta {
+                        text: "parent completed after ordered wait".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ],
+            }
         };
         Ok(stream::iter(events).boxed())
     }
@@ -5823,7 +5906,7 @@ async fn root_search_never_returns_project_owned_vectors() {
 }
 
 #[test]
-fn agent_deps_registers_server_tools_and_the_foreground_sandbox_contract() {
+fn agent_deps_registers_server_tools_and_closed_foreground_orchestration() {
     let (_retrieval, tools, _config) = agent_deps(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
@@ -5837,19 +5920,23 @@ fn agent_deps_registers_server_tools_and_the_foreground_sandbox_contract() {
         names.iter().any(|n| n == "read_file"),
         "file tools still present"
     );
-    assert!(
-        !names
-            .iter()
-            .any(|name| name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL),
-        "the sandbox contract must only be advertised to a claimed foreground turn"
-    );
-    assert!(
-        tools
-            .specs_for_foreground(true)
-            .iter()
-            .any(|spec| spec.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL),
-        "foreground turns must expose the durable sandbox delegation contract"
-    );
+    assert!([
+        openwave_core::SPAWN_SANDBOX_AGENT_TOOL,
+        openwave_core::WAIT_FOR_AGENTS_TOOL,
+    ]
+    .iter()
+    .all(|orchestration| !names.iter().any(|name| name == orchestration)));
+    let foreground = tools
+        .specs_for_foreground(true)
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<std::collections::HashSet<_>>();
+    assert!([
+        openwave_core::SPAWN_SANDBOX_AGENT_TOOL,
+        openwave_core::WAIT_FOR_AGENTS_TOOL,
+    ]
+    .iter()
+    .all(|name| foreground.contains(*name)));
     assert_eq!(
         tools.execution(openwave_core::REQUEST_FOLDER_ACCESS_TOOL),
         Some(ToolCallExecution::Client)
@@ -8556,7 +8643,7 @@ async fn post_message_runs_a_turn_and_journals_its_events() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn foreground_sandbox_spawn_parks_executes_delivers_and_resumes() {
+async fn foreground_spawn_is_nonblocking_and_ordered_wait_resumes_with_child_result() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
@@ -8568,7 +8655,7 @@ async fn foreground_sandbox_spawn_parks_executes_delivers_and_resumes() {
     );
     let provider = Arc::new(SandboxRoundTripProvider::default());
     let mut tools = ToolRegistry::new();
-    tools.register_foreground_sandbox_spawn();
+    tools.register_foreground_agent_orchestration();
     let state = AppState::new(
         Config::desktop(dir.path()),
         store.clone(),
@@ -8611,57 +8698,146 @@ async fn foreground_sandbox_spawn_parks_executes_delivers_and_resumes() {
         events.last().map(|event| &event.event),
         Some(AgentEvent::TurnCompleted { .. })
     ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, AgentEvent::ToolCallCompleted { .. }))
+            .count(),
+        3
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, AgentEvent::StreamInterrupted)));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.event, AgentEvent::TurnFailed { .. })));
 
     let runs = store.list_agent_runs(chat.id).await.unwrap();
-    let child = runs
+    let children = runs
         .iter()
-        .find(|run| run.parent_id.is_some())
-        .expect("foreground delegation should durably create one child");
-    assert_eq!(child.status, AgentRunStatus::Completed);
+        .filter(|run| run.parent_id.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    assert!(children
+        .iter()
+        .all(|child| child.status == AgentRunStatus::Completed));
     let parent = openwave_core::AgentRunId::foreground_for_chat(chat.id);
     let inbox = store.list_agent_run_inbox(parent).await.unwrap();
-    assert_eq!(inbox.len(), 1);
-    assert_eq!(inbox[0].child_run_id, child.id);
-    assert_eq!(inbox[0].result.text, "child result");
-    assert_eq!(inbox[0].status, AgentRunInboxStatus::Consumed);
-    assert_eq!(inbox[0].claim_count, 1);
-    assert!(inbox[0].consumed_lease_token.is_some());
+    assert_eq!(inbox.len(), 2);
+    assert!(inbox.iter().all(|entry| {
+        entry.status == AgentRunInboxStatus::Consumed
+            && entry.claim_count == 1
+            && entry.consumed_lease_token.is_some()
+    }));
+    assert!(inbox
+        .iter()
+        .any(|entry| entry.result.text == "first child result"));
+    assert!(inbox
+        .iter()
+        .any(|entry| entry.result.text == "second child result"));
+    let first_delivery = inbox
+        .iter()
+        .find(|entry| entry.result.text == "first child result")
+        .unwrap()
+        .delivered_at;
+    let second_delivery = inbox
+        .iter()
+        .find(|entry| entry.result.text == "second child result")
+        .unwrap()
+        .delivered_at;
+    assert!(second_delivery < first_delivery);
 
     let turn = store.list_turn_runs(chat.id).await.unwrap().pop().unwrap();
     assert_eq!(turn.status, TurnRunStatus::Completed);
     assert_eq!(
-        turn.claim_count, 2,
-        "the resumed turn requires a fresh lease"
+        turn.claim_count, 4,
+        "two spawn continuations and ordered wait each require a fresh lease"
     );
     let requests = provider.requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
-    assert!(requests[0]
+    assert_eq!(requests.len(), 7);
+    let foreground = requests
+        .iter()
+        .filter(|request| {
+            request
+                .tools
+                .iter()
+                .any(|tool| tool.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL)
+        })
+        .collect::<Vec<_>>();
+    let sandbox = requests
+        .iter()
+        .filter(|request| {
+            request
+                .tools
+                .iter()
+                .any(|tool| tool.name == openwave_core::SANDBOX_WEB_SEARCH_TOOL)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(foreground.len(), 5);
+    assert_eq!(sandbox.len(), 2);
+    assert!(foreground.iter().all(|request| request
         .tools
         .iter()
-        .any(|tool| tool.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL));
+        .any(|tool| tool.name == openwave_core::WAIT_FOR_AGENTS_TOOL)));
+    assert!(sandbox
+        .iter()
+        .all(|request| request.tools.iter().all(|tool| {
+            !matches!(
+                tool.name.as_str(),
+                openwave_core::SPAWN_SANDBOX_AGENT_TOOL | openwave_core::WAIT_FOR_AGENTS_TOOL
+            )
+        })));
     assert!(
-        requests[1]
-            .tools
-            .iter()
-            .any(|tool| tool.name == openwave_core::SANDBOX_WEB_SEARCH_TOOL),
-        "sandbox receives only the fixed web-search tool surface"
-    );
-    assert!(
-        requests[2].messages.iter().any(|message| {
-            message.role == Role::System
-                && message.content
-                    == vec![ContentBlock::Text {
-                        text:
-                            "Sandbox agent completed. Its exact final result follows:\nchild result"
-                                .into(),
-                    }]
+        foreground[3].messages.iter().any(|message| {
+            message.role == Role::System && message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text }
+                        if text.contains("cannot finish yet") && text.contains("wait_for_agents")
+                )
+            })
         }),
-        "the resumed foreground request must receive the durable child result"
+        "premature completion must produce a fixed wait correction"
     );
-    assert!(requests[2]
-        .tools
+    assert!(foreground[4].messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+            ContentBlock::ToolResult { content, .. }
+                if content.contains("first child result") && content.contains("second child result")
+            )
+        })
+    }));
+    drop(requests);
+    let calls = store.list_tool_calls(chat.id).await.unwrap();
+    assert_eq!(calls.len(), 3);
+    assert!(calls.iter().all(|call| {
+        call.execution == openwave_core::ToolCallExecution::Orchestration
+            && call.status == openwave_core::ToolCallStatus::Completed
+    }));
+    assert!(calls
         .iter()
-        .any(|tool| tool.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL));
+        .any(|call| call.name == openwave_core::SPAWN_SANDBOX_AGENT_TOOL));
+    assert!(calls
+        .iter()
+        .any(|call| call.name == openwave_core::WAIT_FOR_AGENTS_TOOL));
+    let wait_result = calls
+        .iter()
+        .find(|call| call.name == openwave_core::WAIT_FOR_AGENTS_TOOL)
+        .and_then(|call| call.result.as_deref())
+        .expect("ordered wait should persist its bounded result");
+    assert!(
+        wait_result.find("first child result").unwrap()
+            < wait_result.find("second child result").unwrap(),
+        "wait result must preserve spawn/request order despite reverse completion"
+    );
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert!(messages
+        .iter()
+        .any(|message| message.content == "parent completed after ordered wait"));
+    assert!(!messages
+        .iter()
+        .any(|message| message.content.contains("premature parent answer")));
 }
 
 #[tokio::test(flavor = "multi_thread")]

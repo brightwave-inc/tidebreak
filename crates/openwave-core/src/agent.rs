@@ -27,7 +27,10 @@ use futures::StreamExt;
 use futures_timer::Delay;
 use serde_json::Value;
 
-use crate::agent_tools::{validate_spawn_sandbox_agent_arguments, SpawnSandboxAgentArgs};
+use crate::agent_tools::{
+    validate_spawn_sandbox_agent_arguments, validate_wait_for_agents_arguments,
+    SpawnSandboxAgentArgs, WaitForAgentsArgs,
+};
 use crate::approval::{
     ApprovalDecision, ApprovalGate, ApprovalJournalIdentity, ApprovalRequest,
     ApprovalRequiredPublication, RefuseGate, ToolApprovalKind,
@@ -67,9 +70,16 @@ enum RegisteredTool {
         spec: ToolSpec,
         validate_arguments: Option<fn(&Value) -> bool>,
     },
-    ForegroundSandboxSpawn {
+    ForegroundOrchestration {
         spec: ToolSpec,
+        kind: ForegroundOrchestrationKind,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ForegroundOrchestrationKind {
+    Spawn,
+    Wait,
 }
 
 impl ToolRegistry {
@@ -111,19 +121,27 @@ impl ToolRegistry {
         );
     }
 
-    /// Register the prepared foreground-only sandbox delegation contract.
+    /// Register the closed foreground-only spawn and ordered-wait contracts.
     ///
-    /// This integration seam is intentionally not enabled by the production
-    /// registry until a sandbox executor can claim and complete the child. A
-    /// claimed foreground worker must opt in before it is advertised, then
-    /// atomically parks its exact turn with durable child admission. Sandboxed
-    /// workers never opt in.
-    pub fn register_foreground_sandbox_spawn(&mut self) {
-        let spec = crate::spawn_sandbox_agent_tool_spec();
-        self.tools.insert(
-            spec.name.clone(),
-            RegisteredTool::ForegroundSandboxSpawn { spec },
-        );
+    /// A claimed foreground worker must still opt in before either definition
+    /// is advertised. Sandboxed workers never opt in, keeping delegation depth
+    /// bounded at one.
+    pub fn register_foreground_agent_orchestration(&mut self) {
+        for (spec, kind) in [
+            (
+                crate::spawn_sandbox_agent_tool_spec(),
+                ForegroundOrchestrationKind::Spawn,
+            ),
+            (
+                crate::wait_for_agents_tool_spec(),
+                ForegroundOrchestrationKind::Wait,
+            ),
+        ] {
+            self.tools.insert(
+                spec.name.clone(),
+                RegisteredTool::ForegroundOrchestration { spec, kind },
+            );
+        }
     }
 
     /// Builder-style [`register`](Self::register).
@@ -139,7 +157,7 @@ impl ToolRegistry {
         match self.tools.get(name) {
             Some(RegisteredTool::Server(tool)) => Some(tool.as_ref()),
             Some(RegisteredTool::Client { .. })
-            | Some(RegisteredTool::ForegroundSandboxSpawn { .. })
+            | Some(RegisteredTool::ForegroundOrchestration { .. })
             | None => None,
         }
     }
@@ -150,7 +168,7 @@ impl ToolRegistry {
         Some(match self.tools.get(name)? {
             RegisteredTool::Server(_) => ToolCallExecution::Server,
             RegisteredTool::Client { .. } => ToolCallExecution::Client,
-            RegisteredTool::ForegroundSandboxSpawn { .. } => return None,
+            RegisteredTool::ForegroundOrchestration { .. } => return None,
         })
     }
 
@@ -165,16 +183,18 @@ impl ToolRegistry {
     /// The foreground coordinator may opt into the sandbox control tool. All
     /// other contexts receive the ordinary server/client tool set only.
     #[must_use]
-    pub fn specs_for_foreground(&self, allow_sandbox_spawn: bool) -> Vec<ToolSpec> {
+    pub fn specs_for_foreground(&self, allow_agent_orchestration: bool) -> Vec<ToolSpec> {
         self.tools
             .values()
             .filter_map(|tool| match tool {
                 RegisteredTool::Server(tool) => Some(tool.spec()),
                 RegisteredTool::Client { spec, .. } => Some(spec.clone()),
-                RegisteredTool::ForegroundSandboxSpawn { spec } if allow_sandbox_spawn => {
+                RegisteredTool::ForegroundOrchestration { spec, .. }
+                    if allow_agent_orchestration =>
+                {
                     Some(spec.clone())
                 }
-                RegisteredTool::ForegroundSandboxSpawn { .. } => None,
+                RegisteredTool::ForegroundOrchestration { .. } => None,
             })
             .collect()
     }
@@ -192,7 +212,7 @@ impl ToolRegistry {
                 ..
             }) => true,
             Some(RegisteredTool::Server(_))
-            | Some(RegisteredTool::ForegroundSandboxSpawn { .. })
+            | Some(RegisteredTool::ForegroundOrchestration { .. })
             | None => false,
         }
     }
@@ -202,7 +222,10 @@ impl ToolRegistry {
     pub fn is_foreground_sandbox_spawn(&self, name: &str) -> bool {
         matches!(
             self.tools.get(name),
-            Some(RegisteredTool::ForegroundSandboxSpawn { .. })
+            Some(RegisteredTool::ForegroundOrchestration {
+                kind: ForegroundOrchestrationKind::Spawn,
+                ..
+            })
         )
     }
 
@@ -217,6 +240,29 @@ impl ToolRegistry {
         serde_json::from_value::<SpawnSandboxAgentArgs>(arguments.clone())
             .ok()
             .map(|arguments| arguments.task)
+    }
+
+    /// Whether `name` identifies the foreground-only ordered wait tool.
+    #[must_use]
+    pub fn is_foreground_agent_wait(&self, name: &str) -> bool {
+        matches!(
+            self.tools.get(name),
+            Some(RegisteredTool::ForegroundOrchestration {
+                kind: ForegroundOrchestrationKind::Wait,
+                ..
+            })
+        )
+    }
+
+    /// Parse and validate one ordered foreground child wait.
+    #[must_use]
+    pub fn wait_for_agent_ids(&self, name: &str, arguments: &Value) -> Option<Vec<AgentRunId>> {
+        if !self.is_foreground_agent_wait(name) || !validate_wait_for_agents_arguments(arguments) {
+            return None;
+        }
+        serde_json::from_value::<WaitForAgentsArgs>(arguments.clone())
+            .ok()
+            .map(|arguments| arguments.agent_ids)
     }
 
     /// Whether no tools are registered.
@@ -317,11 +363,22 @@ pub enum AgentTurnOutcome {
     /// The foreground model requested one durable sandbox child.
     ///
     /// The foreground worker validates this exact request and invokes
-    /// [`Store::accept_sandbox_agent_run_and_park_turn`] with its live lease,
-    /// steering epoch, and accumulated checkpoint totals.
+    /// [`Store::checkpoint_sandbox_spawn`] with its live lease, steering epoch,
+    /// and accumulated checkpoint totals before yielding into `resuming`.
     SandboxAgentSpawn {
         /// Canonical child identity and bounded task derived from the tool call.
         request: SandboxAgentSpawnRequest,
+        /// Provider usage incurred in this agent invocation.
+        usage: Usage,
+        /// Durable steering epoch captured before the producing model call.
+        steer_revision: i64,
+        /// Model-call steps consumed in this agent invocation.
+        model_steps: usize,
+    },
+    /// The foreground model requested an ordered wait for sandbox children.
+    WaitForAgents {
+        /// Canonical wait identity and ordered child set.
+        request: ForegroundAgentWaitRequest,
         /// Provider usage incurred in this agent invocation.
         usage: Usage,
         /// Durable steering epoch captured before the producing model call.
@@ -345,10 +402,14 @@ pub enum AgentTurnOutcome {
 pub struct SandboxAgentSpawnRequest {
     /// Stable call identity emitted by the model stream.
     pub call_id: CallId,
+    /// Provider-facing tool-use identity retained for transcript reconstruction.
+    pub provider_id: String,
     /// Deterministic sandbox child identity derived from [`Self::call_id`].
     pub child_run_id: AgentRunId,
     /// Bounded, self-contained child input.
     pub task: String,
+    /// Canonical closed arguments emitted by the provider.
+    pub arguments: Value,
 }
 
 impl SandboxAgentSpawnRequest {
@@ -357,9 +418,39 @@ impl SandboxAgentSpawnRequest {
     pub fn is_well_formed(&self) -> bool {
         self.call_id.0 != uuid::Uuid::nil()
             && self.child_run_id == AgentRunId::sandbox_for_spawn_call(self.call_id)
-            && validate_spawn_sandbox_agent_arguments(&serde_json::json!({
-                "task": self.task,
-            }))
+            && !self.provider_id.is_empty()
+            && !self.provider_id.contains('\0')
+            && self.provider_id.len() <= ToolCallRecord::MAX_LABEL_LEN
+            && validate_spawn_sandbox_agent_arguments(&self.arguments)
+            && serde_json::from_value::<SpawnSandboxAgentArgs>(self.arguments.clone())
+                .is_ok_and(|arguments| arguments.task == self.task)
+    }
+}
+
+/// One model proposal to wait for an ordered set of admitted sandbox children.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForegroundAgentWaitRequest {
+    /// Stable model tool-call identity.
+    pub call_id: CallId,
+    /// Provider-facing tool-use identity retained for transcript reconstruction.
+    pub provider_id: String,
+    /// Ordered child identities requested by the model.
+    pub child_run_ids: Vec<AgentRunId>,
+    /// Canonical closed arguments emitted by the provider.
+    pub arguments: Value,
+}
+
+impl ForegroundAgentWaitRequest {
+    /// Whether immutable provider output agrees with the closed wait contract.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.call_id.0 != uuid::Uuid::nil()
+            && !self.provider_id.is_empty()
+            && !self.provider_id.contains('\0')
+            && self.provider_id.len() <= ToolCallRecord::MAX_LABEL_LEN
+            && validate_wait_for_agents_arguments(&self.arguments)
+            && serde_json::from_value::<WaitForAgentsArgs>(self.arguments.clone())
+                .is_ok_and(|arguments| arguments.agent_ids == self.child_run_ids)
     }
 }
 
@@ -631,7 +722,8 @@ pub struct Agent {
     cancel: CancelToken,
     steer: SteerInbox,
     durable_steer_lease: Option<uuid::Uuid>,
-    sandbox_spawns_enabled: bool,
+    agent_orchestration_enabled: bool,
+    continuation_instruction: Option<String>,
 }
 
 /// A tool call accumulated from the provider stream.
@@ -667,7 +759,8 @@ impl Agent {
             cancel: CancelToken::new(),
             steer: SteerInbox::new(),
             durable_steer_lease: None,
-            sandbox_spawns_enabled: false,
+            agent_orchestration_enabled: false,
+            continuation_instruction: None,
         }
     }
 
@@ -701,18 +794,25 @@ impl Agent {
         self
     }
 
-    /// Advertise and accept the foreground-only sandbox delegation tool.
+    /// Advertise and accept foreground-only spawn and ordered-wait tools.
     ///
     /// This is intentionally opt-in: sandbox workers must not set it, keeping
     /// the v1 hierarchy at a single child depth.
     #[must_use]
-    pub fn with_foreground_sandbox_spawns(mut self) -> Self {
-        self.sandbox_spawns_enabled = true;
+    pub fn with_foreground_agent_orchestration(mut self) -> Self {
+        self.agent_orchestration_enabled = true;
         self
     }
 
-    fn sandbox_spawns_active(&self) -> bool {
-        self.sandbox_spawns_enabled && self.durable_steer_lease.is_some()
+    /// Add a fixed runtime correction before the next provider invocation.
+    #[must_use]
+    pub fn with_continuation_instruction(mut self, instruction: Option<String>) -> Self {
+        self.continuation_instruction = instruction;
+        self
+    }
+
+    fn agent_orchestration_active(&self) -> bool {
+        self.agent_orchestration_enabled && self.durable_steer_lease.is_some()
     }
 
     /// Run one turn: submit `user_input`, drive the loop to a final answer,
@@ -854,6 +954,9 @@ impl Agent {
         // The provider transcript for this turn: prior stored text + the blocks
         // we build up as the loop runs.
         let mut transcript = self.load_transcript(chat.id).await?;
+        if let Some(instruction) = self.continuation_instruction.as_ref() {
+            transcript.push(ChatMessage::text(Role::System, instruction.clone()));
+        }
         let mut total_usage = Usage::default();
         self.resume_pending_server_calls(chat, turn_id, events, &mut transcript)
             .await?;
@@ -883,7 +986,7 @@ impl Agent {
                     messages: fitted,
                     tools: self
                         .tools
-                        .specs_for_foreground(self.sandbox_spawns_active()),
+                        .specs_for_foreground(self.agent_orchestration_active()),
                     max_tokens: self.config.max_tokens,
                     temperature: self.config.temperature,
                 };
@@ -1071,7 +1174,7 @@ impl Agent {
             let sandbox_spawns = calls
                 .iter()
                 .filter(|call| {
-                    self.sandbox_spawns_active()
+                    self.agent_orchestration_active()
                         && self.tools.is_foreground_sandbox_spawn(&call.name)
                 })
                 .collect::<Vec<_>>();
@@ -1120,8 +1223,65 @@ impl Agent {
                 return Ok(AgentTurnOutcome::SandboxAgentSpawn {
                     request: SandboxAgentSpawnRequest {
                         call_id: call.call_id,
+                        provider_id: call.provider_id.clone(),
                         child_run_id: AgentRunId::sandbox_for_spawn_call(call.call_id),
                         task,
+                        arguments,
+                    },
+                    usage: total_usage,
+                    steer_revision,
+                    model_steps: step + 1,
+                });
+            }
+
+            let agent_waits = calls
+                .iter()
+                .filter(|call| {
+                    self.agent_orchestration_active()
+                        && self.tools.is_foreground_agent_wait(&call.name)
+                })
+                .collect::<Vec<_>>();
+            if !agent_waits.is_empty() {
+                if calls.len() != 1 || agent_waits.len() != 1 || !text.is_empty() {
+                    events.send(AgentEvent::StreamInterrupted);
+                    transcript.push(ChatMessage::text(
+                        Role::User,
+                        "wait_for_agents must be requested alone, without assistant text or sibling tool calls. Retry the request in that form.",
+                    ));
+                    continue;
+                }
+                let call = agent_waits[0];
+                let Some(arguments) = parse_client_args(&call.args) else {
+                    events.send(AgentEvent::StreamInterrupted);
+                    transcript.push(ChatMessage::text(
+                        Role::User,
+                        "The wait_for_agents arguments were not valid JSON. Retry with one complete ordered agent_ids value.",
+                    ));
+                    continue;
+                };
+                let Some(child_run_ids) = self.tools.wait_for_agent_ids(&call.name, &arguments)
+                else {
+                    events.send(AgentEvent::StreamInterrupted);
+                    transcript.push(ChatMessage::text(
+                        Role::User,
+                        "wait_for_agents requires one non-empty, bounded, unique agent_ids list with no extra properties.",
+                    ));
+                    continue;
+                };
+                let Some(steer_revision) = generation_steer_revision else {
+                    events.send(AgentEvent::StreamInterrupted);
+                    transcript.push(ChatMessage::text(
+                        Role::User,
+                        "wait_for_agents is available only from a durably claimed foreground turn.",
+                    ));
+                    continue;
+                };
+                return Ok(AgentTurnOutcome::WaitForAgents {
+                    request: ForegroundAgentWaitRequest {
+                        call_id: call.call_id,
+                        provider_id: call.provider_id.clone(),
+                        child_run_ids,
+                        arguments,
                     },
                     usage: total_usage,
                     steer_revision,
@@ -1964,7 +2124,9 @@ impl Agent {
             self.config.context_window,
             reduction_level,
             self.config.system_prompt.as_deref(),
-            &self.tools.specs(),
+            &self
+                .tools
+                .specs_for_foreground(self.agent_orchestration_active()),
         );
         let floor = context::content_floor_for_level(reduction_level);
         context::fit_to_budget(transcript, budget, floor)
@@ -2735,11 +2897,19 @@ mod tests {
             .unwrap();
 
         let mut registry = ToolRegistry::new();
-        registry.register_foreground_sandbox_spawn();
+        registry.register_foreground_agent_orchestration();
         assert!(registry.specs().is_empty());
+        let advertised = registry
+            .specs_for_foreground(true)
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<std::collections::HashSet<_>>();
         assert_eq!(
-            registry.specs_for_foreground(true)[0].name,
-            crate::SPAWN_SANDBOX_AGENT_TOOL
+            advertised,
+            [crate::SPAWN_SANDBOX_AGENT_TOOL, crate::WAIT_FOR_AGENTS_TOOL]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
         );
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
@@ -2755,7 +2925,7 @@ mod tests {
             },
         )
         .with_durable_steer(lease_token)
-        .with_foreground_sandbox_spawns();
+        .with_foreground_agent_orchestration();
         let (tx, rx) = unbounded();
         let outcome = agent
             .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
@@ -2788,6 +2958,92 @@ mod tests {
             AgentEvent::ToolCallStarted { name, .. }
                 if name == crate::SPAWN_SANDBOX_AGENT_TOOL
         )));
+    }
+
+    #[tokio::test]
+    async fn claimed_foreground_agent_returns_exact_ordered_wait_checkpoint() {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("wait.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "wait for both")
+            .await
+            .unwrap();
+        let lease_token = uuid::Uuid::new_v4();
+        let claimed_at = Utc::now();
+        store
+            .claim_turn_run(
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register_foreground_agent_orchestration();
+        let arguments = r#"{"agent_ids":["00000000-0000-0000-0000-000000000002","00000000-0000-0000-0000-000000000001"]}"#;
+        let agent = Agent::new(
+            Arc::new(ClientToolProvider {
+                assistant_text: false,
+                name: crate::WAIT_FOR_AGENTS_TOOL,
+                arguments,
+            }),
+            Arc::new(registry),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        )
+        .with_durable_steer(lease_token)
+        .with_foreground_agent_orchestration();
+        let (tx, _rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        let AgentTurnOutcome::WaitForAgents {
+            request,
+            steer_revision,
+            model_steps,
+            ..
+        } = outcome
+        else {
+            panic!("foreground agent should return an ordered wait checkpoint");
+        };
+        assert_eq!(request.provider_id, "native_1");
+        assert_eq!(
+            request.arguments,
+            serde_json::from_str::<Value>(arguments).unwrap()
+        );
+        assert_eq!(
+            request.child_run_ids,
+            [
+                "00000000-0000-0000-0000-000000000002",
+                "00000000-0000-0000-0000-000000000001",
+            ]
+            .map(|id| AgentRunId(uuid::Uuid::parse_str(id).unwrap()))
+        );
+        assert!(request.is_well_formed());
+        assert_eq!(steer_revision, 0);
+        assert_eq!(model_steps, 1);
     }
 
     #[tokio::test]

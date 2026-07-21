@@ -1337,8 +1337,8 @@ pub trait Store: Send + Sync {
     /// parent, child, and immutable admission receipt commit together under the
     /// chat/turn write lock. Existing exact receipts are recovered before the
     /// bounded outstanding-child check, making an ambiguous commit retry safe.
-    /// This is a persistence primitive only; the foreground agent does not yet
-    /// expose non-blocking fan-out behavior.
+    /// The stronger checkpoint boundary below composes this admission with the
+    /// foreground transcript, progress, event, and immediate continuation.
     #[allow(clippy::too_many_arguments)]
     async fn admit_sandbox_agent_run(
         &self,
@@ -1360,7 +1360,8 @@ pub trait Store: Send + Sync {
     /// A successful transition writes one terminal, non-executable
     /// orchestration tool call and its `ToolCallCompleted` event, applies one
     /// progress delta, then moves `running` to `resuming` with no live lease.
-    /// This storage primitive is deliberately not advertised to models yet.
+    /// Foreground orchestration advertises this together with the explicit
+    /// ordered wait boundary; sandbox agents receive neither contract.
     async fn checkpoint_sandbox_spawn(
         &self,
         _request: &crate::model::SandboxSpawnCheckpointRequest,

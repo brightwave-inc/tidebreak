@@ -15,11 +15,13 @@ use chrono::Utc;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use openwave_core::{
-    AcceptSandboxAgentRunAndParkTurnOutcome, Agent, AgentConfig, AgentError, AgentEvent,
-    AgentTurnOutcome, ClaimedAgentEvent, CompleteTurnRunOutcome, MessageId,
-    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, Result, SandboxAgentSpawnRequest,
-    SequencedEvent, Store, ToolRegistry, ToolScratch, TurnCheckpointProgress, TurnFailureRetry,
-    TurnId, TurnRun, TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentRunWaitCondition,
+    AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, CheckpointSandboxSpawnOutcome,
+    ClaimedAgentEvent, CompleteTurnRunOutcome, ForegroundAgentWaitRequest, MessageId,
+    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
+    Result, SandboxAgentSpawnRequest, SandboxSpawnCheckpointRequest, SequencedEvent, Store,
+    ToolRegistry, ToolScratch, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRun,
+    TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL,
 };
 use tokio::sync::Notify;
 
@@ -58,6 +60,7 @@ pub(crate) enum TurnWorkerOutcome {
     Completed(TurnId),
     WaitingForClient(TurnId),
     WaitingForAgentRun(TurnId),
+    Resuming(TurnId),
     Cancelled(TurnId),
     Failed(TurnId),
     LeaseLost(TurnId),
@@ -142,6 +145,17 @@ fn sandbox_spawn_checkpoint_is_valid(
                 &serde_json::json!({"task": request.task}),
             )
             .is_some_and(|task| task == request.task)
+}
+
+fn agent_wait_checkpoint_is_valid(
+    tools: &ToolRegistry,
+    request: &ForegroundAgentWaitRequest,
+) -> bool {
+    request.is_well_formed()
+        && tools.is_foreground_agent_wait(WAIT_FOR_AGENTS_TOOL)
+        && tools
+            .wait_for_agent_ids(WAIT_FOR_AGENTS_TOOL, &request.arguments)
+            .is_some_and(|ids| ids == request.child_run_ids)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -386,6 +400,7 @@ impl TurnWorker {
         let mut total_usage = turn.usage;
         let mut checkpoint_usage = openwave_core::Usage::default();
         let mut checkpoint_steps = 0_usize;
+        let mut continuation_instruction = None;
         if remaining_steps == 0 {
             return self
                 .record_failure(
@@ -485,7 +500,8 @@ impl TurnWorker {
                 .with_cancel(cancel.clone())
                 .with_steer(steer.clone())
                 .with_durable_steer(lease_token)
-                .with_foreground_sandbox_spawns();
+                .with_foreground_agent_orchestration()
+                .with_continuation_instruction(continuation_instruction.clone());
             let chat = chat.clone();
             let (events_tx, mut events_rx) = unbounded();
             let mut drive = AbortOnDrop(tokio::spawn(async move {
@@ -627,6 +643,7 @@ impl TurnWorker {
                         | Ok(AgentTurnOutcome::Cancelled { usage, .. })
                         | Ok(AgentTurnOutcome::ClientToolCall { usage, .. })
                         | Ok(AgentTurnOutcome::SandboxAgentSpawn { usage, .. })
+                        | Ok(AgentTurnOutcome::WaitForAgents { usage, .. })
                         | Ok(AgentTurnOutcome::Failed { usage, .. }) => *usage,
                         Err(_) => openwave_core::Usage::default(),
                     };
@@ -752,11 +769,11 @@ impl TurnWorker {
                                     child_run_ids,
                                     ..
                                 } => {
-                                    return Err(AgentError::msg(format!(
-                                        "turn {} attempted to complete with {} unsettled sandbox children",
-                                        turn.id,
-                                        child_run_ids.len()
-                                    )));
+                                    continuation_instruction = Some(format!(
+                                        "You cannot finish yet because background agents are still unsettled. Call wait_for_agents exactly once with this complete agent_ids list, preserving this order: {}",
+                                        serde_json::to_string(&child_run_ids)?
+                                    ));
+                                    break true;
                                 }
                             },
                             Ok(None) => {
@@ -1160,22 +1177,26 @@ impl TurnWorker {
                         })?,
                         usage: checkpoint_usage,
                     };
+                    let checkpoint = SandboxSpawnCheckpointRequest {
+                        origin_turn_id: turn.id,
+                        lease_token,
+                        expected_steer_revision: steer_revision,
+                        call_id: request.call_id,
+                        provider_id: request.provider_id.clone(),
+                        arguments: request.arguments.clone(),
+                        result: serde_json::to_string(&openwave_core::SpawnSandboxAgentResult {
+                            agent_id: request.child_run_id,
+                        })?,
+                        event_ordinal: ordinal,
+                        progress,
+                    };
                     let mut checkpoint_heartbeat = AbortOnDrop(tokio::spawn(
                         self.clone()
                             .heartbeat_lease(turn.clone(), lease_token, cancel.clone()),
                     ));
                     loop {
                         let park_result = tokio::select! {
-                            result = self.store.accept_sandbox_agent_run_and_park_turn(
-                                request.child_run_id,
-                                turn.id,
-                                request.call_id,
-                                &request.task,
-                                lease_token,
-                                steer_revision,
-                                progress,
-                                Utc::now(),
-                            ) => result,
+                            result = self.store.checkpoint_sandbox_spawn(&checkpoint, Utc::now()) => result,
                             result = &mut checkpoint_heartbeat.0 => {
                                 match result {
                                     Ok(HeartbeatOutcome::Cancelling) => {
@@ -1195,44 +1216,39 @@ impl TurnWorker {
                             }
                         };
                         match park_result {
-                            Ok(Some(AcceptSandboxAgentRunAndParkTurnOutcome::Parked {
-                                ..
-                            }))
-                            | Ok(Some(AcceptSandboxAgentRunAndParkTurnOutcome::Existing {
-                                ..
+                            Ok(Some(CheckpointSandboxSpawnOutcome::Checkpointed {
+                                event, ..
                             })) => {
                                 checkpoint_heartbeat.abort_and_wait().await;
-                                // The child and parent wait state are now one
-                                // durable transaction. This is intentionally
-                                // only a latency hint: the sandbox worker's
-                                // durable claim scan remains the correctness
-                                // source if the notification is lost.
+                                self.publish(turn.chat_id, event);
                                 self.sandbox_agent_wake.notify_one();
-                                return Ok(TurnWorkerOutcome::WaitingForAgentRun(turn.id));
+                                self.wake.notify_one();
+                                return Ok(TurnWorkerOutcome::Resuming(turn.id));
                             }
-                            Ok(Some(AcceptSandboxAgentRunAndParkTurnOutcome::SteerPending(_)))
-                            | Ok(Some(
-                                AcceptSandboxAgentRunAndParkTurnOutcome::OutputSuperseded(_),
-                            )) => {
+                            Ok(Some(CheckpointSandboxSpawnOutcome::Existing { event, .. })) => {
+                                checkpoint_heartbeat.abort_and_wait().await;
+                                // Exact recovery can be the first successful
+                                // response observed after an ambiguous commit.
+                                // Re-publishing the same durable sequence is
+                                // safe for cursor-deduplicating clients.
+                                self.publish(turn.chat_id, event);
+                                self.sandbox_agent_wake.notify_one();
+                                self.wake.notify_one();
+                                return Ok(TurnWorkerOutcome::Resuming(turn.id));
+                            }
+                            Ok(Some(CheckpointSandboxSpawnOutcome::SteerPending(_)))
+                            | Ok(Some(CheckpointSandboxSpawnOutcome::OutputSuperseded(_))) => {
                                 break;
                             }
-                            Ok(Some(AcceptSandboxAgentRunAndParkTurnOutcome::AtCapacity)) => {
-                                checkpoint_heartbeat.abort_and_wait().await;
-                                return self
-                                    .record_failure(
-                                        &turn,
-                                        lease_token,
-                                        total_model_steps,
-                                        total_usage,
-                                        "sandbox_agent_capacity_exceeded",
-                                        "sandbox delegation exceeds the bounded outstanding-child limit",
-                                    )
-                                    .await;
+                            Ok(Some(CheckpointSandboxSpawnOutcome::AtCapacity)) => {
+                                continuation_instruction = Some(
+                                    "The background-agent capacity is full. Do not spawn another agent. Call wait_for_agents with previously returned agent IDs before trying to delegate more work."
+                                        .into(),
+                                );
+                                break;
                             }
-                            Ok(Some(AcceptSandboxAgentRunAndParkTurnOutcome::IdentityConflict))
-                            | Ok(Some(
-                                AcceptSandboxAgentRunAndParkTurnOutcome::ParentUnavailable,
-                            )) => {
+                            Ok(Some(CheckpointSandboxSpawnOutcome::IdentityConflict))
+                            | Ok(Some(CheckpointSandboxSpawnOutcome::ParentUnavailable)) => {
                                 checkpoint_heartbeat.abort_and_wait().await;
                                 return self
                                     .record_failure(
@@ -1244,6 +1260,26 @@ impl TurnWorker {
                                         "sandbox delegation conflicts with its durable receipt",
                                     )
                                     .await;
+                            }
+                            Ok(Some(CheckpointSandboxSpawnOutcome::LeaseLost)) => {
+                                match self.live_turn_state_retry(&turn, lease_token).await {
+                                    LiveTurnState::Running => tokio::task::yield_now().await,
+                                    LiveTurnState::Cancelling => {
+                                        checkpoint_heartbeat.abort_and_wait().await;
+                                        drop(active);
+                                        return self
+                                            .acknowledge_cancellation(
+                                                &turn,
+                                                lease_token,
+                                                total_usage,
+                                            )
+                                            .await;
+                                    }
+                                    LiveTurnState::Lost => {
+                                        checkpoint_heartbeat.abort_and_wait().await;
+                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                    }
+                                }
                             }
                             Ok(None) => {
                                 match self.live_turn_state_retry(&turn, lease_token).await {
@@ -1285,6 +1321,207 @@ impl TurnWorker {
                             )
                             .await;
                     }
+                    let mut continuation_heartbeat = AbortOnDrop(tokio::spawn(
+                        self.clone()
+                            .heartbeat_lease(turn.clone(), lease_token, cancel.clone()),
+                    ));
+                    match self
+                        .append_event(&turn, lease_token, ordinal, &AgentEvent::StreamInterrupted)
+                        .await?
+                    {
+                        EventAppend::Committed => {
+                            ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                                AgentError::msg(format!("turn {} event ordinal exhausted", turn.id))
+                            })?;
+                        }
+                        EventAppend::Cancelling => {
+                            cancel.cancel();
+                            drop(active);
+                            return self
+                                .acknowledge_cancellation(&turn, lease_token, total_usage)
+                                .await;
+                        }
+                        EventAppend::LeaseLost => {
+                            return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                        }
+                    }
+                    continuation_heartbeat.abort_and_wait().await;
+                    continue;
+                }
+                Ok(AgentTurnOutcome::WaitForAgents {
+                    request,
+                    usage,
+                    steer_revision,
+                    model_steps,
+                }) => {
+                    if model_steps == 0 || model_steps > remaining_steps {
+                        return Err(AgentError::msg(format!(
+                            "turn {} returned an invalid model-step count {model_steps}",
+                            turn.id
+                        )));
+                    }
+                    remaining_steps -= model_steps;
+                    total_model_steps = checked_model_step_sum(total_model_steps, model_steps)?;
+                    total_usage = match checked_usage_sum(total_usage, usage) {
+                        Ok(total) => total,
+                        Err(_) => {
+                            return self
+                                .record_failure(
+                                    &turn,
+                                    lease_token,
+                                    total_model_steps,
+                                    total_usage,
+                                    "usage_overflow",
+                                    "provider usage exceeded the supported turn total",
+                                )
+                                .await;
+                        }
+                    };
+                    if remaining_steps == 0 {
+                        drop(active);
+                        return self
+                            .record_failure(
+                                &turn,
+                                lease_token,
+                                total_model_steps,
+                                total_usage,
+                                "max_steps_exceeded",
+                                "max steps per turn exceeded before waiting for background agents",
+                            )
+                            .await;
+                    }
+                    if !agent_wait_checkpoint_is_valid(self.tools.as_ref(), &request) {
+                        drop(active);
+                        return self
+                            .record_failure(
+                                &turn,
+                                lease_token,
+                                total_model_steps,
+                                total_usage,
+                                "invalid_agent_wait",
+                                "agent returned an invalid background-agent wait checkpoint",
+                            )
+                            .await;
+                    }
+                    checkpoint_usage = match checked_usage_sum(checkpoint_usage, usage) {
+                        Ok(total) => total,
+                        Err(_) => {
+                            return self
+                                .record_failure(
+                                    &turn,
+                                    lease_token,
+                                    total_model_steps,
+                                    total_usage,
+                                    "usage_overflow",
+                                    "provider usage exceeded the supported checkpoint total",
+                                )
+                                .await;
+                        }
+                    };
+                    checkpoint_steps =
+                        checkpoint_steps.checked_add(model_steps).ok_or_else(|| {
+                            AgentError::msg(format!(
+                                "turn {} checkpoint model-step count overflowed",
+                                turn.id
+                            ))
+                        })?;
+                    let progress = TurnCheckpointProgress {
+                        model_steps: i32::try_from(checkpoint_steps).map_err(|_| {
+                            AgentError::msg(format!(
+                                "turn {} checkpoint model-step count is too large",
+                                turn.id
+                            ))
+                        })?,
+                        usage: checkpoint_usage,
+                    };
+                    let checkpoint = AgentRunWaitSetCheckpointRequest {
+                        call_id: request.call_id,
+                        origin_turn_id: turn.id,
+                        child_run_ids: request.child_run_ids.clone(),
+                        condition: AgentRunWaitCondition::All,
+                        lease_token,
+                        expected_steer_revision: steer_revision,
+                        provider_id: request.provider_id.clone(),
+                        arguments: request.arguments.clone(),
+                        event_ordinal: ordinal,
+                        progress,
+                    };
+                    let mut checkpoint_heartbeat = AbortOnDrop(tokio::spawn(
+                        self.clone()
+                            .heartbeat_lease(turn.clone(), lease_token, cancel.clone()),
+                    ));
+                    loop {
+                        let park_result = tokio::select! {
+                            result = self.store.park_turn_for_agent_run_wait_set(&checkpoint, Utc::now()) => result,
+                            result = &mut checkpoint_heartbeat.0 => {
+                                match result {
+                                    Ok(HeartbeatOutcome::Cancelling) => {
+                                        drop(active);
+                                        return self
+                                            .acknowledge_cancellation(
+                                                &turn,
+                                                lease_token,
+                                                total_usage,
+                                            )
+                                            .await;
+                                    }
+                                    Ok(HeartbeatOutcome::LeaseLost) | Err(_) => {
+                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                    }
+                                }
+                            }
+                        };
+                        match park_result {
+                            Ok(Some(ParkTurnForAgentRunWaitSetOutcome::Parked { .. }))
+                            | Ok(Some(ParkTurnForAgentRunWaitSetOutcome::Existing { .. })) => {
+                                checkpoint_heartbeat.abort_and_wait().await;
+                                // This also drives the durable ready-set scan
+                                // when every child completed before the park.
+                                self.sandbox_agent_wake.notify_one();
+                                return Ok(TurnWorkerOutcome::WaitingForAgentRun(turn.id));
+                            }
+                            Ok(Some(ParkTurnForAgentRunWaitSetOutcome::SteerPending(_)))
+                            | Ok(Some(ParkTurnForAgentRunWaitSetOutcome::OutputSuperseded(_))) => {
+                                break;
+                            }
+                            Ok(Some(ParkTurnForAgentRunWaitSetOutcome::IdentityConflict)) => {
+                                continuation_instruction = Some(
+                                    "That background-agent wait was invalid. Use only unique agent IDs returned by spawn_sandbox_agent in this turn, and include every unsettled child before finishing."
+                                        .into(),
+                                );
+                                break;
+                            }
+                            Ok(None) => {
+                                match self.live_turn_state_retry(&turn, lease_token).await {
+                                    LiveTurnState::Running => tokio::task::yield_now().await,
+                                    LiveTurnState::Cancelling => {
+                                        checkpoint_heartbeat.abort_and_wait().await;
+                                        drop(active);
+                                        return self
+                                            .acknowledge_cancellation(
+                                                &turn,
+                                                lease_token,
+                                                total_usage,
+                                            )
+                                            .await;
+                                    }
+                                    LiveTurnState::Lost => {
+                                        checkpoint_heartbeat.abort_and_wait().await;
+                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                self.retry_after(
+                                    "background-agent wait checkpoint",
+                                    turn.id,
+                                    &error,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    checkpoint_heartbeat.abort_and_wait().await;
                     let mut continuation_heartbeat = AbortOnDrop(tokio::spawn(
                         self.clone()
                             .heartbeat_lease(turn.clone(), lease_token, cancel.clone()),
@@ -2059,12 +2296,14 @@ mod committed_event_drain_tests {
     #[test]
     fn sandbox_spawn_checkpoint_fence_requires_the_registered_foreground_contract() {
         let mut tools = ToolRegistry::new();
-        tools.register_foreground_sandbox_spawn();
+        tools.register_foreground_agent_orchestration();
         let call_id = openwave_core::CallId::new();
         let request = SandboxAgentSpawnRequest {
             call_id,
+            provider_id: "provider-call".into(),
             child_run_id: openwave_core::AgentRunId::sandbox_for_spawn_call(call_id),
             task: "Research the error handling options.".into(),
+            arguments: serde_json::json!({"task":"Research the error handling options."}),
         };
         assert!(sandbox_spawn_checkpoint_is_valid(&tools, &request));
 

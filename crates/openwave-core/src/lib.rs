@@ -39,7 +39,8 @@ pub mod tool;
 pub mod tools;
 
 pub use agent::{
-    Agent, AgentConfig, AgentTurnOutcome, ClaimedAgentEvent, SandboxAgentSpawnRequest, ToolRegistry,
+    Agent, AgentConfig, AgentTurnOutcome, ClaimedAgentEvent, ForegroundAgentWaitRequest,
+    SandboxAgentSpawnRequest, ToolRegistry,
 };
 pub use agent_tools::{
     sandbox_web_search_tool_spec, spawn_sandbox_agent_tool_spec,

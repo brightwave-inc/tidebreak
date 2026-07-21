@@ -3,8 +3,7 @@
 //! These are prepared control-flow proposals, not generic server-executed
 //! tools. The foreground turn worker owns the corresponding durable transition
 //! so the model can never bypass its lease, steer, or accounting fences. The
-//! production registry deliberately keeps this definition disabled until a
-//! sandbox executor can claim and complete the child.
+//! production registry exposes them only to durably claimed foreground turns.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,7 +56,7 @@ pub struct SpawnSandboxAgentArgs {
 ///
 /// This deliberately excludes scheduler state and lease identities. The
 /// foreground model needs only the stable child identity it may later pass to
-/// [`WAIT_FOR_AGENTS_TOOL`]. The current runtime does not emit this result yet.
+/// [`WAIT_FOR_AGENTS_TOOL`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SpawnSandboxAgentResult {
     /// Stable identity of the admitted depth-one child.
@@ -220,13 +219,14 @@ pub fn validate_wait_for_agents_arguments(arguments: &Value) -> bool {
 /// Foreground-only model tool contract for delegating one bounded task.
 ///
 /// The worker derives the durable child identity from the model tool call and
-/// atomically parks the foreground turn. Sandboxed agents never receive this
-/// definition, so the v1 hierarchy cannot recurse past depth one.
+/// atomically checkpoints the result before continuing the foreground turn.
+/// Sandboxed agents never receive this definition, so the v1 hierarchy cannot
+/// recurse past depth one.
 #[must_use]
 pub fn spawn_sandbox_agent_tool_spec() -> ToolSpec {
     ToolSpec {
         name: SPAWN_SANDBOX_AGENT_TOOL.into(),
-        description: "Delegate one self-contained task to an isolated background agent. The conversation will pause until that agent returns. Use this only when independent work is useful; do not ask it to spawn more agents.".into(),
+        description: "Delegate one self-contained task to an isolated background agent and continue immediately. Save every returned agent_id. Before final completion, include every spawned agent_id in a wait_for_agents call; batch independent IDs into one wait, and do not ask it to spawn more agents.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -245,9 +245,8 @@ pub fn spawn_sandbox_agent_tool_spec() -> ToolSpec {
 
 /// Prepared foreground-only contract for waiting on depth-one children.
 ///
-/// This definition is intentionally not registered yet. Advertising it is
-/// safe only after non-blocking spawn and durable multi-child resume are wired
-/// together in the foreground runtime.
+/// It is advertised only with the matching non-blocking spawn contract from a
+/// durably claimed foreground turn.
 #[must_use]
 pub fn wait_for_agents_tool_spec() -> ToolSpec {
     ToolSpec {
