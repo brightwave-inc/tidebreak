@@ -11,6 +11,7 @@ use crate::{ApprovalClass, ChunkId, ToolApprovalStatus};
 use chrono::{DateTime, Utc};
 
 mod agent_run;
+mod delegated_file_read;
 mod multi_agent_wait;
 mod parent_terminal_guard;
 mod root_attachment;

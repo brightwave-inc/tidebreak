@@ -43,11 +43,11 @@ use crate::storage::{
     AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptToolCallOutcome,
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
     BeginRootAttachmentChangeOutcome, CheckpointSandboxSpawnOutcome, ClaimAgentRunInboxOutcome,
-    ClaimClientToolCallOutcome, ClaimSandboxToolCallOutcome, ClaimTurnRunOutcome,
-    CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
-    DecideToolApprovalOutcome, DeleteChatOutcome, DocumentIndexJobReason,
-    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FailAgentRunOutcome,
-    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome,
+    ClaimTurnRunOutcome, CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
+    ConsumeAgentRunInboxOutcome, DecideToolApprovalOutcome, DeleteChatOutcome,
+    DocumentIndexJobReason, EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome,
+    FailAgentRunOutcome, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
     JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
     ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
@@ -1916,6 +1916,34 @@ impl Store for DbStore {
             lease_duration,
         )
         .await
+    }
+
+    async fn claim_delegated_file_read(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<ClaimDelegatedFileReadOutcome> {
+        ops::sandbox_tool::claim_delegated_file_read(self, id, lease_token, lease_duration).await
+    }
+
+    async fn heartbeat_delegated_file_read(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<Option<chrono::Duration>> {
+        ops::sandbox_tool::heartbeat_delegated_file_read(self, id, lease_token, lease_duration)
+            .await
+    }
+
+    async fn resolve_delegated_file_read(
+        &self,
+        id: CallId,
+        lease_token: uuid::Uuid,
+        resolution: &ToolCallResolution,
+    ) -> Result<ResolveSandboxToolCallOutcome> {
+        ops::sandbox_tool::resolve_delegated_file_read(self, id, lease_token, resolution).await
     }
 
     async fn heartbeat_sandbox_tool_call(

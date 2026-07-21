@@ -1586,6 +1586,17 @@ impl SandboxToolCall {
     pub const MAX_RESULT_BYTES: usize = ToolCallRecord::MAX_RESULT_BYTES;
 }
 
+/// Exact host-broker identity exposed only by a trusted native claim.
+///
+/// The root remains opaque and the path remains relative. Neither field is
+/// copied into renderer activity, pending-work projections, or receipts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DelegatedFileReadClaim {
+    pub call: SandboxToolCall,
+    pub root_id: crate::id::HostRootId,
+    pub relative_path: String,
+}
+
 /// Immutable terminal result receipt for sandbox tool work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxToolCallReceipt {

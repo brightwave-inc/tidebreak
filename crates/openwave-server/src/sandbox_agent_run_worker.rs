@@ -695,6 +695,14 @@ impl SandboxAgentRunWorker {
                 )
                 .await
             }
+            ParkSandboxToolCallOutcome::DelegatedResourceUnavailable => {
+                self.record_failure(
+                    run.id,
+                    lease_token,
+                    AgentError::msg("sandbox delegated resource is unavailable"),
+                )
+                .await
+            }
             ParkSandboxToolCallOutcome::LeaseLost => {
                 self.acknowledge_cancellation_or_lease_loss(run.id, lease_token)
                     .await
@@ -2345,6 +2353,10 @@ mod tests {
                 sandbox_folder_access_proposal_tool_spec(),
             ]
         );
+        assert!(request
+            .tools
+            .iter()
+            .all(|tool| tool.name != openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL));
     }
 
     #[tokio::test]

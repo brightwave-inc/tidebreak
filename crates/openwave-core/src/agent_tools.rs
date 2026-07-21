@@ -22,6 +22,12 @@ pub const SPAWN_SANDBOX_AGENT_TOOL: &str = "spawn_sandbox_agent";
 pub const WAIT_FOR_AGENTS_TOOL: &str = "wait_for_agents";
 /// The only tool a depth-one sandbox may receive.
 pub const SANDBOX_WEB_SEARCH_TOOL: &str = "web_search";
+/// Stable name for the future native-executed delegated file read.
+///
+/// The primitive is intentionally not included in the sandbox provider tool
+/// list yet. It exists so the durable checkpoint and trusted-host control
+/// plane can be built and tested before a broker executor is wired in.
+pub const SANDBOX_READ_DELEGATED_FILE_TOOL: &str = "read_delegated_file";
 
 /// Maximum task length in Unicode scalar values advertised to a model.
 ///
@@ -345,6 +351,31 @@ pub fn sandbox_web_search_tool_spec() -> ToolSpec {
     }
 }
 
+/// Native-executed contract for reading the exact file delegated at spawn.
+///
+/// The model supplies no path or root: both identities are recovered from the
+/// immutable child admission and revalidated against the chat attachment at
+/// claim time. Keeping the schema argument-free prevents a sandbox from
+/// widening its own authority.
+#[must_use]
+pub fn sandbox_read_delegated_file_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: SANDBOX_READ_DELEGATED_FILE_TOOL.into(),
+        description: "Read the exact UTF-8 file delegated to this background task.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    }
+}
+
+/// Whether arguments are the one canonical argument-free payload.
+#[must_use]
+pub fn validate_sandbox_read_delegated_file_arguments(arguments: &Value) -> bool {
+    arguments.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +565,22 @@ mod tests {
                 }],
             })
         );
+    }
+
+    #[test]
+    fn delegated_file_read_contract_is_fixed_and_argument_free() {
+        let spec = sandbox_read_delegated_file_tool_spec();
+        assert_eq!(spec.name, SANDBOX_READ_DELEGATED_FILE_TOOL);
+        assert_eq!(spec.input_schema["properties"], serde_json::json!({}));
+        assert!(validate_sandbox_read_delegated_file_arguments(
+            &serde_json::json!({})
+        ));
+        assert!(!validate_sandbox_read_delegated_file_arguments(
+            &serde_json::json!({"relative_path": "notes.txt"})
+        ));
+        assert!(!validate_sandbox_read_delegated_file_arguments(
+            &serde_json::Value::Null
+        ));
     }
 
     #[test]

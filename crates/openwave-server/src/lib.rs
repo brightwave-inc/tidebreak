@@ -113,6 +113,22 @@ pub fn app(state: AppState) -> Router {
 
     let client_executor_api = Router::new()
         .route(
+            "/sandbox-file-reads/pending",
+            get(routes::list_pending_delegated_file_reads),
+        )
+        .route(
+            "/sandbox-file-reads/{call_id}/claim",
+            post(routes::claim_delegated_file_read),
+        )
+        .route(
+            "/sandbox-file-reads/{call_id}/heartbeat",
+            post(routes::heartbeat_delegated_file_read),
+        )
+        .route(
+            "/sandbox-file-reads/{call_id}/resolve",
+            post(routes::resolve_delegated_file_read),
+        )
+        .route(
             "/chats/{id}/client-executions/pending/raw",
             get(routes::list_pending_client_executions_raw),
         )
