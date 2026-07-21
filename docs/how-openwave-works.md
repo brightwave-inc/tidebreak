@@ -86,10 +86,37 @@ The main local data is easy to recognize:
 | Location | Meaning |
 | --- | --- |
 | `openwave.db` | SQLite operational source of truth |
+| `openwave-schema.json` | pre-v1 local SQLite schema epoch |
 | `blobs/` | retained immutable document bytes |
 | `vectors/` | derived Lance search index |
 | `openwave.lock` | proof that one process owns this data directory |
 | OS keychain | provider credentials, kept outside the database |
+
+While the app remains at version `0.0.0`, baseline migrations may be rewritten
+instead of accumulated. The local SQLite schema epoch makes that explicit for
+both the desktop app and a headless `openwave serve` using the desktop profile.
+Opening an older pre-v1 database rebuilds `openwave.db`, its SQLite journals,
+and the derived `vectors/` index so stale search results cannot survive the
+reset. A current epoch preserves both stores. Unknown, newer, or post-v1
+lifecycle markers fail closed so a prerelease binary cannot silently erase a
+future stable database, and the destructive path is disabled at runtime for
+package major version 1 and later.
+
+Source bytes under `blobs/` are physically retained during the reset, but their
+database records are gone. They are therefore unreachable through the product
+and become eligible for the normal orphan-retirement process after its 24-hour
+age grace. Private scratch is likewise retained but scoped under now-unreachable
+random conversation/run IDs. Native client-execution receipts, the stable
+executor identity, broker grants, and the broker audit log are preserved;
+native recovery still has to validate them against the new canonical database
+and fails closed when their old conversation no longer exists.
+
+When an incompatible baseline migration changes during pre-v1 development,
+bump `DESKTOP_SCHEMA_EPOCH` in
+`crates/openwave-server/src/desktop_schema.rs` in the same change. Do not bump
+it for additive migrations that an existing database can apply normally. The
+epoch is a deliberate reset boundary, not a replacement for migrations after
+the schema stabilizes for v1.
 
 Non-secret provider settings and the default model live in the operational
 store and can change while the process runs. Model routing observes those
