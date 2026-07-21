@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 
 mod agent_run;
 mod multi_agent_wait;
+mod parent_terminal_guard;
 mod root_attachment;
 mod sandbox_spawn_checkpoint;
 mod turn_steer;

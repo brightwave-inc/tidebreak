@@ -13,7 +13,7 @@ use crate::storage::{AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutc
 
 use super::super::{entities, store_err, DbStore};
 use super::{
-    acquire_chat_write_lock,
+    acquire_chat_write_lock, acquire_turn_write_lock,
     agent_run::find_foreground_agent_run_on,
     conversation::{
         append_event_on, next_message_seq_on, reserve_message_identity_on,
@@ -431,11 +431,61 @@ pub(in crate::db) async fn claim_turn_run(
         let reclaiming = candidate.status == TurnRunStatus::Running.as_str();
         if reclaiming && candidate.attempt_count >= candidate.max_attempts {
             let chat_id = ChatId(candidate.chat_id);
+            // Final lease exhaustion shares the terminal lock order with
+            // explicit completion and failure: sandbox scheduler, chat, turn.
+            super::agent_run::acquire_agent_run_claim_lock(&transaction).await?;
             if !acquire_chat_write_lock(&transaction, chat_id).await? {
                 return Err(AgentError::Store(format!(
                     "turn {} references missing chat {chat_id}",
                     TurnId(candidate.id)
                 )));
+            }
+            if !acquire_turn_write_lock(&transaction, TurnId(candidate.id)).await? {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            }
+            let Some(locked_candidate) = entities::turn_run::Entity::find_by_id(candidate.id)
+                .one(&transaction)
+                .await
+                .map_err(store_err)?
+            else {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            };
+            if locked_candidate.status != TurnRunStatus::Running.as_str()
+                || locked_candidate.chat_id != candidate.chat_id
+                || locked_candidate.agent_run_id != candidate.agent_run_id
+                || locked_candidate.attempt_count != candidate.attempt_count
+                || locked_candidate.max_attempts != candidate.max_attempts
+                || locked_candidate.claim_count != candidate.claim_count
+                || locked_candidate.lease_token != candidate.lease_token
+                || locked_candidate.lease_expires_at != candidate.lease_expires_at
+                || locked_candidate.updated_at != candidate.updated_at
+            {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            }
+            let candidate = locked_candidate;
+            let terminal_now =
+                std::cmp::max(now, super::agent_run::database_now(&transaction).await?);
+            if candidate
+                .lease_expires_at
+                .is_none_or(|expires_at| expires_at > terminal_now)
+                || candidate.updated_at > terminal_now
+            {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
+            }
+            if !super::agent_run::cancel_sandbox_children_for_origin_turn_on(
+                &transaction,
+                &candidate,
+                terminal_now,
+                crate::model::AgentRunCancellationReason::ParentTurnFailed,
+            )
+            .await?
+            {
+                transaction.rollback().await.map_err(store_err)?;
+                continue;
             }
             let failed = entities::turn_run::Entity::update_many()
                 .col_expr(
@@ -452,7 +502,7 @@ pub(in crate::db) async fn claim_turn_run(
                 )
                 .col_expr(
                     entities::turn_run::Column::FinishedAt,
-                    sea_orm::sea_query::Expr::value(Some(now)),
+                    sea_orm::sea_query::Expr::value(Some(terminal_now)),
                 )
                 .col_expr(
                     entities::turn_run::Column::LastErrorCode,
@@ -464,7 +514,7 @@ pub(in crate::db) async fn claim_turn_run(
                 )
                 .col_expr(
                     entities::turn_run::Column::UpdatedAt,
-                    sea_orm::sea_query::Expr::value(now),
+                    sea_orm::sea_query::Expr::value(terminal_now),
                 )
                 .filter(entities::turn_run::Column::Id.eq(candidate.id))
                 .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
@@ -479,7 +529,8 @@ pub(in crate::db) async fn claim_turn_run(
                 transaction.rollback().await.map_err(store_err)?;
                 continue;
             }
-            steer::reject_pending_turn_steers_on(&transaction, TurnId(candidate.id), now).await?;
+            steer::reject_pending_turn_steers_on(&transaction, TurnId(candidate.id), terminal_now)
+                .await?;
             let event = AgentEvent::TurnFailed {
                 error: AgentErrorInfo {
                     kind: "lease_expired".into(),
@@ -504,7 +555,7 @@ pub(in crate::db) async fn claim_turn_run(
                 requested_retry_at: Set(None),
                 error_code: Set("lease_expired".into()),
                 error_detail: Set(Some("final worker lease expired".into())),
-                resolved_at: Set(now),
+                resolved_at: Set(terminal_now),
                 result_status: Set(TurnRunStatus::Failed.as_str().into()),
             }
             .insert(&transaction)

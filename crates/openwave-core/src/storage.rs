@@ -469,6 +469,14 @@ pub enum CompleteTurnRunOutcome {
     Completed(TurnRun),
     /// This exact completion was already committed by an earlier call.
     Existing(TurnRun),
+    /// Completion was fenced until every child admitted by this turn has a
+    /// consumed or explicitly retired terminal delivery.
+    ChildrenOutstanding {
+        /// The still-live foreground turn.
+        turn: TurnRun,
+        /// Stable admission-order identities that still need settlement.
+        child_run_ids: Vec<crate::id::AgentRunId>,
+    },
     /// Completion was fenced because an accepted steer still needs application.
     SteerPending(TurnRun),
     /// The output was generated from an older steer revision and must be regenerated.

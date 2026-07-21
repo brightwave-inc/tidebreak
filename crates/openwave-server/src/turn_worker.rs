@@ -748,6 +748,16 @@ impl TurnWorker {
                                 | CompleteTurnRunOutcome::OutputSuperseded(_) => {
                                     break true;
                                 }
+                                CompleteTurnRunOutcome::ChildrenOutstanding {
+                                    child_run_ids,
+                                    ..
+                                } => {
+                                    return Err(AgentError::msg(format!(
+                                        "turn {} attempted to complete with {} unsettled sandbox children",
+                                        turn.id,
+                                        child_run_ids.len()
+                                    )));
+                                }
                             },
                             Ok(None) => {
                                 // A concurrent durable admission can advance

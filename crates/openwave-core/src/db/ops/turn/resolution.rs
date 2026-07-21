@@ -135,18 +135,17 @@ async fn complete_turn_run_inner(
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
     validate_turn_output(id, lease_token, output)?;
     super::super::citation::validate_assistant_message(output, citations)?;
-    let now = canonical_db_timestamp(now)?;
+    let requested_at = canonical_db_timestamp(now)?;
     let output_created_at = canonical_db_timestamp(output.created_at)?;
-    if output_created_at > now {
-        return Err(AgentError::Store(
-            "turn output timestamp must not be after completion time".into(),
-        ));
-    }
 
     let Some(journal_chat_id) = journal_chat_id(store, id, true).await? else {
         return Ok(None);
     };
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    // Sandbox scheduling and foreground terminalization share one lock order:
+    // scheduler, chat, then turn. This makes child admission, result delivery,
+    // and the parent terminal decision one serial boundary.
+    super::super::agent_run::acquire_agent_run_claim_lock(&transaction).await?;
     if !acquire_chat_write_lock(&transaction, journal_chat_id).await? {
         return Err(AgentError::Store(format!(
             "turn {id} references missing chat {journal_chat_id}"
@@ -155,6 +154,17 @@ async fn complete_turn_run_inner(
     if !acquire_turn_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
+    }
+    // Caller time records intent. Lock acquisition can wait behind a child
+    // transition, so take an authoritative clock after all terminal locks.
+    let now = std::cmp::max(
+        requested_at,
+        super::super::agent_run::database_now(&transaction).await?,
+    );
+    if output_created_at > now {
+        return Err(AgentError::Store(
+            "turn output timestamp must not be after completion time".into(),
+        ));
     }
     let Some(receipt) = entities::turn_claim::Entity::find_by_id(lease_token)
         .one(&transaction)
@@ -230,6 +240,23 @@ async fn complete_turn_run_inner(
                 CompleteTurnRunOutcome::SteerPending(existing)
             } else {
                 CompleteTurnRunOutcome::OutputSuperseded(existing)
+            },
+            terminal_event: None,
+        }));
+    }
+
+    let outstanding = super::super::agent_run::unsettled_sandbox_children_for_origin_turn_on(
+        &transaction,
+        &existing,
+    )
+    .await?;
+    if !outstanding.is_empty() {
+        let turn = turn_run_from_model(existing)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(JournaledTurnOutcome {
+            outcome: CompleteTurnRunOutcome::ChildrenOutstanding {
+                turn,
+                child_run_ids: outstanding,
             },
             terminal_event: None,
         }));
@@ -443,7 +470,7 @@ async fn record_turn_run_failure_inner(
     terminal_event: Option<&AgentEvent>,
 ) -> Result<Option<JournaledTurnOutcome<RecordTurnFailureOutcome>>> {
     validate_turn_failure(lease_token, error_code, error_detail)?;
-    let now = canonical_db_timestamp(now)?;
+    let requested_at = canonical_db_timestamp(now)?;
     let requested_retry_at = match retry {
         TurnFailureRetry::Permanent => None,
         TurnFailureRetry::RetryAt(retry_at) => Some(canonical_db_timestamp(retry_at)?),
@@ -474,17 +501,20 @@ async fn record_turn_run_failure_inner(
             terminal_event: sequenced_event,
         }));
     }
-    if requested_retry_at.is_some_and(|retry_at| retry_at <= now) {
+    if requested_retry_at.is_some_and(|retry_at| retry_at <= requested_at) {
         return Err(AgentError::Store(
             "turn retry time must be after failure resolution time".into(),
         ));
     }
 
-    let journal_chat_id = journal_chat_id(store, id, terminal_event.is_some()).await?;
-    if terminal_event.is_some() && journal_chat_id.is_none() {
+    let journal_chat_id = journal_chat_id(store, id, true).await?;
+    if journal_chat_id.is_none() {
         return Ok(None);
     }
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    // Keep foreground failure serial with sandbox claims, cancellation, and
+    // result delivery: scheduler, chat, then turn.
+    super::super::agent_run::acquire_agent_run_claim_lock(&transaction).await?;
     if let Some(chat_id) = journal_chat_id {
         if !acquire_chat_write_lock(&transaction, chat_id).await? {
             return Err(AgentError::Store(format!(
@@ -495,6 +525,15 @@ async fn record_turn_run_failure_inner(
     if !acquire_turn_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
+    }
+    let now = std::cmp::max(
+        requested_at,
+        super::super::agent_run::database_now(&transaction).await?,
+    );
+    if requested_retry_at.is_some_and(|retry_at| retry_at <= now) {
+        return Err(AgentError::Store(
+            "turn retry time must be after failure resolution time".into(),
+        ));
     }
     if let Some(existing) = exact_turn_failure_on(
         &transaction,
@@ -580,6 +619,17 @@ async fn record_turn_run_failure_inner(
         TurnRunStatus::Failed
     };
     if result_status == TurnRunStatus::Failed {
+        if !super::super::agent_run::cancel_sandbox_children_for_origin_turn_on(
+            &transaction,
+            &turn,
+            now,
+            crate::model::AgentRunCancellationReason::ParentTurnFailed,
+        )
+        .await?
+        {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(None);
+        }
         super::super::approval::close_pending_for_terminal_turn_on(&transaction, id, now).await?;
     }
     let receipt = entities::turn_failure::ActiveModel {

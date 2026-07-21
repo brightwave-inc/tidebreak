@@ -794,6 +794,211 @@ async fn postgres_parent_cancellation_and_first_child_claim_converge_without_ide
 }
 
 #[tokio::test]
+async fn postgres_parent_completion_and_child_admission_form_one_terminal_boundary() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, lease) = postgres_live_turn(store.as_ref(), chat.id).await;
+    let call = CallId::new();
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id: turn.id,
+        role: Role::Assistant,
+        content: "race-safe terminal answer".into(),
+        created_at: utc_now_at_postgres_precision().max(turn.updated_at),
+    };
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let admission = {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .admit_sandbox_agent_run(
+                    turn.id,
+                    call,
+                    "race parent completion",
+                    lease,
+                    turn.steer_revision,
+                    openwave_core::AgentRun::MAX_CONCURRENCY_LIMIT,
+                    utc_now_at_postgres_precision(),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        })
+    };
+    let completion = {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .complete_turn_run(
+                    turn.id,
+                    lease,
+                    turn.steer_revision,
+                    utc_now_at_postgres_precision(),
+                    &output,
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        })
+    };
+    let admission = admission.await.unwrap();
+    let completion = completion.await.unwrap();
+    let parent = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    let children = store
+        .list_agent_runs(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.execution == AgentRunExecution::Sandbox)
+        .collect::<Vec<_>>();
+    match completion {
+        CompleteTurnRunOutcome::Completed(_) => {
+            assert!(matches!(
+                admission,
+                openwave_core::AdmitSandboxAgentRunOutcome::ParentUnavailable
+                    | openwave_core::AdmitSandboxAgentRunOutcome::LeaseLost
+            ));
+            assert_eq!(parent.status, TurnRunStatus::Completed);
+            assert!(children.is_empty());
+        }
+        CompleteTurnRunOutcome::ChildrenOutstanding { child_run_ids, .. } => {
+            assert!(matches!(
+                admission,
+                openwave_core::AdmitSandboxAgentRunOutcome::Accepted { .. }
+            ));
+            assert_eq!(parent.status, TurnRunStatus::Running);
+            assert_eq!(children.len(), 1);
+            assert_eq!(child_run_ids, vec![children[0].id]);
+        }
+        outcome => panic!("unexpected completion/admission race outcome: {outcome:?}"),
+    }
+    cleanup_postgres_sandbox_chat(store.as_ref(), chat.id).await;
+}
+
+#[tokio::test]
+async fn postgres_permanent_parent_failure_and_child_result_cannot_orphan_delivery() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn, turn_lease) = postgres_live_turn(store.as_ref(), chat.id).await;
+    let child = postgres_admit_sandbox(
+        store.as_ref(),
+        chat.id,
+        CallId::new(),
+        "race parent failure",
+    )
+    .await;
+    let child_lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(child_lease, Duration::minutes(5), 4, 4)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        child.id
+    );
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let submission = {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .submit_agent_run_result(child.id, child_lease, "terminal child result")
+                .await
+                .unwrap()
+        })
+    };
+    let failure = {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .record_turn_run_failure(
+                    turn.id,
+                    turn_lease,
+                    utc_now_at_postgres_precision(),
+                    TurnFailureRetry::Permanent,
+                    0,
+                    Usage::default(),
+                    "provider_failed",
+                    Some("provider failed permanently"),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        })
+    };
+    let submission = submission.await.unwrap();
+    assert!(matches!(
+        failure.await.unwrap(),
+        RecordTurnFailureOutcome::Recorded(_)
+    ));
+    let parent = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    let child = store.get_agent_run(child.id).await.unwrap().unwrap();
+    assert_eq!(parent.status, TurnRunStatus::Failed);
+    match child.status {
+        AgentRunStatus::Completed => {
+            assert!(matches!(
+                submission,
+                Some(SubmitAgentRunResultOutcome::Completed(_))
+            ));
+            let inbox = store
+                .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+                .await
+                .unwrap();
+            assert_eq!(inbox.len(), 1);
+            assert_eq!(inbox[0].status, AgentRunInboxStatus::Cancelled);
+        }
+        AgentRunStatus::Cancelling => {
+            assert!(submission.is_none());
+            store
+                .finish_agent_run_cancellation(child.id, child_lease)
+                .await
+                .unwrap()
+                .unwrap();
+            let inbox = store
+                .list_agent_run_inbox(AgentRunId::foreground_for_chat(chat.id))
+                .await
+                .unwrap();
+            assert!(matches!(
+                inbox[0].result.payload,
+                AgentRunResultPayload::Cancelled {
+                    reason: AgentRunCancellationReason::ParentTurnFailed
+                }
+            ));
+            assert_eq!(inbox[0].status, AgentRunInboxStatus::Cancelled);
+        }
+        status => panic!("unexpected child status after permanent parent failure: {status:?}"),
+    }
+    cleanup_postgres_sandbox_chat(store.as_ref(), chat.id).await;
+}
+
+#[tokio::test]
 async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lock_waits() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
     let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
@@ -1570,15 +1775,16 @@ async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() 
     // intentionally short lease has expired; the regression this test guards
     // is whether the lease was based on the pre-wait transaction timestamp.
     assert!(claimed.lease_expires_at.unwrap() > lock_released_at);
-    // The integration suite shares an isolated database, so leave no live
-    // scheduler capacity behind for its independent concurrency cases.
+    // Restore a cancellable nonterminal shape before shared cleanup. Forging a
+    // terminal child without its immutable result/inbox would now correctly
+    // be treated as corruption by the parent terminal guard.
     blocker
         .execute(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
                 "UPDATE agent_run \
-                 SET status = 'completed', lease_token = NULL, lease_expires_at = NULL, \
-                     finished_at = clock_timestamp(), updated_at = clock_timestamp() \
+                 SET status = 'queued', lease_token = NULL, lease_expires_at = NULL, \
+                     finished_at = NULL, updated_at = clock_timestamp() \
                  WHERE id = '{}'",
                 child_id.0
             ),

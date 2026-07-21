@@ -1282,6 +1282,7 @@ async fn create_agent_run_cancellation_table(manager: &SchemaManager<'_>) -> Res
                 .check(Expr::col(AgentRunCancellation::Reason).is_in([
                     crate::model::AgentRunCancellationReason::Requested.as_str(),
                     crate::model::AgentRunCancellationReason::ParentTurnCancelled.as_str(),
+                    crate::model::AgentRunCancellationReason::ParentTurnFailed.as_str(),
                 ]))
                 .to_owned(),
         )

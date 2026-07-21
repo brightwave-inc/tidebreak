@@ -35,6 +35,7 @@ mod cancellation;
 pub(in crate::db) use cancellation::{
     cancel_sandbox_children_for_origin_turn_on, finish_agent_run_cancellation,
     get_agent_run_cancellation_signal, request_agent_run_cancellation,
+    unsettled_sandbox_children_for_origin_turn_on,
 };
 
 pub(in crate::db) async fn insert_foreground_agent_run_on<C>(
@@ -2584,6 +2585,9 @@ fn agent_run_result_display_text(payload: &AgentRunResultPayload) -> String {
             AgentRunCancellationReason::Requested => "Sandbox task was cancelled.".to_owned(),
             AgentRunCancellationReason::ParentTurnCancelled => {
                 "Sandbox task was cancelled because its parent turn was cancelled.".to_owned()
+            }
+            AgentRunCancellationReason::ParentTurnFailed => {
+                "Sandbox task was cancelled because its parent turn failed.".to_owned()
             }
         },
     }

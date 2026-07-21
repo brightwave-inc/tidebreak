@@ -16,7 +16,7 @@ use super::{
     acquire_agent_run_claim_lock, agent_run_from_model, agent_run_result_display_text,
     agent_run_result_from_model, agent_run_result_payload_json, agent_run_result_payload_kind,
     agent_run_status_from_db, database_now, find_agent_run_inbox_on, find_by_id_on,
-    load_agent_run_inbox_entry_on,
+    load_agent_run_inbox_by_ids_on, load_agent_run_inbox_entry_on,
 };
 
 #[derive(Clone, Copy)]
@@ -246,6 +246,7 @@ pub(in crate::db) async fn cancel_sandbox_children_for_origin_turn_on<C>(
     conn: &C,
     turn: &entities::turn_run::Model,
     now: chrono::DateTime<Utc>,
+    reason: AgentRunCancellationReason,
 ) -> Result<bool>
 where
     C: sea_orm::ConnectionTrait,
@@ -279,27 +280,21 @@ where
                 "sandbox child {child_id} does not match its admission"
             )));
         }
+        agent_run_from_model(child.clone())?;
         match agent_run_status_from_db(&child.status)? {
             AgentRunStatus::Completed | AgentRunStatus::Failed => {
-                retire_inbox_on(conn, turn.agent_run_id, child.id).await?;
+                retire_inbox_on(conn, turn.agent_run_id, &child).await?;
             }
             AgentRunStatus::Cancelled => {
                 validate_cancellation_delivery_on(conn, &child, None).await?;
-                retire_inbox_on(conn, turn.agent_run_id, child.id).await?;
+                retire_inbox_on(conn, turn.agent_run_id, &child).await?;
             }
             AgentRunStatus::Running
                 if child.lease_expires_at.is_some_and(|expiry| expiry > now)
                     && child.deadline_at.is_some_and(|deadline| deadline > now) =>
             {
                 let identity = cancellation_identity_on(conn, &child, now).await?;
-                insert_cancellation_request_on(
-                    conn,
-                    &child,
-                    identity,
-                    AgentRunCancellationReason::ParentTurnCancelled,
-                    now,
-                )
-                .await?;
+                insert_cancellation_request_on(conn, &child, identity, reason, now).await?;
                 if !mark_live_run_cancelling_on(conn, &child, now).await? {
                     return Ok(false);
                 }
@@ -319,7 +314,7 @@ where
                     conn,
                     &child,
                     now,
-                    AgentRunCancellationReason::ParentTurnCancelled,
+                    reason,
                     AgentRunInboxStatus::Cancelled,
                 )
                 .await?
@@ -335,6 +330,131 @@ where
         }
     }
     Ok(true)
+}
+
+/// Validate every child admitted by one exact foreground turn and return the
+/// ones whose terminal delivery is not yet consumed or explicitly retired.
+///
+/// The caller holds the scheduler, chat, and turn locks in that order. Stable
+/// admission ordering makes the typed completion fence deterministic across
+/// retries and database backends.
+pub(in crate::db) async fn unsettled_sandbox_children_for_origin_turn_on<C>(
+    conn: &C,
+    turn: &entities::turn_run::Model,
+) -> Result<Vec<AgentRunId>>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let parent_id = AgentRunId(turn.agent_run_id);
+    let parent = find_by_id_on(conn, parent_id).await?.ok_or_else(|| {
+        AgentError::Store(format!(
+            "origin turn {} is missing its foreground agent",
+            turn.id
+        ))
+    })?;
+    if parent.id != turn.agent_run_id
+        || parent.chat_id != turn.chat_id
+        || parent.execution != AgentRunExecution::Foreground.as_str()
+        || parent.depth != 0
+        || parent.parent_id.is_some()
+    {
+        return Err(AgentError::Store(format!(
+            "origin turn {} does not match its foreground agent",
+            turn.id
+        )));
+    }
+
+    let admissions = entities::sandbox_agent_admission::Entity::find()
+        .filter(entities::sandbox_agent_admission::Column::OriginTurnId.eq(turn.id))
+        .order_by_asc(entities::sandbox_agent_admission::Column::AdmittedAt)
+        .order_by_asc(entities::sandbox_agent_admission::Column::ChildRunId)
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    let mut unsettled = Vec::with_capacity(admissions.len());
+    for admission in admissions {
+        if admission.parent_run_id != turn.agent_run_id
+            || admission.chat_id != turn.chat_id
+            || AgentRunId(admission.child_run_id)
+                != AgentRunId::sandbox_for_spawn_call(crate::CallId(admission.spawn_call_id))
+        {
+            return Err(AgentError::Store(format!(
+                "sandbox admission {} does not match origin turn {}",
+                admission.child_run_id, turn.id
+            )));
+        }
+        let child_id = AgentRunId(admission.child_run_id);
+        let child = find_by_id_on(conn, child_id).await?.ok_or_else(|| {
+            AgentError::Store(format!(
+                "sandbox admission references missing child {child_id}"
+            ))
+        })?;
+        if child.parent_id != Some(turn.agent_run_id)
+            || child.chat_id != turn.chat_id
+            || child.execution != AgentRunExecution::Sandbox.as_str()
+            || child.depth != 1
+            || child.spawn_call_id != Some(admission.spawn_call_id)
+        {
+            return Err(AgentError::Store(format!(
+                "sandbox child {child_id} does not match its admission"
+            )));
+        }
+        agent_run_from_model(child.clone())?;
+
+        let status = agent_run_status_from_db(&child.status)?;
+        if !status.is_terminal() {
+            if find_agent_run_inbox_on(conn, parent_id, child_id)
+                .await?
+                .is_some()
+            {
+                return Err(AgentError::Store(format!(
+                    "nonterminal sandbox child {child_id} has a terminal inbox delivery"
+                )));
+            }
+            unsettled.push(child_id);
+            continue;
+        }
+
+        if status == AgentRunStatus::Cancelled {
+            validate_cancellation_delivery_on(conn, &child, None).await?;
+        }
+        let inbox = load_agent_run_inbox_by_ids_on(conn, parent_id, child_id)
+            .await?
+            .ok_or_else(|| {
+                AgentError::Store(format!(
+                    "terminal sandbox child {child_id} is missing its inbox delivery"
+                ))
+            })?;
+        let result_claim = entities::agent_run_claim::Entity::find_by_id(inbox.result.lease_token)
+            .one(conn)
+            .await
+            .map_err(store_err)?
+            .ok_or_else(|| {
+                AgentError::Store(format!(
+                    "terminal sandbox child {child_id} result is missing claim provenance"
+                ))
+            })?;
+        if inbox.chat_id != ChatId(turn.chat_id)
+            || inbox.result.agent_run_id != child_id
+            || (status != AgentRunStatus::Cancelled
+                && (inbox.result.attempt_count != child.attempt_count
+                    || inbox.result.claim_count != child.claim_count
+                    || result_claim.agent_run_id != Some(child.id)
+                    || result_claim.attempt_count != Some(child.attempt_count)
+                    || result_claim.claim_count != Some(child.claim_count)))
+        {
+            return Err(AgentError::Store(format!(
+                "terminal sandbox child {child_id} has mismatched result provenance"
+            )));
+        }
+        if !matches!(
+            inbox.status,
+            AgentRunInboxStatus::Consumed | AgentRunInboxStatus::Cancelled
+        ) {
+            unsettled.push(child_id);
+        }
+    }
+    Ok(unsettled)
 }
 
 pub(super) async fn reap_expired_cancelling_on<C>(
@@ -670,6 +790,7 @@ where
         turn.status.as_str(),
         "cancelling" | "cancelling_client" | "cancelled"
     );
+    let parent_failed = turn.status == "failed";
     let parent_usable = !matches!(
         turn.status.as_str(),
         "cancelling" | "cancelling_client" | "cancelled" | "completed" | "failed"
@@ -677,6 +798,8 @@ where
     Ok((
         if parent_cancelled {
             AgentRunCancellationReason::ParentTurnCancelled
+        } else if parent_failed {
+            AgentRunCancellationReason::ParentTurnFailed
         } else {
             AgentRunCancellationReason::Requested
         },
@@ -688,11 +811,54 @@ where
     ))
 }
 
-async fn retire_inbox_on<C>(conn: &C, parent_id: uuid::Uuid, child_id: uuid::Uuid) -> Result<()>
+async fn retire_inbox_on<C>(
+    conn: &C,
+    parent_id: uuid::Uuid,
+    child: &entities::agent_run::Model,
+) -> Result<()>
 where
     C: sea_orm::ConnectionTrait,
 {
-    entities::agent_run_inbox::Entity::update_many()
+    let child_id = AgentRunId(child.id);
+    let inbox = load_agent_run_inbox_by_ids_on(conn, AgentRunId(parent_id), child_id)
+        .await?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "terminal sandbox child {child_id} is missing its inbox delivery"
+            ))
+        })?;
+    let result_claim = entities::agent_run_claim::Entity::find_by_id(inbox.result.lease_token)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "terminal sandbox child {child_id} result is missing claim provenance"
+            ))
+        })?;
+    if inbox.parent_run_id != AgentRunId(parent_id)
+        || inbox.child_run_id != child_id
+        || inbox.chat_id != ChatId(child.chat_id)
+        || inbox.result.agent_run_id != child_id
+        || (child.status != AgentRunStatus::Cancelled.as_str()
+            && (inbox.result.attempt_count != child.attempt_count
+                || inbox.result.claim_count != child.claim_count
+                || result_claim.agent_run_id != Some(child.id)
+                || result_claim.attempt_count != Some(child.attempt_count)
+                || result_claim.claim_count != Some(child.claim_count)))
+    {
+        return Err(AgentError::Store(format!(
+            "terminal sandbox child {child_id} has mismatched delivery provenance"
+        )));
+    }
+    let status = inbox.status;
+    if matches!(
+        status,
+        AgentRunInboxStatus::Consumed | AgentRunInboxStatus::Cancelled
+    ) {
+        return Ok(());
+    }
+    let updated = entities::agent_run_inbox::Entity::update_many()
         .col_expr(
             entities::agent_run_inbox::Column::Status,
             sea_orm::sea_query::Expr::value(AgentRunInboxStatus::Cancelled.as_str()),
@@ -705,15 +871,18 @@ where
             entities::agent_run_inbox::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
         )
-        .filter(entities::agent_run_inbox::Column::ChildRunId.eq(child_id))
+        .filter(entities::agent_run_inbox::Column::ChildRunId.eq(child.id))
         .filter(entities::agent_run_inbox::Column::ParentRunId.eq(parent_id))
-        .filter(entities::agent_run_inbox::Column::Status.is_in([
-            AgentRunInboxStatus::Pending.as_str(),
-            AgentRunInboxStatus::Claimed.as_str(),
-        ]))
+        .filter(entities::agent_run_inbox::Column::Status.eq(status.as_str()))
         .exec(conn)
         .await
         .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        return Err(AgentError::Store(format!(
+            "terminal sandbox child {child_id} inbox retirement changed {} rows",
+            updated.rows_affected
+        )));
+    }
     Ok(())
 }
 
@@ -868,7 +1037,8 @@ where
     })?;
     let inbox = load_agent_run_inbox_entry_on(conn, inbox_model).await?;
     let inbox_lifecycle_valid = match reason {
-        AgentRunCancellationReason::ParentTurnCancelled => {
+        AgentRunCancellationReason::ParentTurnCancelled
+        | AgentRunCancellationReason::ParentTurnFailed => {
             inbox.status == AgentRunInboxStatus::Cancelled
         }
         // A direct cancellation may be delivered while its origin is live and

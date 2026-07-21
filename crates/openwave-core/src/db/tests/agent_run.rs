@@ -2050,7 +2050,7 @@ async fn direct_cancellation_reason_wins_a_later_parent_cancellation() {
 }
 
 #[tokio::test]
-async fn cancellation_retry_survives_later_origin_completion() {
+async fn cancellation_retry_remains_pending_while_parent_completion_is_fenced() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
@@ -2075,7 +2075,8 @@ async fn cancellation_retry_survives_later_origin_completion() {
             .complete_turn_run(origin.id, origin_lease, 0, completed_at, &output)
             .await
             .unwrap(),
-        Some(crate::CompleteTurnRunOutcome::Completed(_))
+        Some(crate::CompleteTurnRunOutcome::ChildrenOutstanding { child_run_ids, .. })
+            if child_run_ids == vec![child.id]
     ));
     assert!(matches!(
         store.request_agent_run_cancellation(child.id).await.unwrap(),
