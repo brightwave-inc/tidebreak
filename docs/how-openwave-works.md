@@ -196,9 +196,17 @@ The built-in server registry currently contains:
   from stored state, persists its bounded result, and never exposes host paths
   or broker diagnostics to the renderer or model.
 
-Today these file tools still operate inside a server-derived, pinned per-chat
-scratch capability. Its path is neither persisted on the chat nor returned by
-the product API. The desktop can connect, list, and revoke multiple folders
+Depth-one sandbox agents have a separate, smaller surface and one total tool
+call. Besides web search or a typed folder-access proposal, an embedded-desktop
+child may receive `read_delegated_file` when its foreground spawn immutably
+named one exact attached root and relative path. The tool accepts no arguments;
+it cannot browse, choose a path, open a picker, write, or run commands. The
+headless server does not advertise it.
+
+The built-in `read_file`, `list_dir`, and `write_file` tools operate only inside
+a server-derived, pinned per-chat scratch capability. Its path is neither
+persisted on the chat nor returned by the product API. The desktop can connect,
+list, and revoke multiple folders
 through a native picker and capability-gated host-broker sidecar; it exposes only
 opaque root IDs and display names to the renderer. Foreground tool calls can now
 list/read roots already attached to their stored chat context. An approved
@@ -215,6 +223,15 @@ folder picker, claim the request, and ask the broker to register the selected
 folder. The selected path never enters the renderer or product HTTP API. The
 secret claim token is never renderer-visible; native code sends it only through
 the separately credentialed loopback client-execution API.
+Delegated sandbox reads use a parallel native-only continuation. Pending
+discovery reveals only a call ID; claim recovers the server-owned exact target
+after checking the immutable admission and current chat attachment. Native code
+then persists a no-replay dispatch fence, performs a final authority-checking
+heartbeat, and asks the host broker for one bounded UTF-8 read. The broker
+independently reauthorizes its live grant. Resolve checks attachment authority
+again, which discards content if a detach won while the read was in flight. A
+crash after possible broker dispatch becomes a safe unavailable result instead
+of another read.
 The model router supports Anthropic, OpenAI, and OpenAI-compatible endpoints. It
 fails closed: if no enabled provider with a usable credential can serve the
 selected model, no model request is sent.
@@ -640,6 +657,11 @@ persisted nor returned to the renderer. Foreground agents separately have a
 fenced read-only proxy for roots already attached to the chat:
 `list_connected_folders`, `list_folder`, and `read_connected_file` carry only
 opaque root IDs and bounded relative paths through the trusted native broker.
+An admitted depth-one child can instead read only the single exact file its
+foreground spawn delegated. It receives an argument-free tool, while the native
+executor privately performs claim, final attachment revalidation, one broker
+read, and fenced resolution. The renderer never receives that target or the
+file contents from the executor control plane.
 The UI does not yet provide projects or steer controls. Completed assistant
 messages render the closed structured source cards described above. The
 Documents surface derives scope from the
@@ -755,7 +777,7 @@ fail-closed provider routing.
 The main next steps are:
 
 - extend the bounded depth-one hierarchy with carefully scoped sandbox-safe
-  capabilities without widening its spawn or host-access authority;
+  capabilities without widening the exact delegated-file or spawn authority;
 - continue unifying client execution, folder consent, user questions, and
   resource waits around durable continuations that release workers;
 - persist model/tool step boundaries and side-effect receipts so sandbox and

@@ -54,7 +54,7 @@ differ:
 | --- | --- |
 | Responds directly in the chat | Works on one delegated task |
 | Final assistant text completes a turn | An explicit result submission completes the run |
-| Uses conversation-facing tools | May make at most one web-search or folder-access proposal call; has no shared conversation context |
+| Uses conversation-facing tools | May make at most one sandbox-safe tool call; has no shared conversation context |
 | Usually short-lived work | May park and resume over a longer period |
 | Streams answer content | Publishes bounded progress and a final result |
 
@@ -87,6 +87,13 @@ foreground lease into `resuming`. The foreground can therefore be reclaimed
 and continue while the child runs. Only after the commit does the server wake
 the foreground and sandbox workers. Those notifications reduce latency; their
 durable scans remain the correctness path after a missed wake or restart.
+
+A spawn may also delegate one exact file as an opaque root ID plus a non-empty
+root-relative path. Admission verifies that the root is attached to the
+foreground chat and stores the resource immutably with that child. This does
+not grant a folder, expose a host path, or let the child choose another target;
+it only makes the argument-free desktop read described below eligible while
+the same attachment remains current.
 
 Each spawn call is made alone and returns one ID for the foreground agent to
 retain. Up to four children from the exact origin turn may be unsettled at once.
@@ -147,14 +154,24 @@ notification may reduce latency, but it is never the source of truth.
 ## Sandbox and host-access boundary
 
 A background agent has private runtime scratch but cannot access that scratch,
-projects, host folders, the general network, or the parent conversation. Its
-current narrow exceptions are one checkpointed public web search or a typed
-folder-access proposal that grants no access. It never receives the foreground
-spawn/wait or broker tool contracts. Foreground chats may inspect already
-attached roots, but sandbox agents do not receive the broker transport. Future
-sandbox folder access must use the parent-mediated consent and
-durable-receipt protocol described in [Host access and connected folders](host-access.md),
-never absolute paths.
+projects, general host folders, the general network, or the parent
+conversation. Its narrow exceptions share one total tool-call budget: a
+checkpointed public web search, a typed folder-access proposal that grants no
+access, or—only in the embedded desktop—one exact file named by its immutable
+admission. The read tool takes no arguments. A native executor revalidates the
+current chat attachment immediately before the host broker performs a bounded
+UTF-8 read, persists private no-replay recovery state, and publishes only
+bounded content or a neutral failure. Headless workers never advertise the
+read. Sandboxes do not receive foreground spawn/wait or broker transport
+contracts, and absolute paths never cross into provider context. See
+[Host access and connected folders](host-access.md).
+
+This is intentionally not chat-wide or root-wide access. A sandbox cannot list
+roots or directories, open a picker, request a different file, write, run a
+shell command, or use a general filesystem API. A detach can revoke the exact
+read before claim, at the final pre-dispatch heartbeat, or at resolution; if
+content arrived after authority was lost, it is discarded rather than returned
+to the model.
 
 The sandbox boundary should remain useful outside the desktop product. A local
 process sandbox is the first execution adapter; self-hosted and managed profiles
@@ -299,12 +316,15 @@ The implementation is intentionally incremental:
 11. Let a sandbox relay a typed folder-consent proposal to its foreground
     parent, without host access or a picker. *(Shipped.)*
 12. Add fenced read-only tools to the foreground turn for roots its chat already
-    attached; sandbox broker access remains deferred. *(Shipped.)*
+    attached. *(Shipped.)*
 13. Add desktop surfaces for queued, running, waiting, failed, and completed
    background work, including exact sandbox stop controls. *(Shipped.)*
 14. Persist the non-blocking spawn checkpoint and ordered wait receipts.
     *(Shipped.)*
 15. Activate non-blocking spawn and ordered multi-agent waits together.
     *(Shipped.)*
-16. Add richer context lifecycle, parallel-safe tool groups, and further
-   orchestration only after these recovery boundaries are proven.
+16. Add the desktop-only, argument-free read of one exact file immutably
+    delegated at spawn, with native claim/revalidation, broker authorization,
+    revocation fencing, and crash-safe no-replay recovery. *(Shipped.)*
+17. Add richer context lifecycle, parallel-safe tool groups, and further
+    orchestration only after these recovery boundaries are proven.
