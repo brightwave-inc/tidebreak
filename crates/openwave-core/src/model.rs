@@ -1794,6 +1794,12 @@ pub struct TurnAgentRunWaitSet {
     pub turn_id: TurnId,
     /// Conversation shared by the turn and every child.
     pub chat_id: ChatId,
+    /// Provider-facing identity for the pending orchestration tool use.
+    pub provider_id: String,
+    /// Stable position of the tool use in reconstructed model history.
+    pub history_order: i64,
+    /// Canonical closed `wait_for_agents` arguments.
+    pub arguments: serde_json::Value,
     /// Bounded, unique children in caller-requested order.
     pub child_run_ids: Vec<crate::id::AgentRunId>,
     /// Completion policy committed as immutable request identity.
@@ -1808,6 +1814,10 @@ pub struct TurnAgentRunWaitSet {
     pub claim_count: i32,
     /// Progress committed before releasing the foreground worker.
     pub progress: TurnCheckpointProgress,
+    /// Exact attempt-event ordinal reserved for the terminal tool result.
+    pub event_ordinal: i32,
+    /// Per-chat journal receipt for the terminal tool result, once closed.
+    pub event_seq: Option<i64>,
     /// Durable lifecycle of this ordered wait.
     pub status: TurnAgentRunWaitStatus,
     /// Database time at which the checkpoint committed.
@@ -1816,6 +1826,25 @@ pub struct TurnAgentRunWaitSet {
     pub closed_at: Option<DateTime<Utc>>,
     /// Exact continuation identity that consumed all results, if resumed.
     pub resume_token: Option<Uuid>,
+}
+
+/// One proposed atomic ordered sandbox-child wait checkpoint.
+///
+/// Canonical arguments are retained explicitly as immutable model-call
+/// identity. Storage validates that they encode the same ordered child list as
+/// `child_run_ids` before committing the pending orchestration call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRunWaitSetCheckpointRequest {
+    pub call_id: crate::id::CallId,
+    pub origin_turn_id: crate::id::TurnId,
+    pub child_run_ids: Vec<crate::id::AgentRunId>,
+    pub condition: AgentRunWaitCondition,
+    pub lease_token: Uuid,
+    pub expected_steer_revision: i64,
+    pub provider_id: String,
+    pub arguments: serde_json::Value,
+    pub event_ordinal: i32,
+    pub progress: TurnCheckpointProgress,
 }
 
 /// Minimal recovery hint for an ordered sandbox-child wait that appears ready.

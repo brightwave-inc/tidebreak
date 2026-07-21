@@ -29,8 +29,8 @@ use crate::id::{
 use crate::model::Role;
 use crate::model::{
     validate_project_root_projection, AgentRun, AgentRunExecution, AgentRunInboxEntry,
-    AgentRunStatus, AgentRunWaitCondition, AgentRunWaitSetCandidate, BeginRootAttachmentChange,
-    BlobRetirement, BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
+    AgentRunStatus, AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement,
+    BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
     DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
     DocumentUpsert, Message, Project, RootAttachmentChange, RootAttachmentChangeTerminal,
@@ -2354,27 +2354,10 @@ impl Store for DbStore {
 
     async fn park_turn_for_agent_run_wait_set(
         &self,
-        wait_id: CallId,
-        turn_id: TurnId,
-        child_run_ids: &[AgentRunId],
-        condition: AgentRunWaitCondition,
-        lease_token: uuid::Uuid,
-        expected_steer_revision: i64,
-        progress: TurnCheckpointProgress,
+        request: &crate::model::AgentRunWaitSetCheckpointRequest,
         now: chrono::DateTime<Utc>,
     ) -> Result<Option<ParkTurnForAgentRunWaitSetOutcome>> {
-        ops::turn::park_turn_for_agent_run_wait_set(
-            self,
-            wait_id,
-            turn_id,
-            child_run_ids,
-            condition,
-            lease_token,
-            expected_steer_revision,
-            progress,
-            now,
-        )
-        .await
+        ops::turn::park_turn_for_agent_run_wait_set(self, request, now).await
     }
 
     async fn resume_turn_for_agent_run_wait_set(

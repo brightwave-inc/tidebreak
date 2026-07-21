@@ -628,6 +628,10 @@ pub mod turn_agent_run_wait_set {
         pub parent_run_id: Uuid,
         pub turn_id: Uuid,
         pub chat_id: Uuid,
+        pub provider_id: String,
+        pub history_order: i64,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub arguments: Json,
         pub condition: String,
         pub park_lease_token: Uuid,
         pub expected_steer_revision: i64,
@@ -638,6 +642,8 @@ pub mod turn_agent_run_wait_set {
         pub output_tokens: i64,
         pub cache_read_input_tokens: i64,
         pub cache_creation_input_tokens: i64,
+        pub event_ordinal: i32,
+        pub event_seq: Option<i64>,
         pub status: String,
         pub parked_at: DateTimeUtc,
         pub closed_at: Option<DateTimeUtc>,
@@ -680,6 +686,7 @@ pub mod turn_agent_run_wait_member {
         pub parent_run_id: Uuid,
         pub origin_turn_id: Uuid,
         pub chat_id: Uuid,
+        pub open: bool,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

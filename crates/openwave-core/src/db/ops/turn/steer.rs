@@ -47,6 +47,7 @@ pub(in crate::db) async fn accept_turn_steer(
     }
     let now = canonical_db_timestamp(Utc::now())?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    super::multi_agent_run_wait::acquire_wait_set_lock(&transaction).await?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
         return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
     }
@@ -158,16 +159,32 @@ pub(in crate::db) async fn accept_turn_steer(
         }
     };
 
-    let touched = entities::turn_run::Entity::update_many()
-        .col_expr(
-            entities::turn_run::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
-        .filter(entities::turn_run::Column::Status.eq(&turn.status))
-        .filter(entities::turn_run::Column::AttemptCount.eq(turn.attempt_count))
-        .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
-        .filter(entities::turn_run::Column::UpdatedAt.lte(now));
+    let interrupted_ordered_wait = status == TurnRunStatus::WaitingForAgentRun
+        && interrupt
+        && super::multi_agent_run_wait::interrupt_wait_set_for_steer_on(&transaction, &turn, now)
+            .await?;
+    let touched = entities::turn_run::Entity::update_many().col_expr(
+        entities::turn_run::Column::UpdatedAt,
+        sea_orm::sea_query::Expr::value(now),
+    );
+    let touched = if interrupted_ordered_wait {
+        touched
+            .col_expr(
+                entities::turn_run::Column::Status,
+                sea_orm::sea_query::Expr::value(TurnRunStatus::Resuming.as_str()),
+            )
+            .col_expr(
+                entities::turn_run::Column::AvailableAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+    } else {
+        touched
+    }
+    .filter(entities::turn_run::Column::Id.eq(turn_id.0))
+    .filter(entities::turn_run::Column::Status.eq(&turn.status))
+    .filter(entities::turn_run::Column::AttemptCount.eq(turn.attempt_count))
+    .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
+    .filter(entities::turn_run::Column::UpdatedAt.lte(now));
     let touched = if status == TurnRunStatus::Running {
         touched
             .filter(entities::turn_run::Column::LeaseToken.eq(turn.lease_token))
