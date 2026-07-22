@@ -294,6 +294,7 @@ mod tests {
             }],
             max_tokens: None,
             temperature: Some(0.5),
+            reasoning_effort: None,
         };
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["model"], "claude-opus-4-8");

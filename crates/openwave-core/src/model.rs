@@ -1014,6 +1014,45 @@ pub enum Role {
     Tool,
 }
 
+/// How hard a reasoning-capable model should think before answering.
+///
+/// A hint honored only by providers whose models expose it (OpenAI's o-series);
+/// other providers ignore it. Persisted per chat and threaded into the model
+/// request for each turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    /// Minimize reasoning tokens for the fastest, cheapest response.
+    Low,
+    /// The provider's balanced default.
+    Medium,
+    /// Spend more reasoning tokens for harder problems.
+    High,
+}
+
+impl ReasoningEffort {
+    /// The wire/storage token for this effort level.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    /// Parse a stored/wire token back into an effort level.
+    #[must_use]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
 /// A persistent conversation with an exact, ordered host-root projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chat {
@@ -1025,6 +1064,9 @@ pub struct Chat {
     pub title: Option<String>,
     /// The model this chat runs against, or `None` to use the configured default.
     pub model: Option<String>,
+    /// Reasoning-effort override for this chat, honored only by models that
+    /// expose the control; `None` leaves the provider's default in force.
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// CAS revision of this conversation's exact root projection.
     pub attachment_revision: i64,
     /// Ordered opaque roots available for future broker-backed operations.

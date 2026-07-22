@@ -529,6 +529,7 @@ mod tests {
             project_id: None,
             title: Some("sandbox web search".into()),
             model: Some("model".into()),
+            reasoning_effort: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: Utc::now(),

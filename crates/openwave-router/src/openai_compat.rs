@@ -174,6 +174,11 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     // `max_completion_tokens`. Everything else still speaks `max_tokens`.
     if is_reasoning_model(&req.model) {
         body["max_completion_tokens"] = json!(max_tokens);
+        // Only reasoning models understand `reasoning_effort`; forwarding it to a
+        // plain chat model would be rejected. Absent, the provider's default holds.
+        if let Some(effort) = req.reasoning_effort {
+            body["reasoning_effort"] = json!(effort.as_str());
+        }
     } else {
         body["max_tokens"] = json!(max_tokens);
     }
@@ -445,6 +450,7 @@ mod tests {
     use super::*;
     use openwave_core::provider::ChatMessage;
     use openwave_core::tool::ToolSpec;
+    use openwave_core::ReasoningEffort;
 
     #[test]
     fn request_maps_system_tools_and_messages() {
@@ -459,6 +465,7 @@ mod tests {
             }],
             max_tokens: None,
             temperature: Some(0.2),
+            reasoning_effort: Some(ReasoningEffort::High),
         };
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["model"], "gpt-4o");
@@ -470,6 +477,9 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "read_file");
         assert!((body["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-6);
+        // A non-reasoning model must never receive `reasoning_effort`, even when
+        // the chat sets one — the field would be rejected by the endpoint.
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -481,14 +491,32 @@ mod tests {
             tools: vec![],
             max_tokens: Some(1024),
             temperature: None,
+            reasoning_effort: None,
         };
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["max_completion_tokens"], 1024);
         assert!(body.get("max_tokens").is_none());
+        // Absent an override, the request carries no `reasoning_effort`.
+        assert!(body.get("reasoning_effort").is_none());
         assert!(is_reasoning_model("o4-mini"));
         assert!(is_reasoning_model("o1-preview"));
         assert!(!is_reasoning_model("gpt-4o"));
         assert!(!is_reasoning_model("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn reasoning_models_forward_reasoning_effort() {
+        let req = ChatRequest {
+            model: "o3".into(),
+            system: None,
+            messages: vec![ChatMessage::text(Role::User, "hi")],
+            tools: vec![],
+            max_tokens: Some(1024),
+            temperature: None,
+            reasoning_effort: Some(ReasoningEffort::Low),
+        };
+        let body = build_request_json(&req).unwrap();
+        assert_eq!(body["reasoning_effort"], "low");
     }
 
     #[test]

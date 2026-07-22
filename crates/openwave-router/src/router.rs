@@ -317,6 +317,7 @@ mod tests {
                 tools: vec![],
                 max_tokens: None,
                 temperature: None,
+                reasoning_effort: None,
             })
             .await;
         match result {

@@ -31,7 +31,7 @@ use crate::model::{
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
     DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceUpsert,
-    DocumentSummaryRecord, DocumentUpsert, Message, Project, RootAttachmentChange,
+    DocumentSummaryRecord, DocumentUpsert, Message, Project, ReasoningEffort, RootAttachmentChange,
     RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution, TurnAgentRunWait,
     TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt,
     TurnFailureRetry, TurnRun, TurnSteer,
@@ -1342,6 +1342,7 @@ pub trait Store: Send + Sync {
         id: ChatId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
+        reasoning_effort: Option<Option<ReasoningEffort>>,
     ) -> Result<bool>;
 
     /// Atomically begin one exact broker-backed attachment change.

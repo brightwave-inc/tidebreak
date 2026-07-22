@@ -223,6 +223,7 @@ async fn assistant_retry_and_stream_redaction_survive_durable_replay() {
         project_id: None,
         title: None,
         model: None,
+        reasoning_effort: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: chrono::Utc::now(),
@@ -1191,8 +1192,11 @@ impl Store for PauseTerminalStore {
         id: ChatId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
+        reasoning_effort: Option<Option<openwave_core::ReasoningEffort>>,
     ) -> Result<bool> {
-        self.inner.update_chat_metadata(id, title, model).await
+        self.inner
+            .update_chat_metadata(id, title, model, reasoning_effort)
+            .await
     }
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<openwave_core::TurnRun>> {
         self.inner.get_turn_run(id).await
@@ -6619,6 +6623,7 @@ async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_auth
         project_id: None,
         title: Some("delegated read".into()),
         model: None,
+        reasoning_effort: None,
         attachment_revision: 1,
         root_attachments: vec![ChatRootAttachment {
             root_id,
@@ -9524,6 +9529,7 @@ async fn worker_drains_a_turn_queued_before_startup() {
         project_id: None,
         title: None,
         model: None,
+        reasoning_effort: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: chrono::Utc::now(),

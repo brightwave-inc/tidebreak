@@ -155,6 +155,7 @@ pub mod chat {
         pub project_id: Option<Uuid>,
         pub title: Option<String>,
         pub model: Option<String>,
+        pub reasoning_effort: Option<String>,
         pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
     }

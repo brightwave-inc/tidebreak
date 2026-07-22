@@ -1,5 +1,5 @@
 import { Bot, Brain, Check, ChevronDown, Image as ImageIcon } from "lucide-react";
-import type { ModelInfo } from "./api";
+import type { ModelInfo, ReasoningEffort } from "./api";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -60,9 +60,8 @@ export function formatContextWindow(tokens: number): string {
 
 /**
  * Subtle capability hints for a model row: context window plus icon markers for
- * image input and adjustable reasoning effort. The reasoning marker is only an
- * indicator today — choosing an effort level needs a per-chat field the server
- * doesn't persist yet, so we surface the capability without a live control.
+ * image input and adjustable reasoning effort. The reasoning marker flags which
+ * models expose the live effort control surfaced by [`ReasoningEffortMenu`].
  */
 export function ModelCapabilities({ model }: { model: ModelInfo }) {
   return (
@@ -180,6 +179,82 @@ export function ModelMenu({
             </DropdownMenuItem>
           </>
         )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** The effort levels offered by the picker, in ascending order. */
+const REASONING_EFFORT_OPTIONS: { value: ReasoningEffort; label: string }[] = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
+
+const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> =
+  Object.fromEntries(
+    REASONING_EFFORT_OPTIONS.map((option) => [option.value, option.label]),
+  ) as Record<ReasoningEffort, string>;
+
+/**
+ * Per-chat reasoning-effort selector, shown next to the model picker. `null`
+ * means "use the provider default". The control is interactive only when the
+ * chat's selected model advertises `supports_reasoning_effort`; the caller hides
+ * it otherwise, since the field is inert for models without the capability.
+ */
+export function ReasoningEffortMenu({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: ReasoningEffort | null;
+  disabled?: boolean;
+  onChange: (effort: ReasoningEffort | null) => void | Promise<void>;
+}) {
+  const label = value ? REASONING_EFFORT_LABELS[value] : "Default";
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="model-menu-trigger"
+          disabled={disabled}
+          aria-label={`Reasoning effort: ${label}`}
+          title={`Reasoning effort: ${label}`}
+        >
+          <Brain size={14} />
+          <span className="model-menu-label">{label}</span>
+          <ChevronDown size={13} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        side="top"
+        className="model-menu-content"
+      >
+        <DropdownMenuItem
+          onSelect={() => {
+            if (value !== null) void onChange(null);
+          }}
+        >
+          <span className="model-menu-item-label">Default</span>
+          {value === null && <Check className="ml-auto" />}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        {REASONING_EFFORT_OPTIONS.map((option) => {
+          const selected = value === option.value;
+          return (
+            <DropdownMenuItem
+              key={option.value}
+              onSelect={() => {
+                if (!selected) void onChange(option.value);
+              }}
+            >
+              <span className="model-menu-item-label">{option.label}</span>
+              {selected && <Check className="ml-auto" />}
+            </DropdownMenuItem>
+          );
+        })}
       </DropdownMenuContent>
     </DropdownMenu>
   );

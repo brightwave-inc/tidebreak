@@ -473,6 +473,7 @@ mod tests {
             project_id: None,
             title: None,
             model: None,
+            reasoning_effort: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: chrono::Utc::now(),

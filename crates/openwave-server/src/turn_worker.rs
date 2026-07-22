@@ -465,6 +465,7 @@ impl TurnWorker {
             let mut heartbeat_open = true;
             let mut config = self.agent_config.clone();
             config.model = turn.model.clone();
+            config.reasoning_effort = chat.reasoning_effort;
             config.max_steps = remaining_steps;
             config.tool_scratch = self.private_scratch_root.as_deref().and_then(|root| {
                 match private_chat_scratch(root, chat.id) {

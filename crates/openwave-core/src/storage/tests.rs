@@ -2004,6 +2004,7 @@ fn store_is_object_safe_and_roundtrips() {
         project_id: None,
         title: None,
         model: None,
+        reasoning_effort: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),

@@ -15,7 +15,8 @@ use tokio::sync::broadcast::error::RecvError;
 use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
     ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome, DeleteProjectOutcome,
-    Message as StoredMessage, MessageId, Project, ProjectId, RequestAgentRunCancellationOutcome,
+    Message as StoredMessage, MessageId, Project, ProjectId, ReasoningEffort,
+    RequestAgentRunCancellationOutcome,
     RequestTurnCancellationOutcome, Role, SandboxToolCall, SandboxToolCallStatus, SecretProvider,
     SequencedEvent, Store, ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer,
     TurnSteerId,
@@ -493,6 +494,10 @@ pub struct CreateChat {
     /// Optional model for this chat; omitted to use the configured default.
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional reasoning-effort override for this chat; honored only by models
+    /// that expose the control.
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// `POST /chats` — create a chat and return it (`201 Created`).
@@ -517,6 +522,7 @@ pub async fn create_chat(
         project_id: body.project_id,
         title: body.title,
         model: body.model,
+        reasoning_effort: body.reasoning_effort,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: Utc::now(),
@@ -537,6 +543,9 @@ pub struct ChatUpdate {
     pub title: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     pub model: Option<Option<String>>,
+    /// An explicit `null` clears the reasoning-effort override; a value sets it.
+    #[serde(default, deserialize_with = "double_option")]
+    pub reasoning_effort: Option<Option<ReasoningEffort>>,
 }
 
 /// `PATCH /chats/{id}` — update the human-facing title and/or model selection.
@@ -568,7 +577,12 @@ pub async fn patch_chat(
 
     if !state
         .store
-        .update_chat_metadata(id, title.clone(), body.model.clone())
+        .update_chat_metadata(
+            id,
+            title.clone(),
+            body.model.clone(),
+            body.reasoning_effort,
+        )
         .await?
     {
         return Err(ServerError::not_found(format!("chat {id} not found")));
@@ -578,6 +592,9 @@ pub async fn patch_chat(
     }
     if let Some(model) = body.model {
         chat.model = model;
+    }
+    if let Some(reasoning_effort) = body.reasoning_effort {
+        chat.reasoning_effort = reasoning_effort;
     }
     Ok(Json(chat))
 }
