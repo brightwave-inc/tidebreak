@@ -16,7 +16,7 @@ use std::sync::{
     Arc,
 };
 
-use openwave_core::{ApprovalClass, ChatId, ToolCtx, ToolRegistry};
+use openwave_core::{ApprovalClass, ChatId, ToolCtx, ToolRegistry, VERSION};
 use serde_json::Value;
 
 use crate::protocol::{
@@ -51,7 +51,7 @@ impl McpServer {
             tools,
             ctx,
             server_name: "openwave".to_string(),
-            server_version: env!("CARGO_PKG_VERSION").to_string(),
+            server_version: VERSION.to_string(),
             session_state: AtomicU8::new(SESSION_UNINITIALIZED),
         }
     }
@@ -372,6 +372,7 @@ mod tests {
         let result = resp.result.unwrap();
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(result["serverInfo"]["name"], "openwave");
+        assert_eq!(result["serverInfo"]["version"], VERSION);
         assert!(result["capabilities"]["tools"].is_object());
     }
 

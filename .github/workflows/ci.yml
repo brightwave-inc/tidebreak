@@ -7,6 +7,8 @@ on:
   # secret scan, relevant lightweight checks, and aggregate gate. The expensive
   # Rust lanes run on the merged main tip (and on explicit manual dispatch).
   pull_request:
+    types:
+      [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review]
   workflow_dispatch:
 
 # Least privilege by default; fork PRs get read-only.
@@ -20,6 +22,66 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  pr-title:
+    name: semantic PR title
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+      - uses: actions/checkout@v7
+        with:
+          # Once this policy has landed, always execute its trusted base-branch
+          # copy. The root checkout is retained only to bootstrap this PR.
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .trusted-release-policy
+          fetch-depth: 1
+      - name: Validate Conventional Commit title
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          policy_dir="$GITHUB_WORKSPACE/.trusted-release-policy"
+          bootstrap=false
+          if [[ ! -f "$policy_dir/scripts/check-pr-title.mjs" ]] ||
+            [[ ! -f "$policy_dir/scripts/release-label.mjs" ]]; then
+            policy_dir="$GITHUB_WORKSPACE"
+            bootstrap=true
+            echo "Bootstrapping the release policy from this PR; future PRs use the trusted base copy."
+          fi
+
+          node "$policy_dir/scripts/check-pr-title.mjs" "$PR_TITLE"
+          expected_label="$(node "$policy_dir/scripts/release-label.mjs" --title "$PR_TITLE")"
+          if [[ "$bootstrap" = false ]]; then
+            actual_labels=""
+            for _ in {1..10}; do
+              actual_labels="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+                --jq '[.labels[].name | select(startswith("semver:"))] | sort | join(",")')"
+              [[ "$actual_labels" = "$expected_label" ]] && break
+              sleep 2
+            done
+            test "$actual_labels" = "$expected_label" || {
+              echo "Expected the release-impact label $expected_label; found: ${actual_labels:-none}." >&2
+              echo "The trusted Release draft workflow may still be synchronizing it." >&2
+              exit 1
+            }
+          fi
+
+  release-policy:
+    name: release policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test semantic title and tag policy
+        run: node --test scripts/*.test.mjs
+
   changes:
     name: change scope
     runs-on: ubuntu-latest
@@ -367,7 +429,19 @@ jobs:
   rust:
     name: fmt · clippy · build · test
     if: ${{ always() }}
-    needs: [changes, fmt, lint, build, desktop, test, postgres, ui]
+    needs:
+      [
+        pr-title,
+        release-policy,
+        changes,
+        fmt,
+        lint,
+        build,
+        desktop,
+        test,
+        postgres,
+        ui,
+      ]
     runs-on: ubuntu-latest
     steps:
       - name: Require every Rust lane
@@ -379,12 +453,20 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
           UI_RESULT: ${{ needs.ui.result }}
+          PR_TITLE_RESULT: ${{ needs.pr-title.result }}
+          RELEASE_POLICY_RESULT: ${{ needs.release-policy.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUST_CHANGED: ${{ needs.changes.outputs.rust }}
           UI_CHANGED: ${{ needs.changes.outputs.ui }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           test "$CHANGES_RESULT" = success
+          test "$RELEASE_POLICY_RESULT" = success
+          case "$EVENT_NAME" in
+            pull_request) test "$PR_TITLE_RESULT" = success ;;
+            *) test "$PR_TITLE_RESULT" = skipped ;;
+          esac
+
           case "$UI_CHANGED" in
             true) test "$UI_RESULT" = success ;;
             false) test "$UI_RESULT" = skipped ;;

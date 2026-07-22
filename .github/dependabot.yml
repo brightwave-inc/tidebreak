@@ -9,7 +9,9 @@ updates:
       interval: weekly
     open-pull-requests-limit: 10
     commit-message:
-      prefix: build
+      # Runtime dependency changes are patch-release candidates. GitHub Actions
+      # updates below remain `ci(deps)` and do not release the product.
+      prefix: deps
       include: scope
     # LanceDB 0.31 exposes Arrow 58 types. Moving any one of these direct
     # dependencies to Arrow 59 creates an incompatible duplicate type graph;

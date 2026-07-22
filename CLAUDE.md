@@ -64,10 +64,15 @@ For the desktop UI, run `tsc`, the vitest suite, and a production build under
 
 ## Commits and PRs
 
-- Follow the Conventional Commits prefixes documented in
-  [`CONTRIBUTING.md`](CONTRIBUTING.md) (`feat:`, `fix:`, `docs:`, …).
+- Follow the semantic PR-title policy in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+  The title becomes the squash commit and controls the next version; use `!`
+  only for an intentional breaking change. Published `vX.Y.Z` tags, not
+  committed Cargo/Tauri placeholders, are the desktop product's version source.
 - Commit and PR text should read as ordinary engineering writing: describe what
   changed and why, not the tooling that produced it.
 - This is a public repository. Do not reference internal or private design
   documents in code, comments, commits, or PRs.
 - Never commit secrets — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+Release maintainers should follow [`docs/releases.md`](docs/releases.md),
+especially the compatibility and desktop-schema checklist before `1.0.0`.
