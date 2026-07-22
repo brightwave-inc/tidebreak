@@ -52,8 +52,9 @@ OpenWave is the opposite: a slim desktop app (plus a headless mode) that runs th
 agent loop **on your machine**, keeps your data local, and lets you bring your
 own model — hosted or fully offline. Its MCP server foundation can expose the
 same tool registry to external agents; `openwave mcp <workspace>` serves the
-built-in read-only file tools today, while indexed search wiring and the MCP
-client remain in development.
+built-in read-only file tools today. The inverse client foundation can initialize
+external stdio MCP servers and mount their tools into that registry; app-level
+server configuration and indexed search wiring remain in development.
 
 ## Principles
 
@@ -65,7 +66,8 @@ client remain in development.
 - **Slim by default.** Small install; no bundled model weights or language
   runtimes — fetched on first use, cached locally.
 - **Composable tool surface.** The MCP server foundation exposes OpenWave's
-  tools; mounting external MCP servers as a client is planned.
+  tools, while its client foundation mounts namespaced tools from external stdio
+  MCP servers behind the same approval-aware registry.
 - **Open core.** The runtime is Apache-2.0 and complete on its own.
 
 ## Status
@@ -75,9 +77,9 @@ local file tools, multi-provider model routing, a turn engine with live journale
 WebSocket events, a workspace-style desktop conversation shell, a bounded
 foreground/sandbox agent-run foundation, and durable asynchronous document
 ingestion/retrieval with grounded citations — all behind `openwave serve`.
-Connectors, richer document parsers, indexed-search MCP wiring, and the MCP client
-remain in development. Expect rapid change and rough edges — and see
-[CONTRIBUTING](CONTRIBUTING.md) if you'd like to help.
+Connectors, richer document parsers, indexed-search MCP wiring, and app-level
+MCP client configuration remain in development. Expect rapid change and rough
+edges — and see [CONTRIBUTING](CONTRIBUTING.md) if you'd like to help.
 
 ## Building
 
@@ -123,7 +125,7 @@ foreground/background execution model is described in
 | [`openwave-server`](crates/openwave-server) | authenticated local HTTP/WebSocket API + durable workers |
 | [`openwave-connectors`](crates/openwave-connectors) | OAuth + source connectors |
 | [`openwave-retrieval`](crates/openwave-retrieval) | parsing, embeddings, hybrid search, citations |
-| [`openwave-mcp`](crates/openwave-mcp) | lifecycle-gated read-only MCP server surface (client planned) |
+| [`openwave-mcp`](crates/openwave-mcp) | lifecycle-gated MCP server plus external stdio client tool mounting |
 | [`openwave-desktop`](crates/openwave-desktop) | desktop app (Tauri) |
 | [`openwave-cli`](crates/openwave-cli) | headless `openwave serve` + `openwave mcp` commands |
 | [`openwave-slack`](crates/openwave-slack) | Slack adapter |

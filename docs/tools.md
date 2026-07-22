@@ -55,6 +55,14 @@ Provider-backed tools do not belong in core. Retrieval, web search, connectors,
 and sandbox execution should each supply tools from their owning crate behind
 the common `Tool` interface.
 
+External MCP servers follow the same rule through `openwave-mcp`. A connected
+stdio server completes MCP initialization and paginated `tools/list` discovery
+before its proxies are registered. Each remote name is locally namespaced as
+`mcp__{server}__{tool}` and keeps the remote input schema unchanged. Calls are
+serialized per external server and their text, structured content, and error
+flag are translated back into `ToolOutput`. Because MCP tools can cross both the
+workspace and process boundary, every mounted proxy is classified `Sensitive`.
+
 ## Foreground and sandbox surfaces
 
 Foreground and background agents need different tools. OpenWave should not
