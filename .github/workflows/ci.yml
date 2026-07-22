@@ -185,7 +185,7 @@ jobs:
   lint:
     name: clippy
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request' }}
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -279,7 +279,7 @@ jobs:
   desktop:
     name: desktop test
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request' }}
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -322,7 +322,7 @@ jobs:
   test:
     name: test
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request' }}
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -487,10 +487,13 @@ jobs:
             true)
               test "$FMT_RESULT" = success
               if [[ "$EVENT_NAME" = pull_request ]]; then
-                test "$LINT_RESULT" = skipped
+                # Correctness lanes run on PRs so breakage is caught before merge.
+                test "$LINT_RESULT" = success
+                test "$DESKTOP_RESULT" = success
+                test "$TEST_RESULT" = success
+                # build is redundant with lint+test (both compile the workspace)
+                # and postgres is a heavy service lane — keep them push-only.
                 test "$BUILD_RESULT" = skipped
-                test "$DESKTOP_RESULT" = skipped
-                test "$TEST_RESULT" = skipped
                 test "$POSTGRES_RESULT" = skipped
               else
                 test "$LINT_RESULT" = success
