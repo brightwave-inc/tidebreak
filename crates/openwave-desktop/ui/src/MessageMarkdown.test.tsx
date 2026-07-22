@@ -1,6 +1,19 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { MessageMarkdown, safeMarkdownUrl } from "./MessageMarkdown";
+import {
+  MessageMarkdown,
+  preserveLineBreaks,
+  safeMarkdownUrl,
+} from "./MessageMarkdown";
+
+describe("preserveLineBreaks", () => {
+  it("turns single newlines into hard breaks but leaves paragraph breaks", () => {
+    expect(preserveLineBreaks("one\ntwo")).toBe("one  \ntwo");
+    expect(preserveLineBreaks("para one\n\npara two")).toBe(
+      "para one\n\npara two",
+    );
+  });
+});
 
 describe("safeMarkdownUrl", () => {
   it("permits only secure external links", () => {
@@ -43,5 +56,23 @@ describe("MessageMarkdown", () => {
     expect(markup).toContain('aria-label="Copy table contents"');
     expect(markup).toContain("Alpha");
     expect(markup).toContain("<strong>1</strong>");
+  });
+
+  it("renders single newlines as line breaks without splitting paragraphs", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>{"first line\nsecond line"}</MessageMarkdown>,
+    );
+
+    expect(markup).toContain("<br/>");
+    // One paragraph with a break, not two separate paragraphs.
+    expect(markup.match(/<p>/g)).toHaveLength(1);
+  });
+
+  it("keeps blank-line separated text as distinct paragraphs", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>{"first para\n\nsecond para"}</MessageMarkdown>,
+    );
+
+    expect(markup.match(/<p>/g)).toHaveLength(2);
   });
 });
