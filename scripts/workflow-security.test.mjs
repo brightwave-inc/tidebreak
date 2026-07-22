@@ -14,6 +14,10 @@ const tauriConfig = JSON.parse(
     "utf8",
   ),
 );
+const macosResourceSigner = readFileSync(
+  new URL("./sign-macos-release-resources.sh", import.meta.url),
+  "utf8",
+);
 
 test("third-party workflow actions use immutable commit SHAs", () => {
   for (const [name, source] of Object.entries(workflows)) {
@@ -76,6 +80,19 @@ test("the updater private key is isolated from compilation", () => {
   assert.ok(buildStep);
   assert.doesNotMatch(buildStep, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.doesNotMatch(release, /createUpdaterArtifacts/);
+});
+
+test("nested macOS native resources receive a timestamped Developer ID signature", () => {
+  const release = workflows["release.yml"];
+  assert.match(release, /beforeBundleCommand/);
+  assert.match(release, /bash scripts\/sign-macos-release-resources\.sh/);
+  assert.match(
+    release,
+    /Contents\/Resources\/pdfium\/libpdfium\.dylib/,
+  );
+  assert.match(macosResourceSigner, /--sign "\$APPLE_SIGNING_IDENTITY"/);
+  assert.match(macosResourceSigner, /--options runtime/);
+  assert.match(macosResourceSigner, /--timestamp/);
 });
 
 test("the packaged updater trusts the production signing key and endpoint", () => {
