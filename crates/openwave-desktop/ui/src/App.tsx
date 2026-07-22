@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ApiClient,
   type AgentRun,
@@ -6,12 +6,8 @@ import {
   type ModelInfo,
   type PendingFolderAccessRequest,
   type ProviderInfo,
-  type ProviderKind,
   type SequencedEvent,
   type ServerInfo,
-  type WebSearchConfigInfo,
-  type WebSearchCredentialReadiness,
-  type WebSearchProviderKind,
 } from "./api";
 import { resolveServerInfo } from "./boot";
 import {
@@ -28,10 +24,8 @@ import { Composer } from "./Composer";
 import { MessageList, type ChatMessage } from "./MessageList";
 import {
   ArrowDown,
-  Bot,
   Ellipsis,
   FolderOpen,
-  Globe,
   LibraryBig,
   Monitor,
   Moon,
@@ -42,6 +36,9 @@ import {
   Trash2,
 } from "lucide-react";
 import { useTheme } from "./theme";
+import { SettingsView } from "./SettingsView";
+import { ModelMenu } from "./ModelMenu";
+import { SettingsError, SettingsPanel } from "./settings/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -83,7 +80,6 @@ import {
 import { prependReplacementChat } from "./ChatDeletion";
 import { useConfirm } from "./components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 
 type Msg = ChatMessage;
 
@@ -142,10 +138,10 @@ export default function App() {
   const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
   const [renameChatDraft, setRenameChatDraft] = useState("");
   const skipRenameCommitRef = useRef(false);
-  const [settingsPanel, setSettingsPanel] = useState<
-    "providers" | "web-search" | "folders" | "model" | null
-  >(null);
-  const [primaryView, setPrimaryView] = useState<"chat" | "documents">("chat");
+  const [settingsPanel, setSettingsPanel] = useState<"folders" | null>(null);
+  const [primaryView, setPrimaryView] = useState<
+    "chat" | "documents" | "settings"
+  >("chat");
   const [status, setStatus] = useState("starting…");
   const [hasUnreadActivity, setHasUnreadActivity] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
@@ -174,7 +170,7 @@ export default function App() {
   const creationInFlightRef = useRef(false);
   const deletionInFlightRef = useRef(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
-  const { mode: themeMode, cycle: cycleTheme } = useTheme();
+  const { mode: themeMode, cycle: cycleTheme, setMode: setThemeMode } = useTheme();
 
   useEffect(() => {
     let cancelled = false;
@@ -1096,7 +1092,7 @@ export default function App() {
     }
   }
 
-  async function onModelChange(modelId: string) {
+  async function onModelChange(modelId: string | null) {
     if (!client || !chat || deletionInFlightRef.current) return;
     const chatId = chat.id;
     const selection = chatSelectionRef.current;
@@ -1358,7 +1354,7 @@ export default function App() {
           {hasNativeHost() && (
             <button
               type="button"
-              className={`sidebar-action${settingsPanel === "folders" ? " is-active" : ""}`}
+              className={`sidebar-action${primaryView === "chat" && settingsPanel === "folders" ? " is-active" : ""}`}
               onClick={() => {
                 setPrimaryView("chat");
                 setSettingsPanel((panel) =>
@@ -1372,42 +1368,14 @@ export default function App() {
           )}
           <button
             type="button"
-            className={`sidebar-action${settingsPanel === "model" ? " is-active" : ""}`}
+            className={`sidebar-action${primaryView === "settings" ? " is-active" : ""}`}
             onClick={() => {
-              setPrimaryView("chat");
-              setSettingsPanel((panel) =>
-                panel === "model" ? null : "model",
-              );
-            }}
-          >
-            <Bot size={16} />
-            Model
-          </button>
-          <button
-            type="button"
-            className={`sidebar-action${settingsPanel === "providers" ? " is-active" : ""}`}
-            onClick={() => {
-              setPrimaryView("chat");
-              setSettingsPanel((panel) =>
-                panel === "providers" ? null : "providers",
-              );
+              setSettingsPanel(null);
+              setPrimaryView("settings");
             }}
           >
             <Settings size={16} />
-            Providers
-          </button>
-          <button
-            type="button"
-            className={`sidebar-action${settingsPanel === "web-search" ? " is-active" : ""}`}
-            onClick={() => {
-              setPrimaryView("chat");
-              setSettingsPanel((panel) =>
-                panel === "web-search" ? null : "web-search",
-              );
-            }}
-          >
-            <Globe size={16} />
-            Web search
+            Settings
           </button>
         </div>
       </aside>
@@ -1417,6 +1385,16 @@ export default function App() {
       >
         {primaryView === "documents" ? (
           <DocumentsView chatId={chat.id} onBack={() => setPrimaryView("chat")} />
+        ) : primaryView === "settings" ? (
+          <SettingsView
+            client={client}
+            models={models}
+            providers={providers}
+            onProvidersChanged={() => void refreshCatalog()}
+            onBack={() => setPrimaryView("chat")}
+            themeMode={themeMode}
+            onThemeChange={setThemeMode}
+          />
         ) : (
           <>
         <section className="chat-pane">
@@ -1442,6 +1420,7 @@ export default function App() {
                   <button
                     type="button"
                     className={`btn${settingsPanel === "folders" ? " is-active" : ""}`}
+                    aria-label="Folders"
                     onClick={() =>
                       setSettingsPanel((panel) =>
                         panel === "folders" ? null : "folders",
@@ -1453,36 +1432,14 @@ export default function App() {
                 )}
                 <button
                   type="button"
-                  className={`btn${settingsPanel === "model" ? " is-active" : ""}`}
-                  onClick={() =>
-                    setSettingsPanel((panel) =>
-                      panel === "model" ? null : "model",
-                    )
-                  }
-                >
-                  <Bot size={14} />
-                </button>
-                <button
-                  type="button"
-                  className={`btn${settingsPanel === "providers" ? " is-active" : ""}`}
-                  onClick={() =>
-                    setSettingsPanel((panel) =>
-                      panel === "providers" ? null : "providers",
-                    )
-                  }
+                  className="btn"
+                  aria-label="Settings"
+                  onClick={() => {
+                    setSettingsPanel(null);
+                    setPrimaryView("settings");
+                  }}
                 >
                   <Settings size={14} />
-                </button>
-                <button
-                  type="button"
-                  className={`btn${settingsPanel === "web-search" ? " is-active" : ""}`}
-                  onClick={() =>
-                    setSettingsPanel((panel) =>
-                      panel === "web-search" ? null : "web-search",
-                    )
-                  }
-                >
-                  <Globe size={14} />
                 </button>
               </div>
               <span className="status" title={status}>
@@ -1552,6 +1509,14 @@ export default function App() {
             }
             disabled={deletingChatId !== null}
             draft={draft}
+            modelMenu={
+              <ModelMenu
+                models={models}
+                value={chat.model}
+                disabled={deletingChatId !== null}
+                onChange={onModelChange}
+              />
+            }
             onDraftChange={onComposerDraftChange}
             onSend={onSend}
             onSteer={onSteerActiveTurn}
@@ -1565,23 +1530,11 @@ export default function App() {
           />
         </section>
 
-        {settingsPanel === "model" && (
-          <ModelPanel
-            chat={chat}
-            models={models}
-            disabled={deletingChatId !== null}
-            onModelChange={onModelChange}
-          />
+        {settingsPanel === "folders" && (
+          <aside className="settings">
+            <FoldersPanel chat={chat} />
+          </aside>
         )}
-        {settingsPanel === "providers" && (
-          <ProvidersPanel
-            providers={providers}
-            client={client}
-            onChanged={() => void refreshCatalog()}
-          />
-        )}
-        {settingsPanel === "web-search" && <WebSearchPanel client={client} />}
-        {settingsPanel === "folders" && <FoldersPanel chat={chat} />}
           </>
         )}
       </div>
@@ -1667,76 +1620,6 @@ function discardToolCalls(messages: Msg[], callIds: Set<string>): Msg[] {
 
 function withoutConnectionState(status: string): string {
   return status.replace(/ · (?:live|reconnecting)$/, "");
-}
-
-const SETTINGS_SELECT_CLASS =
-  "flex h-10 w-full rounded-md border border-border bg-background px-3 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
-
-function SettingsPanel({
-  title,
-  description,
-  busy,
-  children,
-}: {
-  title: string;
-  description?: string;
-  busy?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <aside className="settings" aria-busy={busy}>
-      <div className="flex flex-col gap-1">
-        <h2 className="text-base font-semibold tracking-tight">{title}</h2>
-        {description && (
-          <p className="text-sm text-muted-foreground">{description}</p>
-        )}
-      </div>
-      {children}
-    </aside>
-  );
-}
-
-function SettingsField({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-sm font-medium">{label}</span>
-      {children}
-      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
-    </label>
-  );
-}
-
-function SettingsSection({
-  title,
-  children,
-}: {
-  title?: string;
-  children: ReactNode;
-}) {
-  return (
-    <section className="flex flex-col gap-3 rounded-lg border border-border p-4">
-      {title && (
-        <h3 className="text-sm font-semibold capitalize">{title}</h3>
-      )}
-      {children}
-    </section>
-  );
-}
-
-function SettingsError({ children }: { children: ReactNode }) {
-  return (
-    <p className="text-sm text-destructive" role="alert">
-      {children}
-    </p>
-  );
 }
 
 function FoldersPanel({ chat }: { chat: Chat }) {
@@ -1829,469 +1712,5 @@ function FoldersPanel({ chat }: { chat: Chat }) {
       </div>
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>
-  );
-}
-
-const MIN_WEB_SEARCH_TIMEOUT_MS = 1_000;
-const MAX_WEB_SEARCH_TIMEOUT_MS = 60_000;
-
-function WebSearchPanel({ client }: { client: ApiClient }) {
-  const [config, setConfig] = useState<WebSearchConfigInfo | null>(null);
-  const [credentials, setCredentials] = useState<WebSearchCredentialReadiness[]>([]);
-  const [provider, setProvider] = useState<WebSearchProviderKind | "">("");
-  const [timeoutMs, setTimeoutMs] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [savingConfig, setSavingConfig] = useState(false);
-  const [savingCredential, setSavingCredential] = useState(false);
-  const [removingCredential, setRemovingCredential] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function refresh() {
-    const [nextConfig, nextCredentials] = await Promise.all([
-      client.getWebSearchConfig(),
-      client.listWebSearchCredentials(),
-    ]);
-    setConfig(nextConfig);
-    setCredentials(nextCredentials.credentials);
-    setProvider(nextConfig.provider ?? "");
-    setTimeoutMs(String(nextConfig.timeout_ms));
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    void (async () => {
-      try {
-        const [nextConfig, nextCredentials] = await Promise.all([
-          client.getWebSearchConfig(),
-          client.listWebSearchCredentials(),
-        ]);
-        if (cancelled) return;
-        setConfig(nextConfig);
-        setCredentials(nextCredentials.credentials);
-        setProvider(nextConfig.provider ?? "");
-        setTimeoutMs(String(nextConfig.timeout_ms));
-      } catch (err) {
-        if (!cancelled) setError(String(err));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [client]);
-
-  const activeProvider = config?.provider;
-  const selectedCredential = activeProvider
-    ? credentials.find((credential) => credential.provider === activeProvider)
-    : undefined;
-  const selectedHasCredential = selectedCredential?.has_credential ?? false;
-  const working = savingConfig || savingCredential || removingCredential;
-  const state = webSearchState(config);
-
-  async function saveConfig() {
-    const parsedTimeout = Number(timeoutMs);
-    if (
-      !Number.isInteger(parsedTimeout) ||
-      parsedTimeout < MIN_WEB_SEARCH_TIMEOUT_MS ||
-      parsedTimeout > MAX_WEB_SEARCH_TIMEOUT_MS
-    ) {
-      setError(
-        `Timeout must be a whole number between ${MIN_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} and ${MAX_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} ms.`,
-      );
-      return;
-    }
-
-    setSavingConfig(true);
-    setError(null);
-    try {
-      const nextConfig = await client.putWebSearchConfig({
-        provider: provider || null,
-        timeout_ms: parsedTimeout,
-      });
-      setConfig(nextConfig);
-      setTimeoutMs(String(nextConfig.timeout_ms));
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setSavingConfig(false);
-    }
-  }
-
-  async function saveCredential() {
-    if (!activeProvider || !apiKey.trim()) return;
-    setSavingCredential(true);
-    setError(null);
-    try {
-      await client.putWebSearchCredential(activeProvider, apiKey.trim());
-      setApiKey("");
-      await refresh();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setSavingCredential(false);
-    }
-  }
-
-  async function removeCredential() {
-    if (!activeProvider) return;
-    setRemovingCredential(true);
-    setError(null);
-    try {
-      await client.deleteWebSearchCredential(activeProvider);
-      await refresh();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setRemovingCredential(false);
-    }
-  }
-
-  return (
-    <SettingsPanel
-      title="Web search"
-      description="Choose a local provider and a bounded request timeout. Existing keys are never shown here."
-      busy={loading}
-    >
-      {loading ? (
-        <p className="text-sm text-muted-foreground">
-          Loading web-search settings…
-        </p>
-      ) : !config ? (
-        <p className="text-sm text-muted-foreground">
-          Web-search settings are unavailable.
-        </p>
-      ) : (
-        <>
-          <div
-            className={`web-search-state is-${state.kind}`}
-            role="status"
-          >
-            <strong>{state.label}</strong>
-            <span>{state.description}</span>
-          </div>
-
-          <SettingsSection>
-            <SettingsField label="Provider">
-              <select
-                className={SETTINGS_SELECT_CLASS}
-                value={provider}
-                disabled={working}
-                onChange={(event) =>
-                  setProvider(event.target.value as WebSearchProviderKind | "")
-                }
-              >
-                <option value="">Disabled</option>
-                <option value="exa">Exa</option>
-                <option value="tavily">Tavily</option>
-              </select>
-            </SettingsField>
-
-            <SettingsField
-              label="Request timeout (ms)"
-              hint={`Between ${MIN_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} and ${MAX_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} ms.`}
-            >
-              <Input
-                type="number"
-                inputMode="numeric"
-                min={MIN_WEB_SEARCH_TIMEOUT_MS}
-                max={MAX_WEB_SEARCH_TIMEOUT_MS}
-                step="1000"
-                value={timeoutMs}
-                disabled={working}
-                onChange={(event) => setTimeoutMs(event.target.value)}
-              />
-            </SettingsField>
-            <Button
-              type="button"
-              className="self-start"
-              disabled={working}
-              onClick={() => void saveConfig()}
-            >
-              {savingConfig ? "Saving…" : "Save configuration"}
-            </Button>
-          </SettingsSection>
-
-          {activeProvider && (
-            <SettingsSection title={`${activeProvider} credential`}>
-              <span className="text-xs text-muted-foreground">
-                {selectedHasCredential
-                  ? "credential saved"
-                  : "no credential saved"}
-              </span>
-              <SettingsField
-                label={selectedHasCredential ? "Replace API key" : "API key"}
-              >
-                <Input
-                  type="password"
-                  placeholder="Paste a new API key"
-                  value={apiKey}
-                  maxLength={8_192}
-                  autoComplete="new-password"
-                  disabled={working}
-                  onChange={(event) => setApiKey(event.target.value)}
-                />
-              </SettingsField>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  disabled={working || !apiKey.trim()}
-                  onClick={() => void saveCredential()}
-                >
-                  {savingCredential
-                    ? "Saving…"
-                    : selectedHasCredential
-                      ? "Update key"
-                      : "Save key"}
-                </Button>
-                {selectedHasCredential && (
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    disabled={working}
-                    onClick={() => void removeCredential()}
-                  >
-                    {removingCredential ? "Removing…" : "Remove saved key"}
-                  </Button>
-                )}
-              </div>
-            </SettingsSection>
-          )}
-
-          {provider !== (activeProvider ?? "") && (
-            <p className="text-xs text-muted-foreground">
-              Save the provider configuration before managing that provider’s
-              key.
-            </p>
-          )}
-
-          <p className="text-sm leading-relaxed text-muted-foreground">
-            This configures host-owned search access only. Search is not yet a
-            chat tool in this build.
-          </p>
-        </>
-      )}
-      {error && <SettingsError>{error}</SettingsError>}
-    </SettingsPanel>
-  );
-}
-
-function webSearchState(config: WebSearchConfigInfo | null): {
-  kind: "disabled" | "ready" | "not-configured";
-  label: string;
-  description: string;
-} {
-  if (!config?.provider) {
-    return {
-      kind: "disabled",
-      label: "Disabled",
-      description: "No web-search provider is selected.",
-    };
-  }
-  if (config.has_credential) {
-    return {
-      kind: "ready",
-      label: "Ready",
-      description: `${config.provider} is selected and has a saved credential.`,
-    };
-  }
-  return {
-    kind: "not-configured",
-    label: "Not configured",
-    description: `${config.provider} is selected but needs an API key.`,
-  };
-}
-
-function ModelPanel({
-  chat,
-  models,
-  disabled,
-  onModelChange,
-}: {
-  chat: Chat;
-  models: ModelInfo[];
-  disabled: boolean;
-  onModelChange: (modelId: string) => Promise<void>;
-}) {
-  return (
-    <SettingsPanel
-      title="Model"
-      description="Choose the model for this chat."
-    >
-      <SettingsField label="Active model">
-        <select
-          className={SETTINGS_SELECT_CLASS}
-          value={chat.model ?? ""}
-          disabled={disabled}
-          onChange={(e) => void onModelChange(e.target.value)}
-        >
-          <option value="">default</option>
-          {models.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.id} ({m.provider})
-            </option>
-          ))}
-          {chat.model && !models.some((m) => m.id === chat.model) && (
-            <option value={chat.model}>{chat.model} (custom)</option>
-          )}
-        </select>
-      </SettingsField>
-      <SettingsField
-        label="Custom model ID"
-        hint="Select from known models above, or type any model ID your provider supports."
-      >
-        <Input
-          type="text"
-          placeholder="e.g. claude-sonnet-4-20250514"
-          defaultValue={
-            chat.model && !models.some((m) => m.id === chat.model)
-              ? chat.model
-              : ""
-          }
-          key={chat.id}
-          onBlur={(e) => {
-            const next = e.target.value.trim();
-            if (next && next !== (chat.model ?? "")) {
-              void onModelChange(next);
-            }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.currentTarget.blur();
-          }}
-        />
-      </SettingsField>
-    </SettingsPanel>
-  );
-}
-
-function ProvidersPanel({
-  providers,
-  client,
-  onChanged,
-}: {
-  providers: ProviderInfo[];
-  client: ApiClient;
-  onChanged: () => void;
-}) {
-  return (
-    <SettingsPanel
-      title="Providers"
-      description="Keys stay on this machine. Enable a provider, then save a credential."
-    >
-      {providers.map((p) => (
-        <ProviderRow key={p.kind} info={p} client={client} onChanged={onChanged} />
-      ))}
-    </SettingsPanel>
-  );
-}
-
-function ProviderRow({
-  info,
-  client,
-  onChanged,
-}: {
-  info: ProviderInfo;
-  client: ApiClient;
-  onChanged: () => void;
-}) {
-  const [key, setKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState(info.base_url ?? "");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function save(enabled: boolean) {
-    setSaving(true);
-    setError(null);
-    try {
-      const body: {
-        enabled: boolean;
-        base_url?: string | null;
-        credential?: { type: "api_key"; key: string };
-      } = { enabled };
-      if (info.kind === "openai_compatible") {
-        body.base_url = baseUrl.trim() || null;
-      }
-      if (key.trim()) {
-        body.credential = { type: "api_key", key: key.trim() };
-      }
-      await client.putProvider(info.kind as ProviderKind, body);
-      setKey("");
-      onChanged();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function clearCredential() {
-    setSaving(true);
-    setError(null);
-    try {
-      await client.deleteCredential(info.kind as ProviderKind);
-      onChanged();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <SettingsSection title={info.kind.replaceAll("_", " ")}>
-      <div className="flex items-center justify-between gap-3">
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            className="size-4 accent-[var(--primary)]"
-            checked={info.enabled}
-            disabled={saving}
-            onChange={(e) => void save(e.target.checked)}
-          />
-          Enabled
-        </label>
-        <span className="text-xs text-muted-foreground">
-          {info.has_credential ? "credential set" : "no credential"}
-        </span>
-      </div>
-      {info.kind === "openai_compatible" && (
-        <Input
-          type="text"
-          placeholder="base URL (e.g. http://127.0.0.1:1234/v1)"
-          value={baseUrl}
-          onChange={(e) => setBaseUrl(e.target.value)}
-        />
-      )}
-      <Input
-        type="password"
-        placeholder="API key"
-        value={key}
-        onChange={(e) => setKey(e.target.value)}
-        autoComplete="off"
-      />
-      <div className="flex flex-wrap gap-2">
-        <Button
-          type="button"
-          disabled={saving || !key.trim()}
-          onClick={() => void save(true)}
-        >
-          Save
-        </Button>
-        {info.has_credential && (
-          <Button
-            type="button"
-            variant="outline"
-            disabled={saving}
-            onClick={() => void clearCredential()}
-          >
-            Clear
-          </Button>
-        )}
-      </div>
-      {error && <SettingsError>{error}</SettingsError>}
-    </SettingsSection>
   );
 }

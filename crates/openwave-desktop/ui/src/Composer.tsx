@@ -1,6 +1,7 @@
 import {
   type ChangeEvent,
   type KeyboardEvent,
+  type ReactNode,
   useLayoutEffect,
   useRef,
 } from "react";
@@ -78,6 +79,7 @@ export type ComposerProps = {
   cancelPending: boolean;
   disabled: boolean;
   draft: string;
+  modelMenu?: ReactNode;
   onDraftChange: (draft: string) => void;
   onSend: () => Promise<void>;
   onSteer: () => Promise<void>;
@@ -95,6 +97,7 @@ export function Composer({
   cancelPending,
   disabled,
   draft,
+  modelMenu,
   onDraftChange,
   onSend,
   onSteer,
@@ -178,44 +181,47 @@ export function Composer({
           }}
         />
         <div className="composer-actions">
-          {active ? (
-            <>
-              {(hasDraft || steerPending) && (
+          <div className="composer-actions-left">{modelMenu}</div>
+          <div className="composer-actions-right">
+            {active ? (
+              <>
+                {(hasDraft || steerPending) && (
+                  <button
+                    type="submit"
+                    className="btn btn-primary composer-redirect"
+                    aria-label="Redirect active response"
+                    disabled={!canSubmit}
+                  >
+                    {steerPending ? "Sending…" : "Redirect"}
+                  </button>
+                )}
+                <WithTooltip label={cancelPending ? "Stopping…" : "Stop"}>
+                  <button
+                    type="button"
+                    className="composer-icon-btn composer-stop"
+                    aria-label={
+                      cancelPending ? "Stopping response" : "Stop response"
+                    }
+                    disabled={disabled || cancelPending}
+                    onClick={() => void onStop()}
+                  >
+                    <Square size={15} fill="currentColor" strokeWidth={0} />
+                  </button>
+                </WithTooltip>
+              </>
+            ) : (
+              <WithTooltip label="Send · Enter">
                 <button
                   type="submit"
-                  className="btn btn-primary composer-redirect"
-                  aria-label="Redirect active response"
+                  className="composer-icon-btn composer-send"
+                  aria-label="Send message"
                   disabled={!canSubmit}
                 >
-                  {steerPending ? "Sending…" : "Redirect"}
-                </button>
-              )}
-              <WithTooltip label={cancelPending ? "Stopping…" : "Stop"}>
-                <button
-                  type="button"
-                  className="composer-icon-btn composer-stop"
-                  aria-label={
-                    cancelPending ? "Stopping response" : "Stop response"
-                  }
-                  disabled={disabled || cancelPending}
-                  onClick={() => void onStop()}
-                >
-                  <Square size={15} fill="currentColor" strokeWidth={0} />
+                  <ArrowUp size={18} />
                 </button>
               </WithTooltip>
-            </>
-          ) : (
-            <WithTooltip label="Send · Enter">
-              <button
-                type="submit"
-                className="composer-icon-btn composer-send"
-                aria-label="Send message"
-                disabled={!canSubmit}
-              >
-                <ArrowUp size={18} />
-              </button>
-            </WithTooltip>
-          )}
+            )}
+          </div>
         </div>
         <span className="sr-only" role="status">
           {busy ? "Agent is responding" : "Ready to send"}

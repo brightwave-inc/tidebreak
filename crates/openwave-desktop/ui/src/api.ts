@@ -18,6 +18,13 @@ export type ModelInfo = {
   provider: string;
 };
 
+/** Global runtime settings (`GET/PUT /settings`). */
+export type RuntimeSettings = {
+  /** The default model, or `null` when the server default is in effect. */
+  model: string | null;
+  has_api_key: boolean;
+};
+
 export type Project = {
   id: string;
   title: string | null;
@@ -293,6 +300,23 @@ export class ApiClient {
 
   listModels(): Promise<{ models: ModelInfo[] }> {
     return this.json("/models", { headers: this.headers() });
+  }
+
+  getSettings(): Promise<RuntimeSettings> {
+    return this.json("/settings", { headers: this.headers() });
+  }
+
+  /**
+   * Update runtime settings. `model` absent leaves it unchanged, `null` resets
+   * it to the server default, and a value sets it (matching the double-option
+   * body the server expects).
+   */
+  putSettings(body: { model?: string | null }): Promise<RuntimeSettings> {
+    return this.json("/settings", {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify(body),
+    });
   }
 
   getWebSearchConfig(): Promise<WebSearchConfigInfo> {
