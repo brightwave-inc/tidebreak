@@ -109,6 +109,8 @@ test("the updater private key is isolated from compilation", () => {
   assert.ok(buildStep);
   assert.doesNotMatch(buildStep, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.doesNotMatch(release, /createUpdaterArtifacts/);
+  assert.match(release, /tauri signer sign "\$updater_path"/);
+  assert.doesNotMatch(release, /cargo tauri signer sign/);
 });
 
 test("nested macOS native resources receive a timestamped Developer ID signature", () => {
