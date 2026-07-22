@@ -75,6 +75,8 @@ mod hybrid;
 mod id;
 #[cfg(feature = "vec-lance")]
 mod lance_store;
+#[cfg(feature = "parse-image")]
+mod liteparse_image_parser;
 #[cfg(feature = "parse-office")]
 mod liteparse_office_parser;
 #[cfg(feature = "parse-liteparse")]
@@ -98,6 +100,8 @@ pub use error::{Result, RetrievalError};
 pub use id::{ChunkId, DocumentId};
 #[cfg(feature = "vec-lance")]
 pub use lance_store::LanceVectorStore;
+#[cfg(feature = "parse-image")]
+pub use liteparse_image_parser::LiteParseImageParser;
 #[cfg(feature = "parse-office")]
 pub use liteparse_office_parser::LiteParseOfficeParser;
 #[cfg(feature = "parse-liteparse")]

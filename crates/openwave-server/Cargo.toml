@@ -15,13 +15,19 @@ workspace = true
 # default so the desktop and `openwave serve` accept `application/pdf` uploads.
 # The liteparse build downloads a prebuilt PDFium binary; build with
 # `--no-default-features` for a lean, text-only pipeline with no such fetch.
-default = ["parse-liteparse", "parse-office"]
+default = ["parse-liteparse", "parse-office", "parse-image"]
 parse-liteparse = ["openwave-retrieval/parse-liteparse"]
 # Rich Office ingestion (Word/Excel/PowerPoint/OpenDocument) via liteparse's
 # LibreOffice conversion path. On by default, adding no build cost beyond
 # parse-liteparse. LibreOffice is an optional runtime tool: without it, Office
 # uploads are stored without searchable text rather than rejected.
 parse-office = ["openwave-retrieval/parse-office"]
+# Raster image ingestion (PNG/JPEG/WebP/GIF/TIFF/BMP) via liteparse's image
+# conversion path. On by default, adding no build cost beyond parse-liteparse.
+# OCR is off, so images are stored without searchable text (an OCR slice comes
+# later); routing them to a dedicated parser gives a stable fingerprint and keeps
+# them out of the generic fallback.
+parse-image = ["openwave-retrieval/parse-image"]
 
 [dependencies]
 openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite", "tools", "keychain", "blob-fs"] }
