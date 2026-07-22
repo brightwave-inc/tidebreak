@@ -1,7 +1,7 @@
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
+    sea_query::ExprTrait, ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
 };
 
 use crate::agent_tools::SandboxAgentFileResource;
@@ -897,10 +897,12 @@ pub(in crate::db) async fn claim_agent_run(
                 candidate.id
             )));
         }
-        let effective_lease_expires_at = candidate
+        let deadline_at = candidate
             .deadline_at
-            .ok_or_else(|| AgentError::Store("sandbox agent run is missing its deadline".into()))?
-            .min(lease_expires_at);
+            .ok_or_else(|| AgentError::Store("sandbox agent run is missing its deadline".into()))?;
+        // `ExprTrait` (in scope for query builders) also defines `min`, so name
+        // the `Ord` comparison explicitly.
+        let effective_lease_expires_at = Ord::min(deadline_at, lease_expires_at);
         entities::agent_run_claim::ActiveModel {
             token: Set(lease_token),
             agent_run_id: Set(Some(candidate.id)),
@@ -1953,8 +1955,10 @@ where
         _ => "SELECT CURRENT_TIMESTAMP AS now",
     };
     let statement = Statement::from_string(backend, clock_sql);
+    // sea-orm 2.0: `query_one` takes a `StatementBuilder`; a prepared raw
+    // `Statement` goes through `query_one_raw`.
     let row = conn
-        .query_one(statement)
+        .query_one_raw(statement)
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store("database clock query returned no row".into()))?;
@@ -1971,7 +1975,7 @@ where
     let locked = entities::agent_run_claim_lock::Entity::update_many()
         .col_expr(
             entities::agent_run_claim_lock::Column::Id,
-            sea_orm::sea_query::Expr::col(entities::agent_run_claim_lock::Column::Id).into(),
+            sea_orm::sea_query::Expr::col(entities::agent_run_claim_lock::Column::Id),
         )
         .filter(entities::agent_run_claim_lock::Column::Id.eq(1))
         .exec(conn)
@@ -2254,8 +2258,8 @@ where
             // scheduler-origin receipt segment solely to preserve the same
             // immutable result/inbox contract for its parked parent.
             let lease_token = uuid::Uuid::new_v4();
-            let attempt_count = candidate.attempt_count.max(1);
-            let claim_count = candidate.claim_count.max(attempt_count);
+            let attempt_count = Ord::max(candidate.attempt_count, 1);
+            let claim_count = Ord::max(candidate.claim_count, attempt_count);
             entities::agent_run_claim::ActiveModel {
                 token: Set(lease_token),
                 agent_run_id: Set(Some(candidate.id)),

@@ -4806,9 +4806,10 @@ impl MigrationTrait for AddAgentRunResultPayload {
             DatabaseBackend::Postgres => {
                 "UPDATE agent_run_result SET payload_json = json_build_object('text', text)::text"
             }
-            DatabaseBackend::Sqlite | DatabaseBackend::MySql => {
-                "UPDATE agent_run_result SET payload_json = json_object('text', text)"
-            }
+            // `DatabaseBackend` is `#[non_exhaustive]` in sea-orm 2.0; SQLite and
+            // MySQL both use `json_object`, which is also the sensible default
+            // for any other backend.
+            _ => "UPDATE agent_run_result SET payload_json = json_object('text', text)",
         };
         manager
             .get_connection()

@@ -156,7 +156,7 @@ pub(in crate::db) async fn begin_root_attachment_change(
                 .do_nothing()
                 .to_owned(),
         )
-        .do_nothing()
+        .try_insert()
         .exec_without_returning(&transaction)
         .await;
     match inserted {

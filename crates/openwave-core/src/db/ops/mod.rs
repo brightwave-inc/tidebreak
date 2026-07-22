@@ -27,7 +27,7 @@ where
     let locked = entities::chat::Entity::update_many()
         .col_expr(
             entities::chat::Column::Title,
-            sea_orm::sea_query::Expr::col(entities::chat::Column::Title).into(),
+            sea_orm::sea_query::Expr::col(entities::chat::Column::Title),
         )
         .filter(entities::chat::Column::Id.eq(chat_id.0))
         .exec(conn)
@@ -51,7 +51,7 @@ where
     let locked = entities::project::Entity::update_many()
         .col_expr(
             entities::project::Column::Title,
-            sea_orm::sea_query::Expr::col(entities::project::Column::Title).into(),
+            sea_orm::sea_query::Expr::col(entities::project::Column::Title),
         )
         .filter(entities::project::Column::Id.eq(project_id.0))
         .exec(conn)
@@ -101,7 +101,7 @@ where
     let locked = entities::tool_call::Entity::update_many()
         .col_expr(
             entities::tool_call::Column::ResolvedAt,
-            sea_orm::sea_query::Expr::col(entities::tool_call::Column::ResolvedAt).into(),
+            sea_orm::sea_query::Expr::col(entities::tool_call::Column::ResolvedAt),
         )
         .filter(entities::tool_call::Column::Id.eq(id.0))
         .exec(conn)
@@ -118,7 +118,7 @@ where
     let locked = entities::turn_run::Entity::update_many()
         .col_expr(
             entities::turn_run::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(entities::turn_run::Column::UpdatedAt).into(),
+            sea_orm::sea_query::Expr::col(entities::turn_run::Column::UpdatedAt),
         )
         .filter(entities::turn_run::Column::Id.eq(turn_id.0))
         .exec(conn)

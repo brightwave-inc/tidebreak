@@ -1,7 +1,7 @@
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait, TryInsertResult,
+    sea_query::ExprTrait, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
+    QueryOrder, Set, TransactionTrait, TryInsertResult,
 };
 
 use crate::error::{AgentError, AgentErrorInfo, Result};
@@ -604,7 +604,7 @@ pub(in crate::db) async fn claim_turn_run(
                 .do_nothing()
                 .to_owned(),
         )
-        .do_nothing()
+        .try_insert()
         .exec_without_returning(&transaction)
         .await
         .map_err(store_err)?;
@@ -760,7 +760,7 @@ where
     let locked = entities::turn_claim_lock::Entity::update_many()
         .col_expr(
             entities::turn_claim_lock::Column::Id,
-            sea_orm::sea_query::Expr::col(entities::turn_claim_lock::Column::Id).into(),
+            sea_orm::sea_query::Expr::col(entities::turn_claim_lock::Column::Id),
         )
         .filter(entities::turn_claim_lock::Column::Id.eq(1))
         .exec(conn)
