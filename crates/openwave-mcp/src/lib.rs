@@ -1,9 +1,14 @@
 //! OpenWave MCP — Model Context Protocol server and client faces.
 //!
-//! Exposes OpenWave's read-only tools from the same `ToolRegistry` the agent uses
-//! to an external MCP client, so any MCP-speaking host can drive capabilities such
-//! as `search` over a document index. Workspace-mutating and sensitive tools stay
-//! hidden until an approval-aware MCP execution bridge exists.
+//! Exposes OpenWave's tools from the same `ToolRegistry` the agent uses to an
+//! external MCP client, so any MCP-speaking host can drive capabilities such as
+//! `search` over a document index. Read-only tools are always exposed; workspace-
+//! mutating and sensitive tools stay hidden unless an [`ApprovalGate`] is wired
+//! in with [`McpServer::with_approval_gate`], which routes each mutating
+//! `tools/call` through the same approval gate and standing grants the in-app
+//! agent consults.
+//!
+//! [`ApprovalGate`]: openwave_core::ApprovalGate
 //!
 //! [`McpServer`] answers `initialize`, `tools/list`, and `tools/call` and is
 //! transport-agnostic; [`serve_stdio`] runs it over the standard newline-delimited

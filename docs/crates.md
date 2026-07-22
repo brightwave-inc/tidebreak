@@ -142,7 +142,10 @@ outbound-domain policy before expanding the search surface.
 The server half of [MCP](https://modelcontextprotocol.io): JSON-RPC
 `initialize`, `ping`, `tools/list`, and `tools/call` over stdio, backed by
 OpenWave's tool registry. Its atomic session lifecycle gates normal operations,
-and its execution boundary exposes only tools classified read-only. Its client
+and its execution boundary exposes read-only tools by default; wiring in an
+approval gate additionally exposes Workspace and Sensitive tools, routing each
+mutating `tools/call` through the same gate and standing grants the in-app agent
+consults. Its client
 half initializes external stdio servers, follows paginated tool discovery, and
 mounts each proxy as `mcp__{server}__{tool}` in the same registry. Mounted tools
 are classified sensitive so they cross OpenWave's approval boundary before the

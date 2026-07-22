@@ -16,7 +16,10 @@ use std::sync::{
     Arc,
 };
 
-use openwave_core::{ApprovalClass, ChatId, ToolCtx, ToolRegistry, VERSION};
+use openwave_core::{
+    ApprovalClass, ApprovalDecision, ApprovalGate, ApprovalRequest, CallId, ChatId, StandingGrants,
+    ToolApprovalKind, ToolCtx, ToolOutput, ToolRegistry, TurnId, VERSION,
+};
 use serde_json::Value;
 
 use crate::protocol::{
@@ -31,20 +34,65 @@ const SESSION_READY: u8 = 2;
 
 /// An MCP server exposing a tool registry over the Model Context Protocol.
 ///
-/// Only [`ApprovalClass::ReadOnly`] tools cross this boundary. Workspace and
-/// sensitive tools require an approval-aware execution bridge and remain hidden
-/// until one is configured in a future slice.
+/// [`ApprovalClass::ReadOnly`] tools always cross this boundary. Workspace and
+/// Sensitive (mutating) tools stay hidden unless an [`ApprovalGate`] is wired in
+/// via [`McpServer::with_approval_gate`]; with a gate configured, each mutating
+/// `tools/call` is routed through the same gate — and any standing grants — the
+/// in-app agent consults, so a headless client runs mutating tools only with
+/// consent.
 pub struct McpServer {
     tools: Arc<ToolRegistry>,
     ctx: ToolCtx,
     server_name: String,
     server_version: String,
     session_state: AtomicU8,
+    approval: Option<ApprovalBridge>,
+}
+
+/// The consent surface for mutating `tools/call`s: a gate consulted after any
+/// standing grant, mirroring the agent's park-and-resume policy.
+struct ApprovalBridge {
+    gate: Arc<dyn ApprovalGate>,
+    grants: Arc<StandingGrants>,
+}
+
+impl ApprovalBridge {
+    /// Decide a Workspace/Sensitive call. Returns `None` when it may run, or
+    /// `Some(reason)` describing why it was denied (or could not be presented to
+    /// the client). A standing grant the user already gave for this chat runs
+    /// without re-consulting the gate.
+    async fn decide(
+        &self,
+        chat_id: ChatId,
+        tool_name: &str,
+        class: ApprovalClass,
+    ) -> Option<String> {
+        let kind = ToolApprovalKind::for_tool_name(tool_name);
+        if self.grants.covers(chat_id, tool_name, kind) {
+            return None;
+        }
+        let request = ApprovalRequest {
+            call_id: CallId::new(),
+            chat_id,
+            turn_id: TurnId::new(),
+            tool_name: tool_name.to_string(),
+            class,
+            kind,
+            summary: format!("{tool_name} requires approval"),
+        };
+        // MCP has no durable steer journal, so register without a journal identity.
+        let registration = self.gate.register(request, None).await;
+        match registration.decision.await {
+            ApprovalDecision::Approve => None,
+            ApprovalDecision::Reject { reason } => Some(reason),
+        }
+    }
 }
 
 impl McpServer {
     /// Build a server exposing the read-only entries in `tools`, whose calls run
-    /// within `ctx`.
+    /// within `ctx`. Mutating tools stay hidden until a gate is wired in with
+    /// [`McpServer::with_approval_gate`].
     #[must_use]
     pub fn new(tools: Arc<ToolRegistry>, ctx: ToolCtx) -> Self {
         Self {
@@ -53,7 +101,39 @@ impl McpServer {
             server_name: "openwave".to_string(),
             server_version: VERSION.to_string(),
             session_state: AtomicU8::new(SESSION_UNINITIALIZED),
+            approval: None,
         }
+    }
+
+    /// Expose Workspace and Sensitive tools, routing each such `tools/call`
+    /// through `gate` for a decision. An approved call runs; a denied or
+    /// unpresentable one comes back as a `tools/call` result with `isError`,
+    /// never a silent drop. Without a gate the server keeps advertising and
+    /// executing only ReadOnly tools.
+    #[must_use]
+    pub fn with_approval_gate(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
+        self.approval = Some(ApprovalBridge {
+            gate,
+            grants: Arc::new(StandingGrants::new()),
+        });
+        self
+    }
+
+    /// Consult `grants` before the gate, so a repeated in-scope action the user
+    /// already approved for this chat runs without re-prompting. Has no effect
+    /// unless [`McpServer::with_approval_gate`] was called first.
+    #[must_use]
+    pub fn with_standing_grants(mut self, grants: Arc<StandingGrants>) -> Self {
+        if let Some(bridge) = self.approval.as_mut() {
+            bridge.grants = grants;
+        }
+        self
+    }
+
+    /// Whether a tool of `class` crosses this server's boundary. ReadOnly always
+    /// does; mutating classes only once an approval gate is configured.
+    fn exposes(&self, class: ApprovalClass) -> bool {
+        class == ApprovalClass::ReadOnly || self.approval.is_some()
     }
 
     /// The [`ChatId`] the exposed tools run under (from the configured [`ToolCtx`]).
@@ -182,7 +262,7 @@ impl McpServer {
             .filter(|spec| {
                 self.tools
                     .get(&spec.name)
-                    .is_some_and(|tool| tool.approval_class() == ApprovalClass::ReadOnly)
+                    .is_some_and(|tool| self.exposes(tool.approval_class()))
             })
             .map(|spec| ToolDescriptor {
                 name: spec.name,
@@ -204,8 +284,21 @@ impl McpServer {
         let tool = self
             .tools
             .get(&params.name)
-            .filter(|tool| tool.approval_class() == ApprovalClass::ReadOnly)
+            .filter(|tool| self.exposes(tool.approval_class()))
             .ok_or_else(|| RpcError::invalid_params(format!("unknown tool: {}", params.name)))?;
+
+        // A mutating call crosses the boundary only through the approval bridge.
+        // `exposes` guarantees `self.approval` is `Some` for a non-ReadOnly tool.
+        let class = tool.approval_class();
+        if class != ApprovalClass::ReadOnly {
+            if let Some(bridge) = self.approval.as_ref() {
+                if let Some(reason) = bridge.decide(self.ctx.chat_id, &params.name, class).await {
+                    // Denied or unpresentable: a clear error result, not a
+                    // silent drop and not a protocol error.
+                    return tool_result(ToolOutput::error(reason));
+                }
+            }
+        }
 
         // A tool's own failure is a result with isError = true, not a protocol
         // error; only an infrastructure fault (Err) becomes a JSON-RPC error.
@@ -219,20 +312,25 @@ impl McpServer {
                 )
             })?;
 
-        let result = CallToolResult {
-            content: vec![Content::Text {
-                text: output.content,
-            }],
-            structured_content: output.data,
-            is_error: output.is_error,
-        };
-        serde_json::to_value(result).map_err(|e| {
-            RpcError::new(
-                error_code::INTERNAL_ERROR,
-                format!("failed to encode tool result: {e}"),
-            )
-        })
+        tool_result(output)
     }
+}
+
+/// Encode a [`ToolOutput`] as a `tools/call` result value.
+fn tool_result(output: ToolOutput) -> Result<Value, RpcError> {
+    let result = CallToolResult {
+        content: vec![Content::Text {
+            text: output.content,
+        }],
+        structured_content: output.data,
+        is_error: output.is_error,
+    };
+    serde_json::to_value(result).map_err(|e| {
+        RpcError::new(
+            error_code::INTERNAL_ERROR,
+            format!("failed to encode tool result: {e}"),
+        )
+    })
 }
 
 fn request_id_is_valid(id: &Value) -> bool {
@@ -254,7 +352,10 @@ mod tests {
     use std::sync::Barrier;
 
     use async_trait::async_trait;
-    use openwave_core::{ApprovalClass, Tool, ToolOutput, ToolSpec};
+    use chrono::Utc;
+    use openwave_core::{
+        ApprovalClass, AutoApproveGate, RefuseGate, StandingGrant, Tool, ToolOutput, ToolSpec,
+    };
     use serde_json::json;
 
     /// A tool that echoes its `text` argument, or errors when asked.
@@ -319,6 +420,10 @@ mod tests {
     fn server_with(tools: ToolRegistry) -> McpServer {
         let ctx = ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("/tmp/ws"));
         McpServer::new(Arc::new(tools), ctx)
+    }
+
+    fn ctx_for(chat_id: ChatId) -> ToolCtx {
+        ToolCtx::new_legacy_workspace(chat_id, None, PathBuf::from("/tmp/ws"))
     }
 
     fn request(id: i64, method: &str, params: Value) -> Request {
@@ -587,6 +692,122 @@ mod tests {
             .unwrap();
         assert!(response.error.is_none());
         assert!(read_ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn approval_gate_advertises_and_runs_an_approved_mutating_tool() {
+        let read_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sensitive_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tools = ToolRegistry::new()
+            .with(Box::new(ClassifiedTool {
+                name: "read",
+                class: ApprovalClass::ReadOnly,
+                ran: Arc::clone(&read_ran),
+            }))
+            .with(Box::new(ClassifiedTool {
+                name: "external",
+                class: ApprovalClass::Sensitive,
+                ran: Arc::clone(&sensitive_ran),
+            }));
+        let server = McpServer::new(Arc::new(tools), ctx_for(ChatId::new()))
+            .with_approval_gate(Arc::new(AutoApproveGate));
+        initialize_session(&server).await;
+
+        // A configured gate advertises the mutating tool alongside the read-only one.
+        let listed = server
+            .handle(request(2, "tools/list", Value::Null))
+            .await
+            .unwrap()
+            .result
+            .unwrap();
+        let names: Vec<&str> = listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["external", "read"]);
+
+        // The approved Sensitive call runs and returns a normal (non-error) result.
+        let response = server
+            .handle(request(
+                3,
+                "tools/call",
+                json!({"name": "external", "arguments": {}}),
+            ))
+            .await
+            .unwrap();
+        assert!(response.error.is_none());
+        assert_eq!(response.result.unwrap()["isError"], false);
+        assert!(sensitive_ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn denied_mutating_call_is_an_error_result_not_a_protocol_error() {
+        let sensitive_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tools = ToolRegistry::new().with(Box::new(ClassifiedTool {
+            name: "external",
+            class: ApprovalClass::Sensitive,
+            ran: Arc::clone(&sensitive_ran),
+        }));
+        let server = McpServer::new(Arc::new(tools), ctx_for(ChatId::new()))
+            .with_approval_gate(Arc::new(RefuseGate));
+        initialize_session(&server).await;
+
+        let response = server
+            .handle(request(
+                2,
+                "tools/call",
+                json!({"name": "external", "arguments": {}}),
+            ))
+            .await
+            .unwrap();
+        // A refusal is a result with isError = true, never a JSON-RPC error, and
+        // the tool never runs.
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("requires approval"));
+        assert!(!sensitive_ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_standing_grant_runs_a_mutating_tool_without_consulting_the_gate() {
+        let chat_id = ChatId::new();
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // "search" is the sole standing-grantable action today.
+        let tools = ToolRegistry::new().with(Box::new(ClassifiedTool {
+            name: "search",
+            class: ApprovalClass::Sensitive,
+            ran: Arc::clone(&ran),
+        }));
+        let grant = StandingGrant::new(
+            chat_id,
+            "search",
+            ToolApprovalKind::for_tool_name("search"),
+            Utc::now(),
+        )
+        .expect("search is grantable");
+        let server = McpServer::new(Arc::new(tools), ctx_for(chat_id))
+            // A refusing gate proves the grant, not the gate, let the call through.
+            .with_approval_gate(Arc::new(RefuseGate))
+            .with_standing_grants(Arc::new(StandingGrants::from_grants(vec![grant])));
+        initialize_session(&server).await;
+
+        let response = server
+            .handle(request(
+                2,
+                "tools/call",
+                json!({"name": "search", "arguments": {}}),
+            ))
+            .await
+            .unwrap();
+        assert!(response.error.is_none());
+        assert_eq!(response.result.unwrap()["isError"], false);
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
