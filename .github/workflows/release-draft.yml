@@ -5,6 +5,13 @@ on:
     types: [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review]
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Apply the title-derived labels instead of only reporting the plan
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -60,3 +67,64 @@ jobs:
       pull-requests: read
     steps:
       - uses: release-drafter/release-drafter@v7
+
+  backfill:
+    name: backfill release labels
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Plan title-derived labels for merged pull requests
+        run: |
+          gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state merged \
+            --base main \
+            --limit 1000 \
+            --json number,title,labels \
+            > "$RUNNER_TEMP/merged-prs.json"
+          node scripts/create-release-label-plan.mjs \
+            < "$RUNNER_TEMP/merged-prs.json" \
+            > "$RUNNER_TEMP/release-label-plan.json"
+
+          total="$(jq -r .summary.total "$RUNNER_TEMP/release-label-plan.json")"
+          (( total < 1000 )) || {
+            echo "The merged-PR query reached its 1000-item safety limit." >&2
+            exit 1
+          }
+          jq .summary "$RUNNER_TEMP/release-label-plan.json"
+          {
+            echo '## Release-label backfill'
+            echo
+            echo '| Result | Count |'
+            echo '| --- | ---: |'
+            jq -r '.summary | to_entries[] | "| \(.key) | \(.value) |"' \
+              "$RUNNER_TEMP/release-label-plan.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply managed label changes
+        if: ${{ inputs.apply }}
+        run: |
+          while IFS= read -r update; do
+            number="$(jq -r .number <<<"$update")"
+            additions="$(jq -c .add_labels <<<"$update")"
+            if (( $(jq length <<<"$additions") > 0 )); then
+              jq -n --argjson labels "$additions" '{labels: $labels}' | gh api \
+                --method POST \
+                "repos/$GITHUB_REPOSITORY/issues/$number/labels" \
+                --input - >/dev/null
+            fi
+            while IFS= read -r label; do
+              encoded="$(jq -rn --arg value "$label" '$value | @uri')"
+              gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/issues/$number/labels/$encoded" \
+                >/dev/null
+            done < <(jq -r '.remove_labels[]' <<<"$update")
+            echo "Updated #$number"
+          done < <(jq -c '.updates[]' "$RUNNER_TEMP/release-label-plan.json")

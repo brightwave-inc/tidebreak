@@ -70,6 +70,14 @@ Documentation and other maintenance-only types remain excluded. In the rendered
 notes, the section heading supplies the type, so Release Drafter removes the
 redundant Conventional Commit prefix from each PR title.
 
+For historical or imported pull requests, the **Release draft** workflow has a
+manual `workflow_dispatch` backfill. Its default dry run reports the exact
+changes; rerun it with `apply` enabled to synchronize only the managed
+`semver:*` and `release-note:*` labels from titles that pass the current policy.
+It deliberately leaves free-form historical titles in **Other Changes** rather
+than guessing their impact. The job uses the repository `GITHUB_TOKEN`, so its
+label writes do not fan out into hundreds of labeled-event workflow runs.
+
 ## How the native release draft works
 
 The release-draft workflow keeps exactly one draft GitHub Release up to date:
