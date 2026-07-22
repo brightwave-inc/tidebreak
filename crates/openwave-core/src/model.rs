@@ -1042,7 +1042,11 @@ impl ReasoningEffort {
     }
 
     /// Parse a stored/wire token back into an effort level.
+    ///
+    /// Deliberately returns `Option` (invalid tokens are dropped, not errored),
+    /// so this is not the `FromStr` trait.
     #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "low" => Some(Self::Low),

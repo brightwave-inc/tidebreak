@@ -16,10 +16,9 @@ use openwave_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
     ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome, DeleteProjectOutcome,
     Message as StoredMessage, MessageId, Project, ProjectId, ReasoningEffort,
-    RequestAgentRunCancellationOutcome,
-    RequestTurnCancellationOutcome, Role, SandboxToolCall, SandboxToolCallStatus, SecretProvider,
-    SequencedEvent, Store, ToolCallExecution, ToolCallRecord, ToolCallStatus, TurnId, TurnSteer,
-    TurnSteerId,
+    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Role, SandboxToolCall,
+    SandboxToolCallStatus, SecretProvider, SequencedEvent, Store, ToolCallExecution,
+    ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
@@ -577,12 +576,7 @@ pub async fn patch_chat(
 
     if !state
         .store
-        .update_chat_metadata(
-            id,
-            title.clone(),
-            body.model.clone(),
-            body.reasoning_effort,
-        )
+        .update_chat_metadata(id, title.clone(), body.model.clone(), body.reasoning_effort)
         .await?
     {
         return Err(ServerError::not_found(format!("chat {id} not found")));

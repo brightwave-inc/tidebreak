@@ -172,7 +172,14 @@ where
         project_id: Set(chat.project_id.map(|p| p.0)),
         title: Set(chat.title.clone()),
         model: Set(chat.model.clone()),
-        reasoning_effort: Set(chat.reasoning_effort.map(|effort| effort.as_str().to_owned())),
+        // A newly-created chat has no reasoning override (it is set later via
+        // `update_chat_metadata`), so leave the column unset when absent — the DB
+        // defaults it to NULL. This also keeps `create_chat` insertable against a
+        // store migrated only to an older schema (the upgrade-safety tests).
+        reasoning_effort: match &chat.reasoning_effort {
+            Some(effort) => Set(Some(effort.as_str().to_owned())),
+            None => sea_orm::ActiveValue::NotSet,
+        },
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
     }
