@@ -10877,6 +10877,197 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
     );
 }
 
+/// End-to-end integration test that drives the whole product path as a single
+/// flow over one in-process server, store, and worker set: raw document ingest,
+/// the parse/index worker, a library search that must surface the ingested
+/// passage as a citation, and a chat turn whose Sensitive tool crosses the
+/// approval gate — first parking on the gate, then reusing a standing grant so a
+/// later covered call runs without re-prompting.
+///
+/// Unlike the per-slice tests, every seam here shares the same instances: the
+/// retriever the worker indexes into is the one the `/search` route reads from,
+/// and the approval store the gate parks in is the one the HTTP endpoint
+/// decides against. The point is to catch gaps the mocked-seam unit tests can't.
+#[tokio::test(flavor = "multi_thread")]
+async fn ingest_index_search_then_chat_through_the_approval_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    // One retriever shared by the indexing worker and the `/search` route.
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let ran = Arc::new(AtomicUsize::new(0));
+    // Named "search": the approval calibration only presents recognized tools,
+    // so this is the one Sensitive name the approval endpoint can approve (an
+    // arbitrary name is only rejectable — see the unpresentable-tool test).
+    let tools = Arc::new(ToolRegistry::new().with(Box::new(SensitiveProbe {
+        ran: ran.clone(),
+        name: "search",
+    })));
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(ProbeProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            tool_name: "search",
+        }))),
+        Arc::new(MemSecrets::default()),
+        tools,
+        retrieval.clone(),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    let worker = document_worker::DocumentWorker::new(
+        store.clone(),
+        state.blobs.clone(),
+        retrieval,
+        state.document_job_wake.clone(),
+        state.document_writes.clone(),
+        document_worker::DocumentWorkerConfig::default(),
+    );
+    spawn_turn_worker(&state);
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+
+    // 1. Ingest a raw document through the server's document route.
+    let raw = b"Jupiter is the largest planet in the Solar System, a gas giant.".to_vec();
+    let response = post_raw(
+        &router,
+        &bearer,
+        "/documents/raw?uri=file%3A%2F%2F%2Fsolar.txt",
+        Some("text/plain; charset=utf-8"),
+        raw.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let accepted: serde_json::Value = json_body(response).await;
+    let document_id: openwave_core::DocumentId =
+        accepted["document_id"].as_str().unwrap().parse().unwrap();
+
+    // 2. Drive the parse/index worker as the per-slice tests do.
+    run_parse_and_index(&worker).await;
+    let ready = store.get_document(document_id).await.unwrap().unwrap();
+    assert_eq!(
+        ready.processing_status,
+        openwave_core::DocumentProcessingStatus::Ready
+    );
+    assert_eq!(ready.canonical_text, String::from_utf8_lossy(&raw));
+
+    // 3. Library search over the shared index returns a citation for the doc.
+    let search = post_json(
+        &router,
+        &bearer,
+        "/search",
+        serde_json::json!({ "query": "largest gas giant planet", "k": 1 }),
+    )
+    .await;
+    assert_eq!(search.status(), StatusCode::OK);
+    let results: serde_json::Value = json_body(search).await;
+    let citations = results["citations"].as_array().unwrap();
+    assert_eq!(citations.len(), 1);
+    assert_eq!(citations[0]["document_id"], accepted["document_id"]);
+    assert!(citations[0]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("Jupiter"));
+
+    // 4a. A chat turn calls the Sensitive tool and parks on the approval gate.
+    let chat = make_chat(&router, &bearer).await;
+    let first_turn = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, first_turn, "search the library").await,
+        StatusCode::ACCEPTED
+    );
+    let call_id = {
+        let mut found = None;
+        for _ in 0..500 {
+            let events = store.list_events(chat.id, 0).await.unwrap();
+            if let Some(id) = events.iter().find_map(|e| match &e.event {
+                AgentEvent::ApprovalRequired { call_id, .. } => Some(*call_id),
+                _ => None,
+            }) {
+                found = Some(id);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        found.expect("first turn should park on ApprovalRequired")
+    };
+    // The gate holds the call: the Sensitive tool has not executed yet.
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+
+    // Approve through the HTTP endpoint, remembering the decision.
+    let decide = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/approvals/{call_id}", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"decision": "approve", "remember": true}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(decide.status(), StatusCode::NO_CONTENT);
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(events
+        .iter()
+        .any(|e| matches!(e.event, AgentEvent::ApprovalDecided { approved: true, .. })));
+    assert!(matches!(
+        events.last().unwrap().event,
+        AgentEvent::TurnCompleted { .. }
+    ));
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+    // 4b. A second covered call runs under the standing grant left by
+    // `remember: true` — no second approval prompt, the tool just executes.
+    let second_turn = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, second_turn, "search again").await,
+        StatusCode::ACCEPTED
+    );
+    let mut completed = None;
+    for _ in 0..500 {
+        let events = store.list_events(chat.id, 0).await.unwrap();
+        if events
+            .iter()
+            .filter(|event| matches!(event.event, AgentEvent::TurnCompleted { .. }))
+            .count()
+            == 2
+        {
+            completed = Some(events);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let events = completed.expect("second turn should complete under the standing grant");
+    assert_eq!(ran.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, AgentEvent::ApprovalRequired { .. }))
+            .count(),
+        1,
+        "the standing grant must suppress a second approval prompt",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn approval_endpoint_rejects_unpresentable_sensitive_tool_approval() {
     let dir = tempfile::tempdir().unwrap();
