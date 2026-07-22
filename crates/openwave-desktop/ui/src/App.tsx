@@ -5,7 +5,6 @@ import {
   type Chat,
   type ModelInfo,
   type PendingFolderAccessRequest,
-  type Project,
   type ProviderInfo,
   type ProviderKind,
   type SequencedEvent,
@@ -81,8 +80,7 @@ import {
   reconcileSandboxAgentCancellation,
   sandboxAgentStopKey,
 } from "./SandboxAgentStop";
-import { ProjectNavigation } from "./ProjectNavigation";
-import { existingChatAfterDeletion, prependReplacementChat } from "./ChatDeletion";
+import { prependReplacementChat } from "./ChatDeletion";
 import { useConfirm } from "./components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -104,10 +102,6 @@ export default function App() {
   const [hydratedChatId, setHydratedChatId] = useState<string | null>(null);
   const [chats, setChats] = useState<Chat[]>([]);
   const [chatsError, setChatsError] = useState<string | null>(null);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectsLoading, setProjectsLoading] = useState(true);
-  const [projectsError, setProjectsError] = useState<string | null>(null);
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -143,9 +137,7 @@ export default function App() {
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
   const [creatingChat, setCreatingChat] = useState(false);
-  const [creatingProject, setCreatingProject] = useState(false);
   const [deletingChatId, setDeletingChatId] = useState<string | null>(null);
-  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [savingTitle, setSavingTitle] = useState(false);
   const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
   const [renameChatDraft, setRenameChatDraft] = useState("");
@@ -210,16 +202,6 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        void (async () => {
-          try {
-            const existingProjects = await client.listProjects();
-            if (!cancelled) setProjects(existingProjects);
-          } catch {
-            if (!cancelled) setProjectsError("Could not load projects.");
-          } finally {
-            if (!cancelled) setProjectsLoading(false);
-          }
-        })();
         const [catalog, providerList, existingChats] = await Promise.all([
           client.listModels(),
           client.listProviders(),
@@ -278,7 +260,7 @@ export default function App() {
             {
               id: nextId(),
               role: "error",
-              text: `Could not load this conversation: ${String(err)}`,
+              text: `Could not load this chat: ${String(err)}`,
             },
           ]);
         }
@@ -915,7 +897,7 @@ export default function App() {
     try {
       const created = await client.createChat(
         chat?.model ?? models[0]?.id,
-        selectedProjectId,
+        null,
       );
       openCreatedChat(created);
     } catch (err) {
@@ -961,140 +943,16 @@ export default function App() {
     activateChat(created);
     setChats((current) => [created, ...current]);
     setChatsError(null);
-    setProjectsError(null);
     setStatus(`chat ${created.id.slice(0, 8)}…`);
-  }
-
-  async function onSelectProject(projectId: string | null) {
-    if (
-      !client ||
-      projectsLoading ||
-      creationInFlightRef.current ||
-      deletionInFlightRef.current
-    ) {
-      return;
-    }
-    const existing = chats.find((item) => item.project_id === projectId);
-    if (existing) {
-      setProjectsError(null);
-      selectChat(existing);
-      return;
-    }
-
-    creationInFlightRef.current = true;
-    setCreatingChat(true);
-    setProjectsError(null);
-    try {
-      const created = await client.createChat(
-        chat?.model ?? models[0]?.id,
-        projectId,
-      );
-      openCreatedChat(created);
-    } catch (err) {
-      setProjectsError(`Could not open project: ${String(err)}`);
-    } finally {
-      creationInFlightRef.current = false;
-      setCreatingChat(false);
-    }
-  }
-
-  async function onCreateProject(title: string): Promise<boolean> {
-    if (
-      !client ||
-      projectsLoading ||
-      creationInFlightRef.current ||
-      deletionInFlightRef.current
-    ) {
-      return false;
-    }
-    creationInFlightRef.current = true;
-    setCreatingProject(true);
-    setProjectsError(null);
-    let project: Project;
-    try {
-      project = await client.createProject(title);
-      setProjects((current) => [project, ...current]);
-    } catch (err) {
-      setProjectsError(`Could not create project: ${String(err)}`);
-      creationInFlightRef.current = false;
-      setCreatingProject(false);
-      return false;
-    }
-
-    try {
-      const created = await client.createChat(
-        chat?.model ?? models[0]?.id,
-        project.id,
-      );
-      openCreatedChat(created);
-      return true;
-    } catch (err) {
-      setProjectsError(`Project created, but its first chat could not start: ${String(err)}`);
-      return true;
-    } finally {
-      creationInFlightRef.current = false;
-      setCreatingProject(false);
-    }
-  }
-
-  async function onRenameProject(
-    projectId: string,
-    title: string | null,
-  ): Promise<boolean> {
-    if (!client) return false;
-    setProjectsError(null);
-    try {
-      const updated = await client.patchProjectTitle(projectId, title);
-      if (updated.id !== projectId) {
-        throw new Error("project rename response has the wrong identity");
-      }
-      setProjects((current) =>
-        current.map((project) => (project.id === updated.id ? updated : project)),
-      );
-      return true;
-    } catch (err) {
-      setProjectsError(`Could not rename project: ${String(err)}`);
-      return false;
-    }
-  }
-
-  async function onDeleteProject(target: Project): Promise<boolean> {
-    if (!client || deletionInFlightRef.current || creationInFlightRef.current) return false;
-    const label = target.title?.trim() || "Untitled project";
-    const confirmed = await confirm({
-      title: `Delete ${label}?`,
-      description:
-        "Remove its conversations, documents, and connected folders first. This cannot be undone.",
-      confirmLabel: "Delete project",
-      destructive: true,
-    });
-    if (!confirmed) {
-      return false;
-    }
-
-    deletionInFlightRef.current = true;
-    setDeletingProjectId(target.id);
-    setProjectsError(null);
-    try {
-      await client.deleteProject(target.id);
-      setProjects((current) => current.filter((project) => project.id !== target.id));
-      return true;
-    } catch (err) {
-      setProjectsError(`Could not delete project: ${String(err)}`);
-      return false;
-    } finally {
-      deletionInFlightRef.current = false;
-      setDeletingProjectId(null);
-    }
   }
 
   async function onDeleteChat(target: Chat) {
     if (!client || deletionInFlightRef.current || creationInFlightRef.current) return;
-    const label = target.title?.trim() || "this conversation";
+    const label = target.title?.trim() || "this chat";
     const confirmed = await confirm({
       title: `Delete ${label}?`,
       description: "This cannot be undone.",
-      confirmLabel: "Delete conversation",
+      confirmLabel: "Delete chat",
       destructive: true,
     });
     if (!confirmed) return;
@@ -1120,7 +978,7 @@ export default function App() {
         return;
       }
 
-      let next = existingChatAfterDeletion(refreshed, target.project_id);
+      let next: Chat | undefined = refreshed[0];
       if (!next) {
         next = await client.createChat(models[0]?.id, null);
         refreshed = prependReplacementChat(refreshed, next);
@@ -1128,7 +986,7 @@ export default function App() {
       setChats(refreshed);
       selectChat(next, true);
     } catch (err) {
-      setChatsError(`Could not delete conversation: ${String(err)}`);
+      setChatsError(`Could not delete chat: ${String(err)}`);
     } finally {
       deletionInFlightRef.current = false;
       setDeletingChatId(null);
@@ -1145,7 +1003,6 @@ export default function App() {
     assistantMarkerScrubberRef.current =
       new AssistantSourceMarkerStreamScrubber();
     setChat(next);
-    setSelectedProjectId(next.project_id);
   }
 
   function selectChat(next: Chat, force = false) {
@@ -1229,7 +1086,7 @@ export default function App() {
       // silently. Otherwise keep the editor open with the typed draft so the
       // rename can be retried instead of being discarded.
       if (chatSelectionRef.current === selection) {
-        setChatsError(`Could not rename conversation: ${String(err)}`);
+        setChatsError(`Could not rename chat: ${String(err)}`);
       } else {
         setRenamingChatId(null);
         setRenameChatDraft("");
@@ -1350,9 +1207,7 @@ export default function App() {
     );
   }
 
-  const visibleChats = chats.filter(
-    (item) => item.project_id === selectedProjectId,
-  );
+  const visibleChats = chats;
 
   return (
     <div className="app-shell">
@@ -1386,37 +1241,15 @@ export default function App() {
           type="button"
           className="new-chat"
           onClick={() => void onNewChat()}
-          disabled={
-            creatingChat ||
-            creatingProject ||
-            deletingChatId !== null ||
-            deletingProjectId !== null
-          }
+          disabled={creatingChat || deletingChatId !== null}
         >
           <SquarePen size={15} />
           {creatingChat
             ? "Starting…"
-            : deletingChatId || deletingProjectId
+            : deletingChatId
               ? "Deleting…"
               : "New chat"}
         </button>
-
-        <ProjectNavigation
-          projects={projects}
-          selectedProjectId={selectedProjectId}
-          disabled={
-            projectsLoading ||
-            creatingChat ||
-            creatingProject ||
-            deletingChatId !== null ||
-            deletingProjectId !== null
-          }
-          error={projectsError}
-          onSelect={(projectId) => void onSelectProject(projectId)}
-          onCreate={onCreateProject}
-          onRename={onRenameProject}
-          onDelete={onDeleteProject}
-        />
 
         {hasNativeHost() && (
           <button
@@ -1433,16 +1266,12 @@ export default function App() {
         )}
 
         <div className="sidebar-section">
-          <span className="sidebar-label">Conversations</span>
-          <div className="conversation-list" aria-label="Conversations">
+          <span className="sidebar-label">Chats</span>
+          <div className="conversation-list" aria-label="Chats">
             {visibleChats.map((item) => {
-              const chatTitle = item.title?.trim() || "New conversation";
+              const chatTitle = item.title?.trim() || "New chat";
               const isActive = primaryView === "chat" && item.id === chat.id;
-              const mutating =
-                deletingChatId !== null ||
-                deletingProjectId !== null ||
-                creatingChat ||
-                creatingProject;
+              const mutating = deletingChatId !== null || creatingChat;
 
               if (renamingChatId === item.id) {
                 return (
@@ -1453,7 +1282,7 @@ export default function App() {
                     <input
                       className="conversation-rename-input"
                       autoFocus
-                      aria-label="Conversation title"
+                      aria-label="Chat title"
                       value={renameChatDraft}
                       disabled={savingTitle}
                       onChange={(event) =>
@@ -1495,7 +1324,7 @@ export default function App() {
                         type="button"
                         className="conversation-menu"
                         aria-label={`Actions for ${chatTitle}`}
-                        title="Conversation actions"
+                        title="Chat actions"
                         disabled={mutating}
                       >
                         <Ellipsis size={15} />
@@ -1593,7 +1422,7 @@ export default function App() {
         <section className="chat-pane">
           <header className="conversation-header">
             <div className="conversation-title-row">
-              <h1>{chat.title?.trim() || "New conversation"}</h1>
+              <h1>{chat.title?.trim() || "New chat"}</h1>
             </div>
             <div className="conversation-header-actions">
               <div className="mobile-settings-actions">
@@ -1721,7 +1550,7 @@ export default function App() {
             cancelPending={
               activeTurnId !== null && cancelPendingTurnId === activeTurnId
             }
-            disabled={deletingChatId !== null || deletingProjectId !== null}
+            disabled={deletingChatId !== null}
             draft={draft}
             onDraftChange={onComposerDraftChange}
             onSend={onSend}
@@ -1740,7 +1569,7 @@ export default function App() {
           <ModelPanel
             chat={chat}
             models={models}
-            disabled={deletingChatId !== null || deletingProjectId !== null}
+            disabled={deletingChatId !== null}
             onModelChange={onModelChange}
           />
         )}
@@ -1914,7 +1743,7 @@ function FoldersPanel({ chat }: { chat: Chat }) {
   const [folders, setFolders] = useState<ConnectedFolder[]>([]);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const scopeLabel = chat.project_id ? "project" : "chat";
+  const scopeLabel = "chat";
 
   async function refresh() {
     setError(null);
@@ -2290,7 +2119,7 @@ function ModelPanel({
   return (
     <SettingsPanel
       title="Model"
-      description="Choose the model for this conversation."
+      description="Choose the model for this chat."
     >
       <SettingsField label="Active model">
         <select

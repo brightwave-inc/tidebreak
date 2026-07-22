@@ -36,7 +36,7 @@ export function WelcomeState({
   onSelectPrompt?: (prompt: string) => void;
 }) {
   return (
-    <section className="welcome" aria-label="Start a conversation">
+    <section className="welcome" aria-label="Start a chat">
       <span className="welcome-mark" aria-hidden="true">
         <Logomark />
       </span>

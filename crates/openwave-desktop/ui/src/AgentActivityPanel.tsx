@@ -77,8 +77,8 @@ export function AgentActivityPanel({
       </div>
 
       {foreground && (
-        <ul className="agent-activity-list" aria-label="Conversation activity">
-          <AgentActivityItem run={foreground} label="Conversation" />
+        <ul className="agent-activity-list" aria-label="Chat activity">
+          <AgentActivityItem run={foreground} label="Chat" />
         </ul>
       )}
 
@@ -281,7 +281,7 @@ function isActiveAgentRunStatus(status: AgentRun["status"]): boolean {
 function agentRunStatusDescription(status: AgentRun["status"]): string {
   switch (status) {
     case "active":
-      return "Ready for this conversation";
+      return "Ready for this chat";
     case "queued":
       return "Queued to start";
     case "running":

@@ -11,7 +11,7 @@ describe("WelcomeState", () => {
     expect(markup).toContain("How can I help?");
     expect(markup).toContain("What can you help me with?");
     expect(markup).toContain("Draft a plan");
-    expect(markup).toContain('aria-label="Start a conversation"');
+    expect(markup).toContain('aria-label="Start a chat"');
   });
 
   it("omits the starter prompts when no handler is provided", () => {
