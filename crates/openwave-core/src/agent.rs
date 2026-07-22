@@ -33,7 +33,7 @@ use crate::agent_tools::{
 };
 use crate::approval::{
     ApprovalDecision, ApprovalGate, ApprovalJournalIdentity, ApprovalRequest,
-    ApprovalRequiredPublication, RefuseGate, ToolApprovalKind,
+    ApprovalRequiredPublication, RefuseGate, StandingGrants, ToolApprovalKind,
 };
 use crate::cancel::CancelToken;
 use crate::citation::{
@@ -719,6 +719,7 @@ pub struct Agent {
     store: Arc<dyn Store>,
     config: AgentConfig,
     approvals: Arc<dyn ApprovalGate>,
+    standing_grants: Arc<StandingGrants>,
     cancel: CancelToken,
     steer: SteerInbox,
     durable_steer_lease: Option<uuid::Uuid>,
@@ -756,6 +757,7 @@ impl Agent {
             store,
             config,
             approvals: Arc::new(RefuseGate),
+            standing_grants: Arc::new(StandingGrants::new()),
             cancel: CancelToken::new(),
             steer: SteerInbox::new(),
             durable_steer_lease: None,
@@ -768,6 +770,17 @@ impl Agent {
     #[must_use]
     pub fn with_approvals(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
         self.approvals = gate;
+        self
+    }
+
+    /// Consult `grants` before parking a Sensitive tool call, so a repeated
+    /// in-scope action the user already approved runs without re-prompting.
+    ///
+    /// Deny-by-default: an empty set (the default) makes every Sensitive call
+    /// park on the gate exactly as before.
+    #[must_use]
+    pub fn with_standing_grants(mut self, grants: Arc<StandingGrants>) -> Self {
+        self.standing_grants = grants;
         self
     }
 
@@ -1804,7 +1817,20 @@ impl Agent {
         let approval_class = durable_approval
             .map(|approval| approval.class)
             .unwrap_or_else(|| tool.approval_class());
-        if matches!(approval_class, ApprovalClass::Sensitive) {
+        // Standing grant: a brand-new Sensitive call the user already approved
+        // for this chat runs without re-parking on the gate. A recovered call
+        // (`durable_approval` present) keeps its durable park-and-resume
+        // reconciliation. When `durable_approval` is `None` the request kind is
+        // exactly `for_tool_name`, matching what the park block computes below.
+        // Deny-by-default: only approvable kinds are ever covered.
+        let bypass_by_standing_grant = matches!(approval_class, ApprovalClass::Sensitive)
+            && durable_approval.is_none()
+            && self.standing_grants.covers(
+                chat.id,
+                &call.name,
+                ToolApprovalKind::for_tool_name(&call.name),
+            );
+        if matches!(approval_class, ApprovalClass::Sensitive) && !bypass_by_standing_grant {
             let summary = format!("{} requires approval", call.name);
             let kind = durable_approval
                 .map(|approval| approval.kind)
@@ -4049,6 +4075,187 @@ mod tests {
             AgentEvent::ToolCallCompleted { output, .. }
                 if output.content == "boomed" && !output.is_error
         )));
+    }
+
+    /// A Sensitive, standing-grantable tool (`search`) that records whether it
+    /// ran.
+    struct SearchTool {
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for SearchTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "search".into(),
+                description: "a sensitive search tool".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::Sensitive
+        }
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::text("searched"))
+        }
+    }
+
+    /// Provider that asks for the `search` tool once, then finishes.
+    struct SearchProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for SearchProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("search")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_search".into(),
+                        name: "search".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta { text: "ok".into() },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    async fn search_grant_chat(store: &Arc<dyn Store>) -> Chat {
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        chat
+    }
+
+    async fn search_grant_store() -> Arc<dyn Store> {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        // Keep the temp dir alive for the process; SQLite owns its connection.
+        std::mem::forget(db);
+        store
+    }
+
+    fn search_agent(
+        store: Arc<dyn Store>,
+        ran: Arc<AtomicUsize>,
+        grants: Arc<crate::approval::StandingGrants>,
+    ) -> Agent {
+        let tools = Arc::new(ToolRegistry::new().with(Box::new(SearchTool { ran })));
+        // Default gate is `RefuseGate`: it rejects any call that reaches it, so
+        // the tool running proves the standing grant bypassed the gate entirely.
+        Agent::new(
+            Arc::new(SearchProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            tools,
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_standing_grants(grants)
+    }
+
+    #[tokio::test]
+    async fn standing_grant_runs_sensitive_tool_without_parking() {
+        use crate::approval::{StandingGrant, StandingGrants};
+
+        let store = search_grant_store().await;
+        let chat = search_grant_chat(&store).await;
+        let grants = Arc::new(StandingGrants::from_grants(vec![StandingGrant::new(
+            chat.id,
+            "search",
+            ToolApprovalKind::for_tool_name("search"),
+            Utc::now(),
+        )
+        .expect("search is grantable")]));
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let agent = search_agent(store, ran.clone(), grants);
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })),
+            "a covered call must not re-prompt"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolCallCompleted { output, .. }
+                if output.content == "searched" && !output.is_error
+        )));
+    }
+
+    #[tokio::test]
+    async fn standing_grant_for_another_chat_does_not_bypass_the_gate() {
+        use crate::approval::{StandingGrant, StandingGrants};
+
+        let store = search_grant_store().await;
+        let chat = search_grant_chat(&store).await;
+        // A grant scoped to a different chat must not cover this chat's call.
+        let grants = Arc::new(StandingGrants::from_grants(vec![StandingGrant::new(
+            ChatId::new(),
+            "search",
+            ToolApprovalKind::for_tool_name("search"),
+            Utc::now(),
+        )
+        .expect("search is grantable")]));
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let agent = search_agent(store, ran.clone(), grants);
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })),
+            "an uncovered call must still park on the gate"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "RefuseGate blocks the tool");
     }
 
     /// Streams one text delta, then stalls forever — lets a test cancel mid-stream
