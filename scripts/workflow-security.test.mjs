@@ -132,6 +132,26 @@ test("nested macOS native resources receive a timestamped Developer ID signature
   assert.match(release, /security delete-keychain/);
 });
 
+test("macOS disk images are explicitly notarized and stapled", () => {
+  const release = workflows["release.yml"];
+  const dmgNotarization = release.match(
+    /- name: Notarize and staple the DMG[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(dmgNotarization);
+  assert.match(dmgNotarization, /xcrun notarytool submit "\$dmg_path"/);
+  assert.match(dmgNotarization, /--key "\$APPLE_API_KEY_PATH"/);
+  assert.match(dmgNotarization, /xcrun stapler staple "\$dmg_path"/);
+  assert.match(dmgNotarization, /xcrun stapler validate "\$dmg_path"/);
+  assert.ok(
+    release.indexOf("Build, sign, and notarize the Tauri app") <
+      release.indexOf("Notarize and staple the DMG"),
+  );
+  assert.ok(
+    release.indexOf("Notarize and staple the DMG") <
+      release.indexOf("Verify and collect signed artifacts"),
+  );
+});
+
 test("the packaged updater trusts the production signing key and endpoint", () => {
   const updater = tauriConfig.plugins?.updater;
   assert.ok(updater, "plugins.updater must exist when updater artifacts are built");

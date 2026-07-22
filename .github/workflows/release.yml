@@ -354,6 +354,41 @@ jobs:
             --config ${{ runner.temp }}/openwave-release.json
             --bundles app,dmg
 
+      - name: Notarize and staple the DMG
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          dmg_paths=("$target_dir/$RELEASE_TARGET/release/bundle/dmg/"*.dmg)
+          (( ${#dmg_paths[@]} == 1 )) && [[ -f "${dmg_paths[0]}" ]] || {
+            echo "Expected exactly one DMG to notarize for $RELEASE_TARGET" >&2
+            exit 1
+          }
+          dmg_path="${dmg_paths[0]}"
+
+          submission_output="$(xcrun notarytool submit "$dmg_path" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait \
+            --timeout 30m \
+            --output-format json)"
+          printf '%s\n' "$submission_output"
+          submission_id="$(jq -er .id <<<"$submission_output")"
+          submission_status="$(jq -er .status <<<"$submission_output")"
+          if [[ "$submission_status" != Accepted ]]; then
+            echo "DMG notarization failed with status: $submission_status" >&2
+            xcrun notarytool log "$submission_id" \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" \
+              || true
+            exit 1
+          fi
+
+          xcrun stapler staple "$dmg_path"
+          xcrun stapler validate "$dmg_path"
+
       - name: Verify and collect signed artifacts
         env:
           RELEASE_ARCH: ${{ matrix.arch }}

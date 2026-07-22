@@ -233,6 +233,9 @@ Treat the release workflow as public even while the repository is private:
 - Production artifacts are collected only after code-signing, notarization,
   stapling, and local verification succeed. The temporary App Store Connect key
   is removed even when the build fails.
+- Tauri notarizes and staples the app bundle. The workflow separately submits
+  the signed DMG to Apple's notary service, requires an accepted result, and
+  staples its ticket before artifact verification or upload.
 - The release-only Tauri pre-bundle hook signs the staged PDFium Mach-O library
   with the same Developer ID identity and a secure timestamp. Tauri treats it as
   an arbitrary resource and does not sign it automatically; Apple rejects the
