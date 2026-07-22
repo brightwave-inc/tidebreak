@@ -4361,6 +4361,43 @@ async fn raw_ingest_retains_exact_bytes_and_runs_the_async_pipeline() {
     );
 }
 
+/// End-to-end proof that a PDF ingested through the raw route parses (via the
+/// liteparse parser registered in the real pipeline) and indexes to `Ready`,
+/// with the extracted text as canonical text. Only runs with the parser feature.
+#[cfg(feature = "parse-liteparse")]
+#[tokio::test]
+async fn raw_ingest_parses_and_indexes_a_pdf_end_to_end() {
+    let (router, token, store, _dir, worker) = test_app_with_worker().await;
+    let bearer = format!("Bearer {token}");
+    let pdf = include_bytes!("fixtures/minimal.pdf").to_vec();
+
+    let response = post_raw(
+        &router,
+        &bearer,
+        "/documents/raw?uri=file%3A%2F%2F%2Freport.pdf",
+        Some("application/pdf"),
+        pdf,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let accepted: serde_json::Value = json_body(response).await;
+    let document_id: openwave_core::DocumentId =
+        accepted["document_id"].as_str().unwrap().parse().unwrap();
+
+    run_parse_and_index(&worker).await;
+
+    let ready = store.get_document(document_id).await.unwrap().unwrap();
+    assert_eq!(
+        ready.processing_status,
+        openwave_core::DocumentProcessingStatus::Ready
+    );
+    assert!(
+        ready.canonical_text.contains("liteparse ingest report"),
+        "expected the PDF's extracted text as canonical text, got: {:?}",
+        ready.canonical_text
+    );
+}
+
 #[tokio::test]
 async fn raw_ingest_enforces_media_type_body_and_project_scope() {
     let (router, token, store, _dir) = test_app().await;
