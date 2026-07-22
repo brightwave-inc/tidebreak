@@ -1291,14 +1291,24 @@ impl Store for PauseTerminalStore {
                 .cancel_after_apply_steer_commit
                 .swap(false, Ordering::SeqCst)
         {
-            self.inner
-                .request_turn_cancellation_and_append_event(turn_id, chrono::Utc::now())
-                .await?
-                .ok_or_else(|| {
-                    AgentError::Store(
-                        "injected cancellation could not follow steer application".into(),
-                    )
-                })?;
+            // Commit the cancellation that beats the steer's ambiguous response.
+            // `request_turn_cancellation` returns `Ok(None)` when it loses the
+            // optimistic-concurrency race against a concurrent heartbeat that has
+            // just bumped `updated_at`; production callers retry with a fresh
+            // timestamp. Retry here too so the modeled cancellation always lands
+            // instead of being silently abandoned (which left the turn Running
+            // with the steer applied and the notify never fired — the flake).
+            loop {
+                if self
+                    .inner
+                    .request_turn_cancellation_and_append_event(turn_id, chrono::Utc::now())
+                    .await?
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
             self.apply_steer_cancellation_committed.notify_one();
             return Err(AgentError::Store(
                 "injected cancelled ambiguous steer application response".into(),
@@ -3042,10 +3052,7 @@ async fn durable_steer_retries_heartbeat_races_and_ambiguous_application() {
     );
 }
 
-// Quarantined: flaky under parallel test load (cancellation/steer timing race).
-// Passes in isolation. Tracked in #350; remove `#[ignore]` once made deterministic.
 #[tokio::test]
-#[ignore = "flaky under parallel load — see #350"]
 async fn committed_steer_event_recovers_when_cancellation_wins_ambiguous_response() {
     struct NeverFinish {
         entered: Arc<Notify>,
