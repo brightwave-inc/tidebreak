@@ -245,6 +245,17 @@ body {
   }
 }
 
+/* The app's component and legacy styles live in `@layer components`, which
+   Tailwind v4 orders before `@layer utilities`. Unlayered rules beat any layered
+   rule regardless of specificity, so leaving these unlayered let app CSS silently
+   override Tailwind utilities applied to shadcn components. Grouping the whole
+   block in a single layer lets utilities win when applied, while preserving the
+   existing app-vs-app cascade — source order and specificity are unchanged within
+   one layer, and `components` still outranks the `base` resets above. Token
+   definitions (`:root`, `.dark`, `@theme inline`) and element resets stay
+   unlayered/in `base` on purpose. */
+@layer components {
+
 /* ---------- App shell ---------- */
 
 .app-shell {
@@ -2685,6 +2696,8 @@ body {
     margin-top: -0.5rem;
   }
 }
+
+} /* @layer components */
 
 /* Scrollbar styling */
 * {
