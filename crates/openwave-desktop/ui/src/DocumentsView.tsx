@@ -129,8 +129,9 @@ export function DocumentsView({
           <p className="eyebrow">Local library</p>
           <h1 id="documents-title">Documents</h1>
           <p>
-            Add text and Markdown files, then search the passages OpenWave has
-            prepared on this device.
+            Import any file. Text and PDF documents are indexed so you can search
+            the passages OpenWave has prepared on this device; other files are
+            kept in the library to work with.
           </p>
         </div>
         <div className="documents-header-actions">
@@ -237,7 +238,7 @@ export function DocumentsView({
           ) : documents.length === 0 && !error ? (
             <div className="document-empty">
               <strong>Your library is empty</strong>
-              <span>Import a text or Markdown file to make it searchable.</span>
+              <span>Import any file — text and PDFs become searchable.</span>
             </div>
           ) : (
             <div className="document-list">
@@ -280,9 +281,11 @@ function documentTitle(document: LibraryDocument): string {
 }
 
 function mediaTypeLabel(mediaType: string): string {
-  if (mediaType.startsWith("application/pdf")) return "PDF";
-  if (mediaType.startsWith("text/markdown")) return "Markdown";
-  return "Text";
+  const base = mediaType.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (base === "application/pdf") return "PDF";
+  if (base === "text/markdown") return "Markdown";
+  if (base.startsWith("text/")) return "Text";
+  return "File";
 }
 
 function formatDate(value: string): string {
