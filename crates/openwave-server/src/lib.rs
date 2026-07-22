@@ -58,8 +58,8 @@ use openwave_core::{
     ToolRegistry, WriteFile,
 };
 use openwave_retrieval::{
-    Embedder, HashEmbedder, LanceVectorStore, OpenAiEmbedder, ParserRegistry, PlainTextParser,
-    Retriever, SearchTool, TextChunker, VectorStore,
+    Embedder, FallbackParser, HashEmbedder, LanceVectorStore, OpenAiEmbedder, ParserRegistry,
+    PlainTextParser, Retriever, SearchTool, TextChunker, VectorStore,
 };
 
 use resolver::KeyedResolver;
@@ -634,14 +634,18 @@ fn build_retrieval(
     (retrieval, search)
 }
 
-/// Assemble the document parsers. `PlainTextParser` is the always-on fallback
-/// for `text/*`; with the `parse-liteparse` feature, the narrow PDF parser is
-/// registered ahead of it so `application/pdf` ingests as extracted Markdown.
+/// Assemble the document parsers, narrowest first. With the `parse-liteparse`
+/// feature, the PDF parser claims `application/pdf`; `PlainTextParser` claims
+/// `text/*`; the `FallbackParser` claims everything else so **any** upload is
+/// accepted — text-like unknown types stay searchable and binary ones are
+/// stored without polluting the index.
 fn document_parser_registry() -> ParserRegistry {
     let registry = ParserRegistry::new();
     #[cfg(feature = "parse-liteparse")]
     let registry = registry.with_parser(openwave_retrieval::LiteParsePdfParser::new());
-    registry.with_parser(PlainTextParser::new())
+    registry
+        .with_parser(PlainTextParser::new())
+        .with_parser(FallbackParser::new())
 }
 
 /// Open the persistent vector store for this launch: a LanceDB dataset under

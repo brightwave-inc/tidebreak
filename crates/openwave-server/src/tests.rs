@@ -4418,16 +4418,6 @@ async fn raw_ingest_enforces_media_type_body_and_project_scope() {
     .await;
     assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
 
-    let unsupported = post_raw(
-        &router,
-        &bearer,
-        "/documents/raw",
-        Some("application/octet-stream"),
-        b"binary".to_vec(),
-    )
-    .await;
-    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
-
     let project = make_project(&router, &bearer).await;
     let response = post_raw(
         &router,
@@ -5895,22 +5885,63 @@ async fn ingest_rejects_empty_content_and_search_rejects_empty_query() {
 }
 
 #[tokio::test]
-async fn ingest_rejects_unsupported_media_type() {
-    let (router, token, _store, _dir) = test_app().await;
+async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
+    let (router, token, store, _dir, worker) = test_app_with_worker().await;
     let bearer = format!("Bearer {token}");
-    let response = post_json(
+
+    // A text-like body with an unrecognized media type is accepted and stays
+    // searchable: the fallback parser decodes valid UTF-8 into canonical text.
+    let textual = post_raw(
         &router,
         &bearer,
-        "/documents",
-        // `image/png` is handled by no registered parser in any feature config
-        // (unlike `application/pdf`, which the liteparse parser claims).
-        serde_json::json!({ "content": "\u{89}PNG", "media_type": "image/png" }),
+        "/documents/raw?uri=file%3A%2F%2F%2Fnotes.log",
+        Some("application/octet-stream"),
+        b"level=info service started ok".to_vec(),
     )
     .await;
-    // A parser that can't handle the media type is the caller's problem: 400.
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let info: AgentErrorInfo = json_body(response).await;
-    assert_eq!(info.kind, "bad_request");
+    assert_eq!(textual.status(), StatusCode::ACCEPTED);
+    let textual_id: openwave_core::DocumentId = json_body::<serde_json::Value>(textual).await
+        ["document_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // Binary bytes are accepted too, but retained without decoded canonical text
+    // so they never pollute the search index.
+    let binary = post_raw(
+        &router,
+        &bearer,
+        "/documents/raw?uri=file%3A%2F%2F%2Fimage.png",
+        Some("image/png"),
+        vec![0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF],
+    )
+    .await;
+    assert_eq!(binary.status(), StatusCode::ACCEPTED);
+    let binary_id: openwave_core::DocumentId = json_body::<serde_json::Value>(binary).await
+        ["document_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // Two documents ⇒ two parse jobs and two index jobs.
+    run_parse_and_index(&worker).await;
+    run_parse_and_index(&worker).await;
+
+    let textual_doc = store.get_document(textual_id).await.unwrap().unwrap();
+    assert_eq!(
+        textual_doc.processing_status,
+        openwave_core::DocumentProcessingStatus::Ready
+    );
+    assert_eq!(textual_doc.canonical_text, "level=info service started ok");
+
+    let binary_doc = store.get_document(binary_id).await.unwrap().unwrap();
+    assert_eq!(
+        binary_doc.processing_status,
+        openwave_core::DocumentProcessingStatus::Ready
+    );
+    assert!(binary_doc.canonical_text.is_empty());
 }
 
 #[tokio::test]

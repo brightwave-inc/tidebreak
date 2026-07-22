@@ -167,6 +167,49 @@ impl DocumentParser for PlainTextParser {
     }
 }
 
+/// A last-resort parser that accepts **any** media type so no upload is rejected
+/// for its format alone.
+///
+/// Register it after the specific parsers ([`PlainTextParser`], a PDF parser,
+/// …): a document only reaches this fallback when nothing narrower claimed it.
+/// Bytes that decode as valid UTF-8 become canonical text and are indexed —
+/// text-like uploads with an unknown media type (`.log`, `.yaml`, `.ndjson`, a
+/// bare `application/octet-stream`) stay searchable. Bytes that are not valid
+/// UTF-8 are treated as binary: the document is still stored and listed, but its
+/// canonical text is empty, so it produces no chunks and never pollutes search
+/// with decoded noise. This mirrors "import anything, index what we can" — the
+/// document remains available to work with even when it is not searchable.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FallbackParser;
+
+impl FallbackParser {
+    /// Construct the parser.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait::async_trait]
+impl DocumentParser for FallbackParser {
+    fn fingerprint_for(&self, _media_type: &str) -> Option<String> {
+        Some("fallback:utf8-else-empty:v1".to_string())
+    }
+
+    fn supports(&self, _media_type: &str) -> bool {
+        true
+    }
+
+    async fn parse(&self, raw: &[u8], _media_type: &str) -> Result<ParsedDocument> {
+        // Index only genuinely textual bytes; binary content is retained but not
+        // decoded into the search index.
+        let text = std::str::from_utf8(raw)
+            .map(str::to_owned)
+            .unwrap_or_default();
+        Ok(ParsedDocument::from_text(text))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +398,61 @@ mod tests {
     async fn rejects_unsupported_media_type() {
         let p = PlainTextParser::new();
         assert!(p.parse(b"%PDF-1.7", "application/pdf").await.is_err());
+    }
+
+    #[test]
+    fn fallback_supports_and_fingerprints_every_media_type() {
+        let p = FallbackParser::new();
+        for media in [
+            "application/octet-stream",
+            "image/png",
+            "",
+            "application/x-thing",
+        ] {
+            assert!(p.supports(media));
+            assert_eq!(
+                p.fingerprint_for(media).as_deref(),
+                Some("fallback:utf8-else-empty:v1")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_indexes_utf8_but_stores_binary_as_empty() {
+        let p = FallbackParser::new();
+        // A text-like file with an unknown media type stays searchable.
+        let text = p
+            .parse(b"level=info msg=\"started\"", "application/octet-stream")
+            .await
+            .unwrap();
+        assert_eq!(text.text, "level=info msg=\"started\"");
+        // Binary bytes are retained but not decoded into canonical text.
+        let binary = p
+            .parse(&[0x00, 0xFF, 0x89, 0x50], "application/octet-stream")
+            .await
+            .unwrap();
+        assert!(binary.text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn registry_with_fallback_accepts_any_media_type() {
+        let registry = ParserRegistry::new()
+            .with_parser(PlainTextParser::new())
+            .with_parser(FallbackParser::new());
+        // Specific parser still wins for text/*.
+        assert_eq!(
+            registry.fingerprint_for("text/plain").as_deref(),
+            Some("plain-text-lossy-v1")
+        );
+        // Nothing is unsupported once the fallback is present.
+        assert!(registry.supports("application/vnd.custom"));
+        assert_eq!(
+            registry
+                .parse(b"hello", "application/x-unknown")
+                .await
+                .unwrap()
+                .text,
+            "hello"
+        );
     }
 }
