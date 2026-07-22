@@ -3604,6 +3604,7 @@ impl MigrationTrait for AddToolCalls {
                                     .eq(crate::ApprovalClass::Sensitive.as_str()))
                                 .and(Expr::col(ToolCall::ApprovalKind).is_in([
                                     crate::ToolApprovalKind::SearchMayShareQueryAndExcerpts.as_str(),
+                                    crate::ToolApprovalKind::ExecMayRunNetworkedCommand.as_str(),
                                     crate::ToolApprovalKind::Unsupported.as_str(),
                                 ]))
                                 .and(Expr::col(ToolCall::ApprovalRequestedAt).is_not_null())

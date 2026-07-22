@@ -459,6 +459,7 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
         Some("search_may_share_query_and_excerpts") => {
             ToolApprovalKind::SearchMayShareQueryAndExcerpts
         }
+        Some("exec_may_run_networked_command") => ToolApprovalKind::ExecMayRunNetworkedCommand,
         Some("unsupported") => ToolApprovalKind::Unsupported,
         _ => {
             return Err(AgentError::Store(
