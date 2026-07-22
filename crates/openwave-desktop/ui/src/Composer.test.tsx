@@ -99,7 +99,7 @@ describe("Composer", () => {
 
     expect(markup).toContain('class="composer-actions"');
     expect(markup).toContain("Redirect");
-    expect(markup).toContain(">Stop<");
+    expect(markup).toContain('aria-label="Stop response"');
     expect(markup).toContain('aria-label="Redirect active response"');
     expect(markup).toContain('aria-label="Stop response"');
     expect(markup).toContain('aria-label="Message"');
@@ -127,7 +127,7 @@ describe("Composer", () => {
       />,
     );
 
-    expect(markup).toContain(">Stop<");
+    expect(markup).toContain('aria-label="Stop response"');
     expect(markup).toContain('aria-label="Stop response"');
     expect(markup).toContain("Guide the active response…");
     expect(markup).not.toContain('<textarea disabled=""');
@@ -154,7 +154,7 @@ describe("Composer", () => {
     );
 
     expect(markup).toContain(">Sending…<");
-    expect(markup).toContain(">Stop<");
+    expect(markup).toContain('aria-label="Stop response"');
     expect(markup).toContain('aria-label="Redirect active response"');
     expect(markup).not.toContain('<textarea disabled=""');
     expect(markup).toContain("Sending guidance…");
@@ -181,7 +181,7 @@ describe("Composer", () => {
     );
 
     expect(markup).toContain(">Redirect<");
-    expect(markup).toContain(">Stopping…<");
+    expect(markup).toContain('aria-label="Stopping response"');
     expect(markup.match(/disabled=""/g)).toHaveLength(2);
   });
 
@@ -230,7 +230,7 @@ describe("Composer", () => {
       />,
     );
 
-    expect(markup).toContain(">Send<");
+    expect(markup).toContain('aria-label="Send message"');
     expect(markup).toContain('type="submit"');
     expect(markup).toContain('disabled=""');
   });

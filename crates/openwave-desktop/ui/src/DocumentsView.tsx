@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { FileText } from "lucide-react";
 import {
   importLibraryDocument,
   listLibraryDocuments,
@@ -242,7 +243,9 @@ export function DocumentsView({
             <div className="document-list">
               {documents.map((document) => (
                 <article className="document-row" key={document.documentId}>
-                  <div className="document-icon" aria-hidden="true">⌑</div>
+                  <div className="document-icon" aria-hidden="true">
+                    <FileText size={16} />
+                  </div>
                   <div className="document-copy">
                     <strong>{documentTitle(document)}</strong>
                     <span>

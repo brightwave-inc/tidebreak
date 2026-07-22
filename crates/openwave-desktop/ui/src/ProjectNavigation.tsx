@@ -1,4 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent, type Ref } from "react";
+import {
+  Check,
+  FolderOpen,
+  MessagesSquare,
+  Pencil,
+  Plus,
+  X,
+} from "lucide-react";
+import type { ReactNode } from "react";
 import type { Project } from "./api";
 
 type Props = {
@@ -90,7 +99,7 @@ export function ProjectNavigation({
           disabled={disabled || renaming}
           onClick={() => setAdding((current) => !current)}
         >
-          +
+          <Plus size={14} />
         </button>
       </div>
 
@@ -132,7 +141,8 @@ export function ProjectNavigation({
       <div className="project-list">
         <ProjectButton
           buttonRef={looseChatsRef}
-          title="Loose chats"
+          title="Direct chats"
+          icon={<MessagesSquare size={13} />}
           selected={selectedProjectId === null}
           disabled={disabled || renaming}
           onClick={() => onSelect(null)}
@@ -166,7 +176,7 @@ export function ProjectNavigation({
                   aria-label="Save project name"
                   disabled={disabled || savingRename}
                 >
-                  ✓
+                  <Check size={13} />
                 </button>
                 <button
                   type="button"
@@ -174,7 +184,7 @@ export function ProjectNavigation({
                   disabled={disabled || savingRename}
                   onClick={() => finishRename(project.id)}
                 >
-                  ×
+                  <X size={13} />
                 </button>
               </form>
             );
@@ -203,7 +213,7 @@ export function ProjectNavigation({
                     setRenameTitle(project.title ?? "");
                   }}
                 >
-                  ···
+                  <Pencil size={12} />
                 </button>
               )}
               <button
@@ -214,7 +224,7 @@ export function ProjectNavigation({
                 disabled={disabled || savingRename || renaming || adding}
                 onClick={() => void deleteProject(project)}
               >
-                ×
+                <X size={13} />
               </button>
             </div>
           );
@@ -228,12 +238,14 @@ export function ProjectNavigation({
 function ProjectButton({
   buttonRef,
   title,
+  icon,
   selected,
   disabled,
   onClick,
 }: {
   buttonRef?: Ref<HTMLButtonElement>;
   title: string;
+  icon?: ReactNode;
   selected: boolean;
   disabled: boolean;
   onClick: () => void;
@@ -248,7 +260,7 @@ function ProjectButton({
       onClick={onClick}
     >
       <span className="project-icon" aria-hidden="true">
-        {selected ? "◆" : "◇"}
+        {icon ?? <FolderOpen size={12} />}
       </span>
       <span>{title}</span>
     </button>

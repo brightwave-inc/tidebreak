@@ -29,8 +29,11 @@ export function AgentActivityPanel({
   stopErrorRunIds: ReadonlySet<string>;
   onStop: (runId: string) => void;
 }) {
+  // Stay invisible while loading: background agents are the exception, so a
+  // standing "Loading activity…" line under the header would be noise on every
+  // chat. The panel simply appears once background work is present.
   if (loading) {
-    return <div className="agent-activity-state">Loading activity…</div>;
+    return null;
   }
 
   if (error) {
@@ -46,7 +49,11 @@ export function AgentActivityPanel({
 
   const foreground = runs.find((run) => run.execution === "foreground");
   const sandboxes = runs.filter((run) => run.execution === "sandbox");
-  if (!foreground && sandboxes.length === 0) return null;
+  // The foreground conversation turn is already represented by the streaming
+  // reply, tool cards, and the working indicator, so a standing "Activity:
+  // Conversation" card just adds noise. Surface this panel only when there is
+  // real background (sandbox) agent work to report.
+  if (sandboxes.length === 0) return null;
 
   const activeSandboxes = sandboxes.filter((run) =>
     isActiveAgentRunStatus(run.status),

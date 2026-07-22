@@ -29,7 +29,7 @@ describe("ProjectNavigation", () => {
     );
 
     expect(markup).toContain('aria-label="Projects"');
-    expect(markup).toContain("Loose chats");
+    expect(markup).toContain("Direct chats");
     expect(markup).toContain("Research");
     expect(markup).toContain("Untitled project");
     expect(markup).toContain('aria-current="page"');

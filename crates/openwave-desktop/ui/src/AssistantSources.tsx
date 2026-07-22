@@ -1,3 +1,5 @@
+import { ChevronRight } from "lucide-react";
+
 export type AssistantSource = Readonly<{
   id: string;
   ordinal: number;
@@ -56,7 +58,7 @@ export function AssistantSources({ sources }: AssistantSourcesProps) {
           ))}
         </span>
         <span className="assistant-sources-chevron" aria-hidden="true">
-          ›
+          <ChevronRight size={15} />
         </span>
       </summary>
       <ol className="assistant-source-list">

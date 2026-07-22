@@ -4,7 +4,9 @@ import {
   useLayoutEffect,
   useRef,
 } from "react";
+import { ArrowUp, Square } from "lucide-react";
 import { MAX_STEER_CHARACTERS } from "./ActiveTurnSteer";
+import { WithTooltip } from "@/components/ui/tooltip";
 
 const MIN_COMPOSER_LINES = 1;
 export const MAX_COMPOSER_LINES = 6;
@@ -152,91 +154,98 @@ export function Composer({
   }
 
   return (
-    <form
-      className="composer"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void submit();
-      }}
-    >
-      <textarea
-        ref={textareaRef}
-        value={draft}
-        placeholder={
-          active ? "Guide the active response…" : "Message OpenWave…"
-        }
-        aria-label="Message"
-        disabled={inputDisabled}
-        onChange={onChange}
-        onKeyDown={(event) => {
-          if (!shouldSubmitComposerKey(event.nativeEvent)) return;
+    <div className="composer-wrap">
+      <form
+        className="composer"
+        onSubmit={(event) => {
           event.preventDefault();
           void submit();
         }}
-      />
-      <div className="composer-actions">
-        {active ? (
-          <>
-            {(hasDraft || steerPending) && (
+      >
+        <textarea
+          ref={textareaRef}
+          value={draft}
+          placeholder={
+            active ? "Guide the active response…" : "Message OpenWave…"
+          }
+          aria-label="Message"
+          disabled={inputDisabled}
+          onChange={onChange}
+          onKeyDown={(event) => {
+            if (!shouldSubmitComposerKey(event.nativeEvent)) return;
+            event.preventDefault();
+            void submit();
+          }}
+        />
+        <div className="composer-actions">
+          {active ? (
+            <>
+              {(hasDraft || steerPending) && (
+                <button
+                  type="submit"
+                  className="btn btn-primary composer-redirect"
+                  aria-label="Redirect active response"
+                  disabled={!canSubmit}
+                >
+                  {steerPending ? "Sending…" : "Redirect"}
+                </button>
+              )}
+              <WithTooltip label={cancelPending ? "Stopping…" : "Stop"}>
+                <button
+                  type="button"
+                  className="composer-icon-btn composer-stop"
+                  aria-label={
+                    cancelPending ? "Stopping response" : "Stop response"
+                  }
+                  disabled={disabled || cancelPending}
+                  onClick={() => void onStop()}
+                >
+                  <Square size={15} fill="currentColor" strokeWidth={0} />
+                </button>
+              </WithTooltip>
+            </>
+          ) : (
+            <WithTooltip label="Send · Enter">
               <button
                 type="submit"
-                className="btn btn-primary"
-                aria-label="Redirect active response"
+                className="composer-icon-btn composer-send"
+                aria-label="Send message"
                 disabled={!canSubmit}
               >
-                {steerPending ? "Sending…" : "Redirect"}
+                <ArrowUp size={18} />
               </button>
-            )}
-            <button
-              type="button"
-              className="btn btn-stop"
-              aria-label={
-                cancelPending ? "Stopping response" : "Stop response"
-              }
-              disabled={disabled || cancelPending}
-              onClick={() => void onStop()}
-            >
-              {cancelPending ? "Stopping…" : "Stop"}
-            </button>
-          </>
-        ) : (
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={!canSubmit}
-          >
-            Send
-          </button>
+            </WithTooltip>
+          )}
+        </div>
+        <span className="sr-only" role="status">
+          {busy ? "Agent is responding" : "Ready to send"}
+        </span>
+        {cancelError && (
+          <span className="composer-turn-error" role="status">
+            Couldn’t stop turn: {cancelError}
+          </span>
         )}
-      </div>
-      <span className="sr-only" role="status">
-        {busy ? "Agent is responding" : "Ready to send"}
-      </span>
-      {cancelError && (
-        <span className="composer-turn-error" role="status">
-          Couldn’t stop turn: {cancelError}
-        </span>
-      )}
-      {steerError && (
-        <span className="composer-turn-error" role="alert">
-          Couldn’t redirect: {steerError}
-        </span>
-      )}
-      {steerStatus && !steerError && (
-        <span className="composer-turn-status" role="status">
-          {steerStatus}
-        </span>
-      )}
-      {steerTooLong && (
-        <span className="composer-turn-error" role="alert">
-          Guidance is too long.
-        </span>
-      )}
-      {steerHasUnsupportedCharacter && (
-        <span className="composer-turn-error" role="alert">
-          Guidance contains an unsupported character.
-        </span>
-      )}
-    </form>
+        {steerError && (
+          <span className="composer-turn-error" role="alert">
+            Couldn’t redirect: {steerError}
+          </span>
+        )}
+        {steerStatus && !steerError && (
+          <span className="composer-turn-status" role="status">
+            {steerStatus}
+          </span>
+        )}
+        {steerTooLong && (
+          <span className="composer-turn-error" role="alert">
+            Guidance is too long.
+          </span>
+        )}
+        {steerHasUnsupportedCharacter && (
+          <span className="composer-turn-error" role="alert">
+            Guidance contains an unsupported character.
+          </span>
+        )}
+      </form>
+    </div>
   );
 }

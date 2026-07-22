@@ -5,6 +5,13 @@ import {
   toolApprovalPresentation,
 } from "./ToolCallCard";
 
+// Strip element markup so leak checks assert on the visible copy only. The
+// status glyph is an inline SVG whose element names (e.g. `<path>`) are not
+// user-facing text and must not be mistaken for a leaked resource path.
+function visibleText(markup: string): string {
+  return markup.replace(/<[^>]*>/g, "");
+}
+
 describe("ToolCallCard", () => {
   it("uses an allowlisted presentation and a polite live status", () => {
     const markup = renderToStaticMarkup(
@@ -48,8 +55,8 @@ describe("ToolCallCard", () => {
 
     expect(markup).toContain("Read a delegated file");
     expect(markup).toContain("Reading a delegated file");
-    expect(markup).not.toContain("path");
-    expect(markup).not.toContain("root");
+    expect(visibleText(markup)).not.toContain("path");
+    expect(visibleText(markup)).not.toContain("root");
   });
 
   it("distinguishes delegation from waiting for the child results", () => {
