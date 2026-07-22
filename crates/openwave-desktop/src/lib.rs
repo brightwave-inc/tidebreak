@@ -68,6 +68,41 @@ async fn wait_server_info(state: &Arc<AppState>) -> Result<NativeServerInfo, Str
     }
 }
 
+/// Platform file name of the PDFium shared library the liteparse parser loads.
+fn pdfium_dylib_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "pdfium.dll"
+    } else if cfg!(target_os = "macos") {
+        "libpdfium.dylib"
+    } else {
+        "libpdfium.so"
+    }
+}
+
+/// Point the PDFium loader at the library bundled next to the packaged app.
+///
+/// The build script stages `pdfium/<lib>` into the Tauri resource directory for
+/// release bundles. `liteparse-pdfium-sys` searches `PDFIUM_LIB_PATH` first, so
+/// exporting the bundled directory makes PDF parsing work in an installed app,
+/// where the compile-time cache path baked into the binary does not exist.
+///
+/// Best-effort and idempotent: an explicit `PDFIUM_LIB_PATH` is respected, and a
+/// missing resource (dev runs, or a bundle built before the runtime was staged)
+/// is left alone so the loader falls through to its other search paths. The
+/// parser still fails closed with a clear message if PDFium cannot be loaded.
+fn point_pdfium_at_bundle(app: &tauri::AppHandle) {
+    if std::env::var_os("PDFIUM_LIB_PATH").is_some() {
+        return;
+    }
+    let Ok(resource_dir) = app.path().resource_dir() else {
+        return;
+    };
+    let pdfium_dir = resource_dir.join("pdfium");
+    if pdfium_dir.join(pdfium_dylib_name()).is_file() {
+        std::env::set_var("PDFIUM_LIB_PATH", &pdfium_dir);
+    }
+}
+
 /// Absolute data directory for the desktop profile (platform app-data).
 fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -118,6 +153,7 @@ pub fn run() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            point_pdfium_at_bundle(&handle);
             let data = data_dir(&handle)?;
             let home = home_dir(&handle)?;
             let host_access = host_access::HostAccess::new(handle.clone(), data.clone(), home)?;
