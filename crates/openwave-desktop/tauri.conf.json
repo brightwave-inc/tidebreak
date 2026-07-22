@@ -30,6 +30,14 @@
       "csp": "default-src 'self' customprotocol: asset:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*; img-src 'self' asset: data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUyRjM1NjZGOTQxRUFBNwpSV1NuNmtINVpqVXZEaXY4cVFWZ0RrbThUbHlEZFB1RnVtT01MSGcwRElhcjdtUUpJckJzM2ZjTAo=",
+      "endpoints": [
+        "https://downloads.brightwave.io/openwave/latest.json"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

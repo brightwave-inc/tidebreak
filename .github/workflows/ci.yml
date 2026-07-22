@@ -30,11 +30,11 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Once this policy has landed, always execute its trusted base-branch
           # copy. The root checkout is retained only to bootstrap this PR.
@@ -85,7 +85,7 @@ jobs:
     name: release policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Test semantic title and tag policy
         run: node --test scripts/*.test.mjs
 
@@ -96,7 +96,7 @@ jobs:
       rust: ${{ steps.scope.outputs.rust }}
       ui: ${{ steps.scope.outputs.ui }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: Detect validation scope
@@ -160,14 +160,15 @@ jobs:
     name: secret scan (gitleaks)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       # Run gitleaks via its Docker image to avoid the org-license requirement
-      # of gitleaks-action. TODO: pin to a specific digest once the repo settles.
+      # of gitleaks-action. Keep the multi-architecture image pinned by digest.
       - name: gitleaks
         run: |
-          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:latest \
+          docker run --rm -v "$PWD:/repo" \
+            ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
             detect --source=/repo --redact --verbose
 
   fmt:
@@ -176,7 +177,7 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
       - name: rustfmt
@@ -197,11 +198,11 @@ jobs:
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: v0.16.0
       - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
@@ -215,7 +216,7 @@ jobs:
             mold \
             patchelf \
             protobuf-compiler
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: cargo-registry-v2
           add-job-id-key: "false"
@@ -245,11 +246,11 @@ jobs:
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: v0.16.0
       - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
@@ -263,7 +264,7 @@ jobs:
             mold \
             patchelf \
             protobuf-compiler
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: cargo-registry-v2
           add-job-id-key: "false"
@@ -291,11 +292,11 @@ jobs:
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: v0.16.0
       - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
@@ -309,7 +310,7 @@ jobs:
             mold \
             patchelf \
             protobuf-compiler
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: cargo-registry-v2
           add-job-id-key: "false"
@@ -334,11 +335,11 @@ jobs:
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: v0.16.0
       - name: Install headless system deps (protobuf for the LanceDB vector store)
@@ -348,7 +349,7 @@ jobs:
             libprotobuf-dev \
             mold \
             protobuf-compiler
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: cargo-registry-v2
           add-job-id-key: "false"
@@ -366,7 +367,7 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
         env:
           POSTGRES_DB: openwave_test
           POSTGRES_PASSWORD: postgres
@@ -388,14 +389,14 @@ jobs:
       SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: v0.16.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: cargo-registry-v2
           add-job-id-key: "false"
@@ -417,11 +418,11 @@ jobs:
       run:
         working-directory: crates/openwave-desktop/ui
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
           version: 10
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
           cache: pnpm

@@ -165,9 +165,9 @@ that environment:
 | `TAURI_SIGNING_PRIVATE_KEY`          | Private key used to sign Tauri updater archives             |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the Tauri updater-signing key                  |
 
-Generate a dedicated Tauri updater keypair and retain its public key for the
-future updater client configuration. Only the private key and its password
-belong in GitHub secrets.
+Retain the Tauri updater keypair. Its public key is intentionally committed in
+`crates/openwave-desktop/tauri.conf.json` so packaged apps can verify update
+signatures. Only the private key and its password belong in GitHub secrets.
 
 Configure these environment variables:
 
@@ -190,6 +190,34 @@ Before the first public release, protect the environment as appropriate, verify
 all configuration values, and exercise the workflow with the intended first
 tag. The workflow references Apple signing secrets only in the macOS jobs;
 publishing uses short-lived AWS credentials obtained through OIDC.
+
+### Release CI and cache security
+
+Treat the release workflow as public even while the repository is private:
+
+- Release actions are pinned to immutable commit SHAs. Dependabot is responsible
+  for proposing reviewed action updates.
+- The workflow runs only for a published native GitHub Release, then verifies
+  that the tag resolves to the release event commit and that the commit is on
+  `main`. It never runs with production secrets for a pull request.
+- Apple and Tauri credentials remain environment secrets. The Tauri private key
+  is exposed only to the post-notarization updater-signing step, not the build
+  action. AWS authentication uses GitHub OIDC, so no long-lived AWS key is
+  stored in GitHub or the source tree. Infrastructure identifiers remain
+  environment variables rather than committed configuration.
+- `sccache` stores individual Rust compiler outputs. The Cargo cache stores
+  dependency downloads with `cache-targets: false`; it does not archive
+  `target/`, signed apps, DMGs, updater archives, signatures, or temporary Apple
+  key files.
+- Production artifacts are collected only after code-signing, notarization,
+  stapling, and local verification succeed. The temporary App Store Connect key
+  is removed even when the build fails.
+
+Public source does not eliminate the need for operational controls. Restrict
+who can publish releases and change Actions configuration, protect `main`, and
+consider required reviewers on `desktop-production` before making the
+repository public. Never add a pull-request trigger to the production workflow
+or expose its environment secrets to code from forks.
 
 ## Before 1.0
 

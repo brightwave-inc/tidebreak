@@ -32,7 +32,7 @@ jobs:
     steps:
       # pull_request_target is safe here because only trusted base-branch code is
       # checked out; no code or workflow from the PR head is executed.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.base.sha }}
       - name: Synchronize the release-impact label
@@ -66,7 +66,7 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: release-drafter/release-drafter@v7
+      - uses: release-drafter/release-drafter@eada3c96a64734dd381cfbda23511034e328ddb0 # v7
 
   backfill:
     name: backfill release labels
@@ -79,7 +79,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Plan title-derived labels for merged pull requests
         run: |
           gh pr list \
