@@ -711,7 +711,10 @@ effective API specification.
 `openwave mcp /absolute/workspace` starts an MCP stdio server confined to that
 workspace. It currently exposes only `read_file` and `list_dir`, and only after a
 proper MCP initialize lifecycle. Indexed search, approval-aware writable tools,
-and the MCP client that mounts external servers into OpenWave are not wired yet.
+and app-level external-server configuration are not wired yet. The `openwave-mcp`
+library also implements the inverse lifecycle for external stdio servers: it
+discovers their tools, mounts namespaced sensitive proxies into `ToolRegistry`,
+and forwards approved calls over the shared MCP session.
 
 ### Self-host
 
@@ -790,7 +793,7 @@ The main next steps are:
   sandbox-safe capabilities without widening exact delegated-file or spawn
   authority;
 - add richer parsers and wire indexed search into MCP;
-- build the MCP client and connector surfaces;
+- wire MCP client configuration and lifecycle into product surfaces;
 - finish the self-host profile rather than only testing Postgres state logic;
 - add health-aware provider failover;
 - bound the agent-to-worker event channel and batch or page journal traffic so

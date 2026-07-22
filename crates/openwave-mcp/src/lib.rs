@@ -1,4 +1,4 @@
-//! OpenWave MCP — the Model Context Protocol server face.
+//! OpenWave MCP — Model Context Protocol server and client faces.
 //!
 //! Exposes OpenWave's read-only tools from the same `ToolRegistry` the agent uses
 //! to an external MCP client, so any MCP-speaking host can drive capabilities such
@@ -8,6 +8,9 @@
 //! [`McpServer`] answers `initialize`, `tools/list`, and `tools/call` and is
 //! transport-agnostic; [`serve_stdio`] runs it over the standard newline-delimited
 //! JSON-RPC stdio transport that MCP clients launch servers with.
+//! [`McpClient`] connects in the other direction: it initializes an external
+//! stdio MCP server, discovers its tools, and mounts namespaced proxies into an
+//! OpenWave [`ToolRegistry`](openwave_core::ToolRegistry).
 //!
 //! The protocol layer is hand-rolled ([`protocol`]) rather than pulling a full MCP
 //! SDK — the surface a tool server needs is small, and this keeps the crate light
@@ -30,13 +33,16 @@
 //!
 //! The server enforces the MCP session lifecycle: tool requests remain gated until
 //! a valid `initialize` exchange is acknowledged by `notifications/initialized`.
-//! The client side (mounting *external* MCP tool servers into the agent) is a
-//! later slice.
+//! The client performs the matching lifecycle before it advertises any mounted
+//! tools. External tools are conservatively classified as sensitive because an
+//! MCP tool can reach outside OpenWave's workspace and process boundary.
 
+mod client;
 pub mod protocol;
 mod server;
 mod stdio;
 
+pub use client::{McpClient, McpServerInfo, DEFAULT_REQUEST_TIMEOUT};
 pub use protocol::PROTOCOL_VERSION;
 pub use server::McpServer;
 pub use stdio::{serve, serve_stdio};
