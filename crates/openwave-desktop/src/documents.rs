@@ -330,8 +330,8 @@ async fn pick_document(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     let mut picker = app
         .dialog()
         .file()
-        .set_title("Import a text or Markdown document")
-        .add_filter("Text and Markdown", &["txt", "md", "markdown"]);
+        .set_title("Import a document")
+        .add_filter("Documents", &["txt", "md", "markdown", "pdf"]);
     if let Some(window) = app.get_webview_window("main") {
         picker = picker.set_parent(&window);
     }
@@ -356,7 +356,8 @@ fn import_metadata(path: &Path) -> Result<(&'static str, String), String> {
     let media_type = match extension.as_deref() {
         Some("md" | "markdown") => "text/markdown",
         Some("txt") => "text/plain",
-        _ => return Err("Choose a .txt, .md, or .markdown file".to_owned()),
+        Some("pdf") => "application/pdf",
+        _ => return Err("Choose a .txt, .md, .markdown, or .pdf file".to_owned()),
     };
     let display_name = path
         .file_name()
@@ -519,7 +520,12 @@ mod tests {
         assert_eq!(media_type, "text/markdown");
         assert_eq!(name, "plan.md");
         assert!(!name.contains("private"));
-        assert!(import_metadata(Path::new("/Users/private/plan.pdf")).is_err());
+        // PDFs are accepted and map to their canonical media type.
+        let (pdf_media_type, pdf_name) =
+            import_metadata(Path::new("/Users/private/plan.pdf")).unwrap();
+        assert_eq!(pdf_media_type, "application/pdf");
+        assert_eq!(pdf_name, "plan.pdf");
+        assert!(import_metadata(Path::new("/Users/private/sheet.csv")).is_err());
         assert!(import_metadata(Path::new("relative.md")).is_err());
         assert!(import_metadata(Path::new("/Users/private/bad\u{202e}txt.md")).is_err());
         for unsafe_character in ['\u{200d}', '\u{206a}', '\u{206f}', '\u{2028}', '\u{2029}'] {

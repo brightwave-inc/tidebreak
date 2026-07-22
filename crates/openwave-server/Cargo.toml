@@ -10,6 +10,14 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Rich PDF ingestion via the local, PDFium-backed liteparse parser. On by
+# default so the desktop and `openwave serve` accept `application/pdf` uploads.
+# The liteparse build downloads a prebuilt PDFium binary; build with
+# `--no-default-features` for a lean, text-only pipeline with no such fetch.
+default = ["parse-liteparse"]
+parse-liteparse = ["openwave-retrieval/parse-liteparse"]
+
 [dependencies]
 openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite", "tools", "keychain", "blob-fs"] }
 openwave-router = { path = "../openwave-router" }

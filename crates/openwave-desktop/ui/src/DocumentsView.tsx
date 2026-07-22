@@ -280,7 +280,9 @@ function documentTitle(document: LibraryDocument): string {
 }
 
 function mediaTypeLabel(mediaType: string): string {
-  return mediaType.startsWith("text/markdown") ? "Markdown" : "Text";
+  if (mediaType.startsWith("application/pdf")) return "PDF";
+  if (mediaType.startsWith("text/markdown")) return "Markdown";
+  return "Text";
 }
 
 function formatDate(value: string): string {
