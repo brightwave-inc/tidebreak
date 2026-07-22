@@ -8,6 +8,7 @@ import { MessageFooter } from "./MessageFooter";
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
 import { ToolCallCard, type ToolCallStatus } from "./ToolCallCard";
 import { ToolActivityGroup } from "./ToolActivityGroup";
+import { WelcomeState } from "./WelcomeState";
 
 export type ChatMessage =
   | { id: string; role: "user"; text: string; createdAt?: string }
@@ -52,6 +53,8 @@ type MessageListProps = {
     decision: FolderAccessDecision,
   ) => void;
   onFolderAccessCancel: (callId: string, turnId: string) => void;
+  onSelectPrompt?: (prompt: string) => void;
+  hydrated?: boolean;
 };
 
 export function MessageList({
@@ -67,36 +70,51 @@ export function MessageList({
   onApproval,
   onFolderAccessDecision,
   onFolderAccessCancel,
+  onSelectPrompt,
+  hydrated = true,
 }: MessageListProps) {
   const messageItems = groupMessageItems(messages, busy, onApproval);
+  // Only greet a genuinely empty, fully-hydrated conversation. While an
+  // existing chat's transcript is still loading it is transiently empty; showing
+  // the welcome there would flash "How can I help?" before its history renders.
+  const isEmpty =
+    hydrated &&
+    messages.length === 0 &&
+    folderAccessRequests.length === 0 &&
+    !busy;
+
+  if (isEmpty) {
+    return (
+      <div className="messages is-empty" ref={scrollRef} onScroll={onScroll}>
+        <WelcomeState onSelectPrompt={onSelectPrompt} />
+      </div>
+    );
+  }
 
   return (
     <div className="messages" ref={scrollRef} onScroll={onScroll}>
-      {messages.length === 0 && folderAccessRequests.length === 0 && (
-        <div className="message-notice" role="status">
-          Configure a provider, pick a model, then send a message.
-        </div>
-      )}
-      {messageItems}
-      {folderAccessRequests.map((request) => (
-        <FolderAccessCard
-          key={request.callId}
-          request={request}
-          nativeHost={nativeHost}
-          nativeBusy={nativeBusy}
-          working={resolvingFolderCalls.has(request.callId)}
-          error={folderAccessErrors[request.callId]}
-          onDecision={(decision) =>
-            onFolderAccessDecision(request.callId, decision)
-          }
-          onCancel={() => onFolderAccessCancel(request.callId, request.turnId)}
-        />
-      ))}
-      {shouldShowAssistantWorking(
-        messages,
-        busy,
-        folderAccessRequests.length,
-      ) && <AssistantWorkingIndicator />}
+      <div className="messages-column">
+        {messageItems}
+        {folderAccessRequests.map((request) => (
+          <FolderAccessCard
+            key={request.callId}
+            request={request}
+            nativeHost={nativeHost}
+            nativeBusy={nativeBusy}
+            working={resolvingFolderCalls.has(request.callId)}
+            error={folderAccessErrors[request.callId]}
+            onDecision={(decision) =>
+              onFolderAccessDecision(request.callId, decision)
+            }
+            onCancel={() => onFolderAccessCancel(request.callId, request.turnId)}
+          />
+        ))}
+        {shouldShowAssistantWorking(
+          messages,
+          busy,
+          folderAccessRequests.length,
+        ) && <AssistantWorkingIndicator />}
+      </div>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Check, Copy } from "lucide-react";
 
 export type ClipboardWriter = {
   writeText(text: string): Promise<void>;
@@ -60,7 +61,9 @@ export function ClipboardCopyButton({
         title={visibleLabel}
         onClick={() => void onCopy()}
       >
-        <span aria-hidden="true">{copyState === "copied" ? "✓" : "⧉"}</span>
+        <span aria-hidden="true" className="clipboard-copy-icon">
+          {copyState === "copied" ? <Check size={13} /> : <Copy size={13} />}
+        </span>
         <span>{visibleLabel}</span>
       </button>
       <span className="sr-only" role="status" aria-live="polite">

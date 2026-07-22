@@ -1,3 +1,5 @@
+import { ToolStatusIcon } from "./ToolStatusIcon";
+
 export type ToolCallStatus =
   | "running"
   | "waiting_approval"
@@ -133,7 +135,7 @@ export function ToolCallCard({ name, status }: ToolCallCardProps) {
       aria-atomic="true"
     >
       <span className="tool-call-icon" aria-hidden="true">
-        {presentation.icon}
+        <ToolStatusIcon tone={presentation.tone} />
       </span>
       <div className="tool-call-copy">
         <strong>{presentation.label}</strong>

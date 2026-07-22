@@ -151,7 +151,9 @@ describe("AgentActivityPanel", () => {
     expect(markup).not.toContain("future_status");
   });
 
-  it("keeps load and retry states compact and accessible", () => {
+  it("stays silent while loading and keeps the retry state accessible", () => {
+    // Background agents are the exception, so the panel renders nothing while
+    // loading rather than flashing a standing status line under the header.
     expect(
       renderToStaticMarkup(
         <AgentActivityPanel
@@ -162,7 +164,7 @@ describe("AgentActivityPanel", () => {
           {...noStops}
         />,
       ),
-    ).toContain("Loading activity…");
+    ).toBe("");
 
     const failure = renderToStaticMarkup(
       <AgentActivityPanel

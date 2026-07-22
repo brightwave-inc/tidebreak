@@ -1,11 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ApiClient,
   type AgentRun,
   type Chat,
   type ModelInfo,
   type PendingFolderAccessRequest,
-  type Project,
   type ProviderInfo,
   type ProviderKind,
   type SequencedEvent,
@@ -27,6 +26,30 @@ import {
 import { Logomark } from "./Logomark";
 import { Composer } from "./Composer";
 import { MessageList, type ChatMessage } from "./MessageList";
+import {
+  ArrowDown,
+  Bot,
+  Ellipsis,
+  FolderOpen,
+  Globe,
+  LibraryBig,
+  Monitor,
+  Moon,
+  Pencil,
+  Settings,
+  SquarePen,
+  Sun,
+  Trash2,
+} from "lucide-react";
+import { useTheme } from "./theme";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { WithTooltip } from "@/components/ui/tooltip";
 import {
   toolApprovalPresentation,
   type ToolCallStatus,
@@ -57,8 +80,10 @@ import {
   reconcileSandboxAgentCancellation,
   sandboxAgentStopKey,
 } from "./SandboxAgentStop";
-import { ProjectNavigation } from "./ProjectNavigation";
-import { existingChatAfterDeletion, prependReplacementChat } from "./ChatDeletion";
+import { prependReplacementChat } from "./ChatDeletion";
+import { useConfirm } from "./components/ConfirmDialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 type Msg = ChatMessage;
 
@@ -77,10 +102,6 @@ export default function App() {
   const [hydratedChatId, setHydratedChatId] = useState<string | null>(null);
   const [chats, setChats] = useState<Chat[]>([]);
   const [chatsError, setChatsError] = useState<string | null>(null);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectsLoading, setProjectsLoading] = useState(true);
-  const [projectsError, setProjectsError] = useState<string | null>(null);
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -116,14 +137,13 @@ export default function App() {
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
   const [creatingChat, setCreatingChat] = useState(false);
-  const [creatingProject, setCreatingProject] = useState(false);
   const [deletingChatId, setDeletingChatId] = useState<string | null>(null);
-  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
+  const [renameChatDraft, setRenameChatDraft] = useState("");
+  const skipRenameCommitRef = useRef(false);
   const [settingsPanel, setSettingsPanel] = useState<
-    "providers" | "web-search" | "folders" | null
+    "providers" | "web-search" | "folders" | "model" | null
   >(null);
   const [primaryView, setPrimaryView] = useState<"chat" | "documents">("chat");
   const [status, setStatus] = useState("starting…");
@@ -153,6 +173,8 @@ export default function App() {
   const provisionalToolCallIdsRef = useRef<Set<string>>(new Set());
   const creationInFlightRef = useRef(false);
   const deletionInFlightRef = useRef(false);
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const { mode: themeMode, cycle: cycleTheme } = useTheme();
 
   useEffect(() => {
     let cancelled = false;
@@ -180,16 +202,6 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        void (async () => {
-          try {
-            const existingProjects = await client.listProjects();
-            if (!cancelled) setProjects(existingProjects);
-          } catch {
-            if (!cancelled) setProjectsError("Could not load projects.");
-          } finally {
-            if (!cancelled) setProjectsLoading(false);
-          }
-        })();
         const [catalog, providerList, existingChats] = await Promise.all([
           client.listModels(),
           client.listProviders(),
@@ -248,7 +260,7 @@ export default function App() {
             {
               id: nextId(),
               role: "error",
-              text: `Could not load this conversation: ${String(err)}`,
+              text: `Could not load this chat: ${String(err)}`,
             },
           ]);
         }
@@ -885,7 +897,7 @@ export default function App() {
     try {
       const created = await client.createChat(
         chat?.model ?? models[0]?.id,
-        selectedProjectId,
+        null,
       );
       openCreatedChat(created);
     } catch (err) {
@@ -931,134 +943,19 @@ export default function App() {
     activateChat(created);
     setChats((current) => [created, ...current]);
     setChatsError(null);
-    setProjectsError(null);
     setStatus(`chat ${created.id.slice(0, 8)}…`);
-  }
-
-  async function onSelectProject(projectId: string | null) {
-    if (
-      !client ||
-      projectsLoading ||
-      creationInFlightRef.current ||
-      deletionInFlightRef.current
-    ) {
-      return;
-    }
-    const existing = chats.find((item) => item.project_id === projectId);
-    if (existing) {
-      setProjectsError(null);
-      selectChat(existing);
-      return;
-    }
-
-    creationInFlightRef.current = true;
-    setCreatingChat(true);
-    setProjectsError(null);
-    try {
-      const created = await client.createChat(
-        chat?.model ?? models[0]?.id,
-        projectId,
-      );
-      openCreatedChat(created);
-    } catch (err) {
-      setProjectsError(`Could not open project: ${String(err)}`);
-    } finally {
-      creationInFlightRef.current = false;
-      setCreatingChat(false);
-    }
-  }
-
-  async function onCreateProject(title: string): Promise<boolean> {
-    if (
-      !client ||
-      projectsLoading ||
-      creationInFlightRef.current ||
-      deletionInFlightRef.current
-    ) {
-      return false;
-    }
-    creationInFlightRef.current = true;
-    setCreatingProject(true);
-    setProjectsError(null);
-    let project: Project;
-    try {
-      project = await client.createProject(title);
-      setProjects((current) => [project, ...current]);
-    } catch (err) {
-      setProjectsError(`Could not create project: ${String(err)}`);
-      creationInFlightRef.current = false;
-      setCreatingProject(false);
-      return false;
-    }
-
-    try {
-      const created = await client.createChat(
-        chat?.model ?? models[0]?.id,
-        project.id,
-      );
-      openCreatedChat(created);
-      return true;
-    } catch (err) {
-      setProjectsError(`Project created, but its first chat could not start: ${String(err)}`);
-      return true;
-    } finally {
-      creationInFlightRef.current = false;
-      setCreatingProject(false);
-    }
-  }
-
-  async function onRenameProject(
-    projectId: string,
-    title: string | null,
-  ): Promise<boolean> {
-    if (!client) return false;
-    setProjectsError(null);
-    try {
-      const updated = await client.patchProjectTitle(projectId, title);
-      if (updated.id !== projectId) {
-        throw new Error("project rename response has the wrong identity");
-      }
-      setProjects((current) =>
-        current.map((project) => (project.id === updated.id ? updated : project)),
-      );
-      return true;
-    } catch (err) {
-      setProjectsError(`Could not rename project: ${String(err)}`);
-      return false;
-    }
-  }
-
-  async function onDeleteProject(target: Project): Promise<boolean> {
-    if (!client || deletionInFlightRef.current || creationInFlightRef.current) return false;
-    const label = target.title?.trim() || "Untitled project";
-    if (
-      !window.confirm(
-        `Delete ${label}? Remove its conversations, documents, and connected folders first. This cannot be undone.`,
-      )
-    ) {
-      return false;
-    }
-
-    deletionInFlightRef.current = true;
-    setDeletingProjectId(target.id);
-    setProjectsError(null);
-    try {
-      await client.deleteProject(target.id);
-      setProjects((current) => current.filter((project) => project.id !== target.id));
-      return true;
-    } catch (err) {
-      setProjectsError(`Could not delete project: ${String(err)}`);
-      return false;
-    } finally {
-      deletionInFlightRef.current = false;
-      setDeletingProjectId(null);
-    }
   }
 
   async function onDeleteChat(target: Chat) {
     if (!client || deletionInFlightRef.current || creationInFlightRef.current) return;
-    const label = target.title?.trim() || "this conversation";
-    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+    const label = target.title?.trim() || "this chat";
+    const confirmed = await confirm({
+      title: `Delete ${label}?`,
+      description: "This cannot be undone.",
+      confirmLabel: "Delete chat",
+      destructive: true,
+    });
+    if (!confirmed) return;
 
     deletionInFlightRef.current = true;
     setDeletingChatId(target.id);
@@ -1081,7 +978,7 @@ export default function App() {
         return;
       }
 
-      let next = existingChatAfterDeletion(refreshed, target.project_id);
+      let next: Chat | undefined = refreshed[0];
       if (!next) {
         next = await client.createChat(models[0]?.id, null);
         refreshed = prependReplacementChat(refreshed, next);
@@ -1089,7 +986,7 @@ export default function App() {
       setChats(refreshed);
       selectChat(next, true);
     } catch (err) {
-      setChatsError(`Could not delete conversation: ${String(err)}`);
+      setChatsError(`Could not delete chat: ${String(err)}`);
     } finally {
       deletionInFlightRef.current = false;
       setDeletingChatId(null);
@@ -1106,7 +1003,6 @@ export default function App() {
     assistantMarkerScrubberRef.current =
       new AssistantSourceMarkerStreamScrubber();
     setChat(next);
-    setSelectedProjectId(next.project_id);
   }
 
   function selectChat(next: Chat, force = false) {
@@ -1141,27 +1037,60 @@ export default function App() {
     setCancelError(null);
     cancelRequestTurnRef.current = null;
     clearSteerRequestState();
-    setEditingTitle(false);
+    cancelChatRename();
     activateChat(next);
     setStatus(`chat ${next.id.slice(0, 8)}…`);
   }
 
-  async function onRenameChat() {
-    if (!client || !chat || savingTitle || deletionInFlightRef.current) return;
-    const chatId = chat.id;
+  function startChatRename(target: Chat) {
+    skipRenameCommitRef.current = false;
+    setRenameChatDraft(target.title ?? "");
+    setRenamingChatId(target.id);
+  }
+
+  function cancelChatRename() {
+    skipRenameCommitRef.current = true;
+    setRenamingChatId(null);
+    setRenameChatDraft("");
+  }
+
+  async function commitChatRename(target: Chat) {
+    // A single rename resolves through the input's blur; Enter blurs the field
+    // and Escape sets the skip flag before blurring, so the blur that follows
+    // must not also patch.
+    if (skipRenameCommitRef.current) {
+      skipRenameCommitRef.current = false;
+      return;
+    }
+    if (!client || savingTitle || deletionInFlightRef.current) return;
+    const trimmed = renameChatDraft.trim();
+    if (trimmed === (target.title?.trim() ?? "")) {
+      setRenamingChatId(null);
+      setRenameChatDraft("");
+      return;
+    }
     const selection = chatSelectionRef.current;
     setSavingTitle(true);
     try {
-      const updated = await client.patchChatTitle(chatId, titleDraft.trim() || null);
+      const updated = await client.patchChatTitle(target.id, trimmed || null);
       setChats((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
       );
-      if (chatSelectionRef.current !== selection) return;
-      setChat(updated);
-      setEditingTitle(false);
+      if (chat?.id === updated.id && chatSelectionRef.current === selection) {
+        setChat(updated);
+      }
+      setRenamingChatId(null);
+      setRenameChatDraft("");
     } catch (err) {
-      if (chatSelectionRef.current !== selection) return;
-      setChatsError(`Could not rename conversation: ${String(err)}`);
+      // If the user has since switched conversations, abandon this stale edit
+      // silently. Otherwise keep the editor open with the typed draft so the
+      // rename can be retried instead of being discarded.
+      if (chatSelectionRef.current === selection) {
+        setChatsError(`Could not rename chat: ${String(err)}`);
+      } else {
+        setRenamingChatId(null);
+        setRenameChatDraft("");
+      }
     } finally {
       setSavingTitle(false);
     }
@@ -1278,56 +1207,49 @@ export default function App() {
     );
   }
 
-  const visibleChats = chats.filter(
-    (item) => item.project_id === selectedProjectId,
-  );
-  const activeProject = selectedProjectId
-    ? projects.find((project) => project.id === selectedProjectId) ?? null
-    : null;
+  const visibleChats = chats;
 
   return (
     <div className="app-shell">
+      {confirmDialog}
       <aside className="sidebar">
         <div className="sidebar-brand">
           <Logomark />
           <span>OpenWave</span>
+          <WithTooltip
+            label={`Theme: ${themeMode} — click to change`}
+            side="bottom"
+          >
+            <button
+              type="button"
+              className="theme-toggle"
+              aria-label={`Theme: ${themeMode}. Click to change.`}
+              onClick={cycleTheme}
+            >
+              {themeMode === "light" ? (
+                <Sun size={15} />
+              ) : themeMode === "dark" ? (
+                <Moon size={15} />
+              ) : (
+                <Monitor size={15} />
+              )}
+            </button>
+          </WithTooltip>
         </div>
 
         <button
           type="button"
           className="new-chat"
           onClick={() => void onNewChat()}
-          disabled={
-            creatingChat ||
-            creatingProject ||
-            deletingChatId !== null ||
-            deletingProjectId !== null
-          }
+          disabled={creatingChat || deletingChatId !== null}
         >
-          <span aria-hidden="true">+</span>
+          <SquarePen size={15} />
           {creatingChat
             ? "Starting…"
-            : deletingChatId || deletingProjectId
+            : deletingChatId
               ? "Deleting…"
               : "New chat"}
         </button>
-
-        <ProjectNavigation
-          projects={projects}
-          selectedProjectId={selectedProjectId}
-          disabled={
-            projectsLoading ||
-            creatingChat ||
-            creatingProject ||
-            deletingChatId !== null ||
-            deletingProjectId !== null
-          }
-          error={projectsError}
-          onSelect={(projectId) => void onSelectProject(projectId)}
-          onCreate={onCreateProject}
-          onRename={onRenameProject}
-          onDelete={onDeleteProject}
-        />
 
         {hasNativeHost() && (
           <button
@@ -1338,51 +1260,96 @@ export default function App() {
               setPrimaryView("documents");
             }}
           >
-            <span aria-hidden="true">▤</span>
+            <LibraryBig size={16} />
             Documents
           </button>
         )}
 
         <div className="sidebar-section">
-          <span className="sidebar-label">Conversations</span>
-          <div className="conversation-list" aria-label="Conversations">
-            {visibleChats.map((item) => (
-              <div
-                key={item.id}
-                className={`conversation-row${primaryView === "chat" && item.id === chat.id ? " is-active" : ""}`}
-              >
-                <button
-                  type="button"
-                  className="conversation-item"
-                  aria-current={primaryView === "chat" && item.id === chat.id ? "page" : undefined}
-                  disabled={
-                    deletingChatId !== null ||
-                    deletingProjectId !== null ||
-                    creatingChat ||
-                    creatingProject
-                  }
-                  onClick={() => selectChat(item)}
+          <span className="sidebar-label">Chats</span>
+          <div className="conversation-list" aria-label="Chats">
+            {visibleChats.map((item) => {
+              const chatTitle = item.title?.trim() || "New chat";
+              const isActive = primaryView === "chat" && item.id === chat.id;
+              const mutating = deletingChatId !== null || creatingChat;
+
+              if (renamingChatId === item.id) {
+                return (
+                  <div
+                    key={item.id}
+                    className="conversation-row is-renaming"
+                  >
+                    <input
+                      className="conversation-rename-input"
+                      autoFocus
+                      aria-label="Chat title"
+                      value={renameChatDraft}
+                      disabled={savingTitle}
+                      onChange={(event) =>
+                        setRenameChatDraft(event.target.value)
+                      }
+                      onBlur={() => void commitChatRename(item)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          event.currentTarget.blur();
+                        }
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelChatRename();
+                        }
+                      }}
+                    />
+                  </div>
+                );
+              }
+
+              return (
+                <div
+                  key={item.id}
+                  className={`conversation-row${isActive ? " is-active" : ""}`}
                 >
-                  <span className="conversation-dot" aria-hidden="true" />
-                  <span>{item.title?.trim() || "New conversation"}</span>
-                </button>
-                <button
-                  type="button"
-                  className="conversation-delete"
-                  aria-label={`Delete ${item.title?.trim() || "conversation"}`}
-                  title="Delete conversation"
-                  disabled={
-                    deletingChatId !== null ||
-                    deletingProjectId !== null ||
-                    creatingChat ||
-                    creatingProject
-                  }
-                  onClick={() => void onDeleteChat(item)}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
+                  <button
+                    type="button"
+                    className="conversation-item"
+                    aria-current={isActive ? "page" : undefined}
+                    disabled={mutating}
+                    onClick={() => selectChat(item)}
+                  >
+                    <span className="conversation-title">{chatTitle}</span>
+                  </button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        className="conversation-menu"
+                        aria-label={`Actions for ${chatTitle}`}
+                        title="Chat actions"
+                        disabled={mutating}
+                      >
+                        <Ellipsis size={15} />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" side="right">
+                      <DropdownMenuItem
+                        onSelect={() => startChatRename(item)}
+                      >
+                        <Pencil />
+                        Rename
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        variant="destructive"
+                        onSelect={() => void onDeleteChat(item)}
+                      >
+                        <Trash2 />
+                        Delete
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              );
+            })}
           </div>
           {chatsError && <p className="sidebar-error">{chatsError}</p>}
         </div>
@@ -1399,9 +1366,23 @@ export default function App() {
                 );
               }}
             >
+              <FolderOpen size={16} />
               Folders
             </button>
           )}
+          <button
+            type="button"
+            className={`sidebar-action${settingsPanel === "model" ? " is-active" : ""}`}
+            onClick={() => {
+              setPrimaryView("chat");
+              setSettingsPanel((panel) =>
+                panel === "model" ? null : "model",
+              );
+            }}
+          >
+            <Bot size={16} />
+            Model
+          </button>
           <button
             type="button"
             className={`sidebar-action${settingsPanel === "providers" ? " is-active" : ""}`}
@@ -1412,6 +1393,7 @@ export default function App() {
               );
             }}
           >
+            <Settings size={16} />
             Providers
           </button>
           <button
@@ -1424,6 +1406,7 @@ export default function App() {
               );
             }}
           >
+            <Globe size={16} />
             Web search
           </button>
         </div>
@@ -1438,54 +1421,8 @@ export default function App() {
           <>
         <section className="chat-pane">
           <header className="conversation-header">
-            <div>
-              <p className="eyebrow">
-                {activeProject?.title?.trim() ||
-                  (selectedProjectId ? "Untitled project" : "Loose conversation")}
-              </p>
-              {editingTitle ? (
-                <form
-                  className="conversation-title-editor"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void onRenameChat();
-                  }}
-                >
-                  <input
-                    autoFocus
-                    value={titleDraft}
-                    aria-label="Conversation title"
-                    onChange={(event) => setTitleDraft(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") setEditingTitle(false);
-                    }}
-                  />
-                  <button
-                    type="submit"
-                    className="btn"
-                    disabled={
-                      savingTitle || deletingChatId !== null || deletingProjectId !== null
-                    }
-                  >
-                    {savingTitle ? "Saving…" : "Save"}
-                  </button>
-                </form>
-              ) : (
-                <div className="conversation-title-row">
-                  <h1>{chat.title?.trim() || "New conversation"}</h1>
-                  <button
-                    type="button"
-                    className="title-action"
-                    disabled={deletingChatId !== null || deletingProjectId !== null}
-                    onClick={() => {
-                      setTitleDraft(chat.title ?? "");
-                      setEditingTitle(true);
-                    }}
-                  >
-                    Rename
-                  </button>
-                </div>
-              )}
+            <div className="conversation-title-row">
+              <h1>{chat.title?.trim() || "New chat"}</h1>
             </div>
             <div className="conversation-header-actions">
               <div className="mobile-settings-actions">
@@ -1498,7 +1435,7 @@ export default function App() {
                       setPrimaryView("documents");
                     }}
                   >
-                    Documents
+                    <LibraryBig size={14} />
                   </button>
                 )}
                 {hasNativeHost() && (
@@ -1511,9 +1448,20 @@ export default function App() {
                       )
                     }
                   >
-                    Folders
+                    <FolderOpen size={14} />
                   </button>
                 )}
+                <button
+                  type="button"
+                  className={`btn${settingsPanel === "model" ? " is-active" : ""}`}
+                  onClick={() =>
+                    setSettingsPanel((panel) =>
+                      panel === "model" ? null : "model",
+                    )
+                  }
+                >
+                  <Bot size={14} />
+                </button>
                 <button
                   type="button"
                   className={`btn${settingsPanel === "providers" ? " is-active" : ""}`}
@@ -1523,7 +1471,7 @@ export default function App() {
                     )
                   }
                 >
-                  Providers
+                  <Settings size={14} />
                 </button>
                 <button
                   type="button"
@@ -1534,7 +1482,7 @@ export default function App() {
                     )
                   }
                 >
-                  Web search
+                  <Globe size={14} />
                 </button>
               </div>
               <span className="status" title={status}>
@@ -1543,55 +1491,15 @@ export default function App() {
             </div>
           </header>
 
-          <div className="chat-meta">
-            <label>
-              Model{" "}
-              <select
-                value={chat.model ?? ""}
-                disabled={deletingChatId !== null || deletingProjectId !== null}
-                onChange={(e) => void onModelChange(e.target.value)}
-              >
-                <option value="">default</option>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.id} ({m.provider})
-                  </option>
-                ))}
-                {chat.model && !models.some((m) => m.id === chat.model) && (
-                  <option value={chat.model}>{chat.model} (custom)</option>
-                )}
-              </select>
-            </label>
-            <input
-              className="model-custom"
-              type="text"
-              placeholder="or type a model id"
-              defaultValue={
-                chat.model && !models.some((m) => m.id === chat.model)
-                  ? chat.model
-                  : ""
-              }
-              key={chat.id}
-              onBlur={(e) => {
-                const next = e.target.value.trim();
-                if (next && next !== (chat.model ?? "")) {
-                  void onModelChange(next);
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") e.currentTarget.blur();
-              }}
-            />
-            <AgentActivityPanel
-              runs={visibleAgentRuns}
-              loading={agentRunsChatId === chat.id ? agentRunsLoading : true}
-              error={agentRunsChatId === chat.id ? agentRunsError : null}
-              onRetry={() => refreshAgentRunsRef.current?.()}
-              stoppingRunIds={visibleStoppingSandboxRunIds}
-              stopErrorRunIds={visibleSandboxStopErrorRunIds}
-              onStop={(runId) => void onStopSandboxAgentRun(runId)}
-            />
-          </div>
+          <AgentActivityPanel
+            runs={visibleAgentRuns}
+            loading={agentRunsChatId === chat.id ? agentRunsLoading : true}
+            error={agentRunsChatId === chat.id ? agentRunsError : null}
+            onRetry={() => refreshAgentRunsRef.current?.()}
+            stoppingRunIds={visibleStoppingSandboxRunIds}
+            stopErrorRunIds={visibleSandboxStopErrorRunIds}
+            onStop={(runId) => void onStopSandboxAgentRun(runId)}
+          />
 
           <div className="message-view">
             <MessageList
@@ -1616,6 +1524,8 @@ export default function App() {
               onFolderAccessCancel={(callId, turnId) =>
                 void onFolderAccessCancel(callId, turnId)
               }
+              onSelectPrompt={setComposerDraft}
+              hydrated={hydratedChatId === chat.id}
             />
             {hasUnreadActivity && (
               <button
@@ -1627,7 +1537,8 @@ export default function App() {
                   if (scrollRef.current) scrollToLatest(scrollRef.current);
                 }}
               >
-                New activity ↓
+                New activity
+                <ArrowDown size={13} />
               </button>
             )}
           </div>
@@ -1639,7 +1550,7 @@ export default function App() {
             cancelPending={
               activeTurnId !== null && cancelPendingTurnId === activeTurnId
             }
-            disabled={deletingChatId !== null || deletingProjectId !== null}
+            disabled={deletingChatId !== null}
             draft={draft}
             onDraftChange={onComposerDraftChange}
             onSend={onSend}
@@ -1654,6 +1565,14 @@ export default function App() {
           />
         </section>
 
+        {settingsPanel === "model" && (
+          <ModelPanel
+            chat={chat}
+            models={models}
+            disabled={deletingChatId !== null}
+            onModelChange={onModelChange}
+          />
+        )}
         {settingsPanel === "providers" && (
           <ProvidersPanel
             providers={providers}
@@ -1750,11 +1669,81 @@ function withoutConnectionState(status: string): string {
   return status.replace(/ · (?:live|reconnecting)$/, "");
 }
 
+const SETTINGS_SELECT_CLASS =
+  "flex h-10 w-full rounded-md border border-border bg-background px-3 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
+
+function SettingsPanel({
+  title,
+  description,
+  busy,
+  children,
+}: {
+  title: string;
+  description?: string;
+  busy?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <aside className="settings" aria-busy={busy}>
+      <div className="flex flex-col gap-1">
+        <h2 className="text-base font-semibold tracking-tight">{title}</h2>
+        {description && (
+          <p className="text-sm text-muted-foreground">{description}</p>
+        )}
+      </div>
+      {children}
+    </aside>
+  );
+}
+
+function SettingsField({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-sm font-medium">{label}</span>
+      {children}
+      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+    </label>
+  );
+}
+
+function SettingsSection({
+  title,
+  children,
+}: {
+  title?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="flex flex-col gap-3 rounded-lg border border-border p-4">
+      {title && (
+        <h3 className="text-sm font-semibold capitalize">{title}</h3>
+      )}
+      {children}
+    </section>
+  );
+}
+
+function SettingsError({ children }: { children: ReactNode }) {
+  return (
+    <p className="text-sm text-destructive" role="alert">
+      {children}
+    </p>
+  );
+}
+
 function FoldersPanel({ chat }: { chat: Chat }) {
   const [folders, setFolders] = useState<ConnectedFolder[]>([]);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const scopeLabel = chat.project_id ? "project" : "chat";
+  const scopeLabel = "chat";
 
   async function refresh() {
     setError(null);
@@ -1796,45 +1785,50 @@ function FoldersPanel({ chat }: { chat: Chat }) {
   }
 
   return (
-    <aside className="settings">
-      <h2>Connected folders</h2>
-      <p>
-        OpenWave can read only folders you choose for this {scopeLabel}. Folder
-        locations stay with the native host.
-      </p>
-      <button
+    <SettingsPanel
+      title="Connected folders"
+      description={`OpenWave can read only folders you choose for this ${scopeLabel}. Folder locations stay with the native host.`}
+    >
+      <Button
         type="button"
-        className="btn btn-primary"
+        variant="outline"
+        className="self-start"
         disabled={working}
         onClick={() => void addFolder()}
       >
         Choose folder…
-      </button>
-      <div className="folder-list">
+      </Button>
+      <div className="flex flex-col gap-2">
         {folders.length === 0 && !error && (
-          <div className="status">
+          <p className="text-sm text-muted-foreground">
             No folders connected to this {scopeLabel}.
-          </div>
+          </p>
         )}
         {folders.map((folder) => (
-          <div className="folder" key={folder.rootId}>
-            <div>
-              <strong>{folder.displayName}</strong>
-              <div className="status">read access</div>
+          <div
+            className="flex items-center justify-between gap-3 rounded-lg border border-border p-3"
+            key={folder.rootId}
+          >
+            <div className="min-w-0">
+              <strong className="block truncate text-sm font-medium">
+                {folder.displayName}
+              </strong>
+              <span className="text-xs text-muted-foreground">read access</span>
             </div>
-            <button
+            <Button
               type="button"
-              className="btn"
+              variant="outline"
+              size="sm"
               disabled={working}
               onClick={() => void removeFolder(folder.rootId)}
             >
-              Disconnect from {scopeLabel}
-            </button>
+              Disconnect
+            </Button>
           </div>
         ))}
       </div>
-      {error && <div className="folder-error">{error}</div>}
-    </aside>
+      {error && <SettingsError>{error}</SettingsError>}
+    </SettingsPanel>
   );
 }
 
@@ -1957,41 +1951,50 @@ function WebSearchPanel({ client }: { client: ApiClient }) {
   }
 
   return (
-    <aside className="settings web-search-settings" aria-busy={loading}>
-      <h2>Web search</h2>
-      <p>
-        Choose a local provider and a bounded request timeout. Existing keys are
-        never shown here.
-      </p>
-
+    <SettingsPanel
+      title="Web search"
+      description="Choose a local provider and a bounded request timeout. Existing keys are never shown here."
+      busy={loading}
+    >
       {loading ? (
-        <div className="status">Loading web-search settings…</div>
+        <p className="text-sm text-muted-foreground">
+          Loading web-search settings…
+        </p>
       ) : !config ? (
-        <div className="status">Web-search settings are unavailable.</div>
+        <p className="text-sm text-muted-foreground">
+          Web-search settings are unavailable.
+        </p>
       ) : (
         <>
-          <div className={`web-search-state is-${state.kind}`} role="status">
+          <div
+            className={`web-search-state is-${state.kind}`}
+            role="status"
+          >
             <strong>{state.label}</strong>
             <span>{state.description}</span>
           </div>
 
-          <div className="provider">
-            <label className="settings-field">
-              <span>Provider</span>
+          <SettingsSection>
+            <SettingsField label="Provider">
               <select
+                className={SETTINGS_SELECT_CLASS}
                 value={provider}
                 disabled={working}
-                onChange={(event) => setProvider(event.target.value as WebSearchProviderKind | "")}
+                onChange={(event) =>
+                  setProvider(event.target.value as WebSearchProviderKind | "")
+                }
               >
                 <option value="">Disabled</option>
                 <option value="exa">Exa</option>
                 <option value="tavily">Tavily</option>
               </select>
-            </label>
+            </SettingsField>
 
-            <label className="settings-field">
-              <span>Request timeout (ms)</span>
-              <input
+            <SettingsField
+              label="Request timeout (ms)"
+              hint={`Between ${MIN_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} and ${MAX_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} ms.`}
+            >
+              <Input
                 type="number"
                 inputMode="numeric"
                 min={MIN_WEB_SEARCH_TIMEOUT_MS}
@@ -2001,31 +2004,28 @@ function WebSearchPanel({ client }: { client: ApiClient }) {
                 disabled={working}
                 onChange={(event) => setTimeoutMs(event.target.value)}
               />
-            </label>
-            <p className="settings-hint">
-              Between {MIN_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} and {MAX_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} ms.
-            </p>
-            <div className="row">
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={working}
-                onClick={() => void saveConfig()}
-              >
-                {savingConfig ? "Saving…" : "Save configuration"}
-              </button>
-            </div>
-          </div>
+            </SettingsField>
+            <Button
+              type="button"
+              className="self-start"
+              disabled={working}
+              onClick={() => void saveConfig()}
+            >
+              {savingConfig ? "Saving…" : "Save configuration"}
+            </Button>
+          </SettingsSection>
 
           {activeProvider && (
-            <div className="provider">
-              <h3>{activeProvider} credential</h3>
-              <span className="status">
-                {selectedHasCredential ? "credential saved" : "no credential saved"}
+            <SettingsSection title={`${activeProvider} credential`}>
+              <span className="text-xs text-muted-foreground">
+                {selectedHasCredential
+                  ? "credential saved"
+                  : "no credential saved"}
               </span>
-              <label className="settings-field">
-                <span>{selectedHasCredential ? "Replace API key" : "API key"}</span>
-                <input
+              <SettingsField
+                label={selectedHasCredential ? "Replace API key" : "API key"}
+              >
+                <Input
                   type="password"
                   placeholder="Paste a new API key"
                   value={apiKey}
@@ -2034,44 +2034,48 @@ function WebSearchPanel({ client }: { client: ApiClient }) {
                   disabled={working}
                   onChange={(event) => setApiKey(event.target.value)}
                 />
-              </label>
-              <div className="row">
-                <button
+              </SettingsField>
+              <div className="flex flex-wrap gap-2">
+                <Button
                   type="button"
-                  className="btn btn-primary"
                   disabled={working || !apiKey.trim()}
                   onClick={() => void saveCredential()}
                 >
-                  {savingCredential ? "Saving…" : selectedHasCredential ? "Update key" : "Save key"}
-                </button>
+                  {savingCredential
+                    ? "Saving…"
+                    : selectedHasCredential
+                      ? "Update key"
+                      : "Save key"}
+                </Button>
                 {selectedHasCredential && (
-                  <button
+                  <Button
                     type="button"
-                    className="btn btn-danger"
+                    variant="destructive"
                     disabled={working}
                     onClick={() => void removeCredential()}
                   >
                     {removingCredential ? "Removing…" : "Remove saved key"}
-                  </button>
+                  </Button>
                 )}
               </div>
-            </div>
+            </SettingsSection>
           )}
 
           {provider !== (activeProvider ?? "") && (
-            <p className="settings-hint">
-              Save the provider configuration before managing that provider’s key.
+            <p className="text-xs text-muted-foreground">
+              Save the provider configuration before managing that provider’s
+              key.
             </p>
           )}
 
-          <p className="settings-note">
+          <p className="text-sm leading-relaxed text-muted-foreground">
             This configures host-owned search access only. Search is not yet a
             chat tool in this build.
           </p>
         </>
       )}
-      {error && <div className="folder-error" role="alert">{error}</div>}
-    </aside>
+      {error && <SettingsError>{error}</SettingsError>}
+    </SettingsPanel>
   );
 }
 
@@ -2101,6 +2105,68 @@ function webSearchState(config: WebSearchConfigInfo | null): {
   };
 }
 
+function ModelPanel({
+  chat,
+  models,
+  disabled,
+  onModelChange,
+}: {
+  chat: Chat;
+  models: ModelInfo[];
+  disabled: boolean;
+  onModelChange: (modelId: string) => Promise<void>;
+}) {
+  return (
+    <SettingsPanel
+      title="Model"
+      description="Choose the model for this chat."
+    >
+      <SettingsField label="Active model">
+        <select
+          className={SETTINGS_SELECT_CLASS}
+          value={chat.model ?? ""}
+          disabled={disabled}
+          onChange={(e) => void onModelChange(e.target.value)}
+        >
+          <option value="">default</option>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.id} ({m.provider})
+            </option>
+          ))}
+          {chat.model && !models.some((m) => m.id === chat.model) && (
+            <option value={chat.model}>{chat.model} (custom)</option>
+          )}
+        </select>
+      </SettingsField>
+      <SettingsField
+        label="Custom model ID"
+        hint="Select from known models above, or type any model ID your provider supports."
+      >
+        <Input
+          type="text"
+          placeholder="e.g. claude-sonnet-4-20250514"
+          defaultValue={
+            chat.model && !models.some((m) => m.id === chat.model)
+              ? chat.model
+              : ""
+          }
+          key={chat.id}
+          onBlur={(e) => {
+            const next = e.target.value.trim();
+            if (next && next !== (chat.model ?? "")) {
+              void onModelChange(next);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+          }}
+        />
+      </SettingsField>
+    </SettingsPanel>
+  );
+}
+
 function ProvidersPanel({
   providers,
   client,
@@ -2111,13 +2177,14 @@ function ProvidersPanel({
   onChanged: () => void;
 }) {
   return (
-    <aside className="settings">
-      <h2>Providers</h2>
-      <p>Keys stay on this machine. Enable a provider, then save a credential.</p>
+    <SettingsPanel
+      title="Providers"
+      description="Keys stay on this machine. Enable a provider, then save a credential."
+    >
       {providers.map((p) => (
         <ProviderRow key={p.kind} info={p} client={client} onChanged={onChanged} />
       ))}
-    </aside>
+    </SettingsPanel>
   );
 }
 
@@ -2174,60 +2241,57 @@ function ProviderRow({
   }
 
   return (
-    <div className="provider">
-      <h3>{info.kind.replaceAll("_", " ")}</h3>
-      <div className="row">
-        <label>
+    <SettingsSection title={info.kind.replaceAll("_", " ")}>
+      <div className="flex items-center justify-between gap-3">
+        <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
+            className="size-4 accent-[var(--primary)]"
             checked={info.enabled}
             disabled={saving}
             onChange={(e) => void save(e.target.checked)}
-          />{" "}
-          enabled
+          />
+          Enabled
         </label>
-        <span className="status">
+        <span className="text-xs text-muted-foreground">
           {info.has_credential ? "credential set" : "no credential"}
         </span>
       </div>
       {info.kind === "openai_compatible" && (
-        <div className="row">
-          <input
-            type="text"
-            placeholder="base URL (e.g. http://127.0.0.1:1234/v1)"
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-          />
-        </div>
-      )}
-      <div className="row">
-        <input
-          type="password"
-          placeholder="API key"
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          autoComplete="off"
+        <Input
+          type="text"
+          placeholder="base URL (e.g. http://127.0.0.1:1234/v1)"
+          value={baseUrl}
+          onChange={(e) => setBaseUrl(e.target.value)}
         />
-        <button
+      )}
+      <Input
+        type="password"
+        placeholder="API key"
+        value={key}
+        onChange={(e) => setKey(e.target.value)}
+        autoComplete="off"
+      />
+      <div className="flex flex-wrap gap-2">
+        <Button
           type="button"
-          className="btn btn-primary"
           disabled={saving || !key.trim()}
           onClick={() => void save(true)}
         >
           Save
-        </button>
+        </Button>
         {info.has_credential && (
-          <button
+          <Button
             type="button"
-            className="btn"
+            variant="outline"
             disabled={saving}
             onClick={() => void clearCredential()}
           >
             Clear
-          </button>
+          </Button>
         )}
       </div>
-      {error && <div className="status">{error}</div>}
-    </div>
+      {error && <SettingsError>{error}</SettingsError>}
+    </SettingsSection>
   );
 }

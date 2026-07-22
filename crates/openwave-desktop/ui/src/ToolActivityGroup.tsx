@@ -1,8 +1,10 @@
 import { useState } from "react";
+import { ChevronRight } from "lucide-react";
 import {
   toolCallPresentation,
   type ToolCallStatus,
 } from "./ToolCallCard";
+import { ToolStatusIcon } from "./ToolStatusIcon";
 
 export type ToolActivity = {
   id?: string;
@@ -52,14 +54,14 @@ export function ToolActivityGroup({
           className={`tool-activity-group-status is-${summary.tone}`}
           aria-hidden="true"
         >
-          {summary.icon}
+          <ToolStatusIcon tone={summary.tone} size={13} />
         </span>
         <span className="tool-activity-group-label">{summary.label}</span>
         <span
           className={`tool-activity-group-chevron${expanded ? " is-expanded" : ""}`}
           aria-hidden="true"
         >
-          ›
+          <ChevronRight size={15} />
         </span>
       </button>
       <div
@@ -80,7 +82,7 @@ export function ToolActivityGroup({
               key={index}
             >
               <span className="tool-activity-timeline-marker" aria-hidden="true">
-                {presentation.icon}
+                <ToolStatusIcon tone={presentation.tone} size={12} />
               </span>
               <span className="tool-activity-timeline-copy">
                 <strong>{presentation.label}</strong>
