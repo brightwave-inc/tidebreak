@@ -53,21 +53,45 @@ GitHub Actions dependency updates remain `ci(deps)` and do not release the
 product. Cargo Dependabot updates use `deps` because those dependencies ship in
 the desktop app.
 
+User-facing PRs also receive a managed release-note label derived from the same
+validated title. These labels make the native release notes easier to scan
+without asking authors to classify a PR twice:
+
+| Title type | Release-notes section       |
+| ---------- | --------------------------- |
+| `feat`     | New Features                |
+| `fix`      | Bug Fixes                   |
+| `perf`     | Performance Improvements    |
+| `deps`     | Dependency Updates          |
+| `revert`   | Reverted Changes            |
+| Any `!`    | Breaking Changes            |
+
+Documentation and other maintenance-only types remain excluded. In the rendered
+notes, the section heading supplies the type, so Release Drafter removes the
+redundant Conventional Commit prefix from each PR title.
+
 ## How the native release draft works
 
 The release-draft workflow keeps exactly one draft GitHub Release up to date:
 
-1. A trusted workflow maps the validated PR title to one managed label:
-   `semver:breaking`, `semver:minor`, `semver:patch`, or `semver:none`.
-   Required CI also verifies that exact label before merge.
+1. A trusted workflow maps the validated PR title to exactly one managed
+   `semver:*` label and, for a non-breaking user-facing change, one managed
+   `release-note:*` category label. Required CI verifies that exact label set
+   before merge.
 2. After the PR is squash-merged to `main`, Release Drafter adds it to the
-   native draft, groups the release notes, and suggests the next tag.
+   native draft, groups the release notes into the sections above, and suggests
+   the next tag. Breaking changes are always shown first.
 3. Maintenance-only PRs are omitted. The largest release effect among included
-   PRs chooses the proposed version.
+   PRs chooses the proposed version; the category labels do not independently
+   change the version.
 
-The first release predates these managed labels, so set its tag deliberately
-(normally `v0.1.0`) immediately before publishing. From then on, the last
-published tag and the managed PR labels make the draft version automatic.
+The first release has no previous published release to use as a comparison
+baseline, so Release Drafter intentionally leaves that draft as a manual
+starting point. For `v0.1.0`, set the tag deliberately and click **Generate
+release notes** in GitHub; `.github/release.yml` applies the same sections to
+GitHub's native output. Curate that one-time full-history result before
+publishing. From then on, the last published tag and the managed PR labels make
+the maintained draft and its proposed version automatic.
 
 ## Publishing a release
 
@@ -75,6 +99,8 @@ published tag and the managed PR labels make the draft version automatic.
 2. Confirm the target is the intended commit on `main`, the proposed
    `vMAJOR.MINOR.PATCH` tag is correct, the release is not marked as a
    prerelease, and the notes contain the intended PRs.
+   For the first release only, set `v0.1.0`, click **Generate release notes**,
+   and curate the full-history result as described above.
 3. Complete the release-readiness review, then click **Publish release**.
 4. GitHub creates the tag and emits the `release.published` event. The macOS
    release workflow checks out that exact tag, rejects malformed tags or commits
@@ -161,8 +187,8 @@ publishing uses short-lived AWS credentials obtained through OIDC.
 
 While the latest published version is below `1.0.0`, fixes increment patch,
 features increment minor, and breaking changes also increment minor. The
-`Breaking Changes` category in `.github/release-drafter.yml` encodes that
-pre-1.0 behavior.
+`semver:breaking` version-resolver entry in `.github/release-drafter.yml`
+encodes that pre-1.0 behavior.
 
 For example, `0.3.2` becomes `0.3.3` for a fix and `0.4.0` for either a feature
 or a breaking pre-1.0 change.
@@ -185,7 +211,7 @@ its local profile until this checklist is complete:
    claiming support for them.
 4. Update `SECURITY.md` with supported release lines, security-fix policy, and
    end-of-support expectations. Document backup, migration, and rollback.
-5. In the same readiness work, change the `Breaking Changes` category's
+5. In the same readiness work, change the `semver:breaking` version resolver's
    `semver-increment` from `minor` to `major`. This activates normal SemVer for
    all releases after 1.0.
 6. Finish the last 0.x release if needed, review the accumulated native draft,

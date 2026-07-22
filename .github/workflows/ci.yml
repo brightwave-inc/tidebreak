@@ -58,17 +58,24 @@ jobs:
           fi
 
           node "$policy_dir/scripts/check-pr-title.mjs" "$PR_TITLE"
-          expected_label="$(node "$policy_dir/scripts/release-label.mjs" --title "$PR_TITLE")"
+          # The transition PR runs this workflow from its head while loading the
+          # older trusted classifier from main. Fall back once to its single
+          # label interface; after merge, the trusted copy supports --labels.
+          if expected_labels_json="$(node "$policy_dir/scripts/release-label.mjs" --labels "$PR_TITLE" 2>/dev/null)"; then
+            expected_labels="$(jq -r 'sort | join(",")' <<<"$expected_labels_json")"
+          else
+            expected_labels="$(node "$policy_dir/scripts/release-label.mjs" --title "$PR_TITLE")"
+          fi
           if [[ "$bootstrap" = false ]]; then
             actual_labels=""
             for _ in {1..10}; do
               actual_labels="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
-                --jq '[.labels[].name | select(startswith("semver:"))] | sort | join(",")')"
-              [[ "$actual_labels" = "$expected_label" ]] && break
+                --jq '[.labels[].name | select(startswith("semver:") or startswith("release-note:"))] | sort | join(",")')"
+              [[ "$actual_labels" = "$expected_labels" ]] && break
               sleep 2
             done
-            test "$actual_labels" = "$expected_label" || {
-              echo "Expected the release-impact label $expected_label; found: ${actual_labels:-none}." >&2
+            test "$actual_labels" = "$expected_labels" || {
+              echo "Expected managed release labels $expected_labels; found: ${actual_labels:-none}." >&2
               echo "The trusted Release draft workflow may still be synchronizing it." >&2
               exit 1
             }

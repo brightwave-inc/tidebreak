@@ -1,0 +1,28 @@
+# GitHub's native "Generate release notes" button uses this configuration.
+# Keep these categories aligned with release-drafter.yml.
+changelog:
+  exclude:
+    labels:
+      - "semver:none"
+  categories:
+    - title: "Breaking Changes"
+      labels:
+        - "semver:breaking"
+    - title: "New Features"
+      labels:
+        - "release-note:feature"
+    - title: "Bug Fixes"
+      labels:
+        - "release-note:fix"
+    - title: "Performance Improvements"
+      labels:
+        - "release-note:performance"
+    - title: "Dependency Updates"
+      labels:
+        - "release-note:dependencies"
+    - title: "Reverted Changes"
+      labels:
+        - "release-note:revert"
+    - title: "Other Changes"
+      labels:
+        - "*"

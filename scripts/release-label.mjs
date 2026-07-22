@@ -9,9 +9,21 @@ export const MANAGED_RELEASE_LABELS = [
   "semver:minor",
   "semver:patch",
   "semver:none",
+  "release-note:feature",
+  "release-note:fix",
+  "release-note:performance",
+  "release-note:dependencies",
+  "release-note:revert",
 ];
 
 const PATCH_TYPES = new Set(["fix", "perf", "deps", "revert"]);
+const RELEASE_NOTE_LABELS = new Map([
+  ["feat", "release-note:feature"],
+  ["fix", "release-note:fix"],
+  ["perf", "release-note:performance"],
+  ["deps", "release-note:dependencies"],
+  ["revert", "release-note:revert"],
+]);
 
 export function releaseLabel(title) {
   const error = validatePrTitle(title);
@@ -23,16 +35,35 @@ export function releaseLabel(title) {
   return "semver:none";
 }
 
+export function releaseNoteLabel(title) {
+  const error = validatePrTitle(title);
+  if (error) throw new Error(error);
+  const parsed = parsePrTitle(title);
+  if (parsed.breaking) return null;
+  return RELEASE_NOTE_LABELS.get(parsed.type) ?? null;
+}
+
+export function releaseLabels(title) {
+  return [releaseLabel(title), releaseNoteLabel(title)].filter(Boolean);
+}
+
 function main() {
   const [mode, ...rest] = process.argv.slice(2);
   if (mode === "--managed") {
     console.log(JSON.stringify(MANAGED_RELEASE_LABELS));
     return;
   }
-  if (mode !== "--title" || rest.length === 0) {
-    throw new Error("usage: release-label.mjs --title <PR title> | --managed");
+  if (!["--title", "--labels"].includes(mode) || rest.length === 0) {
+    throw new Error(
+      "usage: release-label.mjs --title <PR title> | --labels <PR title> | --managed",
+    );
   }
-  console.log(releaseLabel(rest.join(" ")));
+  const title = rest.join(" ");
+  console.log(
+    mode === "--labels"
+      ? JSON.stringify(releaseLabels(title))
+      : releaseLabel(title),
+  );
 }
 
 if (
