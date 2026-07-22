@@ -457,7 +457,7 @@ jobs:
           signature_path="${updater_path}.sig"
           rm -f "$updater_path" "$signature_path"
           tar -czf "$updater_path" -C "$(dirname "$app_path")" "$(basename "$app_path")"
-          cargo tauri signer sign "$updater_path"
+          tauri signer sign "$updater_path"
           [[ -s "$signature_path" ]] || {
             echo "Tauri updater signature is empty: $signature_path" >&2
             exit 1
