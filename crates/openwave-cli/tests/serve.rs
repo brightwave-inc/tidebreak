@@ -161,6 +161,45 @@ fn serve_fails_closed_when_a_configured_mcp_server_cannot_start() {
 }
 
 #[test]
+fn serve_fails_closed_when_a_selected_mcp_environment_variable_is_missing() {
+    const MISSING: &str = "OPENWAVE_TEST_MCP_ENV_FROM_MUST_NOT_EXIST_46F54489";
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("mcp.json");
+    let config = serde_json::json!({
+        "servers": [{
+            "name": "protected",
+            "command": env!("CARGO_BIN_EXE_openwave"),
+            "args": ["mcp", dir.path()],
+            "env_from": [MISSING]
+        }]
+    });
+    std::fs::write(&config_path, config.to_string()).unwrap();
+
+    let child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .arg("serve")
+        .env("OPENWAVE_DATA_DIR", dir.path().join("data"))
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env("OPENWAVE_MCP_CONFIG", &config_path)
+        .env_remove(MISSING)
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn openwave serve with missing MCP environment");
+    let mut child = Reaper(child);
+    let output = child.wait_with_output(PROCESS_EXIT_TIMEOUT);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("external MCP server protected failed to start"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains(MISSING), "stderr: {stderr}");
+    assert!(stderr.contains("is not set"), "stderr: {stderr}");
+}
+
+#[test]
 fn mcp_serves_read_only_tools_with_protocol_pure_stdout() {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(workspace.path().join("note.txt"), "workspace note").unwrap();
