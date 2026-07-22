@@ -40,18 +40,18 @@ use crate::model::{
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
-    AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptToolCallOutcome,
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
-    BeginRootAttachmentChangeOutcome, CheckpointSandboxSpawnOutcome, ClaimAgentRunInboxOutcome,
-    ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome,
-    ClaimTurnRunOutcome, CompleteTurnRunOutcome, ConsumeAgentRunInboxAndResumeTurnOutcome,
-    ConsumeAgentRunInboxOutcome, DecideToolApprovalOutcome, DeleteChatOutcome,
-    DeleteProjectOutcome, DocumentIndexJobReason, EnsureDocumentIndexJobOutcome,
-    EnsureDocumentParseJobOutcome, FailAgentRunOutcome, FinishAgentRunCancellationOutcome,
-    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
-    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledToolApprovalOutcome,
-    JournaledTurnOutcome, JournaledTurnSteerOutcome, ParkSandboxToolCallOutcome,
-    ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
+    AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptSandboxAgentRunAndParkTurnOutcome,
+    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
+    AppendClaimedMessageOutcome, BeginRootAttachmentChangeOutcome, CheckpointSandboxSpawnOutcome,
+    ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome,
+    ClaimSandboxToolCallOutcome, ClaimTurnRunOutcome, CompleteTurnRunOutcome,
+    ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
+    DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome, DocumentIndexJobReason,
+    EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FailAgentRunOutcome,
+    FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
+    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
+    JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
+    ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
     ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
     RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Store,
@@ -2482,12 +2482,32 @@ impl Store for DbStore {
         ops::citation::append_assistant_message(self, message, references).await
     }
 
+    async fn append_claimed_assistant_message_with_citations(
+        &self,
+        message: &Message,
+        references: &[crate::AssistantCitationReference],
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<AppendClaimedMessageOutcome> {
+        ops::citation::append_claimed_assistant_message(self, message, references, lease_token, now)
+            .await
+    }
+
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>> {
         ops::conversation::list_messages(self, chat_id).await
     }
 
     async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome> {
         ops::client_execution::accept_tool_call(self, call).await
+    }
+
+    async fn accept_claimed_tool_call(
+        &self,
+        call: &ToolCallRecord,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<AcceptClaimedToolCallOutcome> {
+        ops::client_execution::accept_claimed_tool_call(self, call, lease_token, now).await
     }
 
     async fn request_tool_call_approval(
@@ -2599,6 +2619,56 @@ impl Store for DbStore {
             resolution,
             resolved_at,
             evidence,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_claimed_server_tool_call_with_evidence(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+        evidence: &[crate::RetrievalEvidenceInput],
+    ) -> Result<ResolveToolCallOutcome> {
+        ops::client_execution::resolve_claimed_server_tool_call_with_evidence(
+            self,
+            id,
+            chat_id,
+            turn_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
+            evidence,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn abandon_inherited_server_tool_call(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        resolution: &ToolCallResolution,
+        resolved_at: chrono::DateTime<Utc>,
+    ) -> Result<ResolveToolCallOutcome> {
+        ops::client_execution::abandon_inherited_server_tool_call(
+            self,
+            id,
+            chat_id,
+            turn_id,
+            lease_token,
+            now,
+            resolution,
+            resolved_at,
         )
         .await
     }

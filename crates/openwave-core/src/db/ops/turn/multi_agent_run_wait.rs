@@ -407,6 +407,8 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         client_executor_id: Set(None),
         client_lease_token: Set(None),
         client_lease_expires_at: Set(None),
+        turn_lease_token: Set(Some(lease_token)),
+        resolution_turn_lease_token: Set(None),
         created_at: Set(now),
         resolved_at: Set(None),
     }

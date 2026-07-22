@@ -112,12 +112,13 @@ pub use provider::{
 };
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
-    AcceptAgentRunOutcome, AcceptSandboxAgentRunAndParkTurnOutcome, AcceptToolCallOutcome,
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome, ApplyTurnSteerOutcome,
-    BeginRootAttachmentChangeOutcome, BlobStore, ChatToolActivitySnapshot, ChatToolActivityStatus,
-    ChatTranscriptSnapshot, CheckpointSandboxSpawnOutcome, ClaimAgentRunInboxOutcome,
-    ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome,
-    ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim, CompleteTurnRunOutcome,
+    AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptSandboxAgentRunAndParkTurnOutcome,
+    AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
+    AppendClaimedMessageOutcome, ApplyTurnSteerOutcome, BeginRootAttachmentChangeOutcome,
+    BlobStore, ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot,
+    CheckpointSandboxSpawnOutcome, ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome,
+    ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome, ClaimScanTerminalEvent,
+    ClaimTurnRunOutcome, ClientToolCallClaim, CompleteTurnRunOutcome,
     ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
     DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome, DocumentIndexJobReason,
     EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FailAgentRunOutcome,

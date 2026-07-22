@@ -22,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddDocuments),
             Box::new(AddSandboxToolCalls),
             Box::new(AddAgentRunResultPayload),
+            Box::new(AddClaimedTurnEffectLeases),
         ]
     }
 }
@@ -4773,6 +4774,81 @@ impl MigrationName for AddAgentRunResultPayload {
     }
 }
 
+struct AddClaimedTurnEffectLeases;
+
+impl MigrationName for AddClaimedTurnEffectLeases {
+    fn name(&self) -> &str {
+        "m20260722_000009_add_claimed_turn_effect_leases"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddClaimedTurnEffectLeases {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Message::Table)
+                    .add_column(ColumnDef::new(Message::TurnLeaseToken).uuid())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .add_column(ColumnDef::new(ToolCall::TurnLeaseToken).uuid())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .add_column(ColumnDef::new(ToolCall::ResolutionTurnLeaseToken).uuid())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "UPDATE turn_run SET max_attempts = 3 \
+                 WHERE max_attempts = 1 AND status IN \
+                 ('queued', 'running', 'retry_wait', 'resuming', 'waiting_for_client', \
+                  'waiting_for_agent_run', 'cancelling', 'cancelling_client')",
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .drop_column(ToolCall::ResolutionTurnLeaseToken)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .drop_column(ToolCall::TurnLeaseToken)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Message::Table)
+                    .drop_column(Message::TurnLeaseToken)
+                    .to_owned(),
+            )
+            .await
+    }
+}
+
 #[async_trait::async_trait]
 impl MigrationTrait for AddAgentRunResultPayload {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -5269,6 +5345,7 @@ enum Message {
     Seq,
     Role,
     Content,
+    TurnLeaseToken,
     CreatedAt,
 }
 
@@ -5389,6 +5466,8 @@ enum ToolCall {
     ClientExecutorId,
     ClientLeaseToken,
     ClientLeaseExpiresAt,
+    TurnLeaseToken,
+    ResolutionTurnLeaseToken,
     CreatedAt,
     ResolvedAt,
 }

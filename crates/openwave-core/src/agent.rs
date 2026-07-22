@@ -43,7 +43,7 @@ use crate::citation::{
 use crate::context;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{AgentRunId, CallId, MessageId, TurnId};
+use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::model::{
     Chat, Message, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
     TurnRunStatus,
@@ -53,8 +53,9 @@ use crate::provider::{
 };
 use crate::steer::SteerInbox;
 use crate::storage::{
-    AcceptToolCallOutcome, ApplyTurnSteerOutcome, JournaledTurnSteerOutcome,
-    ResolveToolCallOutcome, Store, TurnLeaseFence,
+    AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, AppendClaimedMessageOutcome,
+    ApplyTurnSteerOutcome, JournaledTurnSteerOutcome, ResolveToolCallOutcome, Store,
+    TurnLeaseFence,
 };
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
 
@@ -740,6 +741,13 @@ struct AssistantCandidate {
     citations: Vec<AssistantCitationReference>,
 }
 
+enum AcceptedServerCall {
+    Accepted,
+    Existing(Box<ToolCallRecord>),
+    IdentityConflict,
+    LeaseLost,
+}
+
 impl Agent {
     /// Assemble an agent from its dependencies and config.
     ///
@@ -1351,29 +1359,27 @@ impl Agent {
                 });
                 // Persist the call as soon as args are known so a crash mid-tool
                 // still leaves a reconstructable ToolUse on the next turn.
-                let outcome = self
-                    .store
-                    .accept_tool_call(&ToolCallRecord {
-                        id: call.call_id,
-                        chat_id: chat.id,
-                        turn_id,
-                        provider_id: call.provider_id.clone(),
-                        name: call.name.clone(),
-                        arguments: args,
-                        execution: ToolCallExecution::Server,
-                        status: ToolCallStatus::Pending,
-                        result: None,
-                        error_code: None,
-                        error_detail: None,
-                        client_executor_id: None,
-                        client_lease_expires_at: None,
-                        created_at: Utc::now(),
-                        resolved_at: None,
-                    })
-                    .await?;
+                let record = ToolCallRecord {
+                    id: call.call_id,
+                    chat_id: chat.id,
+                    turn_id,
+                    provider_id: call.provider_id.clone(),
+                    name: call.name.clone(),
+                    arguments: args,
+                    execution: ToolCallExecution::Server,
+                    status: ToolCallStatus::Pending,
+                    result: None,
+                    error_code: None,
+                    error_detail: None,
+                    client_executor_id: None,
+                    client_lease_expires_at: None,
+                    created_at: Utc::now(),
+                    resolved_at: None,
+                };
+                let outcome = self.accept_server_call_retry(&record).await?;
                 match outcome {
-                    AcceptToolCallOutcome::Accepted(_) => {}
-                    AcceptToolCallOutcome::Existing(existing) if existing.status.is_terminal() => {
+                    AcceptedServerCall::Accepted => {}
+                    AcceptedServerCall::Existing(existing) if existing.status.is_terminal() => {
                         let content = existing.result.ok_or_else(|| {
                             AgentError::Store(format!(
                                 "terminal tool call {} is missing its result",
@@ -1390,10 +1396,16 @@ impl Agent {
                             },
                         );
                     }
-                    AcceptToolCallOutcome::Existing(_) => {}
-                    AcceptToolCallOutcome::IdentityConflict => {
+                    AcceptedServerCall::Existing(_) => {}
+                    AcceptedServerCall::IdentityConflict => {
                         return Err(AgentError::Store(format!(
                             "tool call {} identity conflicts with its canonical request",
+                            call.call_id
+                        )));
+                    }
+                    AcceptedServerCall::LeaseLost => {
+                        return Err(AgentError::Store(format!(
+                            "turn {turn_id} lost its lease while accepting tool call {}",
                             call.call_id
                         )));
                     }
@@ -1504,7 +1516,10 @@ impl Agent {
                         ToolOutput::error("turn cancelled before tool execution"),
                         true,
                     ),
-                    None => (self.run_tool(chat, turn_id, call, events, None).await, true),
+                    None => {
+                        self.ensure_durable_lease_current(turn_id).await?;
+                        (self.run_tool(chat, turn_id, call, events, None).await, true)
+                    }
                 };
                 events.send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
@@ -1523,11 +1538,11 @@ impl Agent {
                         }
                     };
                     let outcome = self
-                        .store
-                        .resolve_server_tool_call_with_evidence(
+                        .resolve_server_call_retry(
+                            chat.id,
+                            turn_id,
                             call.call_id,
                             &resolution,
-                            Utc::now(),
                             &output.private_evidence,
                         )
                         .await?;
@@ -1712,6 +1727,115 @@ impl Agent {
                     )));
                 }
                 Err(_) => self.wait_for_durable_store_retry(turn_id).await?,
+            }
+        }
+    }
+
+    async fn accept_server_call_retry(&self, call: &ToolCallRecord) -> Result<AcceptedServerCall> {
+        let Some(lease_token) = self.durable_steer_lease else {
+            return Ok(match self.store.accept_tool_call(call).await? {
+                AcceptToolCallOutcome::Accepted(_) => AcceptedServerCall::Accepted,
+                AcceptToolCallOutcome::Existing(existing) => {
+                    AcceptedServerCall::Existing(Box::new(existing))
+                }
+                AcceptToolCallOutcome::IdentityConflict => AcceptedServerCall::IdentityConflict,
+            });
+        };
+        loop {
+            match self
+                .store
+                .accept_claimed_tool_call(call, lease_token, Utc::now())
+                .await
+            {
+                Ok(AcceptClaimedToolCallOutcome::Accepted(_)) => {
+                    return Ok(AcceptedServerCall::Accepted);
+                }
+                Ok(AcceptClaimedToolCallOutcome::Existing(existing)) => {
+                    return Ok(AcceptedServerCall::Existing(Box::new(existing)));
+                }
+                Ok(AcceptClaimedToolCallOutcome::IdentityConflict) => {
+                    return Ok(AcceptedServerCall::IdentityConflict);
+                }
+                Ok(AcceptClaimedToolCallOutcome::LeaseLost) => {
+                    return Ok(AcceptedServerCall::LeaseLost);
+                }
+                Err(_) => {
+                    self.ensure_durable_lease_current(call.turn_id).await?;
+                    self.wait_for_durable_store_retry(call.turn_id).await?;
+                }
+            }
+        }
+    }
+
+    async fn resolve_server_call_retry(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        call_id: CallId,
+        resolution: &ToolCallResolution,
+        evidence: &[crate::RetrievalEvidenceInput],
+    ) -> Result<ResolveToolCallOutcome> {
+        let resolved_at = Utc::now();
+        let Some(lease_token) = self.durable_steer_lease else {
+            return self
+                .store
+                .resolve_server_tool_call_with_evidence(call_id, resolution, resolved_at, evidence)
+                .await;
+        };
+        loop {
+            match self
+                .store
+                .resolve_claimed_server_tool_call_with_evidence(
+                    call_id,
+                    chat_id,
+                    turn_id,
+                    lease_token,
+                    Utc::now(),
+                    resolution,
+                    resolved_at,
+                    evidence,
+                )
+                .await
+            {
+                Ok(outcome) => return Ok(outcome),
+                Err(_) => {
+                    self.ensure_durable_lease_current(turn_id).await?;
+                    self.wait_for_durable_store_retry(turn_id).await?;
+                }
+            }
+        }
+    }
+
+    async fn abandon_inherited_server_call_retry(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        call_id: CallId,
+        resolution: &ToolCallResolution,
+    ) -> Result<ResolveToolCallOutcome> {
+        let lease_token = self.durable_steer_lease.ok_or_else(|| {
+            AgentError::Store("inherited tool abandonment requires a durable lease".into())
+        })?;
+        let resolved_at = Utc::now();
+        loop {
+            match self
+                .store
+                .abandon_inherited_server_tool_call(
+                    call_id,
+                    chat_id,
+                    turn_id,
+                    lease_token,
+                    Utc::now(),
+                    resolution,
+                    resolved_at,
+                )
+                .await
+            {
+                Ok(outcome) => return Ok(outcome),
+                Err(_) => {
+                    self.ensure_durable_lease_current(turn_id).await?;
+                    self.wait_for_durable_store_retry(turn_id).await?;
+                }
             }
         }
     }
@@ -2045,6 +2169,65 @@ impl Agent {
                 args: serde_json::to_string(&stored.arguments)?,
             };
             let durable_approval = self.store.get_tool_call_approval(call.call_id).await?;
+            if self.durable_steer_lease.is_some() {
+                // A pending call recovered at startup is ambiguous: the prior
+                // process may have performed its side effect and died
+                // before committing the result. Never execute it again. Commit
+                // a deterministic failed result under this attempt's lease so
+                // the model can recover without double-applying the effect.
+                let output = ToolOutput::error(
+                    "tool execution was interrupted before its result was committed; the call was not replayed",
+                );
+                let resolution = ToolCallResolution::Failed {
+                    result: output.content.clone(),
+                    error_code: "tool_execution_interrupted".into(),
+                    error_detail: Some(
+                        "a prior turn attempt may have executed this call; replay was suppressed"
+                            .into(),
+                    ),
+                };
+                let outcome = self
+                    .abandon_inherited_server_call_retry(
+                        chat.id,
+                        turn_id,
+                        call.call_id,
+                        &resolution,
+                    )
+                    .await?;
+                if !matches!(
+                    outcome,
+                    ResolveToolCallOutcome::Resolved | ResolveToolCallOutcome::Existing
+                ) {
+                    return Err(AgentError::Store(format!(
+                        "inherited tool call {} could not be abandoned: {outcome:?}",
+                        call.call_id
+                    )));
+                }
+                if durable_approval.is_some() {
+                    if let Some(approval) = self.store.get_tool_call_approval(call.call_id).await? {
+                        events.send(AgentEvent::ApprovalDecided {
+                            call_id: call.call_id,
+                            approved: matches!(
+                                approval.status,
+                                crate::approval::ToolApprovalStatus::Approved
+                            ),
+                        });
+                    }
+                }
+                events.send(AgentEvent::ToolCallCompleted {
+                    call_id: call.call_id,
+                    output: output.clone(),
+                });
+                transcript.push(ChatMessage {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: call.provider_id,
+                        content: output.content,
+                        is_error: true,
+                    }],
+                });
+                continue;
+            }
             let tool_available = self.tools.get(&call.name).is_some();
             let cancelled_before_run = self.cancel.is_cancelled();
             let output = if cancelled_before_run {
@@ -2159,6 +2342,39 @@ impl Agent {
         message: &Message,
         citations: &[AssistantCitationReference],
     ) -> Result<()> {
+        if let Some(lease_token) = self.durable_steer_lease {
+            loop {
+                match self
+                    .store
+                    .append_claimed_assistant_message_with_citations(
+                        message,
+                        citations,
+                        lease_token,
+                        Utc::now(),
+                    )
+                    .await
+                {
+                    Ok(AppendClaimedMessageOutcome::Appended)
+                    | Ok(AppendClaimedMessageOutcome::Existing) => return Ok(()),
+                    Ok(AppendClaimedMessageOutcome::IdentityConflict) => {
+                        return Err(AgentError::Store(format!(
+                            "message identity {} conflicts with its claimed assistant payload",
+                            message.id
+                        )));
+                    }
+                    Ok(AppendClaimedMessageOutcome::LeaseLost) => {
+                        return Err(AgentError::Store(format!(
+                            "turn {} lost its lease while appending assistant message {}",
+                            message.turn_id, message.id
+                        )));
+                    }
+                    Err(_) => {
+                        self.ensure_durable_lease_current(message.turn_id).await?;
+                        self.wait_for_durable_store_retry(message.turn_id).await?;
+                    }
+                }
+            }
+        }
         if self
             .store
             .append_assistant_message_with_citations(message, citations)
@@ -4325,7 +4541,7 @@ mod tests {
 
     /// Asks for the `spy` tool once, but first lets the turn's lease be stolen
     /// while this provider call is in flight: a fresh claim scan past the lease
-    /// expiry terminalizes the single-attempt turn out from under this worker.
+    /// expiry starts the retry attempt under a new token.
     struct LeaseStealingProvider {
         store: Arc<dyn Store>,
         steal_at: DateTime<Utc>,
@@ -4348,8 +4564,8 @@ mod tests {
                     )
                     .await?;
                 assert!(
-                    outcome.terminal_event.is_some(),
-                    "expired single-attempt turn should be terminalized by the steal"
+                    outcome.turn.is_some(),
+                    "expired turn should be reclaimed for a retry by the steal"
                 );
             }
             Ok(stream::iter(vec![
@@ -4364,6 +4580,27 @@ mod tests {
                 },
                 ProviderEvent::Stop {
                     reason: StopReason::ToolUse,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    struct AnswerOnlyProvider;
+
+    #[async_trait]
+    impl ModelProvider for AnswerOnlyProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("answer-only")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "recovered".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
                 },
             ])
             .boxed())
@@ -4440,10 +4677,128 @@ mod tests {
             0,
             "a stolen lease must not execute tool side effects"
         );
-        // The thief's terminal state stands; the stale worker committed nothing.
+        // The retry claim stands; the stale worker committed nothing.
         let turn = store.get_turn_run(turn_id).await.unwrap().unwrap();
-        assert_eq!(turn.status, TurnRunStatus::Failed);
-        assert_eq!(turn.lease_token, None);
+        assert_eq!(turn.status, TurnRunStatus::Running);
+        assert_ne!(turn.lease_token, Some(lease_token));
+    }
+
+    #[tokio::test]
+    async fn retry_abandons_an_inherited_pending_tool_without_replaying_it() {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        let accepted = match store
+            .accept_turn(turn_id, chat.id, "fake", "go")
+            .await
+            .unwrap()
+        {
+            crate::storage::AcceptTurnOutcome::Accepted(turn) => turn,
+            outcome => panic!("unexpected acceptance: {outcome:?}"),
+        };
+        let first_claim_at = accepted.available_at;
+        let first_lease = uuid::Uuid::new_v4();
+        store
+            .claim_turn_run(
+                first_lease,
+                first_claim_at,
+                first_claim_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap();
+        let call_id = CallId::new();
+        let call = ToolCallRecord {
+            id: call_id,
+            chat_id: chat.id,
+            turn_id,
+            provider_id: "call_spy".into(),
+            name: "spy".into(),
+            arguments: serde_json::json!({}),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: first_claim_at,
+            resolved_at: None,
+        };
+        assert!(matches!(
+            store
+                .accept_claimed_tool_call(&call, first_lease, first_claim_at)
+                .await
+                .unwrap(),
+            AcceptClaimedToolCallOutcome::Accepted(_)
+        ));
+
+        // Simulate a crash after acceptance and possible execution but before
+        // result commit. Reclaiming creates the next failure attempt.
+        let retry_at = first_claim_at + chrono::Duration::seconds(2);
+        let retry_lease = uuid::Uuid::new_v4();
+        let retried = store
+            .claim_turn_run(
+                retry_lease,
+                retry_at,
+                retry_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .turn
+            .unwrap();
+        assert_eq!(retried.attempt_count, 2);
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let tools = Arc::new(ToolRegistry::new().with(Box::new(SpyTool { ran: ran.clone() })));
+        let agent = Agent::new(
+            Arc::new(AnswerOnlyProvider),
+            tools,
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_durable_steer(retry_lease);
+        let (tx, rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        drop(tx);
+        let _ = rx.collect::<Vec<_>>().await;
+
+        assert!(matches!(outcome, AgentTurnOutcome::Completed { .. }));
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "pending work was replayed");
+        let stored = store
+            .list_tool_calls(chat.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == call_id)
+            .unwrap();
+        assert_eq!(stored.status, ToolCallStatus::Failed);
+        assert_eq!(
+            stored.error_code.as_deref(),
+            Some("tool_execution_interrupted")
+        );
     }
 
     /// Streams one text delta, then stalls forever — lets a test cancel mid-stream
@@ -4939,7 +5294,13 @@ mod tests {
             created_at: claimed_at,
             resolved_at: None,
         };
-        store.accept_tool_call(&call).await.unwrap();
+        assert!(matches!(
+            store
+                .accept_claimed_tool_call(&call, lease_token, claimed_at)
+                .await
+                .unwrap(),
+            AcceptClaimedToolCallOutcome::Accepted(_)
+        ));
         store
             .request_tool_call_approval(
                 &ApprovalRequest {
@@ -4972,7 +5333,7 @@ mod tests {
         let agent = Agent::new(
             Arc::new(RestartProvider {
                 provider_id: call.provider_id.clone(),
-                expect_error: !tool_present,
+                expect_error: true,
             }),
             Arc::new(registry),
             store.clone(),
@@ -5009,7 +5370,7 @@ mod tests {
         ));
         drop(tx);
         let events = events.await.unwrap();
-        assert_eq!(ran.load(Ordering::SeqCst), usize::from(tool_present));
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
         assert_eq!(
             store
                 .list_tool_calls(chat.id)
@@ -5019,40 +5380,31 @@ mod tests {
                 .find(|stored| stored.id == call.id)
                 .unwrap()
                 .status,
-            if tool_present {
-                ToolCallStatus::Completed
-            } else {
-                ToolCallStatus::Failed
-            }
+            ToolCallStatus::Failed
         );
-        if !tool_present {
-            let approval_decided = events
-                .iter()
-                .position(|event| {
-                    matches!(
-                        event,
-                        AgentEvent::ApprovalDecided {
-                            call_id,
-                            approved: false,
-                        } if *call_id == call.id
-                    )
-                })
-                .expect("missing tool must close its durable approval card");
-            let tool_completed = events
-                .iter()
-                .position(|event| {
-                    matches!(
-                        event,
-                        AgentEvent::ToolCallCompleted { call_id, .. } if *call_id == call.id
-                    )
-                })
-                .expect("missing tool must publish its failed completion");
-            assert!(approval_decided < tool_completed);
-        }
+        let approval_decided = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::ApprovalDecided { call_id, .. } if *call_id == call.id
+                )
+            })
+            .expect("recovery must close its durable approval card");
+        let tool_completed = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::ToolCallCompleted { call_id, .. } if *call_id == call.id
+                )
+            })
+            .expect("recovery must publish its failed completion");
+        assert!(approval_decided < tool_completed);
     }
 
     #[tokio::test]
-    async fn reclaimed_turn_resumes_pending_and_preapproved_sensitive_calls() {
+    async fn reclaimed_turn_suppresses_pending_and_preapproved_sensitive_calls() {
         assert_sensitive_restart_recovery(false, ApprovalClass::ReadOnly, true).await;
         assert_sensitive_restart_recovery(true, ApprovalClass::Sensitive, true).await;
         assert_sensitive_restart_recovery(false, ApprovalClass::ReadOnly, false).await;
@@ -5126,7 +5478,13 @@ mod tests {
             created_at: claimed_at,
             resolved_at: None,
         };
-        store.accept_tool_call(&call).await.unwrap();
+        assert!(matches!(
+            store
+                .accept_claimed_tool_call(&call, lease_token, claimed_at)
+                .await
+                .unwrap(),
+            AcceptClaimedToolCallOutcome::Accepted(_)
+        ));
         (db, store, chat, turn_id, lease_token, call)
     }
 
@@ -5244,7 +5602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_rechecks_cancellation_immediately_before_tool_execution() {
+    async fn recovery_never_reexecutes_a_pending_workspace_call() {
         let (_db, store, chat, turn_id, lease_token, call) =
             pending_workspace_restart("recovery_write", serde_json::json!({})).await;
         let cancel = CancelToken::new();
@@ -5273,7 +5631,7 @@ mod tests {
                 .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
                 .await
                 .unwrap(),
-            AgentTurnOutcome::Cancelled { .. }
+            AgentTurnOutcome::Completed { .. }
         ));
         assert_eq!(ran.load(Ordering::SeqCst), 0);
         assert_eq!(

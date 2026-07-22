@@ -235,6 +235,8 @@ where
         client_executor_id: Set(None),
         client_lease_token: Set(None),
         client_lease_expires_at: Set(None),
+        turn_lease_token: Set(Some(request.lease_token)),
+        resolution_turn_lease_token: Set(Some(request.lease_token)),
         created_at: Set(created_at),
         resolved_at: Set(Some(created_at)),
     }

@@ -13,12 +13,13 @@ use crate::citation::{
 use crate::error::{AgentError, Result};
 use crate::id::{AssistantCitationId, ChatId, MessageId, TurnId};
 use crate::model::{Message, Role, SourceLocation};
+use crate::storage::{AppendClaimedMessageOutcome, TurnLeaseFence};
 
 use super::super::{entities, store_err, DbStore};
-use super::acquire_chat_write_lock;
 use super::conversation::{
     next_message_seq_on, reserve_message_identity_on, MESSAGE_IDENTITY_OWNER_MESSAGE,
 };
+use super::{acquire_chat_write_lock, acquire_turn_write_lock};
 
 pub(in crate::db) async fn append_assistant_message(
     store: &DbStore,
@@ -62,6 +63,7 @@ pub(in crate::db) async fn append_assistant_message(
         seq: Set(next_message_seq_on(&transaction, message.chat_id).await?),
         role: Set("assistant".into()),
         content: Set(message.content.clone()),
+        turn_lease_token: Set(None),
         created_at: Set(created_at),
     }
     .insert(&transaction)
@@ -71,12 +73,94 @@ pub(in crate::db) async fn append_assistant_message(
     transaction.commit().await.map_err(store_err)
 }
 
+pub(in crate::db) async fn append_claimed_assistant_message(
+    store: &DbStore,
+    message: &Message,
+    references: &[AssistantCitationReference],
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AppendClaimedMessageOutcome> {
+    validate_assistant_message(message, references)?;
+    if lease_token.is_nil() {
+        return Err(AgentError::Store(
+            "claimed message lease token must not be nil".into(),
+        ));
+    }
+    let created_at = super::turn::canonical_db_timestamp(message.created_at)?;
+    let now = super::turn::canonical_db_timestamp(now)?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, message.chat_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(AppendClaimedMessageOutcome::LeaseLost);
+    }
+    if !acquire_turn_write_lock(&transaction, message.turn_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(AppendClaimedMessageOutcome::LeaseLost);
+    }
+    if let Some(existing) = entities::message::Entity::find_by_id(message.id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    {
+        let exact = exact_appended_message_model_on(
+            &transaction,
+            &existing,
+            message,
+            references,
+            Some(lease_token),
+        )
+        .await?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(if exact {
+            AppendClaimedMessageOutcome::Existing
+        } else {
+            AppendClaimedMessageOutcome::IdentityConflict
+        });
+    }
+    if super::turn::turn_lease_is_current_on(&transaction, message.turn_id, lease_token, now)
+        .await?
+        != TurnLeaseFence::Current
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(AppendClaimedMessageOutcome::LeaseLost);
+    }
+    if !reserve_message_identity_on(
+        &transaction,
+        message.id,
+        message.chat_id,
+        message.turn_id,
+        MESSAGE_IDENTITY_OWNER_MESSAGE,
+    )
+    .await?
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(AppendClaimedMessageOutcome::IdentityConflict);
+    }
+    let evidence =
+        resolve_references_on(&transaction, message.chat_id, message.turn_id, references).await?;
+    entities::message::ActiveModel {
+        id: Set(message.id.0),
+        chat_id: Set(message.chat_id.0),
+        turn_id: Set(message.turn_id.0),
+        seq: Set(next_message_seq_on(&transaction, message.chat_id).await?),
+        role: Set("assistant".into()),
+        content: Set(message.content.clone()),
+        turn_lease_token: Set(Some(lease_token)),
+        created_at: Set(created_at),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+    insert_for_message_on(&transaction, message, &evidence).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(AppendClaimedMessageOutcome::Appended)
+}
+
 async fn exact_appended_message_on(
     store: &DbStore,
     message: &Message,
     references: &[AssistantCitationReference],
 ) -> Result<bool> {
-    let created_at = super::turn::canonical_db_timestamp(message.created_at)?;
     let Some(stored) = entities::message::Entity::find_by_id(message.id.0)
         .one(&store.conn)
         .await
@@ -84,22 +168,37 @@ async fn exact_appended_message_on(
     else {
         return Ok(false);
     };
+    exact_appended_message_model_on(&store.conn, &stored, message, references, None).await
+}
+
+async fn exact_appended_message_model_on<C>(
+    conn: &C,
+    stored: &entities::message::Model,
+    message: &Message,
+    references: &[AssistantCitationReference],
+    turn_lease_token: Option<uuid::Uuid>,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let created_at = super::turn::canonical_db_timestamp(message.created_at)?;
     if stored.chat_id != message.chat_id.0
         || stored.turn_id != message.turn_id.0
         || stored.role != "assistant"
         || stored.content != message.content
+        || stored.turn_lease_token != turn_lease_token
         || stored.created_at != created_at
     {
         return Ok(false);
     }
-    let expected = resolve_references_on(&store.conn, message.chat_id, message.turn_id, references)
+    let expected = resolve_references_on(conn, message.chat_id, message.turn_id, references)
         .await?
         .into_iter()
         .map(|evidence| AssistantCitationReference {
             source_token: evidence.source_token,
         })
         .collect::<Vec<_>>();
-    Ok(exact_references_for_message_on(&store.conn, message.id).await? == expected)
+    Ok(exact_references_for_message_on(conn, message.id).await? == expected)
 }
 
 pub(in crate::db) fn validate_assistant_message(

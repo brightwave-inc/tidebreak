@@ -11,13 +11,17 @@ use crate::model::{
     ToolCallRecord, ToolCallResolution, ToolCallStatus,
 };
 use crate::storage::{
-    AcceptToolCallOutcome, ClaimClientToolCallOutcome, ClientToolCallClaim,
-    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, ResolveToolCallOutcome,
+    AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, ClaimClientToolCallOutcome,
+    ClientToolCallClaim, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
+    ResolveToolCallOutcome, TurnLeaseFence,
 };
 
 use super::super::{entities, store_err, DbStore};
 use super::turn::canonical_db_timestamp;
-use super::{acquire_chat_write_lock, acquire_tool_call_write_lock, next_tool_history_order_on};
+use super::{
+    acquire_chat_write_lock, acquire_tool_call_write_lock, acquire_turn_write_lock,
+    next_tool_history_order_on,
+};
 
 pub(in crate::db) async fn accept_tool_call(
     store: &DbStore,
@@ -70,6 +74,8 @@ pub(in crate::db) async fn accept_tool_call(
         client_executor_id: Set(None),
         client_lease_token: Set(None),
         client_lease_expires_at: Set(None),
+        turn_lease_token: Set(None),
+        resolution_turn_lease_token: Set(None),
         created_at: Set(created_at),
         resolved_at: Set(None),
     }
@@ -79,6 +85,86 @@ pub(in crate::db) async fn accept_tool_call(
     let inserted = tool_call_from_model(inserted)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(AcceptToolCallOutcome::Accepted(inserted))
+}
+
+pub(in crate::db) async fn accept_claimed_tool_call(
+    store: &DbStore,
+    call: &ToolCallRecord,
+    lease_token: uuid::Uuid,
+    now: DateTime<Utc>,
+) -> Result<AcceptClaimedToolCallOutcome> {
+    validate_accept(call)?;
+    if call.execution != ToolCallExecution::Server || lease_token.is_nil() {
+        return Err(AgentError::Store(
+            "claimed tool acceptance requires a server call and non-nil lease".into(),
+        ));
+    }
+    let created_at = canonical_db_timestamp(call.created_at)?;
+    let now = canonical_db_timestamp(now)?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, call.chat_id).await?
+        || !acquire_turn_write_lock(&transaction, call.turn_id).await?
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(AcceptClaimedToolCallOutcome::LeaseLost);
+    }
+    if let Some(existing) = entities::tool_call::Entity::find_by_id(call.id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    {
+        let outcome = if immutable_request_matches(&existing, call, created_at)
+            && existing.turn_lease_token == Some(lease_token)
+        {
+            AcceptClaimedToolCallOutcome::Existing(tool_call_from_model(existing)?)
+        } else {
+            AcceptClaimedToolCallOutcome::IdentityConflict
+        };
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(outcome);
+    }
+    if super::turn::turn_lease_is_current_on(&transaction, call.turn_id, lease_token, now).await?
+        != TurnLeaseFence::Current
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(AcceptClaimedToolCallOutcome::LeaseLost);
+    }
+
+    let history_order = next_tool_history_order_on(&transaction, call.chat_id).await?;
+    let inserted = entities::tool_call::ActiveModel {
+        id: Set(call.id.0),
+        chat_id: Set(call.chat_id.0),
+        turn_id: Set(call.turn_id.0),
+        provider_id: Set(call.provider_id.clone()),
+        history_order: Set(history_order),
+        name: Set(call.name.clone()),
+        arguments: Set(call.arguments.clone()),
+        execution: Set(call.execution.as_str().into()),
+        status: Set(ToolCallStatus::Pending.as_str().into()),
+        result: Set(None),
+        error_code: Set(None),
+        error_detail: Set(None),
+        approval_status: Set(None),
+        approval_class: Set(None),
+        approval_kind: Set(None),
+        approval_reason: Set(None),
+        approval_requested_at: Set(None),
+        approval_decided_at: Set(None),
+        approval_event_seq: Set(None),
+        client_executor_id: Set(None),
+        client_lease_token: Set(None),
+        client_lease_expires_at: Set(None),
+        turn_lease_token: Set(Some(lease_token)),
+        resolution_turn_lease_token: Set(None),
+        created_at: Set(created_at),
+        resolved_at: Set(None),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+    let inserted = tool_call_from_model(inserted)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(AcceptClaimedToolCallOutcome::Accepted(inserted))
 }
 
 pub(in crate::db) async fn claim_client_tool_call(
@@ -229,6 +315,65 @@ pub(in crate::db) async fn resolve_server_tool_call_with_evidence(
     .outcome)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn resolve_claimed_server_tool_call_with_evidence(
+    store: &DbStore,
+    id: CallId,
+    chat_id: ChatId,
+    turn_id: crate::TurnId,
+    lease_token: uuid::Uuid,
+    now: DateTime<Utc>,
+    resolution: &ToolCallResolution,
+    resolved_at: DateTime<Utc>,
+    evidence: &[RetrievalEvidenceInput],
+) -> Result<ResolveToolCallOutcome> {
+    Ok(resolve_tool_call(
+        store,
+        id,
+        ResolutionAuthority::ClaimedServer {
+            chat_id,
+            turn_id,
+            lease_token,
+            now,
+            inherited: false,
+        },
+        resolved_at,
+        resolution,
+        Some(evidence),
+    )
+    .await?
+    .outcome)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn abandon_inherited_server_tool_call(
+    store: &DbStore,
+    id: CallId,
+    chat_id: ChatId,
+    turn_id: crate::TurnId,
+    lease_token: uuid::Uuid,
+    now: DateTime<Utc>,
+    resolution: &ToolCallResolution,
+    resolved_at: DateTime<Utc>,
+) -> Result<ResolveToolCallOutcome> {
+    Ok(resolve_tool_call(
+        store,
+        id,
+        ResolutionAuthority::ClaimedServer {
+            chat_id,
+            turn_id,
+            lease_token,
+            now,
+            inherited: true,
+        },
+        resolved_at,
+        resolution,
+        None,
+    )
+    .await?
+    .outcome)
+}
+
 pub(in crate::db) async fn list_retrieval_evidence(
     store: &DbStore,
     id: CallId,
@@ -331,6 +476,12 @@ async fn resolve_tool_call(
             return Ok(journaled_call_outcome(ResolveToolCallOutcome::LeaseLost));
         }
     }
+    if let Some(turn_id) = authority.turn_id() {
+        if !acquire_turn_write_lock(&transaction, turn_id).await? {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(journaled_call_outcome(ResolveToolCallOutcome::LeaseLost));
+        }
+    }
     if !acquire_tool_call_write_lock(&transaction, id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(journaled_call_outcome(ResolveToolCallOutcome::NotFound));
@@ -365,9 +516,7 @@ async fn resolve_tool_call(
                 }
             }
         }
-        let transition = if outcome == ResolveToolCallOutcome::Existing
-            && authority.chat_id().is_some()
-        {
+        let transition = if outcome == ResolveToolCallOutcome::Existing && authority.is_client() {
             super::turn::recover_turn_after_client_resolution_on(&transaction, &existing).await?
         } else {
             None
@@ -380,8 +529,32 @@ async fn resolve_tool_call(
         });
     }
 
+    if let Some((turn_id, lease_token, now)) = authority.turn_lease() {
+        if super::turn::turn_lease_is_current_on(&transaction, turn_id, lease_token, now).await?
+            != TurnLeaseFence::Current
+        {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(journaled_call_outcome(ResolveToolCallOutcome::LeaseLost));
+        }
+    }
+
     let owns = match authority {
-        ResolutionAuthority::Server => existing.execution == ToolCallExecution::Server.as_str(),
+        ResolutionAuthority::Server => {
+            existing.execution == ToolCallExecution::Server.as_str()
+                && existing.turn_lease_token.is_none()
+        }
+        ResolutionAuthority::ClaimedServer {
+            chat_id,
+            turn_id,
+            lease_token,
+            inherited,
+            ..
+        } => {
+            existing.chat_id == chat_id.0
+                && existing.turn_id == turn_id.0
+                && existing.execution == ToolCallExecution::Server.as_str()
+                && (inherited || existing.turn_lease_token == Some(lease_token))
+        }
         ResolutionAuthority::LiveClient {
             chat_id,
             lease_token,
@@ -425,6 +598,7 @@ async fn resolve_tool_call(
     active.error_code = Set(error_code);
     active.error_detail = Set(error_detail);
     active.client_lease_expires_at = Set(None);
+    active.resolution_turn_lease_token = Set(authority.turn_lease_token());
     active.resolved_at = Set(Some(resolved_at));
     if approval_status.as_deref() == Some(crate::ToolApprovalStatus::Pending.as_str()) {
         let requested_at = approval_requested_at
@@ -434,7 +608,7 @@ async fn resolve_tool_call(
         active.approval_decided_at = Set(Some(resolved_at.max(requested_at)));
     }
     let resolved = active.update(&transaction).await.map_err(store_err)?;
-    let transition = if authority.chat_id().is_some() {
+    let transition = if authority.is_client() {
         super::turn::advance_turn_after_client_resolution_on(&transaction, &resolved, resolved_at)
             .await?
     } else {
@@ -669,6 +843,13 @@ fn evidence_models_match(
 #[derive(Clone, Copy)]
 enum ResolutionAuthority {
     Server,
+    ClaimedServer {
+        chat_id: ChatId,
+        turn_id: crate::TurnId,
+        lease_token: uuid::Uuid,
+        now: DateTime<Utc>,
+        inherited: bool,
+    },
     LiveClient {
         chat_id: ChatId,
         lease_token: uuid::Uuid,
@@ -685,6 +866,19 @@ impl ResolutionAuthority {
     fn canonicalized(self) -> Result<Self> {
         Ok(match self {
             Self::Server => Self::Server,
+            Self::ClaimedServer {
+                chat_id,
+                turn_id,
+                lease_token,
+                now,
+                inherited,
+            } => Self::ClaimedServer {
+                chat_id,
+                turn_id,
+                lease_token,
+                now: canonical_db_timestamp(now)?,
+                inherited,
+            },
             Self::LiveClient {
                 chat_id,
                 lease_token,
@@ -708,7 +902,7 @@ impl ResolutionAuthority {
 
     const fn lease_token(self) -> Option<uuid::Uuid> {
         match self {
-            Self::Server => None,
+            Self::Server | Self::ClaimedServer { .. } => None,
             Self::LiveClient { lease_token, .. } | Self::ExpiredClient { lease_token, .. } => {
                 Some(lease_token)
             }
@@ -718,8 +912,40 @@ impl ResolutionAuthority {
     const fn chat_id(self) -> Option<ChatId> {
         match self {
             Self::Server => None,
-            Self::LiveClient { chat_id, .. } | Self::ExpiredClient { chat_id, .. } => Some(chat_id),
+            Self::ClaimedServer { chat_id, .. }
+            | Self::LiveClient { chat_id, .. }
+            | Self::ExpiredClient { chat_id, .. } => Some(chat_id),
         }
+    }
+
+    const fn turn_id(self) -> Option<crate::TurnId> {
+        match self {
+            Self::ClaimedServer { turn_id, .. } => Some(turn_id),
+            _ => None,
+        }
+    }
+
+    const fn turn_lease(self) -> Option<(crate::TurnId, uuid::Uuid, DateTime<Utc>)> {
+        match self {
+            Self::ClaimedServer {
+                turn_id,
+                lease_token,
+                now,
+                ..
+            } => Some((turn_id, lease_token, now)),
+            _ => None,
+        }
+    }
+
+    const fn turn_lease_token(self) -> Option<uuid::Uuid> {
+        match self {
+            Self::ClaimedServer { lease_token, .. } => Some(lease_token),
+            _ => None,
+        }
+    }
+
+    const fn is_client(self) -> bool {
+        matches!(self, Self::LiveClient { .. } | Self::ExpiredClient { .. })
     }
 }
 
@@ -818,6 +1044,19 @@ fn terminal_authority_matches(
         ResolutionAuthority::Server => {
             model.execution == ToolCallExecution::Server.as_str()
                 && model.client_lease_token.is_none()
+                && model.turn_lease_token.is_none()
+                && model.resolution_turn_lease_token.is_none()
+        }
+        ResolutionAuthority::ClaimedServer {
+            chat_id,
+            turn_id,
+            lease_token,
+            ..
+        } => {
+            model.execution == ToolCallExecution::Server.as_str()
+                && model.chat_id == chat_id.0
+                && model.turn_id == turn_id.0
+                && model.resolution_turn_lease_token == Some(lease_token)
         }
         ResolutionAuthority::LiveClient { .. } | ResolutionAuthority::ExpiredClient { .. } => {
             model.execution == ToolCallExecution::Client.as_str()

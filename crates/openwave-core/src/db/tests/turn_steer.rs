@@ -75,6 +75,7 @@ async fn turn_steer_schema_enforces_durable_delivery_identity() {
         seq: Set(2),
         role: Set("user".into()),
         content: Set("change course".into()),
+        turn_lease_token: Set(None),
         created_at: Set(now),
     }
     .insert(&store.conn)
@@ -119,6 +120,7 @@ async fn turn_steer_schema_enforces_durable_delivery_identity() {
         seq: Set(3),
         role: Set("user".into()),
         content: Set("mismatched identity".into()),
+        turn_lease_token: Set(None),
         created_at: Set(now),
     }
     .insert(&store.conn)
@@ -1224,6 +1226,7 @@ async fn terminal_turn_paths_reject_pending_steers_but_retry_wait_preserves_them
         AcceptTurnOutcome::Accepted(turn) => turn,
         other => panic!("unexpected turn acceptance: {other:?}"),
     };
+    set_turn_max_attempts(&store, expired_turn.id, 1).await;
     let expired_lease = uuid::Uuid::new_v4();
     let expired_claim_at = Utc::now();
     let expires_at = expired_claim_at + chrono::Duration::seconds(1);
@@ -1309,6 +1312,7 @@ async fn failed_steer_message_insert_rolls_back_the_application_receipt() {
         seq: Set(2),
         role: Set("assistant".into()),
         content: Set("occupy identity".into()),
+        turn_lease_token: Set(None),
         created_at: Set(Utc::now()),
     }
     .insert(&store.conn)

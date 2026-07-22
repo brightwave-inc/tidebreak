@@ -176,6 +176,7 @@ pub(in crate::db) async fn accept_turn(
         seq: Set(next_message_seq_on(&transaction, chat_id).await?),
         role: Set("user".into()),
         content: Set(content.into()),
+        turn_lease_token: Set(None),
         created_at: Set(now),
     };
     if let Err(error) = message.insert(&transaction).await {
@@ -752,8 +753,6 @@ pub(in crate::db) async fn fence_turn_lease(
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
 ) -> Result<crate::storage::TurnLeaseFence> {
-    use crate::storage::TurnLeaseFence;
-
     if id.0.is_nil() {
         return Err(AgentError::Store("fenced turn id must not be nil".into()));
     }
@@ -763,11 +762,28 @@ pub(in crate::db) async fn fence_turn_lease(
         ));
     }
     let now = canonical_db_timestamp(now)?;
+    turn_lease_is_current_on(&store.conn, id, lease_token, now).await
+}
+
+/// Check the exact turn-claim identity on an existing transaction. Callers
+/// that co-commit an effect first acquire the chat and turn write locks, then
+/// use this helper before inserting or resolving that effect.
+pub(in crate::db) async fn turn_lease_is_current_on<C>(
+    conn: &C,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+) -> Result<crate::storage::TurnLeaseFence>
+where
+    C: ConnectionTrait,
+{
+    use crate::storage::TurnLeaseFence;
+
     // The claim receipt binds this token to the exact attempt and claim segment
     // it was issued for. Matching it against the turn's live counters rejects a
     // token that once owned an earlier segment of the same turn.
     let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
-        .one(&store.conn)
+        .one(conn)
         .await
         .map_err(store_err)?
         .filter(|claim| claim.turn_id == id.0)
@@ -775,7 +791,7 @@ pub(in crate::db) async fn fence_turn_lease(
         return Ok(TurnLeaseFence::Stale);
     };
     let Some(turn) = entities::turn_run::Entity::find_by_id(id.0)
-        .one(&store.conn)
+        .one(conn)
         .await
         .map_err(store_err)?
     else {

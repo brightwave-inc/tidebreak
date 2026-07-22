@@ -2874,6 +2874,7 @@ where
         seq: Set(next_message_seq_on(conn, entry.chat_id).await?),
         role: Set("system".to_owned()),
         content: Set(content),
+        turn_lease_token: Set(None),
         created_at: Set(now),
     }
     .insert(conn)
