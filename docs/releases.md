@@ -73,37 +73,89 @@ published tag and the managed PR labels make the draft version automatic.
 
 1. Open **Releases** in GitHub and select the existing draft.
 2. Confirm the target is the intended commit on `main`, the proposed
-   `vMAJOR.MINOR.PATCH` tag is correct, and the notes contain the intended PRs.
+   `vMAJOR.MINOR.PATCH` tag is correct, the release is not marked as a
+   prerelease, and the notes contain the intended PRs.
 3. Complete the release-readiness review, then click **Publish release**.
 4. GitHub creates the tag and emits the `release.published` event. The macOS
    release workflow checks out that exact tag, rejects malformed tags or commits
    outside `main`, and derives the product version from the tag.
-5. The workflow currently builds ad-hoc-signed Apple Silicon and Intel `.app`
-   bundles as internal Actions artifacts. They are build-pipeline
-   verification only and must not be offered as public downloads.
+5. The workflow builds Apple Silicon and Intel apps, signs them with the
+   production Developer ID identity, notarizes and staples the app and DMG,
+   verifies them with Apple tooling, and creates signed Tauri updater archives.
+6. Only after both architectures pass does the publisher upload immutable
+   versioned files, advance the public manifests, invalidate their CDN paths,
+   and smoke-test the hosted release.
 
 Publishing the native draft is the only release boundary. Merging ordinary PRs
-updates the draft but never builds or ships a desktop version.
+updates the draft but never builds or ships a desktop version. A published
+GitHub Release is considered shipped only when its **Publish macOS release**
+workflow completes successfully.
 
-## Public macOS delivery follow-up
+## Public macOS delivery
 
-The next release-engineering stage will extend the tag-triggered macOS job; it
-will not introduce another version source or release branch. Before a desktop
-build is public, the pipeline must:
+The public download contract is rooted at:
 
-1. Sign both architecture builds with the production Developer ID identity.
-2. Submit them for Apple notarization, wait for acceptance, staple the result,
-   and verify it with `codesign`, `stapler`, and Gatekeeper.
-3. Produce stable DMG and updater artifact names, checksums, and signatures.
-4. Upload immutable versioned artifacts beneath `https://downloads.brightwave.io/`.
-5. Publish `manifest.json` and updater-compatible `latest.json` only after every
-   required artifact is present, then invalidate the CDN metadata paths.
-6. Exercise download, install, launch, and upgrade smoke tests before considering
-   the release shipped.
+```text
+https://downloads.brightwave.io/openwave/
+```
 
-The current internal build is intentionally shaped as two architecture-specific
-outputs so signing, packaging, manifest generation, and hosted delivery can be
-added without changing the release trigger or product-version contract.
+Each release has an immutable prefix:
+
+```text
+openwave/releases/vMAJOR.MINOR.PATCH/
+├── manifest.json
+└── macos/
+    ├── aarch64/
+    └── x86_64/
+```
+
+Each architecture directory contains a notarized DMG, a zip of the notarized
+app, a signed `.app.tar.gz` updater archive, its signature, and SHA-256 files.
+The root `manifest.json` and Tauri-compatible `latest.json` are the only mutable
+objects. The workflow refuses to overwrite a versioned object with different
+bytes or move `latest.json` to an older version.
+
+The current app does not yet install updates automatically; `latest.json` is the
+stable server-side updater contract for that client integration.
+
+### Production environment configuration
+
+Create a GitHub environment named `desktop-production`. Store these secrets in
+that environment:
+
+| Secret                               | Value                                                       |
+| ------------------------------------ | ----------------------------------------------------------- |
+| `APPLE_CERTIFICATE`                  | Base64-encoded Developer ID Application `.p12`              |
+| `APPLE_CERTIFICATE_PASSWORD`         | Password used when exporting that `.p12`                    |
+| `APPLE_API_PRIVATE_KEY`              | Complete App Store Connect `.p8` private key                |
+| `TAURI_SIGNING_PRIVATE_KEY`          | Private key used to sign Tauri updater archives             |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the Tauri updater-signing key                  |
+
+Generate a dedicated Tauri updater keypair and retain its public key for the
+future updater client configuration. Only the private key and its password
+belong in GitHub secrets.
+
+Configure these environment variables:
+
+| Variable                                   | Value                                                            |
+| ------------------------------------------ | ---------------------------------------------------------------- |
+| `APPLE_SIGNING_IDENTITY`                   | Developer ID Application signing identity                        |
+| `APPLE_API_KEY_ID`                         | App Store Connect API key ID                                      |
+| `APPLE_API_ISSUER`                         | App Store Connect API issuer UUID                                 |
+| `AWS_RELEASE_ROLE_ARN`                     | GitHub OIDC role allowed to publish OpenWave release files        |
+| `DOWNLOADS_S3_BUCKET`                      | S3 bucket behind `downloads.brightwave.io`                        |
+| `DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID`     | CloudFront distribution serving the bucket                        |
+| `DOWNLOADS_AWS_REGION`                     | AWS region; defaults to `us-east-1` when omitted                   |
+
+The IAM role must trust GitHub's OIDC provider with the environment subject
+`repo:brightwave-inc/openwave:environment:desktop-production`. Grant only the
+S3 permissions needed beneath `openwave/` and CloudFront invalidation access for
+the configured distribution. No long-lived AWS access key belongs in GitHub.
+
+Before the first public release, protect the environment as appropriate, verify
+all configuration values, and exercise the workflow with the intended first
+tag. The workflow references Apple signing secrets only in the macOS jobs;
+publishing uses short-lived AWS credentials obtained through OIDC.
 
 ## Before 1.0
 
@@ -128,8 +180,9 @@ its local profile until this checklist is complete:
    `crates/openwave-server/src/desktop_schema.rs` with the durable v1 lifecycle.
    It must preserve supported data, migrate transactionally, fail safely, and
    test upgrades from the latest 0.x state.
-3. Complete the signed, notarized, hosted macOS pipeline and its install/upgrade
-   smoke tests. Add other supported platforms before claiming support for them.
+3. Verify the provisioned signed, notarized, hosted macOS pipeline with clean
+   install and 0.x upgrade smoke tests. Add other supported platforms before
+   claiming support for them.
 4. Update `SECURITY.md` with supported release lines, security-fix policy, and
    end-of-support expectations. Document backup, migration, and rollback.
 5. In the same readiness work, change the `Breaking Changes` category's
