@@ -1,0 +1,3 @@
+# Keep this directory so the Tauri resources glob always matches. The
+# target-specific PDFium shared library is staged here at release build time
+# by build.rs and is gitignored.

@@ -23,6 +23,11 @@ dist/
 crates/openwave-desktop/gen/
 crates/openwave-desktop/binaries/openwave-host-broker-*
 
+# Staged at release build time by the desktop build script; keep the tracked
+# .gitkeep so the Tauri resources glob still matches on a clean checkout.
+crates/openwave-desktop/resources/pdfium/*
+!crates/openwave-desktop/resources/pdfium/.gitkeep
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db
