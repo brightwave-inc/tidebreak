@@ -1023,7 +1023,7 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
     let blocker_connection = Database::connect(&url).await.unwrap();
     let blocker = blocker_connection.begin().await.unwrap();
     blocker
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!("UPDATE chat SET title = title WHERE id = '{}'", chat.id.0),
         ))
@@ -1038,7 +1038,7 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
     });
     tokio::time::sleep(StdDuration::from_millis(100)).await;
     blocker
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
                 "INSERT INTO agent_run (id, chat_id, parent_id, parent_depth, spawn_call_id, execution, depth, status, input, attempt_count, max_attempts, claim_count, available_at, deadline_at, lease_token, lease_expires_at, started_at, finished_at, last_error_code, last_error_detail, created_at, updated_at) \
@@ -1053,7 +1053,7 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
         .await
         .unwrap();
     blocker
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
                 "INSERT INTO sandbox_agent_admission (child_run_id, parent_run_id, origin_turn_id, chat_id, spawn_call_id, admitted_at) \
@@ -1110,7 +1110,7 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
     let blocker_connection = Database::connect(&url).await.unwrap();
     let blocker = blocker_connection.begin().await.unwrap();
     blocker
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             "UPDATE agent_run_claim_lock SET id = id WHERE id = 1",
         ))
@@ -1125,7 +1125,7 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
     });
     tokio::time::sleep(StdDuration::from_millis(100)).await;
     blocker
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
                 "UPDATE agent_run SET lease_expires_at = clock_timestamp() + interval '5 minutes', updated_at = clock_timestamp() WHERE id = '{}'",
@@ -1135,7 +1135,7 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
         .await
         .unwrap();
     let heartbeat_row = blocker
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
                 "SELECT updated_at FROM agent_run WHERE id = '{}'",
@@ -1409,7 +1409,7 @@ async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
     let (turn, lease) = postgres_live_turn(&store, chat.id).await;
     let setup_connection = Database::connect(&url).await.unwrap();
     setup_connection
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
                 "UPDATE turn_run SET lease_expires_at = clock_timestamp() + interval '200 milliseconds' WHERE id = '{}'",
@@ -1422,7 +1422,7 @@ async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
     let blocker_connection = Database::connect(&url).await.unwrap();
     let blocker = blocker_connection.begin().await.unwrap();
     blocker
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!("UPDATE chat SET title = title WHERE id = '{}'", chat.id.0),
         ))
@@ -1728,7 +1728,7 @@ async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() 
 
     let blocker = Database::connect(&url).await.unwrap();
     blocker
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
                 "UPDATE agent_run \
@@ -1743,7 +1743,7 @@ async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() 
         .unwrap();
     let transaction = blocker.begin().await.unwrap();
     transaction
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             "UPDATE agent_run_claim_lock SET id = id WHERE id = 1",
         ))
@@ -1780,7 +1780,7 @@ async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() 
     // terminal child without its immutable result/inbox would now correctly
     // be treated as corruption by the parent terminal guard.
     blocker
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
                 "UPDATE agent_run \
@@ -1816,7 +1816,7 @@ async fn postgres_sandbox_terminal_transitions_are_exact_and_fenced() {
             .id;
     let prioritizer = Database::connect(&url).await.unwrap();
     prioritizer
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
                 "UPDATE agent_run \
@@ -1861,7 +1861,7 @@ async fn postgres_sandbox_terminal_transitions_are_exact_and_fenced() {
             .await
             .id;
     prioritizer
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
                 "UPDATE agent_run \

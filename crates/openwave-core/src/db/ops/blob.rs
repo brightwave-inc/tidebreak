@@ -1,5 +1,5 @@
 use chrono::Utc;
-use sea_orm::sea_query::OnConflict;
+use sea_orm::sea_query::{ExprTrait, OnConflict};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
     TransactionTrait, TryInsertResult,
@@ -678,7 +678,7 @@ where
     entities::blob_retirement::Entity::update_many()
         .col_expr(
             entities::blob_retirement::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(entities::blob_retirement::Column::UpdatedAt).into(),
+            sea_orm::sea_query::Expr::col(entities::blob_retirement::Column::UpdatedAt),
         )
         .filter(entities::blob_retirement::Column::BlobId.is_null())
         .exec(conn)

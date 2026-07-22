@@ -1,7 +1,7 @@
 use chrono::Duration;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set, TransactionTrait,
+    sea_query::ExprTrait, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 
 use crate::agent_tools::{
@@ -306,7 +306,7 @@ pub(in crate::db) async fn claim_delegated_file_read(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ClaimDelegatedFileReadOutcome::Unavailable);
     };
-    let expires_at = requested_expires_at.min(deadline);
+    let expires_at = Ord::min(requested_expires_at, deadline);
     let mut active: entities::sandbox_tool_call::ActiveModel = existing.into();
     active.status = Set(SandboxToolCallStatus::Claimed.as_str().into());
     active.executor_lease_token = Set(Some(lease_token));
@@ -389,7 +389,7 @@ async fn claim_sandbox_tool_call_matching(
         transaction.commit().await.map_err(store_err)?;
         return Ok(ClaimSandboxToolCallOutcome::Unavailable);
     };
-    let expires_at = requested_expires_at.min(deadline);
+    let expires_at = Ord::min(requested_expires_at, deadline);
     let mut active: entities::sandbox_tool_call::ActiveModel = existing.into();
     active.status = Set(SandboxToolCallStatus::Claimed.as_str().into());
     active.executor_lease_token = Set(Some(lease_token));
@@ -451,7 +451,7 @@ pub(in crate::db) async fn heartbeat_sandbox_tool_call(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let expires_at = requested_expires_at.min(deadline);
+    let expires_at = Ord::min(requested_expires_at, deadline);
     if call
         .executor_lease_expires_at
         .is_some_and(|current| current >= expires_at)
@@ -557,7 +557,7 @@ pub(in crate::db) async fn heartbeat_delegated_file_read(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let expires_at = requested_expires_at.min(deadline);
+    let expires_at = Ord::min(requested_expires_at, deadline);
     if call
         .executor_lease_expires_at
         .is_some_and(|current| current >= expires_at)

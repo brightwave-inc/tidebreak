@@ -1120,6 +1120,10 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
         lease_expires_at: chrono::DateTime<Utc>,
     ) -> Result<Option<DocumentJob>> {
+        // Scoped here (not module-level) so the blanket `ExprTrait` impl does
+        // not leak into the test submodules' `use super::*` and make their
+        // `Ord::min`/`max` calls ambiguous.
+        use sea_orm::sea_query::ExprTrait;
         if lease_expires_at <= now {
             return Err(AgentError::Store(
                 "document job lease expiry must be after claim time".into(),
@@ -2740,7 +2744,7 @@ where
     entities::document::Entity::update_many()
         .col_expr(
             entities::document::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(entities::document::Column::UpdatedAt).into(),
+            sea_orm::sea_query::Expr::col(entities::document::Column::UpdatedAt),
         )
         .filter(entities::document::Column::Id.eq(id.0))
         .exec(conn)
@@ -2957,7 +2961,7 @@ where
     entities::document_job::Entity::update_many()
         .col_expr(
             entities::document_job::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(entities::document_job::Column::UpdatedAt).into(),
+            sea_orm::sea_query::Expr::col(entities::document_job::Column::UpdatedAt),
         )
         .filter(entities::document_job::Column::Id.is_null())
         .exec(conn)

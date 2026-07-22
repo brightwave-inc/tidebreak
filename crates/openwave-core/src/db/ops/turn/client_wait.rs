@@ -163,7 +163,7 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
             .do_nothing()
             .to_owned(),
     )
-    .do_nothing()
+    .try_insert()
     .exec_without_returning(&transaction)
     .await
     .map_err(store_err)?;

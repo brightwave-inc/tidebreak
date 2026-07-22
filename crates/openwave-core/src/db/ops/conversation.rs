@@ -51,7 +51,7 @@ where
                 .do_nothing()
                 .to_owned(),
         )
-        .do_nothing()
+        .try_insert()
         .exec_without_returning(conn)
         .await
         .map_err(store_err)?;

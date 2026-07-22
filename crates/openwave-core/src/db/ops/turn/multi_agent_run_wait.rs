@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, QueryFilter,
-    QueryOrder, Set, Statement, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QueryOrder, Set,
+    Statement, TransactionTrait,
 };
 
 use crate::agent_tools::{
@@ -1149,7 +1149,7 @@ where
     let locked = entities::turn_agent_run_wait_lock::Entity::update_many()
         .col_expr(
             entities::turn_agent_run_wait_lock::Column::Id,
-            sea_orm::sea_query::Expr::col(entities::turn_agent_run_wait_lock::Column::Id).into(),
+            sea_orm::sea_query::Expr::col(entities::turn_agent_run_wait_lock::Column::Id),
         )
         .filter(entities::turn_agent_run_wait_lock::Column::Id.eq(1))
         .exec(conn)
