@@ -68,8 +68,10 @@ JSON file named by `OPENWAVE_MCP_CONFIG`. Each entry declares a unique namespace
 an executable plus argument array, an optional working directory and explicit
 environment, and an optional bounded request timeout. No shell interprets these
 values. Child environments are cleared by default to avoid leaking provider or
-host credentials; `inherit_env` is an explicit opt-in. Initialization is
-fail-closed so the advertised tool surface never silently differs from the boot
+host credentials; `env_from` selectively forwards named parent variables without
+putting their values in JSON, while `inherit_env` remains an explicit broad
+opt-in. A missing selected variable fails startup. Initialization is fail-closed
+so the advertised tool surface never silently differs from the boot
 configuration. Configuration UI, reconnect supervision, and MCP
 `tools/list_changed` refresh remain future work.
 

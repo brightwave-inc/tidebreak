@@ -719,7 +719,7 @@ servers from the `OPENWAVE_MCP_CONFIG` file used by the desktop and headless boo
 paths, discovers their tools, mounts namespaced sensitive proxies into
 `ToolRegistry`, and forwards approved calls over the shared MCP session. Server
 commands execute directly rather than through a shell, and receive only their
-explicitly configured environment by default.
+literal environment plus specifically selected parent variables by default.
 
 ### Self-host
 

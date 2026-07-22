@@ -120,7 +120,8 @@ at startup. Set `OPENWAVE_MCP_CONFIG` to a JSON file:
       "name": "private_docs",
       "command": "/absolute/path/to/docs-mcp",
       "args": ["--stdio"],
-      "env": { "DOCS_TOKEN": "secret" },
+      "env": { "LOG_LEVEL": "info" },
+      "env_from": ["DOCS_TOKEN"],
       "cwd": "/srv/docs",
       "request_timeout_ms": 60000
     }
@@ -134,11 +135,13 @@ OPENWAVE_MCP_CONFIG=/absolute/path/to/mcp.json \
 ```
 
 Commands are executed directly, without a shell. Each server receives only its
-configured `env` by default, so use an absolute command path; set
-`"inherit_env": true` only when the server must inherit OpenWave's process
-environment. Treat the JSON file as sensitive when it contains credentials and
-restrict its filesystem permissions. Startup fails if a configured server
-cannot initialize. Its discovered tools are named
+configured literal `env` and the parent variables explicitly named by
+`env_from`, so use an absolute command path. A missing `env_from` variable fails
+startup; set `"inherit_env": true` only when the server must inherit OpenWave's
+entire process environment. Prefer `env_from` for credentials so they need not
+be stored in JSON. Treat the file as sensitive and restrict its filesystem
+permissions if it does contain credentials. Startup fails if a configured
+server cannot initialize. Its discovered tools are named
 `mcp__{server}__{tool}` and always cross the sensitive-tool approval boundary.
 
 ## Layout
