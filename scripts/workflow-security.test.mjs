@@ -61,8 +61,37 @@ test("production secrets remain isolated to the release workflow", () => {
 
   const release = workflows["release.yml"];
   assert.match(release, /^on:\n  release:\n    types: \[published\]/m);
+  assert.match(release, /^  workflow_dispatch:\n/m);
   assert.doesNotMatch(release, /^\s*pull_request(?:_target)?:/m);
   assert.match(release, /^permissions:\n  contents: read$/m);
+});
+
+test("release builds use the trusted shared main cache scope", () => {
+  const release = workflows["release.yml"];
+  assert.match(release, /gh workflow run release\.yml/);
+  assert.match(release, /--ref main/);
+  assert.match(release, /actions: write/);
+  assert.match(
+    release,
+    /github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/main'/,
+  );
+  assert.match(
+    release,
+    /repos\/\$GITHUB_REPOSITORY\/releases\/tags\/\$RELEASE_TAG/,
+  );
+  assert.match(release, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+});
+
+test("cache warming cannot access production credentials or publish", () => {
+  const release = workflows["release.yml"];
+  const warmJob = release.match(
+    /^  warm-macos-cache:[\s\S]*?(?=^  build-macos:)/m,
+  )?.[0];
+  assert.ok(warmJob);
+  assert.match(warmJob, /--no-bundle --ci/);
+  assert.doesNotMatch(warmJob, /^    environment:/m);
+  assert.doesNotMatch(warmJob, /secrets\./);
+  assert.doesNotMatch(warmJob, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_/);
 });
 
 test("release caches exclude signed artifacts and target directories", () => {

@@ -110,11 +110,15 @@ the maintained draft and its proposed version automatic.
    For the first release only, set `v0.1.0`, click **Generate release notes**,
    and curate the full-history result as described above.
 3. Complete the release-readiness review, then click **Publish release**.
-4. GitHub creates the tag and emits the `release.published` event. The macOS
-   release workflow checks out that exact tag, rejects malformed tags or commits
-   outside `main`, and derives the product version from the tag.
-5. The workflow builds Apple Silicon and Intel apps, signs them with the
-   production Developer ID identity, notarizes and staples the app and DMG,
+4. GitHub creates the tag and emits the `release.published` event. A short-lived
+   dispatcher starts the production build from the current `main` workflow and
+   passes only the tag. Running the build from `main` gives every release the
+   same trusted compiler-cache scope; the build still queries GitHub for the
+   published release, checks out that exact tag, rejects malformed tags,
+   prereleases, drafts, or commits outside `main`, and pins all later jobs to
+   the resolved commit SHA.
+5. The dispatched workflow builds Apple Silicon and Intel apps, signs them with
+   the production Developer ID identity, notarizes and staples the app and DMG,
    verifies them with Apple tooling, and creates signed Tauri updater archives.
 6. Only after both architectures pass does the publisher upload immutable
    versioned files, advance the public manifests, invalidate their CDN paths,
@@ -122,8 +126,9 @@ the maintained draft and its proposed version automatic.
 
 Publishing the native draft is the only release boundary. Merging ordinary PRs
 updates the draft but never builds or ships a desktop version. A published
-GitHub Release is considered shipped only when its **Publish macOS release**
-workflow completes successfully.
+GitHub Release is considered shipped only when its dispatched **Publish macOS
+release** build completes successfully; the initial dispatch run is not the
+shipping signal.
 
 ## Public macOS delivery
 
@@ -151,6 +156,12 @@ bytes or move `latest.json` to an older version.
 
 The current app does not yet install updates automatically; `latest.json` is the
 stable server-side updater contract for that client integration.
+
+If the shared macOS compiler cache is empty or has been evicted, manually run
+**Publish macOS release** from `main` with an existing published tag and
+`cache_warm_only` enabled. The two architecture jobs compile the release app
+without loading the `desktop-production` environment, signing, bundling, or
+publishing. Normal native release publication leaves this input disabled.
 
 ### Production environment configuration
 
@@ -197,18 +208,24 @@ Treat the release workflow as public even while the repository is private:
 
 - Release actions are pinned to immutable commit SHAs. Dependabot is responsible
   for proposing reviewed action updates.
-- The workflow runs only for a published native GitHub Release, then verifies
-  that the tag resolves to the release event commit and that the commit is on
-  `main`. It never runs with production secrets for a pull request.
+- A published native GitHub Release dispatches the production build on the
+  protected `main` workflow. The build accepts only a published, non-prerelease
+  tag whose resolved commit is on `main`, and every secret-bearing job checks
+  out that immutable commit SHA. It never runs with production secrets for a
+  pull request or a manually selected feature-branch workflow.
 - Apple and Tauri credentials remain environment secrets. The Tauri private key
   is exposed only to the post-notarization updater-signing step, not the build
   action. AWS authentication uses GitHub OIDC, so no long-lived AWS key is
   stored in GitHub or the source tree. Infrastructure identifiers remain
   environment variables rather than committed configuration.
-- `sccache` stores individual Rust compiler outputs. The Cargo cache stores
-  dependency downloads with `cache-targets: false`; it does not archive
-  `target/`, signed apps, DMGs, updater archives, signatures, or temporary Apple
-  key files.
+- The dispatched builds run under the shared protected `main` cache scope, so
+  later release tags can reuse earlier compiler outputs. `sccache` stores
+  individual Rust compiler outputs. The Cargo cache stores dependency downloads
+  with `cache-targets: false`; neither cache archives `target/`, signed apps,
+  DMGs, updater archives, signatures, or temporary Apple key files.
+- The optional cache-warm jobs have no production environment and receive no
+  Apple, Tauri, or AWS credentials. They stop after compiling with
+  `--no-bundle`; they cannot sign or publish a release.
 - Production artifacts are collected only after code-signing, notarization,
   stapling, and local verification succeed. The temporary App Store Connect key
   is removed even when the build fails.

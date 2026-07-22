@@ -1,53 +1,183 @@
 name: Publish macOS release
 
+run-name: >-
+  ${{ github.event_name == 'release'
+    && format('Dispatch macOS {0}', github.event.release.tag_name)
+    || format('Publish macOS {0}', inputs.release_tag) }}
+
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published GitHub Release tag to build
+        required: true
+        type: string
+      cache_warm_only:
+        description: Compile without signing, bundling, or publishing
+        default: false
+        required: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  # Serialize public releases so two tags cannot race the mutable latest.json.
-  group: openwave-macos-production-release
+  # The release-event run only dispatches the real build on main. Give that
+  # short-lived run its own group so it cannot block the dispatched build.
+  # Serialize production builds so two tags cannot race mutable latest.json.
+  group: >-
+    ${{ github.event_name == 'release'
+      && format('openwave-macos-release-dispatch-{0}', github.run_id)
+      || 'openwave-macos-production-release' }}
   cancel-in-progress: false
 
 jobs:
+  dispatch:
+    name: dispatch trusted main build
+    if: ${{ github.event_name == 'release' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the build from the shared main cache scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: >-
+          gh workflow run release.yml
+          --repo "$GITHUB_REPOSITORY"
+          --ref main
+          --field release_tag="$RELEASE_TAG"
+
   validate:
     name: validate release tag
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      published_at: ${{ steps.release.outputs.published_at }}
+      sha: ${{ steps.release.outputs.sha }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-          ref: refs/tags/${{ github.event.release.tag_name }}
-      - name: Derive the product version from the release tag
-        id: version
+          ref: refs/tags/${{ inputs.release_tag }}
+      - name: Validate the published release and derive its product version
+        id: release
         env:
-          RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          [[ "$RELEASE_IS_PRERELEASE" = false ]] || {
+          node scripts/check-release-tag.mjs "$RELEASE_TAG"
+
+          release_json="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          [[ "$(jq -r .tag_name <<<"$release_json")" = "$RELEASE_TAG" ]] || {
+            echo "GitHub returned metadata for a different release tag." >&2
+            exit 1
+          }
+          [[ "$(jq -r .draft <<<"$release_json")" = false ]] || {
+            echo "Production desktop builds require a published GitHub Release." >&2
+            exit 1
+          }
+          [[ "$(jq -r .prerelease <<<"$release_json")" = false ]] || {
             echo "Production desktop builds cannot be published from a GitHub prerelease." >&2
             exit 1
           }
-          node scripts/check-release-tag.mjs "$RELEASE_TAG"
+          published_at="$(jq -er \
+            '.published_at | select(type == "string" and length > 0)' \
+            <<<"$release_json")"
+          {
+            echo "published_at=$published_at"
+            echo "sha=$(git rev-parse HEAD)"
+            echo "tag=$RELEASE_TAG"
+          } >> "$GITHUB_OUTPUT"
       - name: Require a commit from main
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
-            echo "The release event and tag resolve to different commits." >&2
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA" || {
+            echo "The validated tag changed while resolving its commit." >&2
             exit 1
           }
           git fetch origin main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
-            echo "Release tag ${{ github.event.release.tag_name }} does not point to a commit on main." >&2
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main || {
+            echo "Release tag $RELEASE_TAG does not point to a commit on main." >&2
             exit 1
           }
 
+  warm-macos-cache:
+    name: warm macOS cache · ${{ matrix.arch }}
+    if: ${{ inputs.cache_warm_only }}
+    needs: validate
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    env:
+      CARGO_INCREMENTAL: 0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_WRITE
+      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+
+      - name: Install Rust target
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: macos-release-cargo-registry-v1
+          add-job-id-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: ${{ matrix.arch == 'aarch64' }}
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: crates/openwave-desktop/ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Compile the release app without production credentials
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        with:
+          projectPath: crates/openwave-desktop
+          args: --target ${{ matrix.target }} --no-bundle --ci
+
   build-macos:
     name: macOS · ${{ matrix.arch }}
+    if: ${{ !inputs.cache_warm_only }}
     needs: validate
     runs-on: macos-latest
     environment:
@@ -77,8 +207,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # Build the immutable commit carried by the validated release event.
-          ref: ${{ github.sha }}
+          # Build the immutable commit resolved from the validated release tag.
+          ref: ${{ needs.validate.outputs.sha }}
 
       - name: Validate production signing configuration
         env:
@@ -295,9 +425,9 @@ jobs:
       id-token: write
     env:
       OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
-      RELEASE_SHA: ${{ github.sha }}
-      RELEASE_PUBLISHED_AT: ${{ github.event.release.published_at }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+      RELEASE_PUBLISHED_AT: ${{ needs.validate.outputs.published_at }}
       RELEASE_BASE_URL: https://downloads.brightwave.io/openwave
       AWS_REGION: ${{ vars.DOWNLOADS_AWS_REGION || 'us-east-1' }}
       AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
@@ -306,7 +436,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.validate.outputs.sha }}
 
       - name: Validate hosting configuration
         run: |
