@@ -47,7 +47,11 @@ type MessageListProps = {
   busy: boolean;
   scrollRef: RefObject<HTMLDivElement | null>;
   onScroll: (event: UIEvent<HTMLDivElement>) => void;
-  onApproval: (callId: string, decision: "approve" | "reject") => void;
+  onApproval: (
+    callId: string,
+    decision: "approve" | "reject",
+    remember?: boolean,
+  ) => void;
   onFolderAccessDecision: (
     callId: string,
     decision: FolderAccessDecision,
@@ -137,7 +141,11 @@ function isGroupableTerminalTool(
 export function groupMessageItems(
   messages: ChatMessage[],
   busy: boolean,
-  onApproval: (callId: string, decision: "approve" | "reject") => void,
+  onApproval: (
+    callId: string,
+    decision: "approve" | "reject",
+    remember?: boolean,
+  ) => void,
 ) {
   const items: ReactNode[] = [];
   let index = 0;
@@ -220,7 +228,11 @@ export function MessageBubble({
 }: {
   message: ChatMessage;
   busy: boolean;
-  onApproval: (callId: string, decision: "approve" | "reject") => void;
+  onApproval: (
+    callId: string,
+    decision: "approve" | "reject",
+    remember?: boolean,
+  ) => void;
 }) {
   if (message.role === "tool") {
     return <ToolCallCard name={message.name} status={message.status} />;
@@ -233,13 +245,22 @@ export function MessageBubble({
         {!message.resolved && (
           <div className="approval">
             {message.canApprove && (
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => onApproval(message.callId, "approve")}
-              >
-                Approve
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => onApproval(message.callId, "approve")}
+                >
+                  Approve once
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => onApproval(message.callId, "approve", true)}
+                >
+                  Allow for this chat
+                </button>
+              </>
             )}
             <button
               type="button"

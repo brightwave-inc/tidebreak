@@ -11,7 +11,7 @@
 //! v1 scope (deliberately small; each is a tracked follow-up):
 //! - tool calls run **sequentially** (concurrency for independent calls later);
 //! - approval is **auto** for `ReadOnly`/`Workspace`; `Sensitive` parks via an
-//!   [`ApprovalGate`] until approve/reject (standing grants / auto-judge later);
+//!   [`ApprovalGate`] until approve/reject unless a standing grant covers it;
 //! - context reduction is deterministic floor+restore (no LLM summarization);
 //!   retries with progressive reduction on provider prompt-too-long errors.
 
@@ -1851,7 +1851,8 @@ impl Agent {
         let Some(tool) = self.tools.get(&call.name) else {
             return ToolOutput::error(format!("unknown tool: {}", call.name));
         };
-        // v1 policy: ReadOnly/Workspace auto; Sensitive parks on the approval gate.
+        // Policy: ReadOnly/Workspace auto; uncovered Sensitive calls park on the
+        // approval gate.
         // Commit the approval request *before* emitting ApprovalRequired so a
         // client that sees the event can never race a 404 against a request
         // that exists only in this process.

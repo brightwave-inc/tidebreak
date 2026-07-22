@@ -54,8 +54,8 @@ impl ToolScratch {
 /// The approval policy class a tool declares for itself.
 ///
 /// Policy maps class → auto-approve / ask / deny. In v1: `ReadOnly` and
-/// `Workspace` auto-approve; `Sensitive` always parks on the approval gate.
-/// (Workspace-outside prompting and standing grants are deferred.)
+/// `Workspace` auto-approve; `Sensitive` parks on the approval gate unless a
+/// matching standing grant covers the call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalClass {

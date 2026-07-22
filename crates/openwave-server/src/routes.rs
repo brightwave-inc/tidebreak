@@ -1336,9 +1336,12 @@ pub async fn post_cancel(
 pub struct ApprovalBody {
     /// `approve` or `reject`.
     pub decision: ApprovalChoice,
-    /// Optional reject reason (ignored on approve).
+    /// Optional reject reason (invalid on approve).
     #[serde(default)]
     pub reason: Option<String>,
+    /// Remember an approval for matching calls in this chat.
+    #[serde(default)]
+    pub remember: bool,
 }
 
 /// Wire form of an approval decision.
@@ -1440,6 +1443,11 @@ pub async fn post_approval(
                 .unwrap_or_else(|| "user denied approval".into()),
         },
     };
+    if body.remember && !matches!(&decision, ApprovalDecision::Approve) {
+        return Err(ServerError::bad_request(
+            "only an approval can be remembered",
+        ));
+    }
     if decision
         .reason()
         .is_some_and(|reason| !openwave_core::ToolApproval::valid_reason(reason))
@@ -1448,7 +1456,11 @@ pub async fn post_approval(
             "approval reject reason is invalid",
         ));
     }
-    match state.approvals.resolve(chat_id, call_id, decision).await? {
+    match state
+        .approvals
+        .resolve_with_remember(chat_id, call_id, decision, body.remember)
+        .await?
+    {
         crate::approvals::ResolveApprovalOutcome::Resolved => Ok(StatusCode::NO_CONTENT),
         crate::approvals::ResolveApprovalOutcome::NotPending => Err(ServerError::not_found(
             format!("no pending approval for call {call_id}"),

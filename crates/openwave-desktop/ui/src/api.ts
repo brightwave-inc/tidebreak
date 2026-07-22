@@ -498,11 +498,12 @@ export class ApiClient {
     chatId: string,
     callId: string,
     decision: "approve" | "reject",
+    remember = false,
   ): Promise<void> {
     return this.json(`/chats/${chatId}/approvals/${callId}`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify({ decision, remember }),
     });
   }
 
