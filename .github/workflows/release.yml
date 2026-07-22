@@ -161,6 +161,12 @@ jobs:
             const fs = require("node:fs");
             fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
               version: process.env.OPENWAVE_VERSION,
+              build: {
+                beforeBundleCommand: {
+                  script: "bash scripts/sign-macos-release-resources.sh",
+                  cwd: process.env.GITHUB_WORKSPACE
+                }
+              },
               bundle: {
                 targets: ["app", "dmg"],
                 macOS: { signingIdentity: process.env.APPLE_SIGNING_IDENTITY }
@@ -211,6 +217,21 @@ jobs:
           done
 
           codesign --verify --deep --strict --verbose=2 "$app_path"
+          pdfium_path="$app_path/Contents/Resources/pdfium/libpdfium.dylib"
+          [[ -f "$pdfium_path" ]] || {
+            echo "The packaged PDFium runtime is missing: $pdfium_path" >&2
+            exit 1
+          }
+          codesign --verify --strict --verbose=2 "$pdfium_path"
+          pdfium_signature="$(codesign --display --verbose=4 "$pdfium_path" 2>&1)"
+          [[ "$pdfium_signature" == *"Authority=$APPLE_SIGNING_IDENTITY"* ]] || {
+            echo "Packaged PDFium was not signed by the expected Developer ID identity." >&2
+            exit 1
+          }
+          [[ "$pdfium_signature" == *"Timestamp="* ]] || {
+            echo "Packaged PDFium signature does not contain a secure timestamp." >&2
+            exit 1
+          }
           xcrun stapler validate "$app_path"
           spctl --assess --type execute --verbose=4 "$app_path"
           codesign --verify --verbose=2 "$dmg_path"
