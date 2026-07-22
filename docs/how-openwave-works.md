@@ -662,14 +662,16 @@ foreground spawn delegated. It receives an argument-free tool, while the native
 executor privately performs claim, final attachment revalidation, one broker
 read, and fenced resolution. The renderer never receives that target or the
 file contents from the executor control plane.
-The UI does not yet provide project navigation. It does provide a durable
-active-turn redirect control: guidance is admitted with a stable identity and
-the composer waits for authoritative events rather than treating the request as
-locally applied. Completed assistant messages render the closed structured
-source cards described above. The Documents surface derives scope from the
-authoritative current chat: project chats use that project's corpus and loose
-chats use the unscoped corpus. It lists the catalog, imports a user-picked text
-or Markdown file, polls durable processing status, and searches ready passages.
+The desktop presents a single chat-centric workspace. Projects exist in the data
+model, but the desktop intentionally does not surface project structure for now:
+every chat appears in one flat list and new chats are created without a project.
+The UI provides a durable active-turn redirect control: guidance is admitted with
+a stable identity and the composer waits for authoritative events rather than
+treating the request as locally applied. Completed assistant messages render the
+closed structured source cards described above. The Documents surface derives its
+scope from the authoritative current chat, which is projectless, so it searches
+the unscoped corpus. It lists the catalog, imports a user-picked text or Markdown
+file, polls durable processing status, and searches ready passages.
 Native code reads the selected file and calls the existing local document APIs;
 the renderer sees only bounded titles, lifecycle states, and plain-text search
 passages, never the source path, source bytes, generation identities, index
@@ -782,8 +784,6 @@ The main next steps are:
   foreground server-tool effects;
 - add durable user-question continuations that release workers while awaiting
   an exact answer;
-- expose project CRUD and navigation through the desktop so project-scoped
-  document workflows are reachable;
 - continue unifying client execution, folder consent, user questions, and
   resource waits around durable continuations that release workers;
 - only then extend the bounded depth-one hierarchy with carefully scoped
