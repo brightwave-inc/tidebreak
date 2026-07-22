@@ -5793,6 +5793,119 @@ async fn concurrent_cross_chat_reuse_of_a_turn_id_commits_once() {
 }
 
 #[tokio::test]
+async fn fence_turn_lease_reports_only_the_exact_live_segment() {
+    use crate::TurnLeaseFence;
+
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let expiry = claimed_at + chrono::Duration::minutes(1);
+    let token = uuid::Uuid::new_v4();
+    let claimed = store
+        .claim_turn_run(token, claimed_at, expiry)
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    assert_eq!(claimed.lease_token, Some(token));
+
+    // Nil identities are rejected outright rather than reported as a state.
+    assert!(store
+        .fence_turn_lease(TurnId(uuid::Uuid::nil()), token, claimed_at)
+        .await
+        .is_err());
+    assert!(store
+        .fence_turn_lease(turn_id, uuid::Uuid::nil(), claimed_at)
+        .await
+        .is_err());
+
+    // The exact live token owns the segment until its lease expires.
+    assert_eq!(
+        store
+            .fence_turn_lease(turn_id, token, claimed_at + chrono::Duration::seconds(1))
+            .await
+            .unwrap(),
+        TurnLeaseFence::Current
+    );
+    assert_eq!(
+        store
+            .fence_turn_lease(turn_id, token, expiry)
+            .await
+            .unwrap(),
+        TurnLeaseFence::Stale
+    );
+
+    // A token that never claimed this turn — or claimed a different one — never
+    // owns its segment.
+    assert_eq!(
+        store
+            .fence_turn_lease(turn_id, uuid::Uuid::new_v4(), claimed_at)
+            .await
+            .unwrap(),
+        TurnLeaseFence::Stale
+    );
+    let other_turn = TurnId::new();
+    match store
+        .accept_turn(other_turn, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::ChatBusy(_) => {}
+        outcome => panic!("second turn should observe a busy chat: {outcome:?}"),
+    }
+
+    // A cancellation request keeps the same worker's lease live: the segment
+    // still owns the turn and winds down under its own cancel signal.
+    store
+        .request_turn_cancellation(turn_id, claimed_at + chrono::Duration::seconds(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        TurnRunStatus::Cancelling
+    );
+    assert_eq!(
+        store
+            .fence_turn_lease(turn_id, token, claimed_at + chrono::Duration::seconds(3))
+            .await
+            .unwrap(),
+        TurnLeaseFence::Current
+    );
+
+    // Once the expired lease is reclaimed at the attempt limit, the turn is
+    // terminalized and the original token no longer owns anything.
+    let past_expiry = expiry + chrono::Duration::seconds(1);
+    let steal_token = uuid::Uuid::new_v4();
+    let outcome = store
+        .claim_turn_run(
+            steal_token,
+            past_expiry,
+            past_expiry + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert!(outcome.turn.is_none());
+    assert!(outcome.terminal_event.is_some());
+    assert_eq!(
+        store
+            .fence_turn_lease(turn_id, token, past_expiry + chrono::Duration::seconds(1))
+            .await
+            .unwrap(),
+        TurnLeaseFence::Stale
+    );
+}
+
+#[tokio::test]
 async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();

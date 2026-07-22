@@ -54,7 +54,7 @@ use crate::provider::{
 use crate::steer::SteerInbox;
 use crate::storage::{
     AcceptToolCallOutcome, ApplyTurnSteerOutcome, JournaledTurnSteerOutcome,
-    ResolveToolCallOutcome, Store,
+    ResolveToolCallOutcome, Store, TurnLeaseFence,
 };
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
 
@@ -1323,6 +1323,16 @@ impl Agent {
                 continue;
             }
 
+            // This step is about to persist tool-call rows, execute server tool
+            // side effects, and record the assistant message. Fence those on the
+            // lease first: the provider stream just consumed may have outlasted
+            // it, and a stale segment must neither commit nor replay an effect a
+            // later attempt now owns. Terminal completion is left to the worker's
+            // own lease compare-and-swap, so only fence the tool-bearing path.
+            if !calls.is_empty() {
+                self.ensure_durable_lease_current(turn_id).await?;
+            }
+
             // Record the assistant message (text + any tool-use blocks).
             let mut blocks: Vec<ContentBlock> = Vec::new();
             if !text.is_empty() {
@@ -1673,6 +1683,37 @@ impl Agent {
             events.send_committed(event_ordinal, event)?;
         }
         Ok(true)
+    }
+
+    /// Confirm the durable lease still owns this turn before the current model
+    /// step commits or replays any intermediate tool or message effect.
+    ///
+    /// The per-step generation fence proves the lease before the provider call,
+    /// but a long provider stream can outlast the lease; once it expires another
+    /// worker may terminalize or reclaim the turn. Re-checking here keeps a
+    /// segment whose lease was stolen mid-stream from writing tool-call rows,
+    /// executing filesystem or external side effects, or persisting messages a
+    /// later attempt now owns. Legacy (unclaimed) turns carry no lease and are
+    /// never fenced.
+    async fn ensure_durable_lease_current(&self, turn_id: TurnId) -> Result<()> {
+        let Some(lease_token) = self.durable_steer_lease else {
+            return Ok(());
+        };
+        loop {
+            match self
+                .store
+                .fence_turn_lease(turn_id, lease_token, Utc::now())
+                .await
+            {
+                Ok(TurnLeaseFence::Current) => return Ok(()),
+                Ok(TurnLeaseFence::Stale) => {
+                    return Err(AgentError::Store(format!(
+                        "turn {turn_id} no longer owns lease {lease_token}; refusing to commit intermediate effects"
+                    )));
+                }
+                Err(_) => self.wait_for_durable_store_retry(turn_id).await?,
+            }
+        }
     }
 
     async fn durable_generation_revision(&self, turn_id: TurnId) -> Result<Option<i64>> {
@@ -4256,6 +4297,152 @@ mod tests {
             "an uncovered call must still park on the gate"
         );
         assert_eq!(ran.load(Ordering::SeqCst), 0, "RefuseGate blocks the tool");
+    }
+
+    /// Counts every execution so a test can prove a fenced tool never ran.
+    struct SpyTool {
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for SpyTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "spy".into(),
+                description: "records whether it executed".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::ReadOnly
+        }
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::text("spied"))
+        }
+    }
+
+    /// Asks for the `spy` tool once, but first lets the turn's lease be stolen
+    /// while this provider call is in flight: a fresh claim scan past the lease
+    /// expiry terminalizes the single-attempt turn out from under this worker.
+    struct LeaseStealingProvider {
+        store: Arc<dyn Store>,
+        steal_at: DateTime<Utc>,
+        stole: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for LeaseStealingProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("lease-steal")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            if self.stole.fetch_add(1, Ordering::SeqCst) == 0 {
+                let outcome = self
+                    .store
+                    .claim_turn_run(
+                        uuid::Uuid::new_v4(),
+                        self.steal_at,
+                        self.steal_at + chrono::Duration::minutes(1),
+                    )
+                    .await?;
+                assert!(
+                    outcome.terminal_event.is_some(),
+                    "expired single-attempt turn should be terminalized by the steal"
+                );
+            }
+            Ok(stream::iter(vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "call_spy".into(),
+                    name: "spy".into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: "{}".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stolen_lease_fences_intermediate_tool_effects() {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "go")
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let lease_token = uuid::Uuid::new_v4();
+        store
+            .claim_turn_run(lease_token, now, now + chrono::Duration::minutes(1))
+            .await
+            .unwrap();
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let tools = Arc::new(ToolRegistry::new().with(Box::new(SpyTool { ran: ran.clone() })));
+        let agent = Agent::new(
+            Arc::new(LeaseStealingProvider {
+                store: store.clone(),
+                // The steal reads a claim time past the lease expiry, so the
+                // scan reclaims and terminalizes the turn deterministically.
+                steal_at: now + chrono::Duration::minutes(2),
+                stole: AtomicUsize::new(0),
+            }),
+            tools,
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_durable_steer(lease_token);
+
+        let (tx, rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        drop(tx);
+        let _ = rx.collect::<Vec<_>>().await;
+
+        // The stale segment refuses to persist tool-call rows or run the tool.
+        assert!(
+            matches!(outcome, AgentTurnOutcome::Failed { .. }),
+            "a stolen lease must not complete the turn: {outcome:?}"
+        );
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "a stolen lease must not execute tool side effects"
+        );
+        // The thief's terminal state stands; the stale worker committed nothing.
+        let turn = store.get_turn_run(turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.status, TurnRunStatus::Failed);
+        assert_eq!(turn.lease_token, None);
     }
 
     /// Streams one text delta, then stalls forever — lets a test cancel mid-stream

@@ -746,6 +746,56 @@ pub(in crate::db) async fn heartbeat_turn_run(
     Ok(heartbeat.rows_affected == 1)
 }
 
+pub(in crate::db) async fn fence_turn_lease(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+) -> Result<crate::storage::TurnLeaseFence> {
+    use crate::storage::TurnLeaseFence;
+
+    if id.0.is_nil() {
+        return Err(AgentError::Store("fenced turn id must not be nil".into()));
+    }
+    if lease_token.is_nil() {
+        return Err(AgentError::Store(
+            "fence lease token must not be nil".into(),
+        ));
+    }
+    let now = canonical_db_timestamp(now)?;
+    // The claim receipt binds this token to the exact attempt and claim segment
+    // it was issued for. Matching it against the turn's live counters rejects a
+    // token that once owned an earlier segment of the same turn.
+    let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .filter(|claim| claim.turn_id == id.0)
+    else {
+        return Ok(TurnLeaseFence::Stale);
+    };
+    let Some(turn) = entities::turn_run::Entity::find_by_id(id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(TurnLeaseFence::Stale);
+    };
+    let owns_live_segment = (turn.status == TurnRunStatus::Running.as_str()
+        || turn.status == TurnRunStatus::Cancelling.as_str())
+        && turn.attempt_count == claim.attempt_count
+        && turn.claim_count == claim.claim_count
+        && turn.lease_token == Some(lease_token)
+        && turn
+            .lease_expires_at
+            .is_some_and(|lease_expires_at| lease_expires_at > now);
+    Ok(if owns_live_segment {
+        TurnLeaseFence::Current
+    } else {
+        TurnLeaseFence::Stale
+    })
+}
+
 pub(in crate::db) fn canonical_db_timestamp(
     timestamp: chrono::DateTime<Utc>,
 ) -> Result<chrono::DateTime<Utc>> {
