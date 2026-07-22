@@ -58,7 +58,14 @@ jobs:
           fi
 
           node "$policy_dir/scripts/check-pr-title.mjs" "$PR_TITLE"
-          expected_labels="$(node "$policy_dir/scripts/release-label.mjs" --labels "$PR_TITLE" | jq -r 'sort | join(",")')"
+          # The transition PR runs this workflow from its head while loading the
+          # older trusted classifier from main. Fall back once to its single
+          # label interface; after merge, the trusted copy supports --labels.
+          if expected_labels_json="$(node "$policy_dir/scripts/release-label.mjs" --labels "$PR_TITLE" 2>/dev/null)"; then
+            expected_labels="$(jq -r 'sort | join(",")' <<<"$expected_labels_json")"
+          else
+            expected_labels="$(node "$policy_dir/scripts/release-label.mjs" --title "$PR_TITLE")"
+          fi
           if [[ "$bootstrap" = false ]]; then
             actual_labels=""
             for _ in {1..10}; do
