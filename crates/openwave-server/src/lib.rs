@@ -670,16 +670,20 @@ fn build_retrieval(
 /// Assemble the document parsers, narrowest first. With the `parse-liteparse`
 /// feature, the PDF parser claims `application/pdf`; with `parse-office`, the
 /// Office parser claims Word/Excel/PowerPoint/OpenDocument types (converting via
-/// LibreOffice when present, storing without searchable text when not);
-/// `PlainTextParser` claims `text/*`; the `FallbackParser` claims everything else
-/// so **any** upload is accepted — text-like unknown types stay searchable and
-/// binary ones are stored without polluting the index.
+/// LibreOffice when present, storing without searchable text when not); with
+/// `parse-image`, the image parser claims common raster types (PNG/JPEG/WebP/GIF/
+/// TIFF/BMP), stored without searchable text until OCR lands; `PlainTextParser`
+/// claims `text/*`; the `FallbackParser` claims everything else so **any** upload
+/// is accepted — text-like unknown types stay searchable and binary ones are
+/// stored without polluting the index.
 fn document_parser_registry() -> ParserRegistry {
     let registry = ParserRegistry::new();
     #[cfg(feature = "parse-liteparse")]
     let registry = registry.with_parser(openwave_retrieval::LiteParsePdfParser::new());
     #[cfg(feature = "parse-office")]
     let registry = registry.with_parser(openwave_retrieval::LiteParseOfficeParser::new());
+    #[cfg(feature = "parse-image")]
+    let registry = registry.with_parser(openwave_retrieval::LiteParseImageParser::new());
     registry
         .with_parser(PlainTextParser::new())
         .with_parser(FallbackParser::new())

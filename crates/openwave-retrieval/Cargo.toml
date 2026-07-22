@@ -39,6 +39,15 @@ parse-liteparse = ["dep:liteparse", "dep:liteparse-pdfium-sys"]
 # document instead of failing, so this feature is safe to enable by default in
 # consumers that want Office uploads searchable wherever LibreOffice is installed.
 parse-office = ["parse-liteparse"]
+# Raster image ingestion (PNG/JPEG/WebP/GIF/TIFF/BMP) via liteparse's image
+# conversion path. liteparse converts the image to a single-page PDF in pure Rust
+# (no ImageMagick binary) and parses it via PDFium, so this reuses
+# `parse-liteparse`'s dependencies — no new crates, lockfile unchanged. OCR is
+# off, so raster images are stored without searchable text (making image text
+# searchable is a later, OCR slice); when PDFium is absent the parser degrades to
+# an empty document instead of failing, so the feature is safe to enable wherever
+# images should route to a stable image parser rather than the generic fallback.
+parse-image = ["parse-liteparse"]
 
 [dependencies]
 async-trait = { workspace = true }

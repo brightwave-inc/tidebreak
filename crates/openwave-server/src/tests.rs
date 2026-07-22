@@ -6004,13 +6004,13 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
         .parse()
         .unwrap();
 
-    // Binary bytes are accepted too, but retained without decoded canonical text
-    // so they never pollute the search index.
+    // Binary bytes with an unclaimed media type are accepted too, but retained
+    // without decoded canonical text so they never pollute the search index.
     let binary = post_raw(
         &router,
         &bearer,
-        "/documents/raw?uri=file%3A%2F%2F%2Fimage.png",
-        Some("image/png"),
+        "/documents/raw?uri=file%3A%2F%2F%2Fblob.bin",
+        Some("application/octet-stream"),
         vec![0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF],
     )
     .await;
