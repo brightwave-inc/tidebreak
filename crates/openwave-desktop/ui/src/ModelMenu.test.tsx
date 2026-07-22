@@ -1,6 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ModelMenu } from "./ModelMenu";
+import {
+  ModelCapabilities,
+  ModelMenu,
+  ProviderIcon,
+  formatContextWindow,
+} from "./ModelMenu";
 import type { ModelInfo } from "./api";
 
 const MODELS: ModelInfo[] = [
@@ -52,5 +57,53 @@ describe("ModelMenu", () => {
       <ModelMenu models={MODELS} value={null} disabled onChange={() => {}} />,
     );
     expect(markup).toContain("disabled");
+  });
+});
+
+describe("formatContextWindow", () => {
+  it("renders thousands with a K suffix", () => {
+    expect(formatContextWindow(128_000)).toBe("128K");
+    expect(formatContextWindow(200_000)).toBe("200K");
+  });
+
+  it("renders millions with an M suffix", () => {
+    expect(formatContextWindow(1_000_000)).toBe("1M");
+    expect(formatContextWindow(1_500_000)).toBe("1.5M");
+  });
+
+  it("renders small counts verbatim", () => {
+    expect(formatContextWindow(512)).toBe("512");
+  });
+});
+
+describe("ProviderIcon", () => {
+  it("renders a brand mark for a known provider", () => {
+    const markup = renderToStaticMarkup(<ProviderIcon provider="anthropic" />);
+    expect(markup).toContain("<svg");
+    expect(markup).toContain("<path");
+  });
+
+  it("falls back to a generic glyph for unknown providers", () => {
+    const known = renderToStaticMarkup(<ProviderIcon provider="openai" />);
+    const unknown = renderToStaticMarkup(
+      <ProviderIcon provider="openai_compatible" />,
+    );
+    expect(known).not.toBe(unknown);
+  });
+});
+
+describe("ModelCapabilities", () => {
+  it("shows the context window and both capability markers when supported", () => {
+    const markup = renderToStaticMarkup(<ModelCapabilities model={MODELS[0]} />);
+    expect(markup).toContain("200K");
+    expect(markup).toContain("Accepts image input");
+    expect(markup).toContain("Adjustable reasoning effort");
+  });
+
+  it("hides the reasoning marker when the model does not support it", () => {
+    const markup = renderToStaticMarkup(<ModelCapabilities model={MODELS[1]} />);
+    expect(markup).toContain("128K");
+    expect(markup).toContain("Accepts image input");
+    expect(markup).not.toContain("Adjustable reasoning effort");
   });
 });
