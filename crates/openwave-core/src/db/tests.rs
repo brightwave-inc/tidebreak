@@ -43,6 +43,7 @@ fn sample_chat() -> Chat {
         project_id: None,
         title: Some("hello".into()),
         model: None,
+        reasoning_effort: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
@@ -346,6 +347,7 @@ async fn project_membership_fk_and_attachment_insertions_are_atomic() {
         project_id: Set(Some(uuid::Uuid::new_v4())),
         title: Set(None),
         model: Set(None),
+        reasoning_effort: Set(None),
         attachment_revision: Set(0),
         created_at: Set(Utc::now()),
     };

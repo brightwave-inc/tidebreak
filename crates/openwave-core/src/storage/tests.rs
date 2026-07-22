@@ -1375,6 +1375,7 @@ impl Store for MemStore {
         id: ChatId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
+        reasoning_effort: Option<Option<ReasoningEffort>>,
     ) -> Result<bool> {
         let mut chats = self.chats.lock().unwrap();
         let Some(chat) = chats.get_mut(&id) else {
@@ -1385,6 +1386,9 @@ impl Store for MemStore {
         }
         if let Some(model) = model {
             chat.model = model;
+        }
+        if let Some(reasoning_effort) = reasoning_effort {
+            chat.reasoning_effort = reasoning_effort;
         }
         Ok(true)
     }
@@ -2004,6 +2008,7 @@ fn store_is_object_safe_and_roundtrips() {
         project_id: None,
         title: None,
         model: None,
+        reasoning_effort: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),

@@ -33,10 +33,11 @@ use crate::model::{
     BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
     DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
-    DocumentUpsert, Message, Project, RootAttachmentChange, RootAttachmentChangeTerminal,
-    SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest, SourceRegion, ToolCallRecord,
-    ToolCallResolution, TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWaitStatus,
-    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
+    DocumentUpsert, Message, Project, ReasoningEffort, RootAttachmentChange,
+    RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
+    SourceRegion, ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus,
+    TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus,
+    TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::provider::{StopReason, Usage};
 use crate::storage::{
@@ -1760,8 +1761,9 @@ impl Store for DbStore {
         id: ChatId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
+        reasoning_effort: Option<Option<ReasoningEffort>>,
     ) -> Result<bool> {
-        ops::conversation::update_chat_metadata(self, id, title, model).await
+        ops::conversation::update_chat_metadata(self, id, title, model, reasoning_effort).await
     }
 
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {

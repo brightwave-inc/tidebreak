@@ -4,6 +4,7 @@ import {
   ModelCapabilities,
   ModelMenu,
   ProviderIcon,
+  ReasoningEffortMenu,
   formatContextWindow,
 } from "./ModelMenu";
 import type { ModelInfo } from "./api";
@@ -105,5 +106,30 @@ describe("ModelCapabilities", () => {
     expect(markup).toContain("128K");
     expect(markup).toContain("Accepts image input");
     expect(markup).not.toContain("Adjustable reasoning effort");
+  });
+});
+
+describe("ReasoningEffortMenu", () => {
+  it("labels the trigger 'Default' when no effort is set", () => {
+    const markup = renderToStaticMarkup(
+      <ReasoningEffortMenu value={null} onChange={() => {}} />,
+    );
+    expect(markup).toContain('aria-label="Reasoning effort: Default"');
+    expect(markup).toContain(">Default<");
+  });
+
+  it("labels the trigger with the selected effort level", () => {
+    const markup = renderToStaticMarkup(
+      <ReasoningEffortMenu value="high" onChange={() => {}} />,
+    );
+    expect(markup).toContain('aria-label="Reasoning effort: High"');
+    expect(markup).toContain(">High<");
+  });
+
+  it("disables the trigger when asked", () => {
+    const markup = renderToStaticMarkup(
+      <ReasoningEffortMenu value={null} disabled onChange={() => {}} />,
+    );
+    expect(markup).toContain("disabled");
   });
 });

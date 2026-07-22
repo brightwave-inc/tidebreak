@@ -103,6 +103,10 @@ pub struct ChatRequest {
     /// Sampling temperature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Reasoning-effort hint. Adapters shape it for models that expose the
+    /// control and ignore it otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<crate::model::ReasoningEffort>,
 }
 
 /// Token accounting for a completion.
@@ -253,6 +257,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             temperature: None,
+            reasoning_effort: None,
         }))
         .unwrap();
         drop(provider);
@@ -277,11 +282,13 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             temperature: None,
+            reasoning_effort: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("system"), "{json}");
         assert!(!json.contains("tools"), "{json}");
         assert!(!json.contains("max_tokens"), "{json}");
+        assert!(!json.contains("reasoning_effort"), "{json}");
     }
 
     #[test]

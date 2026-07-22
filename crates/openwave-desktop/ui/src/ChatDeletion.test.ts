@@ -8,6 +8,7 @@ function chat(id: string, projectId: string | null): Chat {
     project_id: projectId,
     title: null,
     model: null,
+    reasoning_effort: null,
     attachment_revision: 0,
     root_attachments: [],
     created_at: "2026-07-21T12:00:00Z",

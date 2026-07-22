@@ -959,6 +959,7 @@ async fn sandbox_request(
         },
         max_tokens: config.max_tokens,
         temperature: config.temperature,
+        reasoning_effort: config.reasoning_effort,
     })
 }
 
@@ -1640,6 +1641,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             temperature: None,
+            reasoning_effort: None,
         };
         for events in [
             vec![
@@ -2634,6 +2636,7 @@ mod tests {
             tools: vec![sandbox_read_delegated_file_tool_spec()],
             max_tokens: Some(100),
             temperature: Some(0.0),
+            reasoning_effort: None,
         };
         let provider = Arc::new(EventProvider(vec![
             ProviderEvent::ToolCallStarted {
@@ -2811,6 +2814,7 @@ mod tests {
             project_id: None,
             title: Some("sandbox".into()),
             model: Some("model".into()),
+            reasoning_effort: None,
             attachment_revision: 0,
             root_attachments: Vec::new(),
             created_at: chrono::Utc::now(),

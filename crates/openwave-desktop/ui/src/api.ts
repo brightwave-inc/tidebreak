@@ -6,6 +6,9 @@ export type ServerInfo = {
 
 export type ProviderKind = "anthropic" | "openai" | "openai_compatible";
 
+/** How hard a reasoning-capable model should think before answering. */
+export type ReasoningEffort = "low" | "medium" | "high";
+
 export type ProviderInfo = {
   kind: ProviderKind;
   enabled: boolean;
@@ -61,6 +64,8 @@ export type Chat = {
   id: string;
   title: string | null;
   model: string | null;
+  /** Reasoning-effort override, or `null` to use the provider default. */
+  reasoning_effort: ReasoningEffort | null;
   attachment_revision: number;
   root_attachments: Array<{
     root_id: string;
@@ -436,6 +441,17 @@ export class ApiClient {
       method: "PATCH",
       headers: this.headers(true),
       body: JSON.stringify({ model }),
+    });
+  }
+
+  patchChatReasoningEffort(
+    chatId: string,
+    reasoningEffort: ReasoningEffort | null,
+  ): Promise<Chat> {
+    return this.json(`/chats/${chatId}`, {
+      method: "PATCH",
+      headers: this.headers(true),
+      body: JSON.stringify({ reasoning_effort: reasoningEffort }),
     });
   }
 

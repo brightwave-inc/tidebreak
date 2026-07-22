@@ -6,6 +6,7 @@ import {
   type ModelInfo,
   type PendingFolderAccessRequest,
   type ProviderInfo,
+  type ReasoningEffort,
   type SequencedEvent,
   type ServerInfo,
 } from "./api";
@@ -37,7 +38,7 @@ import {
 } from "lucide-react";
 import { useTheme } from "./theme";
 import { SettingsView } from "./SettingsView";
-import { ModelMenu } from "./ModelMenu";
+import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { SettingsError, SettingsPanel } from "./settings/primitives";
 import {
   DropdownMenu,
@@ -1109,6 +1110,23 @@ export default function App() {
     );
   }
 
+  async function onReasoningEffortChange(effort: ReasoningEffort | null) {
+    if (!client || !chat || deletionInFlightRef.current) return;
+    const chatId = chat.id;
+    const selection = chatSelectionRef.current;
+    const updated = await client.patchChatReasoningEffort(chatId, effort);
+    if (chatSelectionRef.current !== selection) {
+      setChats((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      return;
+    }
+    setChat(updated);
+    setChats((current) =>
+      current.map((item) => (item.id === updated.id ? updated : item)),
+    );
+  }
+
   async function onApproval(
     callId: string,
     decision: "approve" | "reject",
@@ -1514,12 +1532,22 @@ export default function App() {
             disabled={deletingChatId !== null}
             draft={draft}
             modelMenu={
-              <ModelMenu
-                models={models}
-                value={chat.model}
-                disabled={deletingChatId !== null}
-                onChange={onModelChange}
-              />
+              <>
+                <ModelMenu
+                  models={models}
+                  value={chat.model}
+                  disabled={deletingChatId !== null}
+                  onChange={onModelChange}
+                />
+                {models.find((model) => model.id === chat.model)
+                  ?.supports_reasoning_effort && (
+                  <ReasoningEffortMenu
+                    value={chat.reasoning_effort}
+                    disabled={deletingChatId !== null}
+                    onChange={onReasoningEffortChange}
+                  />
+                )}
+              </>
             }
             onDraftChange={onComposerDraftChange}
             onSend={onSend}

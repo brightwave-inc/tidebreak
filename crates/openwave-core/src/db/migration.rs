@@ -23,6 +23,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddSandboxToolCalls),
             Box::new(AddAgentRunResultPayload),
             Box::new(AddClaimedTurnEffectLeases),
+            Box::new(AddChatReasoningEffort),
         ]
     }
 }
@@ -4849,6 +4850,42 @@ impl MigrationTrait for AddClaimedTurnEffectLeases {
     }
 }
 
+/// Adds the optional per-chat `reasoning_effort` override.
+struct AddChatReasoningEffort;
+
+impl MigrationName for AddChatReasoningEffort {
+    fn name(&self) -> &str {
+        "m20260722_000010_add_chat_reasoning_effort"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddChatReasoningEffort {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Chat::Table)
+                    .add_column(ColumnDef::new(Chat::ReasoningEffort).text())
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Chat::Table)
+                    .drop_column(Chat::ReasoningEffort)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl MigrationTrait for AddAgentRunResultPayload {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -5062,6 +5099,7 @@ enum Chat {
     ProjectId,
     Title,
     Model,
+    ReasoningEffort,
     AttachmentRevision,
     CreatedAt,
 }

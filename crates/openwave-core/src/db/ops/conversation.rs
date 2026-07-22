@@ -12,8 +12,8 @@ use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{ChatId, HostRootId, MessageId, ProjectId, TurnId};
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project, Chat,
-    ChatRootAttachment, Message, Role, RootAttachmentOrigin, ToolCallRecord, TurnRunStatus,
-    MAX_ROOT_ATTACHMENTS,
+    ChatRootAttachment, Message, ReasoningEffort, Role, RootAttachmentOrigin, ToolCallRecord,
+    TurnRunStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::{
     ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome,
@@ -172,6 +172,14 @@ where
         project_id: Set(chat.project_id.map(|p| p.0)),
         title: Set(chat.title.clone()),
         model: Set(chat.model.clone()),
+        // A newly-created chat has no reasoning override (it is set later via
+        // `update_chat_metadata`), so leave the column unset when absent — the DB
+        // defaults it to NULL. This also keeps `create_chat` insertable against a
+        // store migrated only to an older schema (the upgrade-safety tests).
+        reasoning_effort: match &chat.reasoning_effort {
+            Some(effort) => Set(Some(effort.as_str().to_owned())),
+            None => sea_orm::ActiveValue::NotSet,
+        },
         attachment_revision: Set(chat.attachment_revision),
         created_at: Set(chat.created_at),
     }
@@ -232,8 +240,9 @@ pub(in crate::db) async fn update_chat_metadata(
     id: ChatId,
     title: Option<Option<String>>,
     model: Option<Option<String>>,
+    reasoning_effort: Option<Option<ReasoningEffort>>,
 ) -> Result<bool> {
-    if title.is_none() && model.is_none() {
+    if title.is_none() && model.is_none() && reasoning_effort.is_none() {
         return Ok(entities::chat::Entity::find_by_id(id.0)
             .one(&store.conn)
             .await
@@ -252,6 +261,14 @@ pub(in crate::db) async fn update_chat_metadata(
         update = update.col_expr(
             entities::chat::Column::Model,
             sea_orm::sea_query::Expr::value(model),
+        );
+    }
+    if let Some(reasoning_effort) = reasoning_effort {
+        update = update.col_expr(
+            entities::chat::Column::ReasoningEffort,
+            sea_orm::sea_query::Expr::value(
+                reasoning_effort.map(|effort| effort.as_str().to_owned()),
+            ),
         );
     }
     let result = update
@@ -980,6 +997,10 @@ fn chat_from_models(
         project_id: model.project_id.map(ProjectId),
         title: model.title,
         model: model.model,
+        reasoning_effort: model
+            .reasoning_effort
+            .as_deref()
+            .and_then(ReasoningEffort::from_str),
         attachment_revision: model.attachment_revision,
         root_attachments,
         created_at: model.created_at,
