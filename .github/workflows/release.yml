@@ -19,7 +19,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           ref: refs/tags/${{ github.event.release.tag_name }}
@@ -62,6 +62,12 @@ jobs:
           - arch: x86_64
             target: x86_64-apple-darwin
     env:
+      # Reuse compiler outputs across trusted release runs without caching the
+      # signed bundles or any signing material.
+      CARGO_INCREMENTAL: 0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_WRITE
       # Rust code that reports or gates on the product version reads this value.
       # Cargo package versions remain development metadata and are not released.
       OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
@@ -69,7 +75,7 @@ jobs:
       APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
       APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Build the immutable commit carried by the validated release event.
           ref: ${{ github.sha }}
@@ -114,10 +120,28 @@ jobs:
           rustup show
           rustup target add "${{ matrix.target }}"
 
-      - uses: pnpm/action-setup@v6
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: macos-release-cargo-registry-v1
+          add-job-id-key: "false"
+          cache-bin: false
+          # Signed apps, DMGs, updater archives, and signatures remain outside
+          # the cache. sccache handles individual compiler outputs instead.
+          cache-targets: false
+          # The matrix shares these architecture-independent downloads. Use a
+          # single writer so simultaneous cold builds cannot race the save.
+          save-if: ${{ matrix.arch == 'aarch64' }}
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
           version: 10
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
           cache: pnpm
@@ -139,7 +163,6 @@ jobs:
               version: process.env.OPENWAVE_VERSION,
               bundle: {
                 targets: ["app", "dmg"],
-                createUpdaterArtifacts: true,
                 macOS: { signingIdentity: process.env.APPLE_SIGNING_IDENTITY }
               }
             }));
@@ -147,12 +170,10 @@ jobs:
 
       - name: Build, sign, and notarize the Tauri app
         id: tauri
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: crates/openwave-desktop
           args: >-
@@ -229,7 +250,7 @@ jobs:
           find "$output_dir" -type f -print
 
       - name: Upload verified macOS artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: openwave-macos-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
           path: dist/macos/${{ matrix.arch }}/
@@ -262,7 +283,7 @@ jobs:
       DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID }}
       DOWNLOADS_S3_BUCKET: ${{ vars.DOWNLOADS_S3_BUCKET }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
 
@@ -282,13 +303,13 @@ jobs:
           fi
 
       - name: Download Apple Silicon artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: openwave-macos-aarch64-${{ needs.validate.outputs.version }}
           path: dist/macos/aarch64
 
       - name: Download Intel artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: openwave-macos-x86_64-${{ needs.validate.outputs.version }}
           path: dist/macos/x86_64
@@ -304,7 +325,7 @@ jobs:
           --base-url "$RELEASE_BASE_URL"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
         with:
           role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
           role-session-name: openwave-${{ github.run_id }}
