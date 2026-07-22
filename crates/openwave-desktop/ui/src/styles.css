@@ -232,6 +232,19 @@ body {
   }
 }
 
+/* Tailwind v4 leaves border-color at its `currentColor` initial value, so shadcn
+   components that use a bare `border` utility (dropdown menus, dialogs, badges)
+   would draw a heavy near-black outline in the text color. Default it to the
+   themed border here, in `@layer base` so explicit border-color utilities and
+   our own component CSS still win. */
+@layer base {
+  *,
+  ::before,
+  ::after {
+    border-color: var(--color-border);
+  }
+}
+
 /* ---------- App shell ---------- */
 
 .app-shell {
