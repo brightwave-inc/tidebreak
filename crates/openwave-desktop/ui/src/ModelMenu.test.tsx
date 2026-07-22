@@ -4,8 +4,22 @@ import { ModelMenu } from "./ModelMenu";
 import type { ModelInfo } from "./api";
 
 const MODELS: ModelInfo[] = [
-  { id: "claude-sonnet-4", provider: "anthropic" },
-  { id: "gpt-4o", provider: "openai" },
+  {
+    id: "claude-sonnet-4",
+    display_name: "Claude Sonnet 4",
+    provider: "anthropic",
+    context_window: 200_000,
+    supports_reasoning_effort: true,
+    multimodal: true,
+  },
+  {
+    id: "gpt-4o",
+    display_name: "GPT-4o",
+    provider: "openai",
+    context_window: 128_000,
+    supports_reasoning_effort: false,
+    multimodal: true,
+  },
 ];
 
 function triggerMarkup(value: string | null): string {
@@ -21,10 +35,10 @@ describe("ModelMenu", () => {
     expect(markup).toContain(">Default<");
   });
 
-  it("labels the trigger with a selected known model id", () => {
+  it("labels the trigger with a selected model's display name", () => {
     const markup = triggerMarkup("gpt-4o");
-    expect(markup).toContain('aria-label="Model: gpt-4o"');
-    expect(markup).toContain(">gpt-4o<");
+    expect(markup).toContain('aria-label="Model: GPT-4o"');
+    expect(markup).toContain(">GPT-4o<");
   });
 
   it("labels the trigger with an unknown (custom) override verbatim", () => {

@@ -25,7 +25,7 @@ export function ModelMenu({
   onChange: (id: string | null) => void | Promise<void>;
 }) {
   const known = models.find((m) => m.id === value);
-  const label = value ? (known?.id ?? value) : "Default";
+  const label = value ? (known?.display_name ?? value) : "Default";
 
   // Group by provider, preserving first-seen order.
   const groups: { provider: string; models: ModelInfo[] }[] = [];
@@ -82,7 +82,9 @@ export function ModelMenu({
                     if (!selected) void onChange(model.id);
                   }}
                 >
-                  <span className="model-menu-item-label">{model.id}</span>
+                  <span className="model-menu-item-label">
+                    {model.display_name}
+                  </span>
                   {selected && <Check className="ml-auto" />}
                 </DropdownMenuItem>
               );
