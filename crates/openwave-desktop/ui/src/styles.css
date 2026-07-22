@@ -215,16 +215,21 @@ body {
   background: var(--page-background);
 }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
-  color: inherit;
-}
+/* Kept in `@layer base` (like Tailwind's Preflight) so utility text colors —
+   e.g. `text-primary-foreground` on the shadcn Button — override these resets
+   instead of losing to an unlayered rule and rendering dark-on-dark. */
+@layer base {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
 
-button {
-  cursor: pointer;
+  button {
+    cursor: pointer;
+  }
 }
 
 /* ---------- App shell ---------- */
