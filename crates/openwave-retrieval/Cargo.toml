@@ -32,6 +32,13 @@ vec-lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-se
 # system OCR dependency; image-only pages simply yield little text. The server
 # enables this feature explicitly to accept `application/pdf` uploads.
 parse-liteparse = ["dep:liteparse", "dep:liteparse-pdfium-sys"]
+# Rich Office parsing (Word/Excel/PowerPoint/OpenDocument) via liteparse's
+# LibreOffice conversion path. Reuses `parse-liteparse`'s dependencies — no new
+# crates — so enabling it leaves the lockfile unchanged. LibreOffice itself is an
+# OPTIONAL runtime system tool: when it is absent the parser degrades to an empty
+# document instead of failing, so this feature is safe to enable by default in
+# consumers that want Office uploads searchable wherever LibreOffice is installed.
+parse-office = ["parse-liteparse"]
 
 [dependencies]
 async-trait = { workspace = true }

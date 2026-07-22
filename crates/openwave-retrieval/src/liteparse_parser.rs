@@ -8,10 +8,9 @@
 //! rather than failing — the retrieval pipeline treats a text-sparse document as
 //! a valid, if unhelpful, ingest instead of an error.
 //!
-//! `liteparse::parse_input` is PDF-centric; Office and image formats route
-//! through separate LibreOffice/ImageMagick conversion in the upstream CLI and
-//! are intentionally out of scope for this parser, which claims only
-//! `application/pdf`.
+//! This parser claims only `application/pdf`. Office formats route through
+//! LibreOffice conversion in the sibling `LiteParseOfficeParser` (feature
+//! `parse-office`); images remain out of scope for now.
 
 use async_trait::async_trait;
 use liteparse::types::PdfInput;

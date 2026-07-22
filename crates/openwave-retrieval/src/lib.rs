@@ -75,6 +75,8 @@ mod hybrid;
 mod id;
 #[cfg(feature = "vec-lance")]
 mod lance_store;
+#[cfg(feature = "parse-office")]
+mod liteparse_office_parser;
 #[cfg(feature = "parse-liteparse")]
 mod liteparse_parser;
 #[cfg(feature = "embed-openai")]
@@ -96,6 +98,8 @@ pub use error::{Result, RetrievalError};
 pub use id::{ChunkId, DocumentId};
 #[cfg(feature = "vec-lance")]
 pub use lance_store::LanceVectorStore;
+#[cfg(feature = "parse-office")]
+pub use liteparse_office_parser::LiteParseOfficeParser;
 #[cfg(feature = "parse-liteparse")]
 pub use liteparse_parser::LiteParsePdfParser;
 #[cfg(feature = "embed-openai")]
