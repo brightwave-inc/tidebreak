@@ -5865,7 +5865,9 @@ async fn ingest_rejects_unsupported_media_type() {
         &router,
         &bearer,
         "/documents",
-        serde_json::json!({ "content": "%PDF-1.7", "media_type": "application/pdf" }),
+        // `image/png` is handled by no registered parser in any feature config
+        // (unlike `application/pdf`, which the liteparse parser claims).
+        serde_json::json!({ "content": "\u{89}PNG", "media_type": "image/png" }),
     )
     .await;
     // A parser that can't handle the media type is the caller's problem: 400.

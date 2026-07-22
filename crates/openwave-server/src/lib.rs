@@ -625,13 +625,23 @@ fn build_retrieval(
     store: Arc<dyn VectorStore>,
 ) -> (Arc<Retriever>, Box<SearchTool>) {
     let retrieval = Arc::new(Retriever::new(
-        Box::new(ParserRegistry::new().with_parser(PlainTextParser::new())),
+        Box::new(document_parser_registry()),
         Box::new(TextChunker::default()),
         embedder.clone(),
         store.clone(),
     ));
     let search = Box::new(SearchTool::new(embedder, store));
     (retrieval, search)
+}
+
+/// Assemble the document parsers. `PlainTextParser` is the always-on fallback
+/// for `text/*`; with the `parse-liteparse` feature, the narrow PDF parser is
+/// registered ahead of it so `application/pdf` ingests as extracted Markdown.
+fn document_parser_registry() -> ParserRegistry {
+    let registry = ParserRegistry::new();
+    #[cfg(feature = "parse-liteparse")]
+    let registry = registry.with_parser(openwave_retrieval::LiteParsePdfParser::new());
+    registry.with_parser(PlainTextParser::new())
 }
 
 /// Open the persistent vector store for this launch: a LanceDB dataset under
