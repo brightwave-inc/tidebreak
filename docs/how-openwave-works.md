@@ -79,7 +79,10 @@ and lazily starts its bundled host-broker sidecar. Server startup acquires
 exclusive ownership of the data directory, opens the operational database and
 Lance index, loads provider configuration, registers tools, starts the turn and
 document workers, and finally binds an ephemeral loopback port with a fresh
-bearer token.
+bearer token. When `OPENWAVE_MCP_CONFIG` names a JSON file, startup also
+initializes every configured external stdio MCP server and registers its
+namespaced tools before accepting requests. A malformed configuration or failed
+server initialization fails startup instead of silently omitting tools.
 
 The main local data is easy to recognize:
 
@@ -710,11 +713,13 @@ effective API specification.
 
 `openwave mcp /absolute/workspace` starts an MCP stdio server confined to that
 workspace. It currently exposes only `read_file` and `list_dir`, and only after a
-proper MCP initialize lifecycle. Indexed search, approval-aware writable tools,
-and app-level external-server configuration are not wired yet. The `openwave-mcp`
-library also implements the inverse lifecycle for external stdio servers: it
-discovers their tools, mounts namespaced sensitive proxies into `ToolRegistry`,
-and forwards approved calls over the shared MCP session.
+proper MCP initialize lifecycle. Indexed search and approval-aware writable
+tools are not wired yet. The inverse client lifecycle loads external stdio
+servers from the `OPENWAVE_MCP_CONFIG` file used by the desktop and headless boot
+paths, discovers their tools, mounts namespaced sensitive proxies into
+`ToolRegistry`, and forwards approved calls over the shared MCP session. Server
+commands execute directly rather than through a shell, and receive only their
+explicitly configured environment by default.
 
 ### Self-host
 
@@ -793,7 +798,8 @@ The main next steps are:
   sandbox-safe capabilities without widening exact delegated-file or spawn
   authority;
 - add richer parsers and wire indexed search into MCP;
-- wire MCP client configuration and lifecycle into product surfaces;
+- add MCP configuration UI, health/reconnect supervision, and dynamic tool-list
+  refresh;
 - finish the self-host profile rather than only testing Postgres state logic;
 - add health-aware provider failover;
 - bound the agent-to-worker event channel and batch or page journal traffic so

@@ -53,8 +53,8 @@ agent loop **on your machine**, keeps your data local, and lets you bring your
 own model — hosted or fully offline. Its MCP server foundation can expose the
 same tool registry to external agents; `openwave mcp <workspace>` serves the
 built-in read-only file tools today. The inverse client foundation can initialize
-external stdio MCP servers and mount their tools into that registry; app-level
-server configuration and indexed search wiring remain in development.
+external stdio MCP servers configured at boot and mount their tools into that
+registry; configuration UI and indexed search wiring remain in development.
 
 ## Principles
 
@@ -77,9 +77,9 @@ local file tools, multi-provider model routing, a turn engine with live journale
 WebSocket events, a workspace-style desktop conversation shell, a bounded
 foreground/sandbox agent-run foundation, and durable asynchronous document
 ingestion/retrieval with grounded citations — all behind `openwave serve`.
-Connectors, richer document parsers, indexed-search MCP wiring, and app-level
-MCP client configuration remain in development. Expect rapid change and rough
-edges — and see [CONTRIBUTING](CONTRIBUTING.md) if you'd like to help.
+Connectors, richer document parsers, indexed-search MCP wiring, and MCP
+configuration UI remain in development. Expect rapid change and rough edges —
+and see [CONTRIBUTING](CONTRIBUTING.md) if you'd like to help.
 
 ## Building
 
@@ -107,6 +107,39 @@ ANTHROPIC_API_KEY=sk-... cargo run -p openwave-cli -- serve
 # MCP stdio server confined to an explicit workspace (read_file + list_dir):
 cargo run -p openwave-cli -- mcp /absolute/path/to/workspace
 ```
+
+### External MCP servers
+
+Both `openwave serve` and the desktop app can mount external stdio MCP servers
+at startup. Set `OPENWAVE_MCP_CONFIG` to a JSON file:
+
+```json
+{
+  "servers": [
+    {
+      "name": "private_docs",
+      "command": "/absolute/path/to/docs-mcp",
+      "args": ["--stdio"],
+      "env": { "DOCS_TOKEN": "secret" },
+      "cwd": "/srv/docs",
+      "request_timeout_ms": 60000
+    }
+  ]
+}
+```
+
+```sh
+OPENWAVE_MCP_CONFIG=/absolute/path/to/mcp.json \
+  cargo run -p openwave-cli -- serve
+```
+
+Commands are executed directly, without a shell. Each server receives only its
+configured `env` by default, so use an absolute command path; set
+`"inherit_env": true` only when the server must inherit OpenWave's process
+environment. Treat the JSON file as sensitive when it contains credentials and
+restrict its filesystem permissions. Startup fails if a configured server
+cannot initialize. Its discovered tools are named
+`mcp__{server}__{tool}` and always cross the sensitive-tool approval boundary.
 
 ## Layout
 

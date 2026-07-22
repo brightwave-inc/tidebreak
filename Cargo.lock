@@ -6727,6 +6727,7 @@ dependencies = [
  "chrono",
  "futures",
  "openwave-core",
+ "openwave-mcp",
  "openwave-retrieval",
  "openwave-router",
  "openwave-web-search",
