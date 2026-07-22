@@ -27,6 +27,19 @@ use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement, Transaction
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+async fn set_postgres_turn_max_attempts(url: &str, turn_id: TurnId, max_attempts: i32) {
+    assert!(max_attempts > 0);
+    let connection = Database::connect(url).await.unwrap();
+    let updated = connection
+        .execute_unprepared(&format!(
+            "UPDATE turn_run SET max_attempts = {max_attempts} WHERE id = '{}'",
+            turn_id.0
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated.rows_affected(), 1);
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn park_wait_set_for_test<S: Store + ?Sized>(
     store: &S,
@@ -2194,6 +2207,10 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
+    // This slice exercises the terminal claim-scan receipt. Accepted turns now
+    // use three attempts by default, so make the terminal boundary explicit just
+    // as the equivalent SQLite coverage does.
+    set_postgres_turn_max_attempts(&url, turn_id, 1).await;
     assert!(matches!(
         store
             .accept_turn(turn_id, chat.id, "gpt-5", "postgres input")
@@ -2369,6 +2386,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
+    set_postgres_turn_max_attempts(&url, failure_turn.id, 1).await;
     let failure_token = uuid::Uuid::new_v4();
     let failure_claimed_at = failure_turn.available_at + Duration::seconds(1);
     let failure_at = failure_claimed_at + Duration::seconds(1);
