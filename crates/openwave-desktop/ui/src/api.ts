@@ -211,11 +211,21 @@ export type RendererToolName =
   | "read_connected_file"
   | "spawn_sandbox_agent"
   | "wait_for_agents"
+  | "exec"
   | "other";
 
 export type RendererApprovalKind =
   | "search_may_share_query_and_excerpts"
+  | "exec_may_run_networked_command"
   | "unsupported";
+
+/** Approval kinds a human may approve from the renderer. */
+export function isApprovableKind(kind: RendererApprovalKind): boolean {
+  return (
+    kind === "search_may_share_query_and_excerpts" ||
+    kind === "exec_may_run_networked_command"
+  );
+}
 
 /** A strict renderer-safe snapshot used to recover a parked approval. */
 export type PendingToolApproval = {
@@ -668,7 +678,7 @@ export function parsePendingToolApproval(
       value.class !== "workspace" &&
       value.class !== "sensitive") ||
     typeof value.can_approve !== "boolean" ||
-    value.can_approve !== (value.approval === "search_may_share_query_and_excerpts")
+    value.can_approve !== isApprovableKind(value.approval)
   ) {
     return null;
   }
@@ -697,13 +707,16 @@ function isRendererToolName(value: unknown): value is RendererToolName {
     value === "read_connected_file" ||
     value === "spawn_sandbox_agent" ||
     value === "wait_for_agents" ||
+    value === "exec" ||
     value === "other"
   );
 }
 
 function isRendererApprovalKind(value: unknown): value is RendererApprovalKind {
   return (
-    value === "search_may_share_query_and_excerpts" || value === "unsupported"
+    value === "search_may_share_query_and_excerpts" ||
+    value === "exec_may_run_networked_command" ||
+    value === "unsupported"
   );
 }
 

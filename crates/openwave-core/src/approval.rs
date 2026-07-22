@@ -62,10 +62,21 @@ pub enum ToolApprovalStatus {
 }
 
 /// Closed immutable consent semantics stored with each approval request.
+///
+/// Each presentable variant names the egress a human is consenting to, so the
+/// renderer can describe the action without ever seeing the model-authored
+/// summary or arguments. `Unsupported` is the fail-closed default: a Sensitive
+/// action the server can only reject, never approve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolApprovalKind {
+    /// A library search may share the query and matched excerpts with the
+    /// provider.
     SearchMayShareQueryAndExcerpts,
+    /// A command execution escapes the chat workspace and may reach the network.
+    ExecMayRunNetworkedCommand,
+    /// A Sensitive action with no presentable consent semantics: rejectable but
+    /// not approvable from the renderer.
     Unsupported,
 }
 
@@ -74,6 +85,7 @@ impl ToolApprovalKind {
     pub fn for_tool_name(name: &str) -> Self {
         match name {
             "search" => Self::SearchMayShareQueryAndExcerpts,
+            "exec" => Self::ExecMayRunNetworkedCommand,
             _ => Self::Unsupported,
         }
     }
@@ -82,13 +94,17 @@ impl ToolApprovalKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SearchMayShareQueryAndExcerpts => "search_may_share_query_and_excerpts",
+            Self::ExecMayRunNetworkedCommand => "exec_may_run_networked_command",
             Self::Unsupported => "unsupported",
         }
     }
 
     #[must_use]
     pub const fn is_approvable(self) -> bool {
-        matches!(self, Self::SearchMayShareQueryAndExcerpts)
+        matches!(
+            self,
+            Self::SearchMayShareQueryAndExcerpts | Self::ExecMayRunNetworkedCommand
+        )
     }
 }
 
@@ -432,6 +448,27 @@ mod standing_grant_tests {
             Utc::now(),
         )
         .expect("approvable tool is grantable")
+    }
+
+    #[test]
+    fn escaping_exec_is_a_presentable_approvable_kind() {
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        assert_eq!(kind, ToolApprovalKind::ExecMayRunNetworkedCommand);
+        assert!(kind.is_approvable());
+        // The string round-trips through durable storage without collapsing to
+        // `Unsupported`, so an approved escaping action stays approvable on
+        // recovery.
+        assert_eq!(kind.as_str(), "exec_may_run_networked_command");
+    }
+
+    #[test]
+    fn escaping_exec_is_standing_grantable() {
+        let chat = ChatId::new();
+        let grants = StandingGrants::from_grants(vec![grant(chat, "exec")]);
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        assert!(grants.covers(chat, "exec", kind));
+        // Deny-by-default still holds for a different chat.
+        assert!(!grants.covers(ChatId::new(), "exec", kind));
     }
 
     #[test]

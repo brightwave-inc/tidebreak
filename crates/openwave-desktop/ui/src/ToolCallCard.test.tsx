@@ -107,6 +107,13 @@ describe("ToolCallCard", () => {
         "Allow search to send your query and potentially matching document excerpts to configured AI services outside OpenWave?",
       canApprove: true,
     });
+    expect(
+      toolApprovalPresentation("exec_may_run_networked_command"),
+    ).toEqual({
+      summary:
+        "Allow OpenWave to run a command that leaves the chat workspace and may reach the network?",
+      canApprove: true,
+    });
     expect(toolApprovalPresentation("unsupported")).toEqual({
       summary: "The exact action cannot be safely described.",
       canApprove: false,
