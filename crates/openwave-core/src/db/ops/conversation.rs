@@ -678,6 +678,7 @@ pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) ->
         seq: Set(seq),
         role: Set(role_to_db(message.role).to_string()),
         content: Set(message.content.clone()),
+        turn_lease_token: Set(None),
         created_at: Set(message.created_at),
     };
     if let Err(error) = active.insert(&transaction).await {

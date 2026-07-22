@@ -944,20 +944,29 @@ impl PauseTerminalStore {
             .lease_expires_at
             .ok_or_else(|| AgentError::Store("injected scan found no lease".into()))?
             + chrono::Duration::microseconds(1);
-        let outcome = self
-            .inner
-            .claim_turn_run(
-                uuid::Uuid::new_v4(),
-                now,
-                now + chrono::Duration::seconds(1),
-            )
-            .await?;
-        if outcome.terminal_event.is_none() {
-            return Err(AgentError::Store(
-                "injected scan did not terminalize the turn".into(),
-            ));
+        let mut scan_at = now;
+        loop {
+            let outcome = self
+                .inner
+                .claim_turn_run(
+                    uuid::Uuid::new_v4(),
+                    scan_at,
+                    scan_at + chrono::Duration::seconds(1),
+                )
+                .await?;
+            if outcome.terminal_event.is_some() {
+                return Ok(());
+            }
+            let Some(retried) = outcome.turn else {
+                return Err(AgentError::Store(
+                    "injected scan neither retried nor terminalized the turn".into(),
+                ));
+            };
+            scan_at = retried
+                .lease_expires_at
+                .ok_or_else(|| AgentError::Store("injected retry has no lease".into()))?
+                + chrono::Duration::microseconds(1);
         }
-        Ok(())
     }
 }
 
@@ -1567,6 +1576,28 @@ impl Store for PauseTerminalStore {
         }
         Ok(())
     }
+    async fn append_claimed_assistant_message_with_citations(
+        &self,
+        message: &Message,
+        citations: &[openwave_core::AssistantCitationReference],
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::AppendClaimedMessageOutcome> {
+        self.assistant_append_calls.fetch_add(1, Ordering::SeqCst);
+        let outcome = self
+            .inner
+            .append_claimed_assistant_message_with_citations(message, citations, lease_token, now)
+            .await?;
+        if self
+            .fail_after_assistant_commit
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(AgentError::Store(
+                "injected ambiguous claimed assistant append response".into(),
+            ));
+        }
+        Ok(outcome)
+    }
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>> {
         self.inner.list_messages(chat_id).await
     }
@@ -1575,6 +1606,16 @@ impl Store for PauseTerminalStore {
         call: &openwave_core::ToolCallRecord,
     ) -> Result<openwave_core::AcceptToolCallOutcome> {
         self.inner.accept_tool_call(call).await
+    }
+    async fn accept_claimed_tool_call(
+        &self,
+        call: &openwave_core::ToolCallRecord,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::AcceptClaimedToolCallOutcome> {
+        self.inner
+            .accept_claimed_tool_call(call, lease_token, now)
+            .await
     }
     async fn claim_client_tool_call(
         &self,
@@ -1620,6 +1661,54 @@ impl Store for PauseTerminalStore {
     ) -> Result<openwave_core::ResolveToolCallOutcome> {
         self.inner
             .resolve_server_tool_call_with_evidence(id, resolution, resolved_at, evidence)
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_claimed_server_tool_call_with_evidence(
+        &self,
+        id: openwave_core::CallId,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &openwave_core::ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+        evidence: &[openwave_core::RetrievalEvidenceInput],
+    ) -> Result<openwave_core::ResolveToolCallOutcome> {
+        self.inner
+            .resolve_claimed_server_tool_call_with_evidence(
+                id,
+                chat_id,
+                turn_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+                evidence,
+            )
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn abandon_inherited_server_tool_call(
+        &self,
+        id: openwave_core::CallId,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &openwave_core::ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::ResolveToolCallOutcome> {
+        self.inner
+            .abandon_inherited_server_tool_call(
+                id,
+                chat_id,
+                turn_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+            )
             .await
     }
     async fn resolve_client_tool_call_and_append_event(
@@ -9662,6 +9751,60 @@ async fn worker_recovers_ambiguous_claim_and_completion_with_exact_receipts() {
         next_events.last().map(|event| &event.event),
         Some(AgentEvent::TurnCompleted { .. })
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_retries_a_transient_provider_failure_without_a_terminal_event() {
+    struct FailOnceProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for FailOnceProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("retry-once")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(AgentError::Provider("injected transient failure".into()));
+            }
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "recovered".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (router, token, store, _dir) = test_app_with(Arc::new(FailOnceProvider {
+        calls: calls.clone(),
+    }))
+    .await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "retry me").await,
+        StatusCode::ACCEPTED
+    );
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.event, AgentEvent::TurnFailed { .. })));
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+    let turn = store.list_turn_runs(chat.id).await.unwrap().pop().unwrap();
+    assert_eq!(turn.attempt_count, 2);
+    assert_eq!(turn.status, TurnRunStatus::Completed);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -442,6 +442,7 @@ pub(in crate::db) async fn apply_turn_steer(
             seq: Set(next_message_seq_on(&transaction, preceding.chat_id).await?),
             role: Set("assistant".into()),
             content: Set(preceding.content.clone()),
+            turn_lease_token: Set(Some(lease_token)),
             created_at: Set(preceding_created_at),
         };
         if let Err(error) = message.insert(&transaction).await {
@@ -478,6 +479,7 @@ pub(in crate::db) async fn apply_turn_steer(
         seq: Set(next_message_seq_on(&transaction, ChatId(steer.chat_id)).await?),
         role: Set("user".into()),
         content: Set(steer.content.clone()),
+        turn_lease_token: Set(Some(lease_token)),
         created_at: Set(now),
     };
     if let Err(error) = message.insert(&transaction).await {

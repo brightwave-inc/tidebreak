@@ -1674,9 +1674,9 @@ pub struct TurnRun {
 }
 
 impl TurnRun {
-    /// New turns are not automatically replayed after an ambiguous side effect.
-    /// A later resumable-checkpoint slice may opt specific turns into more.
-    pub const DEFAULT_MAX_ATTEMPTS: i32 = 1;
+    /// New turns retry transient failures while per-attempt effect provenance
+    /// prevents ambiguous tool work from being replayed.
+    pub const DEFAULT_MAX_ATTEMPTS: i32 = 3;
     /// Maximum persisted model identifier length.
     pub const MAX_MODEL_LEN: usize = 512;
     /// Maximum persisted machine-readable error code length.

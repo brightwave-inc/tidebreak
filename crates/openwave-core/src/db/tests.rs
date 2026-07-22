@@ -25,6 +25,18 @@ async fn temp_store() -> (tempfile::TempDir, DbStore) {
     (dir, store)
 }
 
+async fn set_turn_max_attempts(store: &DbStore, turn_id: TurnId, max_attempts: i32) {
+    entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::MaxAttempts,
+            sea_orm::sea_query::Expr::value(max_attempts),
+        )
+        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+}
+
 fn sample_chat() -> Chat {
     Chat {
         id: ChatId::new(),
@@ -5090,6 +5102,7 @@ async fn make_queued_turn(
         seq: Set(seq),
         role: Set("user".into()),
         content: Set("turn input".into()),
+        turn_lease_token: Set(None),
         created_at: Set(now),
     }
     .insert(&store.conn)
@@ -5169,6 +5182,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         seq: Set(first_output_seq),
         role: Set("assistant".into()),
         content: Set("done".into()),
+        turn_lease_token: Set(None),
         created_at: Set(now),
     }
     .insert(&store.conn)
@@ -5547,7 +5561,7 @@ async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
     assert_eq!(accepted.model, "gpt-5");
     assert_eq!(accepted.status, TurnRunStatus::Queued);
     assert_eq!(accepted.attempt_count, 0);
-    assert_eq!(accepted.max_attempts, 1);
+    assert_eq!(accepted.max_attempts, TurnRun::DEFAULT_MAX_ATTEMPTS);
     assert_eq!(accepted.lease_token, None);
 
     let messages = store.list_messages(chat.id).await.unwrap();
@@ -6156,7 +6170,7 @@ async fn resuming_turn_claims_a_new_lease_without_consuming_failure_budget() {
         .turn
         .unwrap();
     assert_eq!((first.attempt_count, first.claim_count), (1, 1));
-    assert_eq!(first.max_attempts, 1);
+    assert_eq!(first.max_attempts, TurnRun::DEFAULT_MAX_ATTEMPTS);
 
     let resume_at = first_claimed_at + chrono::Duration::seconds(10);
     let parked = entities::turn_run::Entity::update_many()
@@ -6208,7 +6222,7 @@ async fn resuming_turn_claims_a_new_lease_without_consuming_failure_budget() {
     assert_eq!(resumed.id, turn_id);
     assert_eq!(resumed.status, TurnRunStatus::Running);
     assert_eq!((resumed.attempt_count, resumed.claim_count), (1, 2));
-    assert_eq!(resumed.max_attempts, 1);
+    assert_eq!(resumed.max_attempts, TurnRun::DEFAULT_MAX_ATTEMPTS);
 
     let output = Message {
         id: MessageId::new(),
@@ -7502,6 +7516,7 @@ async fn turn_failure_exhaustion_retains_retry_intent_and_rolls_back_atomically(
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
+    set_turn_max_attempts(&store, turn_id, 1).await;
     let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
     let token = uuid::Uuid::new_v4();
     store
@@ -8260,6 +8275,7 @@ async fn claim_scan_rolls_back_terminal_state_when_event_append_fails() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
+    set_turn_max_attempts(&store, turn.id, 1).await;
     let claimed_at = turn.available_at + chrono::Duration::seconds(1);
     let expires_at = claimed_at + chrono::Duration::minutes(1);
     let token = uuid::Uuid::new_v4();
@@ -8335,6 +8351,8 @@ async fn claim_scan_returns_one_routable_terminal_action_at_a_time() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
+    set_turn_max_attempts(&store, first_turn.id, 1).await;
+    set_turn_max_attempts(&store, second_turn.id, 1).await;
     let claimed_at =
         first_turn.available_at.max(second_turn.available_at) + chrono::Duration::seconds(1);
     let expires_at = claimed_at + chrono::Duration::minutes(1);
@@ -9836,6 +9854,219 @@ async fn server_tool_call_lifecycle_is_atomic_and_idempotent() {
     assert_eq!(listed[0].status, ToolCallStatus::Completed);
     assert_eq!(listed[0].result.as_deref(), Some("hello"));
     assert_eq!(listed[0].arguments, serde_json::json!({"path": "note.txt"}));
+}
+
+#[tokio::test]
+async fn claimed_tool_results_are_co_committed_with_the_turn_lease() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "run a tool")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected turn acceptance: {outcome:?}"),
+    };
+    let first_claim_at = accepted.available_at;
+    let first_lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(
+            first_lease,
+            first_claim_at,
+            first_claim_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id,
+        provider_id: "tu_claimed".into(),
+        name: "write_file".into(),
+        arguments: serde_json::json!({"path": "note.txt"}),
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: first_claim_at,
+        resolved_at: None,
+    };
+    assert!(matches!(
+        store
+            .accept_claimed_tool_call(&call, first_lease, first_claim_at)
+            .await
+            .unwrap(),
+        AcceptClaimedToolCallOutcome::Accepted(_)
+    ));
+    let stored = entities::tool_call::Entity::find_by_id(call.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.turn_lease_token, Some(first_lease));
+    assert_eq!(stored.resolution_turn_lease_token, None);
+
+    let resolution = ToolCallResolution::Completed {
+        result: "written".into(),
+    };
+    assert_eq!(
+        store
+            .resolve_claimed_server_tool_call_with_evidence(
+                call.id,
+                chat.id,
+                turn_id,
+                uuid::Uuid::new_v4(),
+                first_claim_at,
+                &resolution,
+                first_claim_at,
+                &[],
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::LeaseLost
+    );
+    assert_eq!(
+        store.list_tool_calls(chat.id).await.unwrap()[0].status,
+        ToolCallStatus::Pending
+    );
+
+    let retry_at = first_claim_at + chrono::Duration::seconds(2);
+    let retry_lease = uuid::Uuid::new_v4();
+    let retried = store
+        .claim_turn_run(
+            retry_lease,
+            retry_at,
+            retry_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    assert_eq!(retried.attempt_count, 2);
+    assert_eq!(
+        store
+            .resolve_claimed_server_tool_call_with_evidence(
+                call.id,
+                chat.id,
+                turn_id,
+                first_lease,
+                retry_at,
+                &resolution,
+                retry_at,
+                &[],
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::LeaseLost,
+        "the result and stale lease check must commit together"
+    );
+
+    let interrupted = ToolCallResolution::Failed {
+        result: "not replayed".into(),
+        error_code: "tool_execution_interrupted".into(),
+        error_detail: None,
+    };
+    assert_eq!(
+        store
+            .abandon_inherited_server_tool_call(
+                call.id,
+                chat.id,
+                turn_id,
+                retry_lease,
+                retry_at,
+                &interrupted,
+                retry_at,
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Resolved
+    );
+    let stored = entities::tool_call::Entity::find_by_id(call.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.resolution_turn_lease_token, Some(retry_lease));
+    assert_eq!(stored.status, ToolCallStatus::Failed.as_str());
+}
+
+#[tokio::test]
+async fn claimed_intermediate_message_is_co_committed_with_the_turn_lease() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "draft")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected turn acceptance: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at;
+    let lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::seconds(1))
+        .await
+        .unwrap();
+    let message = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        content: "intermediate".into(),
+        created_at: claimed_at,
+    };
+    assert_eq!(
+        store
+            .append_claimed_assistant_message_with_citations(&message, &[], lease, claimed_at,)
+            .await
+            .unwrap(),
+        AppendClaimedMessageOutcome::Appended
+    );
+    assert_eq!(
+        store
+            .append_claimed_assistant_message_with_citations(&message, &[], lease, claimed_at,)
+            .await
+            .unwrap(),
+        AppendClaimedMessageOutcome::Existing
+    );
+
+    let retry_at = claimed_at + chrono::Duration::seconds(2);
+    let retry_lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(
+            retry_lease,
+            retry_at,
+            retry_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    let stale_message = Message {
+        id: MessageId::new(),
+        content: "stale".into(),
+        created_at: retry_at,
+        ..message
+    };
+    assert_eq!(
+        store
+            .append_claimed_assistant_message_with_citations(&stale_message, &[], lease, retry_at,)
+            .await
+            .unwrap(),
+        AppendClaimedMessageOutcome::LeaseLost
+    );
+    assert!(entities::message::Entity::find_by_id(stale_message.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]

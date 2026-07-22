@@ -317,6 +317,7 @@ pub mod message {
         pub seq: i64,
         pub role: String,
         pub content: String,
+        pub turn_lease_token: Option<Uuid>,
         pub created_at: DateTimeUtc,
     }
 
@@ -909,6 +910,8 @@ pub mod tool_call {
         pub client_executor_id: Option<Uuid>,
         pub client_lease_token: Option<Uuid>,
         pub client_lease_expires_at: Option<DateTimeUtc>,
+        pub turn_lease_token: Option<Uuid>,
+        pub resolution_turn_lease_token: Option<Uuid>,
         pub created_at: DateTimeUtc,
         pub resolved_at: Option<DateTimeUtc>,
     }

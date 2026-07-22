@@ -294,6 +294,7 @@ async fn complete_turn_run_inner(
         seq: Set(next_message_seq_on(&transaction, output.chat_id).await?),
         role: Set("assistant".into()),
         content: Set(output.content.clone()),
+        turn_lease_token: Set(Some(lease_token)),
         created_at: Set(output_created_at),
     };
     if let Err(error) = message.insert(&transaction).await {

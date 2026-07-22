@@ -554,6 +554,32 @@ pub enum AcceptToolCallOutcome {
     IdentityConflict,
 }
 
+/// Result of accepting a tool call under an exact live turn lease.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AcceptClaimedToolCallOutcome {
+    /// The request and its originating turn lease were committed together.
+    Accepted(ToolCallRecord),
+    /// An exact retry recovered the request committed by this same lease.
+    Existing(ToolCallRecord),
+    /// The call identity already names different request bytes or another lease.
+    IdentityConflict,
+    /// The exact turn lease was no longer current at commit time.
+    LeaseLost,
+}
+
+/// Result of appending an intermediate assistant message under a turn lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendClaimedMessageOutcome {
+    /// The message and citations were committed under the lease.
+    Appended,
+    /// An exact retry recovered the same message, citations, and lease owner.
+    Existing,
+    /// The message identity names different bytes or another lease.
+    IdentityConflict,
+    /// The exact turn lease was no longer current at commit time.
+    LeaseLost,
+}
+
 /// Result of registering one exact durable approval request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestToolApprovalOutcome {
@@ -2176,11 +2202,34 @@ pub trait Store: Send + Sync {
         }
     }
 
+    /// Atomically append one intermediate assistant message and its citations
+    /// only while `lease_token` owns the exact live turn segment.
+    async fn append_claimed_assistant_message_with_citations(
+        &self,
+        _message: &Message,
+        _references: &[crate::AssistantCitationReference],
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AppendClaimedMessageOutcome> {
+        turn_storage_unavailable()
+    }
+
     /// List a chat's messages in creation order.
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>>;
 
     /// Accept immutable canonical tool-call identity and arguments exactly once.
     async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome>;
+
+    /// Atomically accept one server tool call only while its exact originating
+    /// turn lease remains live. The stored lease is private replay state.
+    async fn accept_claimed_tool_call(
+        &self,
+        _call: &ToolCallRecord,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AcceptClaimedToolCallOutcome> {
+        turn_storage_unavailable()
+    }
 
     /// Register a Sensitive server tool call for durable human review.
     async fn request_tool_call_approval(
@@ -2284,6 +2333,42 @@ pub trait Store: Send + Sync {
         }
         self.resolve_server_tool_call(id, resolution, resolved_at)
             .await
+    }
+
+    /// Resolve a server tool result and retain its evidence only if the same
+    /// live turn lease that accepted the call still owns the turn. The result,
+    /// evidence, and lease comparison commit atomically.
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_claimed_server_tool_call_with_evidence(
+        &self,
+        _id: CallId,
+        _chat_id: ChatId,
+        _turn_id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+        _resolution: &ToolCallResolution,
+        _resolved_at: chrono::DateTime<chrono::Utc>,
+        _evidence: &[crate::RetrievalEvidenceInput],
+    ) -> Result<ResolveToolCallOutcome> {
+        turn_storage_unavailable()
+    }
+
+    /// Resolve a pending server call recovered at worker startup without
+    /// executing it again. An exact live lease for the same turn may commit
+    /// this conservative interrupted result, including after a process restart
+    /// that retained the lease.
+    #[allow(clippy::too_many_arguments)]
+    async fn abandon_inherited_server_tool_call(
+        &self,
+        _id: CallId,
+        _chat_id: ChatId,
+        _turn_id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+        _resolution: &ToolCallResolution,
+        _resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ResolveToolCallOutcome> {
+        turn_storage_unavailable()
     }
 
     /// Read private evidence for trusted server-side citation assembly.

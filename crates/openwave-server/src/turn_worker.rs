@@ -363,21 +363,6 @@ impl TurnWorker {
             )));
         }
         let mut total_model_steps = turn.model_steps;
-        // Intermediate tool/message effects are not yet lease-CAS fenced. Keep
-        // execution explicitly single-attempt so a crash can fail conservatively
-        // but can never replay a filesystem or external tool side effect.
-        if turn.max_attempts != 1 {
-            return self
-                .record_failure(
-                    &turn,
-                    lease_token,
-                    total_model_steps,
-                    turn.usage,
-                    "unsupported_retry_policy",
-                    "turn execution requires max_attempts = 1",
-                )
-                .await;
-        }
         let consumed_steps = usize::try_from(total_model_steps).map_err(|_| {
             AgentError::msg(format!(
                 "turn {} has invalid durable model-step accounting",
@@ -1601,7 +1586,7 @@ impl TurnWorker {
                     };
                     drop(active);
                     return self
-                        .record_failure(
+                        .record_classified_failure(
                             &turn,
                             lease_token,
                             total_model_steps,
@@ -1619,12 +1604,12 @@ impl TurnWorker {
                             .await;
                     }
                     return self
-                        .record_failure(
+                        .record_classified_failure(
                             &turn,
                             lease_token,
                             total_model_steps,
                             total_usage,
-                            "agent_error",
+                            error.kind(),
                             &error.to_string(),
                         )
                         .await;
@@ -1913,6 +1898,47 @@ impl TurnWorker {
         code: &str,
         detail: &str,
     ) -> Result<TurnWorkerOutcome> {
+        self.record_failure_with_retry(
+            turn,
+            lease_token,
+            model_steps,
+            usage,
+            code,
+            detail,
+            TurnFailureRetry::Permanent,
+        )
+        .await
+    }
+
+    async fn record_classified_failure(
+        &self,
+        turn: &TurnRun,
+        lease_token: uuid::Uuid,
+        model_steps: i32,
+        usage: openwave_core::Usage,
+        code: &str,
+        detail: &str,
+    ) -> Result<TurnWorkerOutcome> {
+        let retry = if matches!(code, "provider" | "store" | "secret") {
+            TurnFailureRetry::RetryAt(Utc::now() + chrono_duration(self.config.failure_delay)?)
+        } else {
+            TurnFailureRetry::Permanent
+        };
+        self.record_failure_with_retry(turn, lease_token, model_steps, usage, code, detail, retry)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn record_failure_with_retry(
+        &self,
+        turn: &TurnRun,
+        lease_token: uuid::Uuid,
+        model_steps: i32,
+        usage: openwave_core::Usage,
+        code: &str,
+        detail: &str,
+        retry: TurnFailureRetry,
+    ) -> Result<TurnWorkerOutcome> {
         let mut detail: String = detail
             .chars()
             .map(|character| {
@@ -1940,7 +1966,7 @@ impl TurnWorker {
                     turn.id,
                     lease_token,
                     Utc::now(),
-                    TurnFailureRetry::Permanent,
+                    retry,
                     model_steps,
                     usage,
                     code,
@@ -1971,6 +1997,12 @@ impl TurnWorker {
                 Err(error) => {
                     self.retry_after("failure resolution", turn.id, &error)
                         .await;
+                    if !matches!(retry, TurnFailureRetry::Permanent) {
+                        // Retry the exact failure identity and timestamp. The
+                        // immutable failure receipt is recoverable even after
+                        // the first commit released this lease into retry_wait.
+                        continue;
+                    }
                     match self
                         .resolution_state_retry(
                             turn,
