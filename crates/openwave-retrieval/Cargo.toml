@@ -26,6 +26,12 @@ embed-openai = ["dep:reqwest", "dep:sha2"]
 # and needs `protoc` at build time. OpenWave's workspace CI installs `protoc`, and
 # the server enables this feature explicitly.
 vec-lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-select", "dep:futures", "dep:tokio"]
+# Rich PDF parsing via the local, PDFium-backed `liteparse` engine. Not a default
+# feature: it pulls a large dependency tree. Tesseract OCR is disabled
+# (`default-features = false`), so text-layer PDFs parse fully offline with no
+# system OCR dependency; image-only pages simply yield little text. The server
+# enables this feature explicitly to accept `application/pdf` uploads.
+parse-liteparse = ["dep:liteparse"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -50,6 +56,8 @@ arrow-schema = { version = "58", optional = true }
 arrow-select = { version = "58", optional = true }
 futures = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync"], optional = true }
+# Rich PDF parser (parse-liteparse feature only). Local + PDFium-backed; OCR off.
+liteparse = { version = "2.8", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }

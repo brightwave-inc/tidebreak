@@ -75,6 +75,8 @@ mod hybrid;
 mod id;
 #[cfg(feature = "vec-lance")]
 mod lance_store;
+#[cfg(feature = "parse-liteparse")]
+mod liteparse_parser;
 #[cfg(feature = "embed-openai")]
 mod openai_embed;
 mod parse;
@@ -94,6 +96,8 @@ pub use error::{Result, RetrievalError};
 pub use id::{ChunkId, DocumentId};
 #[cfg(feature = "vec-lance")]
 pub use lance_store::LanceVectorStore;
+#[cfg(feature = "parse-liteparse")]
+pub use liteparse_parser::LiteParsePdfParser;
 #[cfg(feature = "embed-openai")]
 pub use openai_embed::OpenAiEmbedder;
 pub use openwave_core::{DocumentGeneration, ProjectId};
