@@ -1,4 +1,4 @@
-name: Build macOS release
+name: Publish macOS release
 
 on:
   release:
@@ -8,7 +8,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-release-${{ github.event.release.tag_name }}
+  # Serialize public releases so two tags cannot race the mutable latest.json.
+  group: openwave-macos-production-release
   cancel-in-progress: false
 
 jobs:
@@ -25,8 +26,14 @@ jobs:
       - name: Derive the product version from the release tag
         id: version
         env:
+          RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: node scripts/check-release-tag.mjs "$RELEASE_TAG"
+        run: |
+          [[ "$RELEASE_IS_PRERELEASE" = false ]] || {
+            echo "Production desktop builds cannot be published from a GitHub prerelease." >&2
+            exit 1
+          }
+          node scripts/check-release-tag.mjs "$RELEASE_TAG"
       - name: Require a commit from main
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
@@ -43,6 +50,9 @@ jobs:
     name: macOS · ${{ matrix.arch }}
     needs: validate
     runs-on: macos-latest
+    environment:
+      name: desktop-production
+      url: https://downloads.brightwave.io/openwave/manifest.json
     strategy:
       fail-fast: false
       matrix:
@@ -55,11 +65,49 @@ jobs:
       # Rust code that reports or gates on the product version reads this value.
       # Cargo package versions remain development metadata and are not released.
       OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+      APPLE_API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
+      APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+      APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
     steps:
       - uses: actions/checkout@v7
         with:
           # Build the immutable commit carried by the validated release event.
           ref: ${{ github.sha }}
+
+      - name: Validate production signing configuration
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in \
+            APPLE_API_ISSUER \
+            APPLE_API_KEY_ID \
+            APPLE_API_PRIVATE_KEY \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY \
+            TAURI_SIGNING_PRIVATE_KEY \
+            TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing desktop-production signing configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Prepare App Store Connect key
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY=$APPLE_API_KEY_ID" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
       - name: Install Rust target
         run: |
@@ -89,20 +137,285 @@ jobs:
             const fs = require("node:fs");
             fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
               version: process.env.OPENWAVE_VERSION,
-              bundle: { targets: ["app"], macOS: { signingIdentity: "-" } }
+              bundle: {
+                targets: ["app", "dmg"],
+                createUpdaterArtifacts: true,
+                macOS: { signingIdentity: process.env.APPLE_SIGNING_IDENTITY }
+              }
             }));
           '
 
-      # These are deliberately internal, ad-hoc-signed verification artifacts.
-      # A follow-up will notarize/package them and publish the stable manifest
-      # contract under downloads.brightwave.io.
-      - name: Build versioned Tauri app
+      - name: Build, sign, and notarize the Tauri app
+        id: tauri
         uses: tauri-apps/tauri-action@v1
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: crates/openwave-desktop
           args: >-
             --target ${{ matrix.target }}
             --config ${{ runner.temp }}/openwave-release.json
-            --bundles app
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: openwave-macos-${{ matrix.arch }}-[version]
+            --bundles app,dmg
+
+      - name: Verify and collect signed artifacts
+        env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+          RELEASE_TARGET: ${{ matrix.target }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          bundle_dir="$target_dir/$RELEASE_TARGET/release/bundle"
+          app_paths=("$bundle_dir"/macos/*.app)
+          dmg_paths=("$bundle_dir"/dmg/*.dmg)
+          (( ${#app_paths[@]} == 1 )) && [[ -d "${app_paths[0]}" ]] || {
+            echo "Expected exactly one macOS app bundle in $bundle_dir/macos" >&2
+            exit 1
+          }
+          (( ${#dmg_paths[@]} == 1 )) && [[ -f "${dmg_paths[0]}" ]] || {
+            echo "Expected exactly one DMG in $bundle_dir/dmg" >&2
+            exit 1
+          }
+          app_path="${app_paths[0]}"
+          dmg_path="${dmg_paths[0]}"
+
+          for file in "$app_path" "$dmg_path"; do
+            [[ -e "$file" ]] || {
+              echo "Required macOS release artifact is missing: ${file:-<empty path>}" >&2
+              exit 1
+            }
+          done
+
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          xcrun stapler validate "$app_path"
+          spctl --assess --type execute --verbose=4 "$app_path"
+          codesign --verify --verbose=2 "$dmg_path"
+          xcrun stapler validate "$dmg_path"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path"
+
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist")"
+          binary_arches="$(lipo -archs "$app_path/Contents/MacOS/$executable")"
+          case "$RELEASE_ARCH" in
+            aarch64) [[ "$binary_arches" = *arm64* && "$binary_arches" != *x86_64* ]] ;;
+            x86_64) [[ "$binary_arches" = *x86_64* && "$binary_arches" != *arm64* ]] ;;
+            *) echo "Unsupported release architecture: $RELEASE_ARCH" >&2; exit 1 ;;
+          esac || {
+            echo "Expected $RELEASE_ARCH app, found Mach-O architectures: $binary_arches" >&2
+            exit 1
+          }
+
+          # Recreate the updater after notarization so the archive contains the
+          # stapled app, then sign those exact bytes for latest.json.
+          updater_path="${app_path}.tar.gz"
+          signature_path="${updater_path}.sig"
+          rm -f "$updater_path" "$signature_path"
+          tar -czf "$updater_path" -C "$(dirname "$app_path")" "$(basename "$app_path")"
+          cargo tauri signer sign "$updater_path"
+          [[ -s "$signature_path" ]] || {
+            echo "Tauri updater signature is empty: $signature_path" >&2
+            exit 1
+          }
+
+          output_dir="$GITHUB_WORKSPACE/dist/macos/$RELEASE_ARCH"
+          base_name="OpenWave_${OPENWAVE_VERSION}_${RELEASE_ARCH}"
+          mkdir -p "$output_dir"
+          cp "$dmg_path" "$output_dir/${base_name}.dmg"
+          cp "$updater_path" "$output_dir/${base_name}.app.tar.gz"
+          cp "$signature_path" "$output_dir/${base_name}.app.tar.gz.sig"
+          ditto -c -k --keepParent "$app_path" "$output_dir/${base_name}.app.zip"
+          find "$output_dir" -type f -print
+
+      - name: Upload verified macOS artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: openwave-macos-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
+          path: dist/macos/${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove App Store Connect key
+        if: ${{ always() }}
+        run: |
+          [[ -z "${APPLE_API_KEY_PATH:-}" ]] || rm -f "$APPLE_API_KEY_PATH"
+
+  publish:
+    name: publish downloads.brightwave.io
+    needs: [validate, build-macos]
+    runs-on: ubuntu-latest
+    environment:
+      name: desktop-production
+      url: https://downloads.brightwave.io/openwave/manifest.json
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_PUBLISHED_AT: ${{ github.event.release.published_at }}
+      RELEASE_BASE_URL: https://downloads.brightwave.io/openwave
+      AWS_REGION: ${{ vars.DOWNLOADS_AWS_REGION || 'us-east-1' }}
+      AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+      DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID }}
+      DOWNLOADS_S3_BUCKET: ${{ vars.DOWNLOADS_S3_BUCKET }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Validate hosting configuration
+        run: |
+          missing=()
+          for name in \
+            AWS_REGION \
+            AWS_RELEASE_ROLE_ARN \
+            DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID \
+            DOWNLOADS_S3_BUCKET; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing desktop-production hosting configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Download Apple Silicon artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: openwave-macos-aarch64-${{ needs.validate.outputs.version }}
+          path: dist/macos/aarch64
+
+      - name: Download Intel artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: openwave-macos-x86_64-${{ needs.validate.outputs.version }}
+          path: dist/macos/x86_64
+
+      - name: Create release manifests and checksums
+        run: >-
+          node scripts/create-release-manifests.mjs
+          --dist dist
+          --version "$OPENWAVE_VERSION"
+          --tag "$RELEASE_TAG"
+          --sha "$RELEASE_SHA"
+          --published-at "$RELEASE_PUBLISHED_AT"
+          --base-url "$RELEASE_BASE_URL"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
+          role-session-name: openwave-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Prevent latest-version regression
+        run: |
+          error_file="$RUNNER_TEMP/latest-head-error"
+          if aws s3api head-object \
+            --bucket "$DOWNLOADS_S3_BUCKET" \
+            --key openwave/latest.json >/dev/null 2>"$error_file"; then
+            aws s3 cp \
+              "s3://$DOWNLOADS_S3_BUCKET/openwave/latest.json" \
+              "$RUNNER_TEMP/current-latest.json" >/dev/null
+            current_version="$(jq -er .version "$RUNNER_TEMP/current-latest.json")"
+            node scripts/check-release-order.mjs "$current_version" "$OPENWAVE_VERSION"
+          else
+            error="$(<"$error_file")"
+            case "$error" in
+              *404*|*Not\ Found*) echo "No current OpenWave release is hosted yet." ;;
+              *) printf '%s\n' "$error" >&2; exit 1 ;;
+            esac
+          fi
+
+      - name: Upload immutable release files
+        run: |
+          release_prefix="openwave/releases/v$OPENWAVE_VERSION"
+          head_error="$RUNNER_TEMP/release-head-error"
+
+          content_type() {
+            case "$1" in
+              *.json) echo application/json ;;
+              *.dmg) echo application/x-apple-diskimage ;;
+              *.zip) echo application/zip ;;
+              *.tar.gz) echo application/gzip ;;
+              *.sig|*.sha256) echo text/plain ;;
+              *) echo application/octet-stream ;;
+            esac
+          }
+
+          upload_immutable() {
+            local file="$1"
+            local key="$2"
+            local digest remote_digest error
+            digest="$(sha256sum "$file" | cut -d ' ' -f 1)"
+            if remote_digest="$(aws s3api head-object \
+              --bucket "$DOWNLOADS_S3_BUCKET" \
+              --key "$key" \
+              --query Metadata.sha256 \
+              --output text 2>"$head_error")"; then
+              [[ "$remote_digest" = "$digest" ]] || {
+                echo "Refusing to overwrite immutable s3://$DOWNLOADS_S3_BUCKET/$key" >&2
+                exit 1
+              }
+              echo "Already uploaded with matching digest: $key"
+              return
+            fi
+            error="$(<"$head_error")"
+            case "$error" in
+              *404*|*Not\ Found*) ;;
+              *) printf '%s\n' "$error" >&2; exit 1 ;;
+            esac
+            aws s3 cp "$file" "s3://$DOWNLOADS_S3_BUCKET/$key" \
+              --content-type "$(content_type "$file")" \
+              --cache-control 'public,max-age=31536000,immutable' \
+              --metadata "sha256=$digest"
+          }
+
+          while IFS= read -r -d '' file; do
+            relative="${file#dist/}"
+            upload_immutable "$file" "$release_prefix/$relative"
+          done < <(find dist -type f ! -name manifest.json ! -name latest.json -print0)
+          upload_immutable dist/manifest.json "$release_prefix/manifest.json"
+
+      - name: Publish latest release metadata
+        run: |
+          aws s3 cp dist/manifest.json \
+            "s3://$DOWNLOADS_S3_BUCKET/openwave/manifest.json" \
+            --content-type application/json \
+            --cache-control 'no-cache, max-age=0'
+          aws s3 cp dist/latest.json \
+            "s3://$DOWNLOADS_S3_BUCKET/openwave/latest.json" \
+            --content-type application/json \
+            --cache-control 'no-cache, max-age=0'
+
+      - name: Invalidate release metadata
+        id: invalidate
+        run: |
+          invalidation_id="$(aws cloudfront create-invalidation \
+            --distribution-id "$DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID" \
+            --paths '/openwave/manifest.json' '/openwave/latest.json' \
+            --query Invalidation.Id \
+            --output text)"
+          echo "id=$invalidation_id" >> "$GITHUB_OUTPUT"
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "$DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID" \
+            --id "$invalidation_id"
+
+      - name: Smoke test hosted release
+        run: |
+          cache_bust="release=$OPENWAVE_VERSION-$GITHUB_RUN_ID"
+          curl --fail --silent --show-error \
+            "$RELEASE_BASE_URL/latest.json?$cache_bust" \
+            --output "$RUNNER_TEMP/hosted-latest.json"
+          curl --fail --silent --show-error \
+            "$RELEASE_BASE_URL/manifest.json?$cache_bust" \
+            --output "$RUNNER_TEMP/hosted-manifest.json"
+          cmp dist/latest.json "$RUNNER_TEMP/hosted-latest.json"
+          cmp dist/manifest.json "$RUNNER_TEMP/hosted-manifest.json"
+          jq -r '.artifacts[] | .url, .checksum_url, (.signature_url // empty), (.signature_checksum_url // empty)' \
+            dist/manifest.json | while IFS= read -r url; do
+            [[ -n "$url" ]] || continue
+            curl --fail --silent --show-error --head "$url" >/dev/null
+          done
