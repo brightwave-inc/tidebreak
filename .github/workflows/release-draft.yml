@@ -21,7 +21,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-      pull-requests: read
+      pull-requests: write
     steps:
       # pull_request_target is safe here because only trusted base-branch code is
       # checked out; no code or workflow from the PR head is executed.
