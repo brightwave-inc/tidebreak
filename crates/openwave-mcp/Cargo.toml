@@ -20,4 +20,5 @@ tokio = { workspace = true, features = ["io-std", "io-util", "process", "sync", 
 openwave-core = { path = "../openwave-core", default-features = false }
 
 [dev-dependencies]
+chrono = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
