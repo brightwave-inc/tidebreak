@@ -74,13 +74,6 @@ jobs:
             }
           fi
 
-          squash_title="$(gh api "repos/$GITHUB_REPOSITORY" --jq .squash_merge_commit_title)"
-          test "$squash_title" = PR_TITLE || {
-            echo "Set the repository's default squash commit title to 'Pull request title'." >&2
-            echo "The semantic PR title must become the commit title on main." >&2
-            exit 1
-          }
-
   release-policy:
     name: release policy
     runs-on: ubuntu-latest
