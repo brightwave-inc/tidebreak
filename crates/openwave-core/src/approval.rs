@@ -11,6 +11,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::RwLock;
 
 use crate::event::SequencedEvent;
 use crate::id::{CallId, ChatId, TurnId};
@@ -151,6 +152,146 @@ impl ToolApproval {
     }
 }
 
+/// A remembered approval that lets a repeated in-scope Sensitive action run
+/// without re-prompting.
+///
+/// Deny-by-default, like the host broker's capability grants: a grant covers
+/// exactly one chat and one approvable tool. Resource-level sub-scoping (a path
+/// subtree, a single connector) is deliberately deferred until
+/// [`ApprovalRequest`] carries a structured resource — see the follow-up on the
+/// capability-model issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingGrant {
+    chat_id: ChatId,
+    tool_name: String,
+    kind: ToolApprovalKind,
+    granted_at: DateTime<Utc>,
+}
+
+impl StandingGrant {
+    /// Record consent to stop re-prompting `tool_name` in `chat_id`.
+    ///
+    /// Returns `None` for a tool whose consent semantics are not standing-
+    /// grantable (mirrors [`ToolApprovalKind::is_approvable`]); an unknown or
+    /// non-approvable action must keep parking on the gate every call.
+    #[must_use]
+    pub fn new(
+        chat_id: ChatId,
+        tool_name: impl Into<String>,
+        kind: ToolApprovalKind,
+        granted_at: DateTime<Utc>,
+    ) -> Option<Self> {
+        if !kind.is_approvable() {
+            return None;
+        }
+        Some(Self {
+            chat_id,
+            tool_name: tool_name.into(),
+            kind,
+            granted_at,
+        })
+    }
+
+    /// Chat the standing consent belongs to.
+    #[must_use]
+    pub const fn chat_id(&self) -> ChatId {
+        self.chat_id
+    }
+
+    /// Tool name the consent covers.
+    #[must_use]
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+
+    /// Frozen consent semantics the grant was created under.
+    #[must_use]
+    pub const fn kind(&self) -> ToolApprovalKind {
+        self.kind
+    }
+
+    /// When the user granted the standing approval.
+    #[must_use]
+    pub const fn granted_at(&self) -> DateTime<Utc> {
+        self.granted_at
+    }
+
+    /// Whether this grant covers an exact Sensitive action.
+    #[must_use]
+    fn covers(&self, chat_id: ChatId, tool_name: &str, kind: ToolApprovalKind) -> bool {
+        self.chat_id == chat_id
+            && self.tool_name == tool_name
+            && self.kind == kind
+            && kind.is_approvable()
+    }
+}
+
+/// A live, deny-by-default set of standing grants consulted before a Sensitive
+/// tool call parks on the approval gate.
+///
+/// Held behind `Arc` and shared with the agent loop. Interior mutability lets a
+/// later decision path record a grant mid-turn without re-threading the agent;
+/// this slice only seeds and consults the set.
+#[derive(Debug, Default)]
+pub struct StandingGrants {
+    grants: RwLock<Vec<StandingGrant>>,
+}
+
+impl StandingGrants {
+    /// An empty set — nothing is pre-approved.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Seed a fixed set of grants, e.g. recovered from durable state at turn
+    /// start.
+    #[must_use]
+    pub fn from_grants(grants: Vec<StandingGrant>) -> Self {
+        Self {
+            grants: RwLock::new(grants),
+        }
+    }
+
+    /// Remember `grant`, ignoring a duplicate so the set never grows unbounded
+    /// on repeated approvals of the same action.
+    pub fn record(&self, grant: StandingGrant) {
+        let mut grants = self.write();
+        if !grants.iter().any(|existing| {
+            existing.chat_id == grant.chat_id
+                && existing.tool_name == grant.tool_name
+                && existing.kind == grant.kind
+        }) {
+            grants.push(grant);
+        }
+    }
+
+    /// Whether a live grant covers this exact Sensitive action.
+    #[must_use]
+    pub fn covers(&self, chat_id: ChatId, tool_name: &str, kind: ToolApprovalKind) -> bool {
+        self.read()
+            .iter()
+            .any(|grant| grant.covers(chat_id, tool_name, kind))
+    }
+
+    /// Drop every grant, e.g. on explicit revocation.
+    pub fn clear(&self) {
+        self.write().clear();
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<StandingGrant>> {
+        self.grants
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<StandingGrant>> {
+        self.grants
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// What the agent asks the gate to decide.
 #[derive(Debug, Clone)]
 pub struct ApprovalRequest {
@@ -276,5 +417,68 @@ impl ApprovalGate for AutoApproveGate {
                 publication: ApprovalRequiredPublication::Ordinary,
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod standing_grant_tests {
+    use super::*;
+
+    fn grant(chat_id: ChatId, tool: &str) -> StandingGrant {
+        StandingGrant::new(
+            chat_id,
+            tool,
+            ToolApprovalKind::for_tool_name(tool),
+            Utc::now(),
+        )
+        .expect("approvable tool is grantable")
+    }
+
+    #[test]
+    fn non_approvable_tools_cannot_be_granted() {
+        assert!(StandingGrant::new(
+            ChatId::new(),
+            "third_party_sensitive",
+            ToolApprovalKind::for_tool_name("third_party_sensitive"),
+            Utc::now(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn empty_set_covers_nothing() {
+        let chat = ChatId::new();
+        let grants = StandingGrants::new();
+        assert!(!grants.covers(chat, "search", ToolApprovalKind::for_tool_name("search")));
+    }
+
+    #[test]
+    fn grant_covers_only_its_exact_chat_and_tool() {
+        let chat = ChatId::new();
+        let other_chat = ChatId::new();
+        let grants = StandingGrants::from_grants(vec![grant(chat, "search")]);
+        let kind = ToolApprovalKind::for_tool_name("search");
+
+        assert!(grants.covers(chat, "search", kind));
+        assert!(!grants.covers(other_chat, "search", kind));
+        assert!(!grants.covers(
+            chat,
+            "third_party_sensitive",
+            ToolApprovalKind::for_tool_name("third_party_sensitive"),
+        ));
+    }
+
+    #[test]
+    fn recording_is_idempotent_and_revocable() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::for_tool_name("search");
+        let grants = StandingGrants::new();
+        grants.record(grant(chat, "search"));
+        grants.record(grant(chat, "search"));
+        assert_eq!(grants.read().len(), 1);
+        assert!(grants.covers(chat, "search", kind));
+
+        grants.clear();
+        assert!(!grants.covers(chat, "search", kind));
     }
 }
