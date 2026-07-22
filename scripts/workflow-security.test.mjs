@@ -113,6 +113,13 @@ test("the updater private key is isolated from compilation", () => {
 
 test("nested macOS native resources receive a timestamped Developer ID signature", () => {
   const release = workflows["release.yml"];
+  assert.match(release, /security import "\$certificate_path"/);
+  assert.match(release, /security find-identity -v -p codesigning/);
+  assert.ok(
+    release.indexOf("security import") <
+      release.indexOf("Build, sign, and notarize the Tauri app"),
+    "Developer ID certificate must be imported before beforeBundleCommand runs",
+  );
   assert.match(release, /beforeBundleCommand/);
   assert.match(release, /bash scripts\/sign-macos-release-resources\.sh/);
   assert.match(
@@ -122,6 +129,7 @@ test("nested macOS native resources receive a timestamped Developer ID signature
   assert.match(macosResourceSigner, /--sign "\$APPLE_SIGNING_IDENTITY"/);
   assert.match(macosResourceSigner, /--options runtime/);
   assert.match(macosResourceSigner, /--timestamp/);
+  assert.match(release, /security delete-keychain/);
 });
 
 test("the packaged updater trusts the production signing key and endpoint", () => {

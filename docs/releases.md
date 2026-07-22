@@ -218,6 +218,10 @@ Treat the release workflow as public even while the repository is private:
   action. AWS authentication uses GitHub OIDC, so no long-lived AWS key is
   stored in GitHub or the source tree. Infrastructure identifiers remain
   environment variables rather than committed configuration.
+- The Developer ID certificate is imported into an ephemeral runner keychain
+  before Tauri invokes the release-only resource-signing hook. The workflow
+  verifies the configured identity is available, then deletes the keychain and
+  decoded certificate even when the build fails.
 - The dispatched builds run under the shared protected `main` cache scope, so
   later release tags can reuse earlier compiler outputs. `sccache` stores
   individual Rust compiler outputs. The Cargo cache stores dependency downloads

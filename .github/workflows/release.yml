@@ -245,6 +245,46 @@ jobs:
           echo "APPLE_API_KEY=$APPLE_API_KEY_ID" >> "$GITHUB_ENV"
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          certificate_path="$RUNNER_TEMP/openwave-signing.p12"
+          keychain_path="$RUNNER_TEMP/openwave-signing.keychain-db"
+          keychain_password="$(openssl rand -base64 32)"
+          echo "::add-mask::$keychain_password"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+          chmod 600 "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          existing_keychains=()
+          while IFS= read -r existing_keychain; do
+            existing_keychains+=("${existing_keychain//\"/}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s \
+            "$keychain_path" \
+            "${existing_keychains[@]}"
+          security find-identity -v -p codesigning "$keychain_path" \
+            | grep -F -- "$APPLE_SIGNING_IDENTITY"
+
+          {
+            echo "APPLE_CERTIFICATE_PATH=$certificate_path"
+            echo "APPLE_SIGNING_KEYCHAIN=$keychain_path"
+          } >> "$GITHUB_ENV"
+
       - name: Install Rust target
         run: |
           rustup show
@@ -307,9 +347,6 @@ jobs:
       - name: Build, sign, and notarize the Tauri app
         id: tauri
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         with:
           projectPath: crates/openwave-desktop
           args: >-
@@ -408,10 +445,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Remove App Store Connect key
+      - name: Remove temporary signing material
         if: ${{ always() }}
         run: |
           [[ -z "${APPLE_API_KEY_PATH:-}" ]] || rm -f "$APPLE_API_KEY_PATH"
+          [[ -z "${APPLE_SIGNING_KEYCHAIN:-}" ]] \
+            || security delete-keychain "$APPLE_SIGNING_KEYCHAIN" \
+            || true
+          [[ -z "${APPLE_CERTIFICATE_PATH:-}" ]] \
+            || rm -f "$APPLE_CERTIFICATE_PATH"
 
   publish:
     name: publish downloads.brightwave.io
