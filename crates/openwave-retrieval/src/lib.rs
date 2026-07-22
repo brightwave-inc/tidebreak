@@ -101,7 +101,7 @@ pub use liteparse_parser::LiteParsePdfParser;
 #[cfg(feature = "embed-openai")]
 pub use openai_embed::OpenAiEmbedder;
 pub use openwave_core::{DocumentGeneration, ProjectId};
-pub use parse::{DocumentParser, ParsedDocument, ParserRegistry, PlainTextParser};
+pub use parse::{DocumentParser, FallbackParser, ParsedDocument, ParserRegistry, PlainTextParser};
 pub use rerank::Reranker;
 pub use retriever::{GenerationIndexOutcome, IngestOutcome, Retriever};
 #[cfg(feature = "tool")]
