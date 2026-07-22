@@ -15,6 +15,8 @@ Project documentation, versioned alongside the code.
   foreground/sandbox split, provider boundaries, and web-search plan.
 - [Web search configuration](web-search.md) — the local host-owned Exa/Tavily
   selection boundary and its current no-tool state.
+- [Releases and versioning](releases.md) — semantic PR titles, native release
+  drafts, tag-derived macOS builds, and the deliberate path to `1.0.0`.
 
 More to come as the product surfaces land (running locally, API reference, and
 writing tools).

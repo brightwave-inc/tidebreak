@@ -15,4 +15,7 @@ coordinate disclosure once a fix is available.
 ## Scope
 
 OpenWave is pre-alpha and under active development. Security fixes land on the
-default branch; there are no supported release branches yet.
+default branch; there are no supported release branches yet. Before `1.0.0`,
+maintainers must replace this statement with explicit supported release lines
+and an end-of-support policy as required by the
+[release readiness checklist](docs/releases.md#preparing-and-shipping-100).

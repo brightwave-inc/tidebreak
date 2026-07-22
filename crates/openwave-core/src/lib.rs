@@ -13,6 +13,16 @@
 //! model), [`tool`] (the tool contract), and [`provider`] (the model-provider
 //! contract).
 
+/// Version of the OpenWave product containing this crate.
+///
+/// Published desktop builds inject the version selected by their `vX.Y.Z` Git
+/// tag. Ordinary development and independently published crates fall back to
+/// Cargo package metadata.
+pub const VERSION: &str = match option_env!("OPENWAVE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 pub mod agent;
 pub mod agent_tools;
 pub mod approval;

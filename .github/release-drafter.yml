@@ -1,0 +1,32 @@
+name-template: "OpenWave v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+tag-prefix: "v"
+categories:
+  - type: pre-exclude
+    title: "Maintenance"
+    when:
+      label: "semver:none"
+  - title: "Breaking Changes"
+    semver-increment: minor
+    exclusive: true
+    when:
+      label: "semver:breaking"
+  - title: "Features"
+    semver-increment: minor
+    when:
+      label: "semver:minor"
+  - title: "Fixes and Improvements"
+    semver-increment: patch
+    when:
+      label: "semver:patch"
+  # Historical PRs merged before semantic labels existed receive a patch
+  # fallback in the first draft. The first release version is chosen manually.
+  - type: version-resolver
+    title: "Fallback"
+    semver-increment: patch
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+change-title-escapes: '\<*_&'
+template: |
+  ## What's Changed
+
+  $CHANGES

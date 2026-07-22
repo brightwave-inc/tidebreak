@@ -1,0 +1,108 @@
+name: Build macOS release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ github.event.release.tag_name }}
+      - name: Derive the product version from the release tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: node scripts/check-release-tag.mjs "$RELEASE_TAG"
+      - name: Require a commit from main
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
+            echo "The release event and tag resolve to different commits." >&2
+            exit 1
+          }
+          git fetch origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "Release tag ${{ github.event.release.tag_name }} does not point to a commit on main." >&2
+            exit 1
+          }
+
+  build-macos:
+    name: macOS · ${{ matrix.arch }}
+    needs: validate
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    env:
+      # Rust code that reports or gates on the product version reads this value.
+      # Cargo package versions remain development metadata and are not released.
+      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Build the immutable commit carried by the validated release event.
+          ref: ${{ github.sha }}
+
+      - name: Install Rust target
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: crates/openwave-desktop/ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Write tag-derived Tauri configuration
+        env:
+          RELEASE_CONFIG: ${{ runner.temp }}/openwave-release.json
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
+              version: process.env.OPENWAVE_VERSION,
+              bundle: { targets: ["app"], macOS: { signingIdentity: "-" } }
+            }));
+          '
+
+      # These are deliberately internal, ad-hoc-signed verification artifacts.
+      # A follow-up will notarize/package them and publish the stable manifest
+      # contract under downloads.brightwave.io.
+      - name: Build versioned Tauri app
+        uses: tauri-apps/tauri-action@v1
+        with:
+          projectPath: crates/openwave-desktop
+          args: >-
+            --target ${{ matrix.target }}
+            --config ${{ runner.temp }}/openwave-release.json
+            --bundles app
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: openwave-macos-${{ matrix.arch }}-[version]

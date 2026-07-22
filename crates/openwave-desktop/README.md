@@ -73,7 +73,10 @@ build time the bundle still builds (with a loud `cargo:warning`) and PDF parsing
 fails closed with a clear message rather than crashing.
 
 Building an installer per platform and confirming PDF import in the packaged app
-is release-engineering work that must be run on macOS, Windows, and Linux.
+is release-engineering work that must be run on macOS, Windows, and Linux. The
+[release guide](../../docs/releases.md) defines the current tag-derived macOS
+verification build, the signed delivery follow-up, and the additional upgrade
+gate before `1.0.0`.
 
 ## Run locally (browser UI against `openwave serve`)
 

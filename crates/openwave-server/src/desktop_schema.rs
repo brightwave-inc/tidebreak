@@ -66,13 +66,16 @@ where
 /// Prepare the SQLite files and return whether a current marker must be
 /// recorded after migrations succeed.
 fn prepare(data_dir: &Path) -> Result<bool> {
-    prepare_for_package_major(data_dir, env!("CARGO_PKG_VERSION_MAJOR"))
+    let product_major = openwave_core::VERSION
+        .split_once('.')
+        .map_or(openwave_core::VERSION, |(major, _)| major);
+    prepare_for_product_major(data_dir, product_major)
 }
 
-fn prepare_for_package_major(data_dir: &Path, package_major: &str) -> Result<bool> {
-    if package_major != "0" {
+fn prepare_for_product_major(data_dir: &Path, product_major: &str) -> Result<bool> {
+    if product_major != "0" {
         return Err(AgentError::config(format!(
-            "pre-v1 local SQLite schema lifecycle is disabled for package major {package_major}"
+            "pre-v1 local SQLite schema lifecycle is disabled for product major {product_major}"
         )));
     }
     let database = data_dir.join(DATABASE_FILE);
@@ -574,9 +577,9 @@ mod tests {
         std::fs::create_dir_all(vector.parent().unwrap()).unwrap();
         std::fs::write(&vector, b"vector").unwrap();
 
-        let error = prepare_for_package_major(dir.path(), "1").unwrap_err();
+        let error = prepare_for_product_major(dir.path(), "1").unwrap_err();
 
-        assert!(error.to_string().contains("disabled for package major 1"));
+        assert!(error.to_string().contains("disabled for product major 1"));
         assert_eq!(std::fs::read(database).unwrap(), b"database");
         assert_eq!(std::fs::read(vector).unwrap(), b"vector");
         for sidecar in sqlite_files(&dir.path().join(DATABASE_FILE))
