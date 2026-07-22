@@ -14,13 +14,15 @@ use tokio::sync::Notify;
 use openwave_core::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
     ApprovalRegistrationFuture, ApprovalRequest, ApprovalRequiredPublication, CallId, ChatId,
-    DecideToolApprovalOutcome, RequestToolApprovalOutcome, Result, Store,
+    DecideToolApprovalOutcome, RequestToolApprovalOutcome, Result, StandingGrant, StandingGrants,
+    Store,
 };
 
 /// Coordinates durable approval state with local low-latency waiters.
 pub struct ApprovalBroker {
     store: Arc<dyn Store>,
     wake: Arc<Notify>,
+    standing_grants: Arc<StandingGrants>,
 }
 
 impl ApprovalBroker {
@@ -29,7 +31,13 @@ impl ApprovalBroker {
         Self {
             store,
             wake: Arc::new(Notify::new()),
+            standing_grants: Arc::new(StandingGrants::new()),
         }
+    }
+
+    /// Live remembered approvals shared with foreground agent loops.
+    pub fn standing_grants(&self) -> Arc<StandingGrants> {
+        self.standing_grants.clone()
     }
 
     /// Decide one exact request. The same decision is an idempotent success;
@@ -39,6 +47,19 @@ impl ApprovalBroker {
         chat_id: ChatId,
         call_id: CallId,
         decision: ApprovalDecision,
+    ) -> Result<ResolveApprovalOutcome> {
+        self.resolve_with_remember(chat_id, call_id, decision, false)
+            .await
+    }
+
+    /// Decide one exact request and optionally remember an approval for later
+    /// matching calls in the same chat.
+    pub async fn resolve_with_remember(
+        &self,
+        chat_id: ChatId,
+        call_id: CallId,
+        decision: ApprovalDecision,
+        remember: bool,
     ) -> Result<ResolveApprovalOutcome> {
         let Some(current) = self.store.get_tool_call_approval(call_id).await? else {
             return Ok(ResolveApprovalOutcome::NotPending);
@@ -55,6 +76,16 @@ impl ApprovalBroker {
             .await?;
         match outcome {
             DecideToolApprovalOutcome::Decided(_) | DecideToolApprovalOutcome::Existing(_) => {
+                if remember && matches!(&decision, ApprovalDecision::Approve) {
+                    if let Some(grant) = StandingGrant::new(
+                        current.chat_id,
+                        current.tool_name,
+                        current.kind,
+                        Utc::now(),
+                    ) {
+                        self.standing_grants.record(grant);
+                    }
+                }
                 self.wake.notify_waiters();
                 Ok(ResolveApprovalOutcome::Resolved)
             }
@@ -331,6 +362,29 @@ mod tests {
                 .unwrap(),
             ResolveApprovalOutcome::DecisionConflict
         );
+    }
+
+    #[tokio::test]
+    async fn remembered_approval_grants_matching_calls_in_the_chat() {
+        let (store, request) = setup("search").await;
+        let broker = ApprovalBroker::new(store);
+        let _pending = broker.register(request.clone(), None).await;
+
+        assert_eq!(
+            broker
+                .resolve_with_remember(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    true,
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+        assert!(broker
+            .standing_grants()
+            .covers(request.chat_id, &request.tool_name, request.kind,));
     }
 
     #[tokio::test]

@@ -7,9 +7,9 @@
 //! the *same* `Arc<dyn VectorStore>` the ingest side writes to and the agent
 //! searches a live index.
 //!
-//! It is always `Sensitive`: even local retrieval returns matching document
-//! excerpts to the selected chat model, which may be a remote provider.
-//! Recoverable problems (empty query, an
+//! Its approval class follows the work the tool itself performs: fully local
+//! retrieval is read-only, while a remote embedder, vector store, or reranker
+//! makes the call sensitive. Recoverable problems (empty query, an
 //! embedder/store hiccup) come back as [`ToolOutput::error`] for the model to see
 //! and adapt to, per the tool convention; only genuinely unexpected faults would
 //! be an `Err`.
@@ -160,11 +160,12 @@ impl Tool for SearchTool {
     }
 
     fn approval_class(&self) -> ApprovalClass {
-        // Foreground search results include matching document excerpts. They
-        // are fed back into the selected chat provider even when retrieval,
-        // embedding, and reranking are local. Until the entire consumer path
-        // can prove it remains local, consent is required unconditionally.
-        ApprovalClass::Sensitive
+        let reranker_is_local = self.reranker.as_deref().is_none_or(Reranker::is_local);
+        if self.embedder.is_local() && self.store.is_local() && reranker_is_local {
+            ApprovalClass::ReadOnly
+        } else {
+            ApprovalClass::Sensitive
+        }
     }
 
     async fn execute(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
@@ -339,6 +340,8 @@ mod tests {
 
     struct FixedReranker(Vec<f32>);
 
+    struct LocalReranker;
+
     struct RemoteEmbedder(HashEmbedder);
 
     #[async_trait]
@@ -371,6 +374,21 @@ mod tests {
             _candidates: &[ScoredChunk],
         ) -> crate::Result<Vec<f32>> {
             Ok(self.0.clone())
+        }
+    }
+
+    #[async_trait]
+    impl Reranker for LocalReranker {
+        fn is_local(&self) -> bool {
+            true
+        }
+
+        async fn rerank(
+            &self,
+            _query: &str,
+            candidates: &[ScoredChunk],
+        ) -> crate::Result<Vec<f32>> {
+            Ok(candidates.iter().map(|candidate| candidate.score).collect())
         }
     }
 
@@ -423,16 +441,20 @@ mod tests {
     }
 
     #[test]
-    fn search_requires_consent_even_when_retrieval_is_local() {
+    fn search_only_requires_consent_when_retrieval_can_escape() {
         let store = Arc::new(InMemoryVectorStore::new(DIMS));
         let local = SearchTool::new(Arc::new(HashEmbedder::new(DIMS)), store.clone());
         assert_eq!(local.spec().name, "search");
-        assert_eq!(local.approval_class(), ApprovalClass::Sensitive);
+        assert_eq!(local.approval_class(), ApprovalClass::ReadOnly);
         assert!(local.spec().input_schema["required"]
             .as_array()
             .unwrap()
             .iter()
             .any(|v| v == "query"));
+
+        let locally_reranked = SearchTool::new(Arc::new(HashEmbedder::new(DIMS)), store.clone())
+            .with_reranker(Arc::new(LocalReranker));
+        assert_eq!(locally_reranked.approval_class(), ApprovalClass::ReadOnly);
 
         let remote = SearchTool::new(
             Arc::new(RemoteEmbedder(HashEmbedder::new(DIMS))),

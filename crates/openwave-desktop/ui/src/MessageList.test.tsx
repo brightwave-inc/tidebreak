@@ -66,6 +66,8 @@ describe("MessageBubble", () => {
       markup.indexOf("Approval needed"),
     );
     expect(markup).toContain("message-approval");
+    expect(markup).toContain(">Approve once<");
+    expect(markup).toContain(">Allow for this chat<");
     expect(markup).not.toContain("Working");
     expect(markup).toContain('aria-live="polite"');
   });

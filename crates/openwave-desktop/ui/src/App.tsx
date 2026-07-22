@@ -1109,9 +1109,13 @@ export default function App() {
     );
   }
 
-  async function onApproval(callId: string, decision: "approve" | "reject") {
+  async function onApproval(
+    callId: string,
+    decision: "approve" | "reject",
+    remember = false,
+  ) {
     if (!client || !chat) return;
-    await client.decideApproval(chat.id, callId, decision);
+    await client.decideApproval(chat.id, callId, decision, remember);
     setMessages((prev) =>
       prev.map((m) =>
         m.role === "approval" && m.callId === callId

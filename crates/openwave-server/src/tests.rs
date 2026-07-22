@@ -10519,7 +10519,11 @@ impl ModelProvider for ProbeProvider {
         &self,
         _req: ChatRequest,
     ) -> openwave_core::Result<BoxStream<'static, ProviderEvent>> {
-        let events = if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+        let events = if self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .is_multiple_of(2)
+        {
             vec![
                 ProviderEvent::ToolCallStarted {
                     index: 0,
@@ -10616,6 +10620,7 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
     // decision, leaving the exact approval actionable.
     for body in [
         serde_json::json!({"decision": "reject", "reason": "bad\0reason"}),
+        serde_json::json!({"decision": "reject", "remember": true}),
         serde_json::json!({"decision": "approve", "unexpected": true}),
     ] {
         let invalid = router
@@ -10652,7 +10657,7 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"decision": "approve"}).to_string(),
+                    serde_json::json!({"decision": "approve", "remember": true}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -10672,6 +10677,7 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
 
     // An exact decision retry remains an idempotent success after execution.
     let again = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -10686,6 +10692,37 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
         .await
         .unwrap();
     assert_eq!(again.status(), StatusCode::NO_CONTENT);
+
+    // A later matching call in this chat runs under the standing grant and
+    // never emits a second approval prompt.
+    let second_turn = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, second_turn, "probe it again").await,
+        StatusCode::ACCEPTED
+    );
+    let mut completed_events = None;
+    for _ in 0..500 {
+        let events = store.list_events(chat.id, 0).await.unwrap();
+        if events
+            .iter()
+            .filter(|event| matches!(event.event, AgentEvent::TurnCompleted { .. }))
+            .count()
+            == 2
+        {
+            completed_events = Some(events);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let events = completed_events.expect("second turn should complete under the standing grant");
+    assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, AgentEvent::ApprovalRequired { .. }))
+            .count(),
+        1,
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

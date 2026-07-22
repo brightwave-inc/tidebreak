@@ -497,6 +497,7 @@ impl TurnWorker {
             let steer = active.steer_inbox();
             let agent = Agent::new(provider, self.tools.clone(), self.store.clone(), config)
                 .with_approvals(self.approvals.clone())
+                .with_standing_grants(self.approvals.standing_grants())
                 .with_cancel(cancel.clone())
                 .with_steer(steer.clone())
                 .with_durable_steer(lease_token)
