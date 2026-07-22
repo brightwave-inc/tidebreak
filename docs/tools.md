@@ -63,6 +63,16 @@ serialized per external server and their text, structured content, and error
 flag are translated back into `ToolOutput`. Because MCP tools can cross both the
 workspace and process boundary, every mounted proxy is classified `Sensitive`.
 
+The desktop and `openwave serve` boot paths read external stdio servers from the
+JSON file named by `OPENWAVE_MCP_CONFIG`. Each entry declares a unique namespace,
+an executable plus argument array, an optional working directory and explicit
+environment, and an optional bounded request timeout. No shell interprets these
+values. Child environments are cleared by default to avoid leaking provider or
+host credentials; `inherit_env` is an explicit opt-in. Initialization is
+fail-closed so the advertised tool surface never silently differs from the boot
+configuration. Configuration UI, reconnect supervision, and MCP
+`tools/list_changed` refresh remain future work.
+
 ## Foreground and sandbox surfaces
 
 Foreground and background agents need different tools. OpenWave should not

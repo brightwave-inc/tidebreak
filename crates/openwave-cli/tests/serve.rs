@@ -54,6 +54,7 @@ fn serve_announces_its_address_and_answers_health() {
         .arg("serve")
         .env("OPENWAVE_DATA_DIR", dir.path())
         .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env_remove("OPENWAVE_MCP_CONFIG")
         .env_remove("ANTHROPIC_API_KEY")
         .stdout(Stdio::piped())
         .spawn()
@@ -87,6 +88,76 @@ fn serve_announces_its_address_and_answers_health() {
 
     assert!(response.contains("200 OK"), "response: {response}");
     assert!(response.trim_end().ends_with("ok"), "response: {response}");
+}
+
+#[test]
+fn serve_mounts_external_mcp_servers_from_boot_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("mcp-workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let config_path = dir.path().join("mcp.json");
+    let config = serde_json::json!({
+        "servers": [{
+            "name": "fixture",
+            "command": env!("CARGO_BIN_EXE_openwave"),
+            "args": ["mcp", workspace],
+            "request_timeout_ms": 5_000
+        }]
+    });
+    std::fs::write(&config_path, config.to_string()).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .arg("serve")
+        .env("OPENWAVE_DATA_DIR", dir.path().join("data"))
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env("OPENWAVE_MCP_CONFIG", &config_path)
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn configured openwave serve");
+
+    let stdout = child.stdout.take().unwrap();
+    let _reaper = Reaper(child);
+    let mut lines = BufReader::new(stdout).lines();
+    let addr_line = lines.next().unwrap().unwrap();
+    let token_line = lines.next().unwrap().unwrap();
+    assert!(addr_line.contains("listening on http://127.0.0.1:"));
+    assert!(token_line.starts_with("openwave: token "));
+}
+
+#[test]
+fn serve_fails_closed_when_a_configured_mcp_server_cannot_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_command = dir.path().join("missing-mcp-server");
+    let config_path = dir.path().join("mcp.json");
+    let config = serde_json::json!({
+        "servers": [{
+            "name": "broken",
+            "command": missing_command
+        }]
+    });
+    std::fs::write(&config_path, config.to_string()).unwrap();
+
+    let child = Command::new(env!("CARGO_BIN_EXE_openwave"))
+        .arg("serve")
+        .env("OPENWAVE_DATA_DIR", dir.path().join("data"))
+        .env("OPENWAVE_KEYCHAIN_MOCK", "1")
+        .env("OPENWAVE_MCP_CONFIG", &config_path)
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn openwave serve with broken MCP config");
+    let mut child = Reaper(child);
+    let output = child.wait_with_output(PROCESS_EXIT_TIMEOUT);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("external MCP server broken failed to start"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]

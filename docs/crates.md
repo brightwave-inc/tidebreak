@@ -146,8 +146,9 @@ and its execution boundary exposes only tools classified read-only. Its client
 half initializes external stdio servers, follows paginated tool discovery, and
 mounts each proxy as `mcp__{server}__{tool}` in the same registry. Mounted tools
 are classified sensitive so they cross OpenWave's approval boundary before the
-client forwards a call. Product configuration and dynamic tool-list refresh are
-still follow-up work.
+client forwards a call. The CLI and desktop boot paths load external stdio
+servers from `OPENWAVE_MCP_CONFIG`. Configuration UI, reconnect supervision,
+and dynamic tool-list refresh are still follow-up work.
 
 **Depends on:** `openwave-core`.
 

@@ -24,6 +24,7 @@ mod document_worker;
 mod error;
 mod event_projection;
 mod extract;
+mod mcp_config;
 mod provider;
 mod providers;
 mod resolver;
@@ -381,7 +382,16 @@ const DEFAULT_MODEL: &str = "claude-opus-4-8";
 /// This generic embedding does not expose durable root-attachment mutations,
 /// because it has no restart-stable native executor identity.
 pub async fn bind(config: Config) -> Result<Server> {
-    bind_inner(config, None).await
+    bind_inner(config, None, mcp_config::ConfiguredMcpServers::default()).await
+}
+
+/// Bind the API and mount external MCP servers from `OPENWAVE_MCP_CONFIG`.
+///
+/// This is the product boot path used by the CLI. Custom embedders can continue
+/// to use [`bind`] when process-environment configuration is undesirable.
+pub async fn bind_configured(config: Config) -> Result<Server> {
+    let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
+    bind_inner(config, None, mcp_servers).await
 }
 
 /// Bind the API with a stable app-private native executor identity.
@@ -395,10 +405,32 @@ pub async fn bind_with_desktop_executor(
     if client_executor_id.is_nil() {
         return Err(AgentError::config("client executor id must not be nil"));
     }
-    bind_inner(config, Some(client_executor_id)).await
+    bind_inner(
+        config,
+        Some(client_executor_id),
+        mcp_config::ConfiguredMcpServers::default(),
+    )
+    .await
 }
 
-async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<Server> {
+/// Desktop counterpart to [`bind_configured`], retaining the stable native
+/// executor identity used by host-owned continuations.
+pub async fn bind_configured_with_desktop_executor(
+    config: Config,
+    client_executor_id: Uuid,
+) -> Result<Server> {
+    if client_executor_id.is_nil() {
+        return Err(AgentError::config("client executor id must not be nil"));
+    }
+    let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
+    bind_inner(config, Some(client_executor_id), mcp_servers).await
+}
+
+async fn bind_inner(
+    config: Config,
+    client_executor_id: Option<Uuid>,
+    mcp_servers: mcp_config::ConfiguredMcpServers,
+) -> Result<Server> {
     // Desktop live delivery remains process-local. Turns, steering, and tool
     // approvals are durable, while one process still owns the complete data
     // directory and its worker set.
@@ -411,7 +443,9 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
     let resolver = Arc::new(KeyedResolver::new(store.clone(), secrets.clone()));
     let embedder = resolve_embedder(&*store, &*secrets).await;
     let vector_store = connect_vector_store(&config, embedder.dimensions()).await?;
-    let (retrieval, tools, agent_config) = agent_deps(embedder, vector_store);
+    let (retrieval, mut tools, agent_config) = agent_deps(embedder, vector_store);
+    mcp_servers.mount(&mut tools).await?;
+    let tools = Arc::new(tools);
     let state = match client_executor_id {
         Some(client_executor_id) => AppState::new_with_client_executor_id(
             config,
@@ -543,7 +577,7 @@ async fn bind_inner(config: Config, client_executor_id: Option<Uuid>) -> Result<
 fn agent_deps(
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn VectorStore>,
-) -> (Arc<Retriever>, Arc<ToolRegistry>, AgentConfig) {
+) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
     let (retrieval, search) = build_retrieval(embedder, store);
     let mut tools = ToolRegistry::new()
         .with(Box::new(ReadFile))
@@ -567,7 +601,6 @@ fn agent_deps(
     // an explicit ordered wait parks only when results are needed. The bounded
     // sandbox worker below never receives either orchestration definition.
     tools.register_foreground_agent_orchestration();
-    let tools = Arc::new(tools);
     let model = std::env::var("OPENWAVE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let agent_config = AgentConfig {
         model,

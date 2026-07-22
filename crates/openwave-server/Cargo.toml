@@ -25,11 +25,12 @@ parse-office = ["openwave-retrieval/parse-office"]
 
 [dependencies]
 openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite", "tools", "keychain", "blob-fs"] }
+openwave-mcp = { path = "../openwave-mcp" }
 openwave-router = { path = "../openwave-router" }
 openwave-retrieval = { path = "../openwave-retrieval", features = ["vec-lance"] }
 openwave-web-search = { path = "../openwave-web-search", features = ["http"] }
 axum = { workspace = true }
-tokio = { workspace = true, features = ["net", "rt", "sync", "macros", "time"] }
+tokio = { workspace = true, features = ["net", "process", "rt", "sync", "macros", "time"] }
 tower-http = { version = "=0.7.0", features = ["cors"] }
 futures = { workspace = true }
 async-trait = { workspace = true }

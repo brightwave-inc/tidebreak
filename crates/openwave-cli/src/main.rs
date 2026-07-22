@@ -4,7 +4,8 @@
 //! port and prints the address and per-launch bearer token it minted, so a local
 //! client (the desktop shell, or a script) can connect. Configuration comes from
 //! the environment via [`Config::from_env`] (`OPENWAVE_PROFILE`,
-//! `OPENWAVE_DATA_DIR`); the model API key comes from `ANTHROPIC_API_KEY`.
+//! `OPENWAVE_DATA_DIR`); the model API key comes from `ANTHROPIC_API_KEY`, and
+//! `OPENWAVE_MCP_CONFIG` may name an external stdio-server configuration file.
 //!
 //! `openwave mcp <workspace>` serves the built-in read-only filesystem tools over
 //! MCP stdio, confined to the explicit workspace directory.
@@ -61,7 +62,7 @@ fn usage_error(message: &str) -> ! {
 /// Bind the server and run its accept loop, announcing where to reach it.
 async fn serve() -> Result<()> {
     let config = Config::from_env()?;
-    let server = openwave_server::bind(config).await?;
+    let server = openwave_server::bind_configured(config).await?;
     // The address and token are the client's entry point: the parent process that
     // launched the daemon reads them from stdout to connect. The token is a secret,
     // so an integrator should capture this process's stdout directly (a piped
