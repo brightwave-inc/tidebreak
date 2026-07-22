@@ -83,6 +83,7 @@ pub(crate) enum RendererToolName {
     ReadConnectedFile,
     SpawnSandboxAgent,
     WaitForAgents,
+    Exec,
     Other,
 }
 
@@ -109,6 +110,7 @@ impl From<&str> for RendererToolName {
             "read_connected_file" => Self::ReadConnectedFile,
             "spawn_sandbox_agent" => Self::SpawnSandboxAgent,
             "wait_for_agents" => Self::WaitForAgents,
+            "exec" => Self::Exec,
             _ => Self::Other,
         }
     }

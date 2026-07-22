@@ -389,6 +389,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn escaping_exec_can_be_approved_and_remembered() {
+        // Deny-by-default previously blocked every non-`search` Sensitive action
+        // from being approved (409 `NotApprovable`). An escaping `exec` is now a
+        // presentable, grantable action.
+        let (store, request) = setup("exec").await;
+        let broker = ApprovalBroker::new(store);
+        let _pending = broker.register(request.clone(), None).await;
+
+        assert_eq!(
+            broker
+                .resolve_with_remember(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    true,
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+        assert!(broker
+            .standing_grants()
+            .covers(request.chat_id, &request.tool_name, request.kind));
+    }
+
+    #[tokio::test]
     async fn unknown_action_cannot_be_approved_but_can_be_rejected() {
         let (store, request) = setup("third_party_sensitive").await;
         let broker = ApprovalBroker::new(store);

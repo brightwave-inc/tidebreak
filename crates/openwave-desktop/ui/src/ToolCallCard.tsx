@@ -114,6 +114,12 @@ const TOOL_PRESENTATIONS: Record<string, ToolPresentation> = {
     complete: "Background agents finished",
     settled: "Background agents finished",
   },
+  exec: {
+    label: "Run a command",
+    active: "Running a command",
+    complete: "Command complete",
+    settled: "Ran a command",
+  },
 };
 
 const FALLBACK_TOOL: ToolPresentation = {
@@ -174,6 +180,13 @@ export function toolApprovalPresentation(
     return {
       summary:
         "Allow search to send your query and potentially matching document excerpts to configured AI services outside OpenWave?",
+      canApprove: true,
+    };
+  }
+  if (kind === "exec_may_run_networked_command") {
+    return {
+      summary:
+        "Allow OpenWave to run a command that leaves the chat workspace and may reach the network?",
       canApprove: true,
     };
   }

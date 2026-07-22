@@ -122,6 +122,31 @@ describe("pending approval recovery", () => {
     expect(parsePendingToolApproval({ ...safe, action: "private_plugin" })).toBeNull();
   });
 
+  it("recovers an approvable escaping exec action", () => {
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "exec",
+        approval: "exec_may_run_networked_command",
+        can_approve: true,
+      }),
+    ).toMatchObject({
+      action: "exec",
+      approval: "exec_may_run_networked_command",
+      canApprove: true,
+    });
+    // The approvable invariant still binds: a presentable escaping kind that
+    // claims it cannot be approved is rejected.
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "exec",
+        approval: "exec_may_run_networked_command",
+        can_approve: false,
+      }),
+    ).toBeNull();
+  });
+
   it("recognizes the fixed background wait name without accepting extensions", () => {
     expect(
       parsePendingToolApproval({

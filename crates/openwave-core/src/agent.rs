@@ -4534,6 +4534,154 @@ mod tests {
         assert_eq!(ran.load(Ordering::SeqCst), 0, "RefuseGate blocks the tool");
     }
 
+    /// A Sensitive tool that escapes the chat workspace (`exec`) and records
+    /// whether it ran.
+    struct ExecTool {
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for ExecTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "exec".into(),
+                description: "an escaping command execution tool".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::Sensitive
+        }
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::text("executed"))
+        }
+    }
+
+    /// Provider that asks for the `exec` tool once, then finishes.
+    struct ExecProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ExecProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("exec")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_exec".into(),
+                        name: "exec".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta { text: "ok".into() },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    fn exec_agent(
+        store: Arc<dyn Store>,
+        ran: Arc<AtomicUsize>,
+        grants: Arc<StandingGrants>,
+    ) -> Agent {
+        let tools = Arc::new(ToolRegistry::new().with(Box::new(ExecTool { ran })));
+        // Default gate is `RefuseGate`: it rejects any call that reaches it, so
+        // the tool running proves the standing grant bypassed the gate entirely.
+        Agent::new(
+            Arc::new(ExecProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            tools,
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_standing_grants(grants)
+    }
+
+    #[tokio::test]
+    async fn standing_grant_runs_escaping_exec_without_parking() {
+        use crate::approval::{StandingGrant, StandingGrants};
+
+        let store = search_grant_store().await;
+        let chat = search_grant_chat(&store).await;
+        let grants = Arc::new(StandingGrants::from_grants(vec![StandingGrant::new(
+            chat.id,
+            "exec",
+            ToolApprovalKind::for_tool_name("exec"),
+            Utc::now(),
+        )
+        .expect("exec is grantable")]));
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let agent = exec_agent(store, ran.clone(), grants);
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })),
+            "a covered escaping call must not re-prompt"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolCallCompleted { output, .. }
+                if output.content == "executed" && !output.is_error
+        )));
+    }
+
+    #[tokio::test]
+    async fn ungranted_escaping_exec_still_parks_deny_by_default() {
+        use crate::approval::StandingGrants;
+
+        let store = search_grant_store().await;
+        let chat = search_grant_chat(&store).await;
+        // No grant covers this chat: an escaping action must still park.
+        let grants = Arc::new(StandingGrants::new());
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let agent = exec_agent(store, ran.clone(), grants);
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ApprovalRequired { kind, .. }
+                    if *kind == ToolApprovalKind::ExecMayRunNetworkedCommand
+            )),
+            "an uncovered escaping call must park on the gate with a presentable kind"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "RefuseGate blocks the tool");
+    }
+
     /// Counts every execution so a test can prove a fenced tool never ran.
     struct SpyTool {
         ran: Arc<AtomicUsize>,
