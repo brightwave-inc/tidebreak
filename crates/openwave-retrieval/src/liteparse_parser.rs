@@ -81,6 +81,17 @@ impl DocumentParser for LiteParsePdfParser {
                 "LiteParsePdfParser does not support media type `{media_type}`"
             )));
         }
+        // Fail closed if the PDFium runtime library is unavailable. liteparse
+        // otherwise panics (`load_default().expect(..)`) the first time it
+        // touches PDFium, which would abort the parse task instead of marking
+        // the document failed. This probe shares liteparse's runtime binding
+        // (same pinned `liteparse-pdfium-sys`), so a success here also primes
+        // liteparse's own lazy load; it is memoized and cheap to repeat.
+        liteparse_pdfium_sys::dynamic::load_default().map_err(|error| {
+            RetrievalError::parse(format!(
+                "PDF parsing is unavailable: the PDFium runtime library could not be loaded ({error})"
+            ))
+        })?;
         let result = LiteParse::new(Self::config())
             .parse_input(PdfInput::Bytes(raw.to_vec()))
             .await
