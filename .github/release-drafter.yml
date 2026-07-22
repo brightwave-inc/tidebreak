@@ -3,29 +3,60 @@ tag-template: "v$RESOLVED_VERSION"
 tag-prefix: "v"
 categories:
   - type: pre-exclude
-    title: "Maintenance"
     when:
       label: "semver:none"
   - title: "Breaking Changes"
-    semver-increment: minor
     exclusive: true
     when:
       label: "semver:breaking"
-  - title: "Features"
+  - title: "New Features"
+    exclusive: true
+    when:
+      label: "release-note:feature"
+  - title: "Bug Fixes"
+    exclusive: true
+    when:
+      label: "release-note:fix"
+  - title: "Performance Improvements"
+    exclusive: true
+    when:
+      label: "release-note:performance"
+  - title: "Dependency Updates"
+    exclusive: true
+    when:
+      label: "release-note:dependencies"
+  - title: "Reverted Changes"
+    exclusive: true
+    when:
+      label: "release-note:revert"
+  # Historical PRs merged before managed labels existed remain visible here in
+  # the first draft. Current maintenance PRs are removed by the pre-exclude.
+  - title: "Other Changes"
+  - type: version-resolver
+    semver-increment: minor
+    when:
+      label: "semver:breaking"
+  - type: version-resolver
     semver-increment: minor
     when:
       label: "semver:minor"
-  - title: "Fixes and Improvements"
+  - type: version-resolver
     semver-increment: patch
     when:
       label: "semver:patch"
   # Historical PRs merged before semantic labels existed receive a patch
   # fallback in the first draft. The first release version is chosen manually.
   - type: version-resolver
-    title: "Fallback"
     semver-increment: patch
-change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+category-template: "### $TITLE"
+change-template: "- $TITLE ([#$NUMBER]($URL)) by @$AUTHOR"
 change-title-escapes: '\<*_&'
+no-changes-template: "- No user-facing changes."
+replacers:
+  # Category headings already communicate the change type, so remove the
+  # Conventional Commit prefix from each rendered PR title.
+  - search: '/- (?:feat|fix|perf|deps|revert)(?:\([^)]+\))?!?: /g'
+    replace: "- "
 template: |
   ## What's Changed
 

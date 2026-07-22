@@ -34,9 +34,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          desired="$(node scripts/release-label.mjs --title "$PR_TITLE")"
+          desired_labels="$(node scripts/release-label.mjs --labels "$PR_TITLE")"
+          desired="$(jq -r 'sort | join(",")' <<<"$desired_labels")"
           current="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER" \
-            --jq '[.labels[].name | select(startswith("semver:"))] | sort | join(",")')"
+            --jq '[.labels[].name | select(startswith("semver:") or startswith("release-note:"))] | sort | join(",")')"
           if [[ "$current" = "$desired" ]]; then
             exit 0
           fi
@@ -46,7 +47,7 @@ jobs:
               "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/$encoded" \
               >/dev/null 2>&1 || true
           done < <(node scripts/release-label.mjs --managed | jq -r '.[]')
-          jq -n --arg label "$desired" '{labels: [$label]}' | gh api \
+          jq -n --argjson labels "$desired_labels" '{labels: $labels}' | gh api \
             --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
             --input - >/dev/null
 
