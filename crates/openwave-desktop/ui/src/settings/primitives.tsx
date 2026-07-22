@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 /** Shared styling for the native <select> elements used across settings. */
 export const SETTINGS_SELECT_CLASS =
-  "flex h-10 w-full rounded-md border border-border bg-background px-3 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
+  "flex h-10 w-full rounded-md border border-border bg-background px-3 text-sm ring-offset-background focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
 
 /**
  * A single settings surface: a titled, optionally described column of fields.
