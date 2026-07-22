@@ -7763,6 +7763,15 @@ async fn models_catalog_is_served() {
     let models = catalog["models"].as_array().unwrap();
     assert!(!models.is_empty());
     assert!(models.iter().any(|m| m["provider"] == "anthropic"));
+    // Each entry carries a human label and capability metadata.
+    let opus = models
+        .iter()
+        .find(|m| m["id"] == "claude-opus-4-8")
+        .expect("curated Anthropic model is present");
+    assert_eq!(opus["display_name"], "Claude Opus 4.8");
+    assert!(opus["context_window"].as_u64().unwrap() > 0);
+    assert!(opus["multimodal"].as_bool().unwrap());
+    assert!(opus["supports_reasoning_effort"].as_bool().unwrap());
 }
 
 #[tokio::test]

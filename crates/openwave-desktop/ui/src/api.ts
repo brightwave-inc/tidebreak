@@ -15,7 +15,15 @@ export type ProviderInfo = {
 
 export type ModelInfo = {
   id: string;
+  /** Human-readable label for the selector (e.g. "Claude Opus 4.8"). */
+  display_name: string;
   provider: string;
+  /** Approximate context window in tokens. */
+  context_window: number;
+  /** Whether the model exposes a reasoning-effort control. */
+  supports_reasoning_effort: boolean;
+  /** Whether the model accepts image input alongside text. */
+  multimodal: boolean;
 };
 
 /** Global runtime settings (`GET/PUT /settings`). */

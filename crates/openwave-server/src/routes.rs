@@ -333,8 +333,16 @@ pub async fn delete_provider_credential(
 pub struct ModelInfo {
     /// The identifier passed to the provider and stored as `chat.model`.
     pub id: String,
+    /// Human-readable label for the selector (e.g. `"Claude Opus 4.8"`).
+    pub display_name: String,
     /// The provider that serves the model.
     pub provider: String,
+    /// Approximate context window in tokens.
+    pub context_window: u32,
+    /// Whether the model exposes a reasoning-effort control.
+    pub supports_reasoning_effort: bool,
+    /// Whether the model accepts image input alongside text.
+    pub multimodal: bool,
 }
 
 /// Response for `GET /models`.
@@ -352,9 +360,13 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
     let models = providers::catalog_models(&*state.store, &*state.secrets)
         .await?
         .into_iter()
-        .map(|(kind, id)| ModelInfo {
-            id: id.to_string(),
-            provider: kind.as_str().to_string(),
+        .map(|spec| ModelInfo {
+            id: spec.id.to_string(),
+            display_name: providers::display_name_for(spec.id),
+            provider: spec.provider.as_str().to_string(),
+            context_window: spec.context_window,
+            supports_reasoning_effort: spec.supports_reasoning_effort,
+            multimodal: spec.multimodal,
         })
         .collect();
     Ok(Json(ModelCatalog { models }))
