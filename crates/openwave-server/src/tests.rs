@@ -1348,6 +1348,14 @@ impl Store for PauseTerminalStore {
         }
         Ok(heartbeat)
     }
+    async fn fence_turn_lease(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<openwave_core::TurnLeaseFence> {
+        self.inner.fence_turn_lease(id, lease_token, now).await
+    }
     async fn complete_turn_run_and_append_event(
         &self,
         id: TurnId,

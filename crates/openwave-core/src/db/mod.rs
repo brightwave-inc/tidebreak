@@ -55,7 +55,7 @@ use crate::storage::{
     ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
     RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Store,
-    SubmitAgentRunResultOutcome,
+    SubmitAgentRunResultOutcome, TurnLeaseFence,
 };
 
 mod ops;
@@ -2212,6 +2212,15 @@ impl Store for DbStore {
         lease_expires_at: chrono::DateTime<Utc>,
     ) -> Result<bool> {
         ops::turn::heartbeat_turn_run(self, id, lease_token, now, lease_expires_at).await
+    }
+
+    async fn fence_turn_lease(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<TurnLeaseFence> {
+        ops::turn::fence_turn_lease(self, id, lease_token, now).await
     }
 
     async fn accept_turn_steer(

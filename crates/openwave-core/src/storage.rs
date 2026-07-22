@@ -791,6 +791,21 @@ pub struct ClaimTurnRunOutcome {
     pub terminal_event: Option<ClaimScanTerminalEvent>,
 }
 
+/// Whether a lease token still owns the exact live worker segment of a turn.
+///
+/// This is the read side of the lease compare-and-swap that guards durable turn
+/// writes. A worker fences an intermediate tool or message side effect on the
+/// current lease so that a segment whose lease was stolen after expiry can
+/// neither commit a fresh effect nor replay one a later attempt already owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnLeaseFence {
+    /// The turn is running (or cancelling) under exactly this unexpired lease.
+    Current,
+    /// The token no longer owns a live segment: it expired, was superseded by a
+    /// later claim, or the turn already reached a terminal state.
+    Stale,
+}
+
 fn document_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "document storage is not implemented by this Store".into(),
@@ -1828,6 +1843,24 @@ pub trait Store: Send + Sync {
         _now: chrono::DateTime<chrono::Utc>,
         _lease_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
+        turn_storage_unavailable()
+    }
+
+    /// Report whether `lease_token` still owns the exact live segment of a turn.
+    ///
+    /// Returns [`TurnLeaseFence::Current`] only while the turn is running or
+    /// cancelling under this exact token, its claim receipt still matches the
+    /// turn's attempt and claim counters, and the lease has not expired at
+    /// `now`. Any other state — a superseding claim, an expired lease, or a
+    /// terminal turn — is [`TurnLeaseFence::Stale`]. This is a read-only fence a
+    /// worker consults before committing an intermediate tool or message effect;
+    /// it never mutates durable state.
+    async fn fence_turn_lease(
+        &self,
+        _id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<TurnLeaseFence> {
         turn_storage_unavailable()
     }
 
