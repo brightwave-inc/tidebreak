@@ -68,11 +68,7 @@ impl From<CatalogDocument> for LibraryDocument {
             title: document
                 .title
                 .and_then(|title| is_safe_renderer_text(&title, 255, false).then_some(title)),
-            media_type: if document.media_type.starts_with("text/markdown") {
-                "text/markdown".to_owned()
-            } else {
-                "text/plain".to_owned()
-            },
+            media_type: document.media_type,
             processing_status: document.processing_status,
             updated_at: document.updated_at,
         }
@@ -327,11 +323,10 @@ fn local_client() -> reqwest::Client {
 
 async fn pick_document(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     let (tx, rx) = oneshot::channel();
-    let mut picker = app
-        .dialog()
-        .file()
-        .set_title("Import a document")
-        .add_filter("Documents", &["txt", "md", "markdown", "pdf"]);
+    // Any file may be imported: text-like formats are indexed and searchable,
+    // and the rest are stored so they can still be worked with. No filter is set
+    // so the native picker never greys out a file for its type.
+    let mut picker = app.dialog().file().set_title("Import a document");
     if let Some(window) = app.get_webview_window("main") {
         picker = picker.set_parent(&window);
     }
@@ -353,11 +348,19 @@ fn import_metadata(path: &Path) -> Result<(&'static str, String), String> {
         .extension()
         .and_then(|extension| extension.to_str())
         .map(str::to_ascii_lowercase);
+    // Map common extensions to a media type; anything else is imported as opaque
+    // bytes (`application/octet-stream`). The server accepts every type — text is
+    // indexed, binary is stored — so an unknown extension is never an error here.
     let media_type = match extension.as_deref() {
         Some("md" | "markdown") => "text/markdown",
-        Some("txt") => "text/plain",
+        Some("txt" | "text" | "log") => "text/plain",
+        Some("csv") => "text/csv",
+        Some("html" | "htm") => "text/html",
+        Some("json") => "application/json",
+        Some("xml") => "application/xml",
+        Some("yaml" | "yml") => "application/yaml",
         Some("pdf") => "application/pdf",
-        _ => return Err("Choose a .txt, .md, .markdown, or .pdf file".to_owned()),
+        _ => "application/octet-stream",
     };
     let display_name = path
         .file_name()
@@ -387,7 +390,7 @@ fn read_selected_document(path: &Path) -> Result<Vec<u8>, String> {
         .metadata()
         .map_err(|_| "Could not read the selected document".to_owned())?;
     if !metadata.is_file() {
-        return Err("Choose a text or Markdown file".to_owned());
+        return Err("Choose a file to import".to_owned());
     }
     if metadata.len() > MAX_IMPORT_BYTES {
         return Err("Documents must be 16 MB or smaller".to_owned());
@@ -520,12 +523,33 @@ mod tests {
         assert_eq!(media_type, "text/markdown");
         assert_eq!(name, "plan.md");
         assert!(!name.contains("private"));
-        // PDFs are accepted and map to their canonical media type.
-        let (pdf_media_type, pdf_name) =
-            import_metadata(Path::new("/Users/private/plan.pdf")).unwrap();
-        assert_eq!(pdf_media_type, "application/pdf");
-        assert_eq!(pdf_name, "plan.pdf");
-        assert!(import_metadata(Path::new("/Users/private/sheet.csv")).is_err());
+        // Known extensions map to their media type…
+        assert_eq!(
+            import_metadata(Path::new("/Users/private/plan.pdf"))
+                .unwrap()
+                .0,
+            "application/pdf"
+        );
+        assert_eq!(
+            import_metadata(Path::new("/Users/private/sheet.csv"))
+                .unwrap()
+                .0,
+            "text/csv"
+        );
+        // …and any other file is imported as opaque bytes rather than rejected.
+        assert_eq!(
+            import_metadata(Path::new("/Users/private/archive.bin"))
+                .unwrap()
+                .0,
+            "application/octet-stream"
+        );
+        assert_eq!(
+            import_metadata(Path::new("/Users/private/no_extension"))
+                .unwrap()
+                .0,
+            "application/octet-stream"
+        );
+        // Path and filename safety still apply regardless of type.
         assert!(import_metadata(Path::new("relative.md")).is_err());
         assert!(import_metadata(Path::new("/Users/private/bad\u{202e}txt.md")).is_err());
         for unsafe_character in ['\u{200d}', '\u{206a}', '\u{206f}', '\u{2028}', '\u{2029}'] {
