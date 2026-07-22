@@ -2013,6 +2013,9 @@ body {
 }
 
 .model-menu-group-label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
   padding: 0.3rem 0.5rem 0.15rem;
   color: var(--muted-foreground);
   font-size: 0.7rem;
@@ -2021,10 +2024,33 @@ body {
   text-transform: uppercase;
 }
 
+.model-menu-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .model-menu-item-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.model-menu-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-menu-content .model-menu-item-meta svg {
+  flex: 0 0 auto;
+  width: 0.85rem;
+  height: 0.85rem;
 }
 
 .composer-icon-btn {
