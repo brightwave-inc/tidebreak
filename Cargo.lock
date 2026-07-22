@@ -6691,6 +6691,7 @@ dependencies = [
  "futures",
  "lancedb",
  "liteparse",
+ "liteparse-pdfium-sys",
  "openwave-core",
  "reqwest 0.12.28",
  "serde",

@@ -31,7 +31,7 @@ vec-lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-se
 # (`default-features = false`), so text-layer PDFs parse fully offline with no
 # system OCR dependency; image-only pages simply yield little text. The server
 # enables this feature explicitly to accept `application/pdf` uploads.
-parse-liteparse = ["dep:liteparse"]
+parse-liteparse = ["dep:liteparse", "dep:liteparse-pdfium-sys"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -58,6 +58,11 @@ futures = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync"], optional = true }
 # Rich PDF parser (parse-liteparse feature only). Local + PDFium-backed; OCR off.
 liteparse = { version = "2.8", default-features = false, optional = true }
+# The PDFium loader liteparse builds on. Depended on directly (pinned to the same
+# version liteparse resolves, so cargo unifies the one runtime binding) only to
+# probe `load_default()` and fail closed with a clear error instead of the panic
+# liteparse raises when the PDFium library is absent.
+liteparse-pdfium-sys = { version = "1.3", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
