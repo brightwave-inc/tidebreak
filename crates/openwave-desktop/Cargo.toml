@@ -19,7 +19,7 @@ name = "openwave-desktop"
 path = "src/main.rs"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "=2.6.3", features = [] }
 serde_json = { workspace = true }
 
 [dependencies]
@@ -30,9 +30,9 @@ openwave-core = { path = "../openwave-core", default-features = false }
 openwave-host-broker = { path = "../openwave-host-broker" }
 openwave-server = { path = "../openwave-server" }
 reqwest = { workspace = true }
-tauri = { version = "2", features = [] }
-tauri-plugin-dialog = "2"
-tauri-plugin-shell = "2"
+tauri = { version = "=2.11.5", features = [] }
+tauri-plugin-dialog = "=2.7.2"
+tauri-plugin-shell = "=2.3.5"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -42,10 +42,10 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }
-tempfile = "3"
+tempfile = "=3.27.0"
 
 [target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dependencies]
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = "=2.4.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }

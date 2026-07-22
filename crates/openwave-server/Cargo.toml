@@ -25,7 +25,7 @@ openwave-retrieval = { path = "../openwave-retrieval", features = ["vec-lance"] 
 openwave-web-search = { path = "../openwave-web-search", features = ["http"] }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "macros", "time"] }
-tower-http = { version = "0.7", features = ["cors"] }
+tower-http = { version = "=0.7.0", features = ["cors"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -41,7 +41,7 @@ windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
-tower = { version = "0.5", features = ["util"] }
+tower = { version = "=0.5.3", features = ["util"] }
 reqwest = { workspace = true }
-tokio-tungstenite = "0.30"
-tempfile = "3"
+tokio-tungstenite = "=0.30.0"
+tempfile = "=3.27.0"

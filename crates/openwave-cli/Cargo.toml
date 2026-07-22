@@ -26,4 +26,4 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tempfile = "3"
+tempfile = "=3.27.0"
