@@ -9,6 +9,17 @@ import { MarkdownTable } from "./MarkdownTable";
  * this allowlist keeps rendered links from opening local files or executable
  * schemes.
  */
+/**
+ * Convert single newlines to Markdown hard breaks (two trailing spaces + newline)
+ * so a model's intended line breaks render, while double+ newlines stay paragraph
+ * breaks. This is what lets us drop `white-space: pre-wrap` on the container: the
+ * line breaks flow through the parser instead of being forced by CSS, so source
+ * indentation no longer leaks and the parsed block structure renders cleanly.
+ */
+export function preserveLineBreaks(input: string): string {
+  return input.replace(/([^\n])\n(?!\n)/g, "$1  \n");
+}
+
 export function safeMarkdownUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
 
@@ -66,7 +77,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
         skipHtml
         urlTransform={(url) => safeMarkdownUrl(url) ?? ""}
       >
-        {children}
+        {preserveLineBreaks(children)}
       </ReactMarkdown>
     </div>
   );
