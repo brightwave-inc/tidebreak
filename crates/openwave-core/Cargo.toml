@@ -55,13 +55,13 @@ tokio = { workspace = true, optional = true }
 # async-secret-service (pure-Rust zbus + rustcrypto) — no system libdbus/pkg-config
 # at build time; the blocking `keyring` calls already run under `spawn_blocking`.
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", features = ["apple-native"], optional = true }
+keyring = { version = "=3.6.3", features = ["apple-native"], optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3", features = ["windows-native"], optional = true }
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"], optional = true }
+keyring = { version = "=3.6.3", features = ["windows-native"], optional = true }
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"], optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3", features = ["async-secret-service", "crypto-rust", "tokio"], optional = true }
+keyring = { version = "=3.6.3", features = ["async-secret-service", "crypto-rust", "tokio"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-tempfile = "3"
+tempfile = "=3.27.0"

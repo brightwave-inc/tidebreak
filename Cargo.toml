@@ -16,22 +16,22 @@ all = { level = "warn", priority = -1 }
 # Shared dependency versions. Crates opt in with `dep.workspace = true` so the
 # whole workspace resolves one version of each.
 [workspace.dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-async-trait = "0.1"
-cap-std = "4.0.2"
-cap-fs-ext = "4.0.2"
-futures = "0.3"
-futures-timer = "3"
-thiserror = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
-unicode-general-category = "1.1.0"
-chrono = { version = "0.4", features = ["serde"] }
-windows-sys = "0.61"
-sea-orm = { version = "2", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
-sea-orm-migration = { version = "2", default-features = false, features = ["runtime-tokio-rustls"] }
-tokio = { version = "1", features = ["rt", "macros", "fs"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-sha2 = "0.11"
-async-stream = "0.3"
-axum = { version = "0.8", features = ["ws"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.151"
+async-trait = "=0.1.91"
+cap-std = "=4.0.2"
+cap-fs-ext = "=4.0.2"
+futures = "=0.3.32"
+futures-timer = "=3.0.4"
+thiserror = "=2.0.19"
+uuid = { version = "=1.24.0", features = ["v4", "serde"] }
+unicode-general-category = "=1.1.0"
+chrono = { version = "=0.4.45", features = ["serde"] }
+windows-sys = "=0.61.2"
+sea-orm = { version = "=2.0.0", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
+sea-orm-migration = { version = "=2.0.0", default-features = false, features = ["runtime-tokio-rustls"] }
+tokio = { version = "=1.53.1", features = ["rt", "macros", "fs"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "stream", "rustls-tls"] }
+sha2 = "=0.11.0"
+async-stream = "=0.3.6"
+axum = { version = "=0.8.9", features = ["ws"] }
