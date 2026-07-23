@@ -56,6 +56,7 @@ pub mod document {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
+        pub chat_id: Option<Uuid>,
         pub project_id: Option<Uuid>,
         pub source_uri: Option<String>,
         pub media_type: String,

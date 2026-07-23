@@ -11,11 +11,18 @@ change.
 
 ## OpenWave in one minute
 
-OpenWave is a local agent runtime. A user chooses a model, starts a chat, and can
-connect one or more folders that the project or conversation is allowed to use.
-The runtime can ask the model for an answer, call tools over those connected
-folders, search an indexed document corpus, pause for approval before a
-sensitive action, and stream progress back to the client.
+OpenWave is a local agent runtime. A user chooses a model and starts a chat,
+which is the current product's single workspace. Sources, connected folders,
+scratch, retrieval, messages, and tool activity are all resolved through that
+exact conversation. The runtime can ask the model for an answer, call tools over
+folders connected to the chat, search sources indexed for the chat, pause for
+approval before a sensitive action, and stream progress back to the client.
+
+Standalone chats never share a fallback source corpus. Projects remain in the
+data model and lower-level APIs for compatibility and future design work, but
+the desktop does not surface them. A future Project layer may optionally provide
+shared context to several conversations; no such inheritance is part of the
+current product contract.
 
 The important architectural choice is that the user-facing request and the
 potentially long-running work are separate:
@@ -132,6 +139,13 @@ helps configuration, but it does not bypass egress safety: a turn still fails
 closed until a matching provider is enabled and credentialed. OpenAI-compatible
 routes currently require a nonempty credential even when a local endpoint would
 otherwise accept unauthenticated requests.
+
+Curated model metadata has one server-owned registry. It records the canonical
+provider ID, display name, token limits, accepted input modalities, and reasoning
+capabilities used by both `GET /models` and model-to-provider routing. Provider
+configuration filters that registry; it does not maintain a second list of model
+IDs. Custom OpenAI-compatible model IDs remain allowed outside the curated
+registry and receive a derived display name.
 
 ## What happens during a chat turn
 
@@ -444,7 +458,7 @@ tool implementation is no longer available. Server-tool execution and result
 persistence are not yet one atomic, receipted operation, so a crash between
 them can replay execution; each tool still needs an idempotency or reconciliation
 contract before OpenWave can claim exactly-once effects. The search consent
-prompt explicitly describes that the query and potentially matching document
+prompt explicitly describes that the query and potentially matching source
 excerpts may be sent to configured AI services outside OpenWave.
 
 ### Steering
@@ -475,11 +489,19 @@ Applying a steer commits its user message, application receipt, revision, and
 lost, the worker retries the same identity and recovers the exact existing
 result rather than applying the instruction twice.
 
-## What happens when a document is added
+## What happens when a source is added
 
-A project does not automatically crawl its connected roots. Documents enter the
-system through an explicit HTTP upload. A source URI is identity and provenance;
-OpenWave does not fetch that URI itself.
+Adding a source to a conversation does not crawl its connected roots. Source
+documents enter the system through an explicit upload scoped to the exact chat.
+A source URI is identity and provenance; OpenWave does not fetch that URI
+itself. The lower-level global and project document APIs remain as legacy
+surfaces, but the desktop does not use them as a fallback.
+
+> **Pre-1.0 upgrade note:** Sources created through the older shared or
+> project-scoped desktop flow are retained in their legacy corpus, but they are
+> not automatically attached to a conversation. Re-add any source you still
+> need from that conversation's Sources view. An explicit legacy re-attachment
+> flow can be added before compatibility guarantees begin.
 
 ### 1. Publish immutable source bytes
 
@@ -497,7 +519,8 @@ embedding happen later.
 This is where “revision” and “generation” matter:
 
 - `DocumentId` means “this logical document.” A URI gives it a stable identity;
-  project scope is included so the same URI in different projects stays separate.
+  conversation scope is included so the same URI in different chats stays
+  separate. Legacy global and project APIs retain their own identity scopes.
 - `content_revision` is a counter: first content is 1, replacement is 2, and so
   on. Deletion also advances the clock.
 - `revision_token` is a random identity for that exact revision.
@@ -577,8 +600,11 @@ but never became referenced because a later catalog transaction failed.
 
 ## How search works
 
-Search is scoped either to explicitly unscoped documents or to one project. The
-same retriever backs the HTTP search endpoint and the agent's `search` tool.
+Product search is scoped to the exact conversation. The HTTP chat-search
+endpoint and the agent's `search` tool both filter by that chat identity; they
+never fall back to conversationless or project documents. Explicit legacy
+global/project endpoints remain available only to callers that deliberately use
+those lower-level APIs.
 
 For each query, OpenWave:
 
@@ -653,8 +679,8 @@ That surface reads a redacted durable snapshot and is only an observer: worker
 leases, delegated inputs, and scheduler control remain server-private.
 OpenWave's operational scratch stays in private app storage; user-selected paths
 cross only the native host-to-broker control boundary, while the renderer sees
-opaque folder summaries. Projects and chats store only ordered opaque root IDs
-and attachment revisions—never host paths or grants. Built-in scratch tools
+opaque folder summaries. Chats store only ordered opaque root IDs and attachment
+revisions—never host paths or grants. Built-in scratch tools
 remain confined to a server-derived per-chat directory whose path is neither
 persisted nor returned to the renderer. Foreground agents separately have a
 fenced read-only proxy for roots already attached to the chat:
@@ -665,20 +691,25 @@ foreground spawn delegated. It receives an argument-free tool, while the native
 executor privately performs claim, final attachment revalidation, one broker
 read, and fenced resolution. The renderer never receives that target or the
 file contents from the executor control plane.
-The desktop presents a single chat-centric workspace. Projects exist in the data
-model, but the desktop intentionally does not surface project structure for now:
-every chat appears in one flat list and new chats are created without a project.
+The desktop presents a single conversation-centric workspace. Projects exist in
+the data model and lower-level APIs, but the desktop intentionally does not
+surface project structure: every chat appears in one flat list and new chats are
+created without a project. Projects are reserved as a possible completely
+optional future inheritance layer; the current product does not implement or
+promise project source/folder inheritance.
 The UI provides a durable active-turn redirect control: guidance is admitted with
 a stable identity and the composer waits for authoritative events rather than
 treating the request as locally applied. Completed assistant messages render the
-closed structured source cards described above. The Documents surface derives its
-scope from the authoritative current chat, which is projectless, so it searches
-the unscoped corpus. It lists the catalog, imports a user-picked text or Markdown
-file, polls durable processing status, and searches ready passages.
-Native code reads the selected file and calls the existing local document APIs;
-the renderer sees only bounded titles, lifecycle states, and plain-text search
-passages, never the source path, source bytes, generation identities, index
-metadata, or canonical search records. Connected-folder consent and reads work.
+closed structured source cards described above. The Sources surface lists only
+the authoritative current chat's catalog, adds a user-picked file to that exact
+conversation, polls durable processing status, and searches only its ready
+passages. Switching conversations switches this scope; there is no shared
+standalone-chat corpus.
+Native code reads the selected file and calls the conversation-scoped local
+document APIs. The renderer sees only bounded titles, lifecycle states, and
+plain-text search passages, never the source path, source bytes, generation
+identities, index metadata, or canonical search records. Connected-folder
+consent and reads work.
 Agent-approved picker results, manual connect/disconnect, and bounded startup
 recovery all reconcile broker registration, exact attachment, and the durable
 product projection before reporting success. Every folder UI action therefore
@@ -690,9 +721,9 @@ those routes on their primary bearer because they do not have a webview trust
 boundary. The native document bridge follows bounded catalog cursors and reports
 when it has intentionally stopped at the newest 1,000 records.
 
-Because that chat is projectless, its `search` tool can see only the unscoped
-document corpus. Project-scoped documents are not reachable through the current
-desktop journey.
+The chat's `search` tool can see only documents owned by that exact conversation.
+Conversationless legacy documents, project-scoped documents, and sources owned
+by other chats are not reachable through the current desktop journey.
 
 Conversation reopen uses an atomic transcript snapshot plus a terminal event
 cursor. The desktop then replays and follows later events, so durable history
@@ -839,9 +870,12 @@ steps; the migrations should be condensed into a clean baseline before v1.
 
 ## Glossary
 
-- **Chat:** a conversation container that resolves an explicit host-access
-  context; it does not own an arbitrary absolute workspace path in the intended
-  model.
+- **Chat:** the current user-facing workspace and exact boundary for messages,
+  sources, retrieval, scratch, and connected-root projection; it does not own an
+  arbitrary absolute workspace path.
+- **Project:** a dormant data/API concept that is not surfaced in the current
+  desktop. It is reserved for a possible completely optional future inheritance
+  layer; that inheritance is not implemented today.
 - **Connected root:** a user-approved host folder known to tools by an opaque
   root identifier and root-relative paths.
 - **Turn:** one accepted unit of user-to-agent work inside a chat.

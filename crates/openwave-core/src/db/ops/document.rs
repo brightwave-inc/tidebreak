@@ -17,7 +17,7 @@ use super::super::{
     validate_document_source_blob, validate_document_source_regions, DbStore,
 };
 use super::blob as blob_ops;
-use super::require_project_write_lock;
+use super::require_document_scope_write_lock;
 
 pub(in crate::db) async fn accept_source_and_enqueue_parse(
     store: &DbStore,
@@ -29,17 +29,19 @@ pub(in crate::db) async fn accept_source_and_enqueue_parse(
 
     loop {
         let transaction = store.conn.begin().await.map_err(store_err)?;
+        require_document_scope_write_lock(&transaction, source.chat_id, source.project_id).await?;
         acquire_document_write_lock(&transaction, source.id).await?;
-        require_project_write_lock(&transaction, source.project_id).await?;
         let existing = entities::document::Entity::find_by_id(source.id.0)
             .one(&transaction)
             .await
             .map_err(store_err)?;
 
         if let Some(current) = existing.as_ref() {
-            if current.project_id != source.project_id.map(|id| id.0) {
+            if current.chat_id != source.chat_id.map(|id| id.0)
+                || current.project_id != source.project_id.map(|id| id.0)
+            {
                 return Err(AgentError::Store(format!(
-                    "document {} cannot move between project corpora",
+                    "document {} cannot move between document corpora",
                     source.id
                 )));
             }
@@ -97,6 +99,7 @@ pub(in crate::db) async fn accept_source_and_enqueue_parse(
             .map_err(|_| AgentError::Store("document source is too large".into()))?;
         let active = entities::document::ActiveModel {
             id: Set(source.id.0),
+            chat_id: Set(source.chat_id.map(|id| id.0)),
             project_id: Set(source.project_id.map(|id| id.0)),
             source_uri: Set(source.source_uri.clone()),
             media_type: Set(source.media_type.clone()),
@@ -716,7 +719,8 @@ fn validate_job_input(fingerprint: &str, max_attempts: i32) -> Result<()> {
 }
 
 fn source_matches(current: &entities::document::Model, source: &DocumentSourceUpsert) -> bool {
-    current.project_id == source.project_id.map(|id| id.0)
+    current.chat_id == source.chat_id.map(|id| id.0)
+        && current.project_id == source.project_id.map(|id| id.0)
         && current.source_uri == source.source_uri
         && current.media_type == source.media_type
         && current.title == source.title

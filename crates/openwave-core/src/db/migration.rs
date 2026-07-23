@@ -24,7 +24,63 @@ impl MigratorTrait for Migrator {
             Box::new(AddAgentRunResultPayload),
             Box::new(AddClaimedTurnEffectLeases),
             Box::new(AddChatReasoningEffort),
+            Box::new(AddDocumentChatScope),
         ]
+    }
+}
+
+/// Adds an explicit conversation boundary to document metadata. Existing
+/// project and unscoped rows remain conversationless and are available only
+/// through their legacy APIs; new conversation routes always populate this
+/// column and retrieval filters it directly.
+struct AddDocumentChatScope;
+
+impl MigrationName for AddDocumentChatScope {
+    fn name(&self) -> &str {
+        "m20260723_000011_add_document_chat_scope"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddDocumentChatScope {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Document::Table)
+                    .add_column(ColumnDef::new(Document::ChatId).uuid())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_document_chat_created")
+                    .table(Document::Table)
+                    .col(Document::ChatId)
+                    .col(Document::CreatedAt)
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx_document_chat_created")
+                    .table(Document::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Document::Table)
+                    .drop_column(Document::ChatId)
+                    .to_owned(),
+            )
+            .await
     }
 }
 
@@ -4987,6 +5043,7 @@ enum Project {
 enum Document {
     Table,
     Id,
+    ChatId,
     ProjectId,
     SourceUri,
     MediaType,

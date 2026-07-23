@@ -77,6 +77,30 @@ where
     Ok(())
 }
 
+/// Fence creation or replacement of a document inside exactly one optional
+/// corpus. Legacy rows may be unscoped; new conversation routes provide only a
+/// chat id. A document may never simultaneously belong to a chat and project.
+pub(in crate::db) async fn require_document_scope_write_lock<C>(
+    conn: &C,
+    chat_id: Option<ChatId>,
+    project_id: Option<ProjectId>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    if chat_id.is_some() && project_id.is_some() {
+        return Err(AgentError::Store(
+            "document cannot belong to both a conversation and a project".into(),
+        ));
+    }
+    if let Some(chat_id) = chat_id {
+        if !acquire_chat_write_lock(conn, chat_id).await? {
+            return Err(AgentError::Store(format!("chat {chat_id} not found")));
+        }
+    }
+    require_project_write_lock(conn, project_id).await
+}
+
 /// Allocate the next stable tool-history position while the caller owns the
 /// chat write lock.
 pub(in crate::db) async fn next_tool_history_order_on<C>(conn: &C, chat_id: ChatId) -> Result<i64>

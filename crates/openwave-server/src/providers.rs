@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use openwave_core::{Result, SecretProvider, Store};
 
 use crate::error::ServerError;
+use crate::model_registry::{self, ModelSpec};
 
 /// Setting-key prefix for per-provider non-secret config (`provider.<kind>`).
 const PROVIDER_SETTING_PREFIX: &str = "provider.";
@@ -77,177 +78,6 @@ impl ProviderKind {
             "{PROVIDER_SETTING_PREFIX}{}{CREDENTIAL_SUFFIX}",
             self.as_str()
         )
-    }
-
-    /// Curated model specs this kind contributes to `GET /models`.
-    ///
-    /// `openai_compatible` is free-form (local / custom gateways) — it contributes
-    /// nothing to the curated catalog; the chat model field accepts any string.
-    pub fn curated_specs(self) -> &'static [ModelSpec] {
-        match self {
-            ProviderKind::Anthropic => ANTHROPIC_MODELS,
-            ProviderKind::Openai => OPENAI_MODELS,
-            ProviderKind::OpenaiCompatible => &[],
-        }
-    }
-}
-
-/// Capability metadata for a curated model, surfaced by `GET /models` so the
-/// chat model selector can show a human label and (later) reason about what a
-/// model supports.
-///
-/// Kept deliberately small — the fields we need at the reasoning-effort /
-/// multimodal boundary. Values are conservative where a hard number isn't
-/// obvious; extend as new capability boundaries (pricing, extra modalities)
-/// start to matter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ModelSpec {
-    /// Identifier passed to the provider and stored as `chat.model`.
-    pub id: &'static str,
-    /// Human-readable label for the selector (e.g. `"Claude Opus 4.8"`).
-    pub display_name: &'static str,
-    /// Provider that serves the model.
-    pub provider: ProviderKind,
-    /// Approximate context window in tokens.
-    pub context_window: u32,
-    /// Whether the model exposes a reasoning-effort control.
-    pub supports_reasoning_effort: bool,
-    /// Whether the model accepts image input alongside text.
-    pub multimodal: bool,
-}
-
-/// Anthropic's curated catalog.
-const ANTHROPIC_MODELS: &[ModelSpec] = &[
-    ModelSpec {
-        id: "claude-opus-4-8",
-        display_name: "Claude Opus 4.8",
-        provider: ProviderKind::Anthropic,
-        context_window: 200_000,
-        supports_reasoning_effort: true,
-        multimodal: true,
-    },
-    ModelSpec {
-        id: "claude-sonnet-5",
-        display_name: "Claude Sonnet 5",
-        provider: ProviderKind::Anthropic,
-        context_window: 200_000,
-        supports_reasoning_effort: true,
-        multimodal: true,
-    },
-    ModelSpec {
-        id: "claude-haiku-4-5-20251001",
-        display_name: "Claude Haiku 4.5",
-        provider: ProviderKind::Anthropic,
-        context_window: 200_000,
-        supports_reasoning_effort: true,
-        multimodal: true,
-    },
-];
-
-/// OpenAI's curated catalog.
-const OPENAI_MODELS: &[ModelSpec] = &[
-    ModelSpec {
-        id: "gpt-4o",
-        display_name: "GPT-4o",
-        provider: ProviderKind::Openai,
-        context_window: 128_000,
-        supports_reasoning_effort: false,
-        multimodal: true,
-    },
-    ModelSpec {
-        id: "gpt-4o-mini",
-        display_name: "GPT-4o mini",
-        provider: ProviderKind::Openai,
-        context_window: 128_000,
-        supports_reasoning_effort: false,
-        multimodal: true,
-    },
-    ModelSpec {
-        id: "o3",
-        display_name: "o3",
-        provider: ProviderKind::Openai,
-        context_window: 200_000,
-        supports_reasoning_effort: true,
-        multimodal: true,
-    },
-    ModelSpec {
-        id: "o4-mini",
-        display_name: "o4-mini",
-        provider: ProviderKind::Openai,
-        context_window: 200_000,
-        supports_reasoning_effort: true,
-        multimodal: true,
-    },
-];
-
-/// Human label for a model id: the curated display name when the id is in the
-/// registry, else a readable fallback derived from the id (a trailing date
-/// suffix is dropped and the remaining `-`-separated tokens are title-cased).
-///
-/// Useful for ids outside the curated catalog — a free-form
-/// `openai_compatible` model, or a `chat.model` a client set directly.
-pub fn display_name_for(id: &str) -> String {
-    for &kind in ProviderKind::ALL {
-        for spec in kind.curated_specs() {
-            if spec.id == id {
-                return spec.display_name.to_string();
-            }
-        }
-    }
-    derive_display_name(id)
-}
-
-/// Fallback label for an id with no curated entry.
-fn derive_display_name(id: &str) -> String {
-    strip_date_suffix(id)
-        .split('-')
-        .map(title_token)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Drop a trailing `-YYYYMMDD` or `-YYYY-MM-DD` date suffix, if present.
-fn strip_date_suffix(id: &str) -> &str {
-    let tokens: Vec<&str> = id.split('-').collect();
-    if tokens.len() < 2 {
-        return id;
-    }
-    let is_digits = |t: &str, len: usize| t.len() == len && t.bytes().all(|b| b.is_ascii_digit());
-
-    let last = tokens[tokens.len() - 1];
-    if is_digits(last, 8) {
-        return &id[..id.len() - last.len() - 1];
-    }
-    if tokens.len() >= 4 {
-        let (y, m, d) = (
-            tokens[tokens.len() - 3],
-            tokens[tokens.len() - 2],
-            tokens[tokens.len() - 1],
-        );
-        if is_digits(y, 4) && is_digits(m, 2) && is_digits(d, 2) {
-            let cut = y.len() + m.len() + d.len() + 3; // three separating dashes
-            return &id[..id.len() - cut];
-        }
-    }
-    id
-}
-
-/// Title-case a single id token, honoring a few brand spellings.
-fn title_token(token: &str) -> String {
-    match token {
-        "gpt" => return "GPT".to_string(),
-        "claude" => return "Claude".to_string(),
-        "opus" => return "Opus".to_string(),
-        "sonnet" => return "Sonnet".to_string(),
-        "haiku" => return "Haiku".to_string(),
-        "mini" => return "Mini".to_string(),
-        "nano" => return "Nano".to_string(),
-        _ => {}
-    }
-    let mut chars = token.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
     }
 }
 
@@ -572,9 +402,7 @@ pub async fn collect_routes(
             kind: route_kind(kind),
             api_key,
             base_url: config.base_url,
-            curated_models: kind
-                .curated_specs()
-                .iter()
+            curated_models: model_registry::models_for(kind)
                 .map(|spec| spec.id.to_string())
                 .collect(),
         });
@@ -627,13 +455,13 @@ pub async fn catalog_models(
         if !has_credential(secrets, kind).await {
             continue;
         }
-        models.extend(kind.curated_specs());
+        models.extend(model_registry::models_for(kind));
     }
     // If nothing is enabled+credentialed yet, still surface Anthropic's curated
     // list so a fresh install's model selector isn't empty before the user
     // finishes provider setup (turns still fail-closed without a key).
     if models.is_empty() {
-        models.extend(ProviderKind::Anthropic.curated_specs());
+        models.extend(model_registry::models_for(ProviderKind::Anthropic));
     }
     Ok(models)
 }
@@ -651,34 +479,6 @@ mod tests {
         let back: ProviderCredential = serde_json::from_str(&json).unwrap();
         assert_eq!(back.as_api_key(), Some("sk-secret"));
         assert!(!format!("{cred:?}").contains("sk-secret"));
-    }
-
-    #[test]
-    fn display_name_prefers_curated_entry() {
-        assert_eq!(display_name_for("claude-opus-4-8"), "Claude Opus 4.8");
-        assert_eq!(display_name_for("gpt-4o-mini"), "GPT-4o mini");
-    }
-
-    #[test]
-    fn display_name_falls_back_for_unknown_ids() {
-        // Trailing date suffix is dropped, remaining tokens title-cased.
-        assert_eq!(
-            display_name_for("claude-sonnet-9-20260101"),
-            "Claude Sonnet 9"
-        );
-        assert_eq!(display_name_for("gpt-6-2026-01-01"), "GPT 6");
-        assert_eq!(display_name_for("local-model"), "Local Model");
-    }
-
-    #[test]
-    fn curated_specs_ids_match_across_kinds() {
-        // Every spec reports the provider whose catalog it lives in.
-        for &kind in ProviderKind::ALL {
-            for spec in kind.curated_specs() {
-                assert_eq!(spec.provider, kind);
-            }
-        }
-        assert!(ProviderKind::OpenaiCompatible.curated_specs().is_empty());
     }
 
     #[test]

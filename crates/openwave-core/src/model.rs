@@ -586,7 +586,9 @@ impl DocumentSourceBlob {
 pub struct DocumentSourceUpsert {
     /// Stable document identifier.
     pub id: DocumentId,
-    /// Owning project, or `None` for an explicitly unscoped document.
+    /// Owning conversation for conversation-scoped sources.
+    pub chat_id: Option<ChatId>,
+    /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, when known.
     pub source_uri: Option<String>,
@@ -710,7 +712,9 @@ pub struct RetrievalEvidence {
 pub struct DocumentRecord {
     /// Stable identifier shared with the retrieval index.
     pub id: DocumentId,
-    /// Owning project, or `None` for an explicitly unscoped document.
+    /// Owning conversation for conversation-scoped sources.
+    pub chat_id: Option<ChatId>,
+    /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, or `None` for content supplied inline.
     pub source_uri: Option<String>,
@@ -927,7 +931,9 @@ impl BlobRetirementStatus {
 pub struct DocumentSummaryRecord {
     /// Stable identifier shared with the retrieval index.
     pub id: DocumentId,
-    /// Owning project, or `None` for an explicitly unscoped document.
+    /// Owning conversation for conversation-scoped sources.
+    pub chat_id: Option<ChatId>,
+    /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, or `None` for content supplied inline.
     pub source_uri: Option<String>,
@@ -972,7 +978,9 @@ pub struct DocumentListCursor {
 pub struct DocumentUpsert {
     /// Stable identifier shared with the retrieval index.
     pub id: DocumentId,
-    /// Owning project, or `None` for an explicitly unscoped document.
+    /// Owning conversation for conversation-scoped sources.
+    pub chat_id: Option<ChatId>,
+    /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, or `None` for content supplied inline.
     pub source_uri: Option<String>,
@@ -994,10 +1002,12 @@ pub struct DocumentUpsert {
 pub enum DocumentScope {
     /// Every document, for maintenance and reindexing only.
     All,
-    /// Only explicitly projectless documents.
+    /// Only explicitly legacy projectless, conversationless documents.
     Unscoped,
     /// Only documents owned by this project.
     Project(ProjectId),
+    /// Only documents owned by this conversation.
+    Chat(ChatId),
 }
 
 /// Who authored a message.

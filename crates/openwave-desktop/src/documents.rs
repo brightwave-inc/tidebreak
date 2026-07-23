@@ -1,4 +1,4 @@
-//! Native document-library bridge.
+//! Native conversation-source bridge.
 //!
 //! File paths and bytes terminate here. The webview receives a deliberately
 //! small catalog/search projection and never sees source locations, indexing
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
-use openwave_core::{ChatId, DocumentProcessingStatus, ProjectId, Store};
+use openwave_core::{ChatId, DocumentProcessingStatus, Store};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -122,22 +122,16 @@ pub(crate) struct LibraryRequest {
     chat_id: Uuid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LibraryScope {
-    Unscoped,
-    Project(ProjectId),
-}
-
 #[tauri::command]
 pub(crate) async fn list_library_documents(
     state: State<'_, Arc<AppState>>,
     host_access: State<'_, HostAccess>,
     request: LibraryRequest,
 ) -> Result<LibraryCatalog, String> {
-    let scope = resolve_library_scope(&host_access, request.chat_id).await?;
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
     let info = wait_server_info(state.inner()).await?;
     let http = local_client();
-    let path = documents_path(scope);
+    let path = documents_path(chat_id);
     let mut cursor: Option<String> = None;
     let mut documents = Vec::new();
     let truncated;
@@ -151,14 +145,14 @@ pub(crate) async fn list_library_documents(
         let response = native_auth(request, &info)
             .send()
             .await
-            .map_err(|_| "Could not load the document library".to_owned())?;
+            .map_err(|_| "Could not load this conversation's sources".to_owned())?;
         if !response.status().is_success() {
-            return Err("Could not load the document library".to_owned());
+            return Err("Could not load this conversation's sources".to_owned());
         }
         let page = response
             .json::<CatalogPage>()
             .await
-            .map_err(|_| "The document library returned an invalid response".to_owned())?;
+            .map_err(|_| "The source catalog returned an invalid response".to_owned())?;
         documents.extend(page.documents.into_iter().map(LibraryDocument::from));
         cursor = page.next_cursor;
         if documents.len() >= MAX_LIBRARY_DOCUMENTS || cursor.is_none() {
@@ -184,18 +178,18 @@ pub(crate) async fn search_library_documents(
     if query.is_empty() || query.chars().count() > MAX_SEARCH_QUERY_CHARS {
         return Err("Enter a search between 1 and 500 characters".to_owned());
     }
-    let scope = resolve_library_scope(&host_access, request.chat_id).await?;
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
     let info = wait_server_info(state.inner()).await?;
     let response = native_auth(
-        local_client().post(format!("{}{}", info.base_url, search_path(scope))),
+        local_client().post(format!("{}{}", info.base_url, search_path(chat_id))),
         &info,
     )
     .json(&serde_json::json!({ "query": query, "k": 8 }))
     .send()
     .await
-    .map_err(|_| "Could not search the document library".to_owned())?;
+    .map_err(|_| "Could not search this conversation's sources".to_owned())?;
     if !response.status().is_success() {
-        return Err("Could not search the document library".to_owned());
+        return Err("Could not search this conversation's sources".to_owned());
     }
     let response = response
         .json::<SearchResponse>()
@@ -216,8 +210,8 @@ pub(crate) async fn import_library_document(
     request: LibraryRequest,
 ) -> Result<Option<ImportedDocument>, String> {
     // Validate before presenting native consent, then resolve again after the
-    // user returns so a long-lived picker cannot retain stale project scope.
-    resolve_library_scope(&host_access, request.chat_id).await?;
+    // user returns so a long-lived picker cannot retain a deleted conversation.
+    resolve_conversation_scope(&host_access, request.chat_id).await?;
     let _picker = host_access
         .picker
         .try_lock()
@@ -233,10 +227,10 @@ pub(crate) async fn import_library_document(
         return Err("The selected document is empty".to_owned());
     }
 
-    let scope = resolve_library_scope(&host_access, request.chat_id).await?;
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
     let info = wait_server_info(app_state.inner()).await?;
     let response = native_auth(
-        local_client().post(format!("{}{}", info.base_url, raw_documents_path(scope))),
+        local_client().post(format!("{}{}", info.base_url, raw_documents_path(chat_id))),
         &info,
     )
     .query(&[("title", display_name.as_str())])
@@ -259,50 +253,42 @@ pub(crate) async fn import_library_document(
     }))
 }
 
-async fn resolve_library_scope(
+async fn resolve_conversation_scope(
     host_access: &HostAccess,
     chat_id: Uuid,
-) -> Result<LibraryScope, String> {
+) -> Result<ChatId, String> {
     if chat_id.is_nil() {
         return Err("Invalid conversation".to_owned());
     }
     let store = host_access
         .store()
         .ok_or_else(|| "OpenWave is still starting".to_owned())?;
-    resolve_library_scope_from_store(store.as_ref(), chat_id).await
+    resolve_conversation_scope_from_store(store.as_ref(), chat_id).await
 }
 
-async fn resolve_library_scope_from_store(
+async fn resolve_conversation_scope_from_store(
     store: &dyn Store,
     chat_id: Uuid,
-) -> Result<LibraryScope, String> {
-    let chat = store
-        .get_chat(ChatId::from(chat_id))
+) -> Result<ChatId, String> {
+    let chat_id = ChatId::from(chat_id);
+    store
+        .get_chat(chat_id)
         .await
         .map_err(|_| "Could not load the conversation".to_owned())?
         .ok_or_else(|| "Conversation not found".to_owned())?;
-    Ok(match chat.project_id {
-        Some(project_id) => LibraryScope::Project(project_id),
-        None => LibraryScope::Unscoped,
-    })
+    Ok(chat_id)
 }
 
-fn documents_path(scope: LibraryScope) -> String {
-    match scope {
-        LibraryScope::Unscoped => "/documents".to_owned(),
-        LibraryScope::Project(project_id) => format!("/projects/{project_id}/documents"),
-    }
+fn documents_path(chat_id: ChatId) -> String {
+    format!("/chats/{chat_id}/documents")
 }
 
-fn raw_documents_path(scope: LibraryScope) -> String {
-    format!("{}/raw", documents_path(scope))
+fn raw_documents_path(chat_id: ChatId) -> String {
+    format!("{}/raw", documents_path(chat_id))
 }
 
-fn search_path(scope: LibraryScope) -> String {
-    match scope {
-        LibraryScope::Unscoped => "/search".to_owned(),
-        LibraryScope::Project(project_id) => format!("/projects/{project_id}/search"),
-    }
+fn search_path(chat_id: ChatId) -> String {
+    format!("/chats/{chat_id}/search")
 }
 
 fn native_auth(
@@ -450,8 +436,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn chat_record_is_the_only_authority_for_library_scope() {
-        use openwave_core::{Chat, DbStore, Project};
+    async fn chat_record_is_the_only_authority_for_source_scope() {
+        use openwave_core::{Chat, DbStore, Project, ProjectId};
 
         let directory = tempfile::tempdir().unwrap();
         let store = DbStore::connect(&format!(
@@ -487,21 +473,32 @@ mod tests {
         store.create_chat(&project_chat).await.unwrap();
 
         assert_eq!(
-            resolve_library_scope_from_store(&store, standalone.id.0)
+            resolve_conversation_scope_from_store(&store, standalone.id.0)
                 .await
                 .unwrap(),
-            LibraryScope::Unscoped
+            standalone.id
         );
         assert_eq!(
-            resolve_library_scope_from_store(&store, project_chat.id.0)
+            resolve_conversation_scope_from_store(&store, project_chat.id.0)
                 .await
                 .unwrap(),
-            LibraryScope::Project(project.id)
+            project_chat.id
         );
-        assert_eq!(documents_path(LibraryScope::Unscoped), "/documents");
         assert_eq!(
-            documents_path(LibraryScope::Project(project.id)),
-            format!("/projects/{}/documents", project.id)
+            documents_path(standalone.id),
+            format!("/chats/{}/documents", standalone.id)
+        );
+        assert_eq!(
+            documents_path(project_chat.id),
+            format!("/chats/{}/documents", project_chat.id)
+        );
+        assert_eq!(
+            raw_documents_path(standalone.id),
+            format!("/chats/{}/documents/raw", standalone.id)
+        );
+        assert_eq!(
+            search_path(standalone.id),
+            format!("/chats/{}/search", standalone.id)
         );
 
         let injected = serde_json::json!({

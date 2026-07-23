@@ -50,7 +50,7 @@ use crate::vector::{
     DocumentGenerationState, GenerationStageOutcome, SearchOptions, SearchScope, VectorRecord,
     VectorStore,
 };
-use openwave_core::{DocumentGeneration, ProjectId};
+use openwave_core::{ChatId, DocumentGeneration, ProjectId};
 
 /// The single table all chunks and publication markers are stored in.
 const TABLE: &str = "chunks";
@@ -386,6 +386,11 @@ impl LanceVectorStore {
 
     fn validate_record(&self, record: &VectorRecord) -> Result<()> {
         self.check_dims(&record.embedding)?;
+        if record.chat_id.is_some() && record.project_id.is_some() {
+            return Err(RetrievalError::vector_store(
+                "vector record cannot belong to both a conversation and a project",
+            ));
+        }
         record.source.validate()?;
         record.chunk.validate_source_regions()
     }
@@ -395,7 +400,9 @@ impl LanceVectorStore {
         document_id: DocumentId,
         records: &[VectorRecord],
     ) -> Result<()> {
-        let project_id = records.first().map(|record| record.project_id);
+        let scope = records
+            .first()
+            .map(|record| (record.chat_id, record.project_id));
         for record in records {
             self.validate_record(record)?;
             if record.chunk.document_id != document_id {
@@ -404,9 +411,9 @@ impl LanceVectorStore {
                     record.chunk.id, record.chunk.document_id
                 )));
             }
-            if Some(record.project_id) != project_id {
+            if Some((record.chat_id, record.project_id)) != scope {
                 return Err(RetrievalError::vector_store(format!(
-                    "records for document {document_id} span multiple project corpora"
+                    "records for document {document_id} span multiple document corpora"
                 )));
             }
         }
@@ -414,18 +421,18 @@ impl LanceVectorStore {
     }
 
     fn validate_upsert_records(&self, records: &[VectorRecord]) -> Result<()> {
-        let mut projects = std::collections::HashMap::new();
+        let mut scopes = std::collections::HashMap::new();
         for record in records {
             self.validate_record(record)?;
-            match projects.entry(record.chunk.document_id) {
+            match scopes.entry(record.chunk.document_id) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(record.project_id);
+                    entry.insert((record.chat_id, record.project_id));
                 }
                 std::collections::hash_map::Entry::Occupied(entry)
-                    if *entry.get() != record.project_id =>
+                    if *entry.get() != (record.chat_id, record.project_id) =>
                 {
                     return Err(RetrievalError::vector_store(format!(
-                        "records for document {} span multiple project corpora",
+                        "records for document {} span multiple document corpora",
                         record.chunk.document_id
                     )));
                 }
@@ -435,24 +442,34 @@ impl LanceVectorStore {
         Ok(())
     }
 
-    async fn live_document_project_id(
+    async fn live_document_scope(
         &self,
         document_id: DocumentId,
-    ) -> Result<Option<Option<ProjectId>>> {
+    ) -> Result<Option<(Option<ChatId>, Option<ProjectId>)>> {
         let mut stream = self
             .table
             .query()
             .only_if(format!(
                 "document_id = '{document_id}' AND row_kind IN ('{UNVERSIONED_CHUNK}', '{ACTIVE_CHUNK}', '{STAGED_CHUNK}')"
             ))
-            .select(Select::columns(&["project_id"]))
+            .select(Select::columns(&["chat_id", "project_id"]))
             .execute()
             .await
             .map_err(lance_err)?;
         let mut found = None;
         while let Some(batch) = stream.try_next().await.map_err(lance_err)? {
+            let chat_ids = str_col(&batch, "chat_id")?;
             let project_ids = str_col(&batch, "project_id")?;
             for index in 0..batch.num_rows() {
+                let chat_id = if chat_ids.is_null(index) {
+                    None
+                } else {
+                    Some(chat_ids.value(index).parse::<ChatId>().map_err(|error| {
+                        RetrievalError::vector_store(format!(
+                            "document {document_id} has an invalid chat_id: {error}"
+                        ))
+                    })?)
+                };
                 let project_id = if project_ids.is_null(index) {
                     None
                 } else {
@@ -467,12 +484,13 @@ impl LanceVectorStore {
                             })?,
                     )
                 };
-                if found.is_some_and(|existing| existing != project_id) {
+                let scope = (chat_id, project_id);
+                if found.is_some_and(|existing| existing != scope) {
                     return Err(RetrievalError::vector_store(format!(
-                        "stored records for document {document_id} span multiple project corpora"
+                        "stored records for document {document_id} span multiple document corpora"
                     )));
                 }
-                found = Some(project_id);
+                found = Some(scope);
             }
         }
         Ok(found)
@@ -483,16 +501,19 @@ impl LanceVectorStore {
         document_id: DocumentId,
         records: &[VectorRecord],
     ) -> Result<()> {
-        let Some(requested) = records.first().map(|record| record.project_id) else {
+        let Some(requested) = records
+            .first()
+            .map(|record| (record.chat_id, record.project_id))
+        else {
             return Ok(());
         };
         if self
-            .live_document_project_id(document_id)
+            .live_document_scope(document_id)
             .await?
             .is_some_and(|existing| existing != requested)
         {
             return Err(RetrievalError::vector_store(format!(
-                "document {document_id} cannot move between project corpora while it has live chunks"
+                "document {document_id} cannot move between document corpora while it has live chunks"
             )));
         }
         Ok(())
@@ -517,6 +538,17 @@ impl LanceVectorStore {
             .map(|row| row.document_id.to_string())
             .collect::<Vec<_>>();
         let doc_ids = StringArray::from_iter_values(doc_id_values.iter().map(String::as_str));
+        let chat_id_values = rows
+            .iter()
+            .map(|row| {
+                row.record
+                    .as_ref()
+                    .and_then(|record| record.chat_id)
+                    .map(|chat_id| chat_id.to_string())
+            })
+            .collect::<Vec<_>>();
+        let chat_ids =
+            StringArray::from_iter(chat_id_values.iter().map(|chat_id| chat_id.as_deref()));
         let project_id_values = rows
             .iter()
             .map(|row| {
@@ -637,6 +669,7 @@ impl LanceVectorStore {
             Arc::new(row_kinds),
             Arc::new(chunk_ids),
             Arc::new(doc_ids),
+            Arc::new(chat_ids),
             Arc::new(project_ids),
             Arc::new(ordinals),
             Arc::new(texts),
@@ -751,6 +784,7 @@ impl LanceVectorStore {
             .select(Select::columns(&[
                 "chunk_id",
                 "document_id",
+                "chat_id",
                 "project_id",
                 "ordinal",
                 "text",
@@ -902,10 +936,13 @@ impl VectorStore for LanceVectorStore {
         let _snapshot = self.publication_lock.read().await;
         // Lance applies this predicate before the vector limit, so a closer row
         // in another corpus cannot consume one of this scope's top-k slots.
-        // ProjectId is a parsed UUID newtype, not caller-provided query text.
+        // Scope ids are parsed UUID newtypes, not caller-provided query text.
         let scope_filter = match options.scope {
-            SearchScope::Unscoped => "project_id IS NULL".to_string(),
-            SearchScope::Project(project_id) => format!("project_id = '{project_id}'"),
+            SearchScope::Unscoped => "chat_id IS NULL AND project_id IS NULL".to_string(),
+            SearchScope::Project(project_id) => {
+                format!("chat_id IS NULL AND project_id = '{project_id}'")
+            }
+            SearchScope::Chat(chat_id) => format!("chat_id = '{chat_id}'"),
         };
         let visibility_filter = format!("({VISIBLE_CHUNKS}) AND ({scope_filter})");
         let hybrid = !query_text.trim().is_empty();
@@ -1154,6 +1191,7 @@ fn build_schema(dims: usize) -> SchemaRef {
         Field::new("row_kind", DataType::Utf8, false),
         Field::new("chunk_id", DataType::Utf8, false),
         Field::new("document_id", DataType::Utf8, false),
+        Field::new("chat_id", DataType::Utf8, true),
         Field::new("project_id", DataType::Utf8, true),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("text", DataType::Utf8, false),
@@ -1183,6 +1221,7 @@ fn build_schema(dims: usize) -> SchemaRef {
 fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Result<()> {
     let chunk_ids = str_col(batch, "chunk_id")?;
     let doc_ids = str_col(batch, "document_id")?;
+    let chat_ids = str_col(batch, "chat_id")?;
     let project_ids = str_col(batch, "project_id")?;
     let ordinals = u64_col(batch, "ordinal")?;
     let texts = str_col(batch, "text")?;
@@ -1207,6 +1246,14 @@ fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Resu
             .value(index)
             .parse()
             .map_err(|error| RetrievalError::vector_store(format!("bad document_id: {error}")))?;
+        let chat_id =
+            if chat_ids.is_null(index) {
+                None
+            } else {
+                Some(chat_ids.value(index).parse::<ChatId>().map_err(|error| {
+                    RetrievalError::vector_store(format!("bad chat_id: {error}"))
+                })?)
+            };
         let project_id = if project_ids.is_null(index) {
             None
         } else {
@@ -1243,6 +1290,7 @@ fn read_vector_records(batch: &RecordBatch, out: &mut Vec<VectorRecord>) -> Resu
         };
         chunk.validate_source_regions()?;
         out.push(VectorRecord {
+            chat_id,
             project_id,
             source,
             generation: decode_generation(revisions.value(index), revision_tokens.value(index))?,
@@ -1455,6 +1503,7 @@ mod tests {
     fn record(doc: DocumentId, ordinal: usize, text: &str, vector: Vec<f32>) -> VectorRecord {
         let span = ByteSpan::new(ordinal * 100, ordinal * 100 + text.len());
         VectorRecord {
+            chat_id: None,
             project_id: None,
             source: crate::DocumentSource::Inline,
             generation: None,
@@ -1471,8 +1520,17 @@ mod tests {
         vector: Vec<f32>,
     ) -> VectorRecord {
         VectorRecord {
+            chat_id: None,
             project_id: Some(project_id),
             ..record(doc, ordinal, text, vector)
+        }
+    }
+
+    fn chat_record(chat_id: ChatId, doc: DocumentId, text: &str, vector: Vec<f32>) -> VectorRecord {
+        VectorRecord {
+            chat_id: Some(chat_id),
+            project_id: None,
+            ..record(doc, 0, text, vector)
         }
     }
 
@@ -1748,6 +1806,8 @@ mod tests {
         let uri = dir.path().to_str().unwrap();
         let project_a = ProjectId::new();
         let project_b = ProjectId::new();
+        let chat_a = ChatId::new();
+        let chat_b = ChatId::new();
         let unscoped_doc = DocumentId::new();
         let a_doc = DocumentId::new();
         let b_doc = DocumentId::new();
@@ -1760,6 +1820,8 @@ mod tests {
                     project_record(project_a, a_doc, 0, "project-a", vec![0.9, 0.1]),
                     // Globally closest, but it must not consume project A's k=1.
                     project_record(project_b, b_doc, 0, "project-b", vec![1.0, 0.0]),
+                    chat_record(chat_a, DocumentId::new(), "chat-a", vec![0.7, 0.3]),
+                    chat_record(chat_b, DocumentId::new(), "chat-b", vec![1.0, 0.0]),
                 ])
                 .await
                 .unwrap();
@@ -1777,9 +1839,14 @@ mod tests {
                 .query("", &query, 1, SearchScope::Project(project_b))
                 .await
                 .unwrap();
+            let chat = store
+                .query("", &query, 1, SearchScope::Chat(chat_a))
+                .await
+                .unwrap();
             assert_eq!(unscoped[0].chunk.text, "unscoped");
             assert_eq!(a[0].chunk.text, "project-a");
             assert_eq!(b[0].chunk.text, "project-b");
+            assert_eq!(chat[0].chunk.text, "chat-a");
         }
 
         let reopened = LanceVectorStore::connect(uri, 2).await.unwrap();
@@ -1810,6 +1877,15 @@ mod tests {
                 .chunk
                 .text,
             "project-b"
+        );
+        assert_eq!(
+            reopened
+                .query("", &query, 1, SearchScope::Chat(chat_a))
+                .await
+                .unwrap()[0]
+                .chunk
+                .text,
+            "chat-a"
         );
     }
 
@@ -2417,7 +2493,7 @@ mod tests {
                 .replace_document(legacy_doc, records)
                 .await
                 .unwrap_err();
-            assert!(error.to_string().contains("multiple project corpora"));
+            assert!(error.to_string().contains("multiple document corpora"));
             assert_eq!(store.table.version().await.unwrap(), version);
         }
         let hits = store
@@ -2442,7 +2518,7 @@ mod tests {
                 .stage_document_generation(generation_doc, generation(1), records)
                 .await
                 .unwrap_err();
-            assert!(error.to_string().contains("multiple project corpora"));
+            assert!(error.to_string().contains("multiple document corpora"));
             assert_eq!(store.table.version().await.unwrap(), version);
             assert_eq!(
                 store
@@ -2472,7 +2548,7 @@ mod tests {
             ])
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("multiple project corpora"));
+        assert!(error.to_string().contains("multiple document corpora"));
         assert_eq!(store.table.version().await.unwrap(), empty_version);
         assert_eq!(store.document_len(batch_doc).await.unwrap(), Some(0));
 
