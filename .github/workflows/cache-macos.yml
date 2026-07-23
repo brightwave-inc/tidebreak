@@ -1,0 +1,104 @@
+name: Warm macOS release cache
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .cargo/**
+      - .github/workflows/cache-macos.yml
+      - Cargo.lock
+      - Cargo.toml
+      - crates/**
+      - rust-toolchain.toml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Let the active main-tip compilation finish so a later release can consume
+  # its compiler outputs. GitHub retains at most one newer pending run.
+  group: openwave-macos-release-cache
+  cancel-in-progress: false
+
+jobs:
+  cargo-downloads:
+    name: Cargo dependency downloads
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: macos-release-cargo-registry-v1
+          add-job-id-key: "false"
+          cache-bin: false
+          cache-targets: false
+
+      - name: Fetch Cargo dependency downloads
+        run: |
+          cargo fetch --locked --target aarch64-apple-darwin
+          cargo fetch --locked --target x86_64-apple-darwin
+
+  warm:
+    name: macOS cache · ${{ matrix.arch }}
+    needs: cargo-downloads
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    env:
+      CARGO_INCREMENTAL: 0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_WRITE
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust target
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: macos-release-cargo-registry-v1
+          add-job-id-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: crates/openwave-desktop/ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Compile without production credentials or bundles
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        with:
+          projectPath: crates/openwave-desktop
+          args: --target ${{ matrix.target }} --no-bundle --ci

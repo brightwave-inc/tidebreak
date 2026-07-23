@@ -83,22 +83,36 @@ test("release builds use the trusted shared main cache scope", () => {
 });
 
 test("cache warming cannot access production credentials or publish", () => {
+  const cache = workflows["cache-macos.yml"];
+  assert.ok(cache);
+  assert.match(cache, /^on:\n  push:\n    branches: \[main\]/m);
+  assert.match(cache, /^  workflow_dispatch:$/m);
+  assert.doesNotMatch(cache, /^\s*pull_request(?:_target)?:/m);
+  assert.match(cache, /^  cargo-downloads:$/m);
+  assert.match(cache, /^    needs: cargo-downloads$/m);
+  assert.match(cache, /cargo fetch --locked --target aarch64-apple-darwin/);
+  assert.match(cache, /cargo fetch --locked --target x86_64-apple-darwin/);
+  assert.match(cache, /cancel-in-progress: false/);
+  assert.match(cache, /--no-bundle --ci/);
+  assert.doesNotMatch(cache, /^    environment:/m);
+  assert.doesNotMatch(cache, /secrets\./);
+  assert.doesNotMatch(cache, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_/);
+  assert.doesNotMatch(cache, /actions\/upload-artifact/);
+
   const release = workflows["release.yml"];
-  const warmJob = release.match(
-    /^  warm-macos-cache:[\s\S]*?(?=^  build-macos:)/m,
-  )?.[0];
-  assert.ok(warmJob);
-  assert.match(warmJob, /--no-bundle --ci/);
-  assert.doesNotMatch(warmJob, /^    environment:/m);
-  assert.doesNotMatch(warmJob, /secrets\./);
-  assert.doesNotMatch(warmJob, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_/);
+  assert.doesNotMatch(release, /cache_warm_only/);
+  assert.doesNotMatch(release, /^  warm-macos-cache:/m);
 });
 
 test("release caches exclude signed artifacts and target directories", () => {
   const release = workflows["release.yml"];
+  const cache = workflows["cache-macos.yml"];
   assert.match(release, /SCCACHE_GHA_ENABLED: "true"/);
   assert.match(release, /cache-targets: false/);
   assert.doesNotMatch(release, /actions\/cache/);
+  assert.match(cache, /SCCACHE_GHA_ENABLED: "true"/);
+  assert.match(cache, /cache-targets: false/);
+  assert.doesNotMatch(cache, /actions\/cache/);
 });
 
 test("the updater private key is isolated from compilation", () => {
