@@ -73,6 +73,9 @@ pub enum ToolApprovalKind {
     /// A library search may share the query and matched excerpts with the
     /// provider.
     SearchMayShareQueryAndExcerpts,
+    /// A public-web search may share the query and explicit filters with the
+    /// host's configured provider.
+    WebSearchMayShareQuery,
     /// A command execution escapes the chat workspace and may reach the network.
     ExecMayRunNetworkedCommand,
     /// A Sensitive action with no presentable consent semantics: rejectable but
@@ -85,6 +88,7 @@ impl ToolApprovalKind {
     pub fn for_tool_name(name: &str) -> Self {
         match name {
             "search" => Self::SearchMayShareQueryAndExcerpts,
+            "web_search" => Self::WebSearchMayShareQuery,
             "exec" => Self::ExecMayRunNetworkedCommand,
             _ => Self::Unsupported,
         }
@@ -94,6 +98,11 @@ impl ToolApprovalKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SearchMayShareQueryAndExcerpts => "search_may_share_query_and_excerpts",
+            // Existing databases constrain this column to the original closed
+            // search vocabulary. The exact tool name stored beside it
+            // disambiguates document search from web search on recovery, while
+            // serde still exposes the narrower renderer kind.
+            Self::WebSearchMayShareQuery => "search_may_share_query_and_excerpts",
             Self::ExecMayRunNetworkedCommand => "exec_may_run_networked_command",
             Self::Unsupported => "unsupported",
         }
@@ -103,7 +112,9 @@ impl ToolApprovalKind {
     pub const fn is_approvable(self) -> bool {
         matches!(
             self,
-            Self::SearchMayShareQueryAndExcerpts | Self::ExecMayRunNetworkedCommand
+            Self::SearchMayShareQueryAndExcerpts
+                | Self::WebSearchMayShareQuery
+                | Self::ExecMayRunNetworkedCommand
         )
     }
 }
@@ -459,6 +470,21 @@ mod standing_grant_tests {
         // `Unsupported`, so an approved escaping action stays approvable on
         // recovery.
         assert_eq!(kind.as_str(), "exec_may_run_networked_command");
+    }
+
+    #[test]
+    fn web_search_has_narrow_presentable_consent_semantics() {
+        let kind = ToolApprovalKind::for_tool_name("web_search");
+        assert_eq!(kind, ToolApprovalKind::WebSearchMayShareQuery);
+        assert!(kind.is_approvable());
+        assert_eq!(
+            serde_json::to_string(&kind).unwrap(),
+            "\"web_search_may_share_query\""
+        );
+        assert_eq!(
+            kind.as_str(),
+            ToolApprovalKind::SearchMayShareQueryAndExcerpts.as_str()
+        );
     }
 
     #[test]

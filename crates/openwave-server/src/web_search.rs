@@ -1,18 +1,18 @@
 //! Host-owned configuration and provider selection for web search.
 //!
-//! This module deliberately stops before model-tool registration or worker
-//! execution. A selected provider only becomes usable when a future host
-//! component explicitly asks [`resolve_provider`] for it. Provider endpoints
-//! are fixed in `openwave-web-search`; this config never accepts an endpoint,
-//! a secret reference, or a model-controlled network target.
+//! A selected provider becomes usable only when the sandbox worker or approved
+//! foreground tool explicitly asks [`resolve_provider`] for it. Provider
+//! endpoints are fixed in `openwave-web-search`; this config never accepts an
+//! endpoint, a secret reference, or a model-controlled network target.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use openwave_core::{Result, SecretProvider, Store};
 use openwave_web_search::{
     ExaProvider, ReqwestHttpClient, TavilyProvider, WebSearchCredentials, WebSearchProvider,
-    WebSearchProviderKind,
+    WebSearchProviderKind, WebSearchResolver, WebSearchResolverError, WebSearchTool,
 };
 use serde::{Deserialize, Serialize};
 
@@ -225,8 +225,8 @@ pub async fn update_config(
     config_info(store, secrets).await.map_err(Into::into)
 }
 
-/// Resolve the explicitly selected, credentialed provider for a future host
-/// worker. The returned provider is inert until its `search` method is called.
+/// Resolve the explicitly selected, credentialed provider for host execution.
+/// The returned provider is inert until its `search` method is called.
 ///
 /// Secret resolution failures are intentionally projected to one generic
 /// message so keychain implementation details cannot escape through logs or
@@ -259,6 +259,33 @@ pub async fn resolve_provider(
         ),
     };
     Ok(Some(provider))
+}
+
+struct HostWebSearchResolver {
+    store: Arc<dyn Store>,
+    secrets: Arc<dyn SecretProvider>,
+}
+
+#[async_trait]
+impl WebSearchResolver for HostWebSearchResolver {
+    async fn resolve(
+        &self,
+    ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError> {
+        resolve_provider(&*self.store, &*self.secrets)
+            .await
+            .map_err(|_| WebSearchResolverError)
+    }
+}
+
+/// Build the inert foreground tool over a live host configuration resolver.
+///
+/// The registry may keep this object for the server lifetime: each approved
+/// call rereads current settings and credentials before any outbound request.
+pub(crate) fn foreground_tool(
+    store: Arc<dyn Store>,
+    secrets: Arc<dyn SecretProvider>,
+) -> WebSearchTool {
+    WebSearchTool::new(Arc::new(HostWebSearchResolver { store, secrets }))
 }
 
 #[cfg(test)]

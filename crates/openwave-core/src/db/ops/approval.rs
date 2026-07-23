@@ -456,8 +456,14 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
         }
     };
     let kind = match model.approval_kind.as_deref() {
+        Some("search_may_share_query_and_excerpts") if model.name == "web_search" => {
+            ToolApprovalKind::WebSearchMayShareQuery
+        }
         Some("search_may_share_query_and_excerpts") => {
             ToolApprovalKind::SearchMayShareQueryAndExcerpts
+        }
+        Some("web_search_may_share_query") if model.name == "web_search" => {
+            ToolApprovalKind::WebSearchMayShareQuery
         }
         Some("exec_may_run_networked_command") => ToolApprovalKind::ExecMayRunNetworkedCommand,
         Some("unsupported") => ToolApprovalKind::Unsupported,

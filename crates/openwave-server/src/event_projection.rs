@@ -323,6 +323,25 @@ mod tests {
     }
 
     #[test]
+    fn web_search_approval_projects_narrow_query_egress_kind() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 8,
+            event: AgentEvent::ApprovalRequired {
+                call_id: CallId::new(),
+                tool_name: "web_search".into(),
+                class: ApprovalClass::Sensitive,
+                kind: ToolApprovalKind::WebSearchMayShareQuery,
+                summary: "private query and domain filters".into(),
+            },
+        });
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(json.contains(r#""action":"web_search""#));
+        assert!(json.contains(r#""approval":"web_search_may_share_query""#));
+        assert!(!json.contains("private query"));
+        assert!(!json.contains("domain filters"));
+    }
+
+    #[test]
     fn background_agent_tools_use_fixed_renderer_names() {
         for (name, expected) in [
             ("spawn_sandbox_agent", r#""name":"spawn_sandbox_agent""#),

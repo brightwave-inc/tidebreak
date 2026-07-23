@@ -107,6 +107,11 @@ describe("ToolCallCard", () => {
         "Allow search to send your query and potentially matching document excerpts to configured AI services outside OpenWave?",
       canApprove: true,
     });
+    expect(toolApprovalPresentation("web_search_may_share_query")).toEqual({
+      summary:
+        "Allow web search to send this query and its explicit filters to the configured search provider outside OpenWave?",
+      canApprove: true,
+    });
     expect(
       toolApprovalPresentation("exec_may_run_networked_command"),
     ).toEqual({

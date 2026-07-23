@@ -119,21 +119,23 @@ revisions and Parse→Index jobs are coordinated by `openwave-core` and
 
 ## `openwave-web-search` — provider-neutral web search 🟢
 
-The bounded request/result contract and direct HTTP adapters for Exa and
-Tavily. It is intentionally separate from both the model loop and the tool
-registry: loading a credential or constructing an adapter performs no egress,
-and calling search requires an explicit host-owned HTTP client. API keys are
-resolved only through `SecretProvider` under fixed provider keys, never from a
-model argument or persisted tool-call payload. The optional `http` feature
-provides a timeout- and response-size-bounded `reqwest` client; hosts may supply
-their own proxy, allow-list, audit, or test client through the same seam.
+The bounded request/result contract, direct HTTP adapters for Exa and Tavily,
+strict model-argument decoder, and foreground `WebSearchTool`. It remains
+separate from the model loop: loading a credential, building the tool, or
+constructing an adapter performs no egress, and calling search requires an
+explicit host-owned resolver and HTTP client. API keys are resolved only
+through `SecretProvider` under fixed provider keys, never from a model argument
+or persisted tool-call payload. The optional `http` feature provides a timeout-
+and response-size-bounded `reqwest` client; hosts may supply their own proxy,
+allow-list, audit, or test client through the same seam.
 
 `openwave-server` owns an explicit disabled-by-default Exa/Tavily selection
 and bounded request timeout. Its depth-one sandbox loop may durably checkpoint
 the one fixed `web_search` contract, and the server worker resolves that exact
-checkpoint under a fenced lease. The foreground registry and recursive
-sandboxes never receive this contract. The concrete host client is bound to the
-selected provider's exact HTTPS API domain before credentials are attached;
+checkpoint under a fenced lease. The foreground registry mounts the crate's
+Sensitive tool over the same live resolver and durable approval boundary;
+recursive sandboxes remain unavailable. The concrete host client is bound to
+the selected provider's exact HTTPS API domain before credentials are attached;
 scheme, authority, explicit-port, or userinfo deviations fail before dispatch.
 
 **Depends on:** `openwave-core`.
