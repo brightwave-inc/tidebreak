@@ -9,17 +9,21 @@ use sea_orm::{
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, HostRootId, MessageId, ProjectId, TurnId};
+use crate::id::{ChatId, DocumentId, HostRootId, MessageId, ProjectId, TurnId};
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project, Chat,
-    ChatRootAttachment, Message, ReasoningEffort, Role, RootAttachmentOrigin, ToolCallRecord,
-    TurnRunStatus, MAX_ROOT_ATTACHMENTS,
+    ChatRootAttachment, DocumentGeneration, Message, ReasoningEffort, Role, RootAttachmentOrigin,
+    ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::{
     ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome,
 };
 
-use super::super::{entities, project_from_models, store_err, DbStore};
+use super::super::{
+    ensure_live_document_generation_on, entities, project_from_models, store_err,
+    try_advance_document_generation_on, DbStore,
+};
+use super::blob as blob_ops;
 use super::turn::canonical_db_timestamp;
 use super::{
     acquire_chat_write_lock, acquire_project_write_lock, acquire_turn_write_lock,
@@ -383,6 +387,52 @@ pub(in crate::db) async fn delete_chat(
     if active_turn || active_sandbox {
         transaction.rollback().await.map_err(store_err)?;
         return Ok(DeleteChatOutcome::ActiveWork);
+    }
+
+    // Sources are product state owned by the conversation. Retire them through
+    // the same generation/tombstone protocol as an explicit document delete so
+    // the derived index and content-addressed blobs are cleaned asynchronously
+    // after this atomic operational transaction commits.
+    let documents = entities::document::Entity::find()
+        .filter(entities::document::Column::ChatId.eq(chat_id.0))
+        .all(&transaction)
+        .await
+        .map_err(store_err)?;
+    for document in documents {
+        ensure_live_document_generation_on(&transaction, &document).await?;
+        let document_id = DocumentId(document.id);
+        let Some(advanced) =
+            try_advance_document_generation_on(&transaction, document_id, true).await?
+        else {
+            return Err(AgentError::Store(format!(
+                "document {document_id} changed while deleting chat {chat_id}"
+            )));
+        };
+        let live_generation = DocumentGeneration {
+            content_revision: document.content_revision,
+            revision_token: document.revision_token,
+        };
+        if advanced.previous != Some(live_generation) {
+            return Err(AgentError::Store(format!(
+                "document {document_id} does not match its retained generation clock"
+            )));
+        }
+        let deleted = entities::document::Entity::delete_many()
+            .filter(entities::document::Column::Id.eq(document.id))
+            .filter(entities::document::Column::ChatId.eq(chat_id.0))
+            .filter(entities::document::Column::ContentRevision.eq(document.content_revision))
+            .filter(entities::document::Column::RevisionToken.eq(document.revision_token))
+            .exec(&transaction)
+            .await
+            .map_err(store_err)?;
+        if deleted.rows_affected != 1 {
+            return Err(AgentError::Store(format!(
+                "document {document_id} changed while deleting chat {chat_id}"
+            )));
+        }
+        if let Some(blob_id) = document.source_blob_id {
+            blob_ops::enqueue_on(&transaction, blob_id).await?;
+        }
     }
 
     // Delete dependency leaves before their parent lifecycle rows. These

@@ -1279,7 +1279,7 @@ export default function App() {
             }}
           >
             <LibraryBig size={16} />
-            Documents
+            Sources
           </button>
         )}
 
@@ -1430,6 +1430,7 @@ export default function App() {
                   <button
                     type="button"
                     className="btn"
+                    aria-label="Sources"
                     onClick={() => {
                       setSettingsPanel(null);
                       setPrimaryView("documents");

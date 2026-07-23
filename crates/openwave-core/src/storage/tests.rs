@@ -250,12 +250,16 @@ impl Store for MemStore {
         Ok(self.projects.lock().unwrap().values().cloned().collect())
     }
     async fn create_document(&self, document: &DocumentRecord) -> Result<()> {
-        if document
-            .project_id
-            .is_some_and(|id| !self.projects.lock().unwrap().contains_key(&id))
+        if (document.chat_id.is_some() && document.project_id.is_some())
+            || document
+                .chat_id
+                .is_some_and(|id| !self.chats.lock().unwrap().contains_key(&id))
+            || document
+                .project_id
+                .is_some_and(|id| !self.projects.lock().unwrap().contains_key(&id))
         {
             return Err(AgentError::Store(
-                "document references an unknown project".into(),
+                "document references an invalid owner scope".into(),
             ));
         }
         let mut state = self.document_state.lock().unwrap();
@@ -287,8 +291,13 @@ impl Store for MemStore {
             .values()
             .filter(|document| match scope {
                 DocumentScope::All => true,
-                DocumentScope::Unscoped => document.project_id.is_none(),
-                DocumentScope::Project(id) => document.project_id == Some(id),
+                DocumentScope::Unscoped => {
+                    document.chat_id.is_none() && document.project_id.is_none()
+                }
+                DocumentScope::Project(id) => {
+                    document.chat_id.is_none() && document.project_id == Some(id)
+                }
+                DocumentScope::Chat(id) => document.chat_id == Some(id),
             })
             .cloned()
             .collect())
@@ -307,8 +316,13 @@ impl Store for MemStore {
             .values()
             .filter(|document| match scope {
                 DocumentScope::All => true,
-                DocumentScope::Unscoped => document.project_id.is_none(),
-                DocumentScope::Project(id) => document.project_id == Some(id),
+                DocumentScope::Unscoped => {
+                    document.chat_id.is_none() && document.project_id.is_none()
+                }
+                DocumentScope::Project(id) => {
+                    document.chat_id.is_none() && document.project_id == Some(id)
+                }
+                DocumentScope::Chat(id) => document.chat_id == Some(id),
             })
             .filter(|document| {
                 after.is_none_or(|cursor| {
@@ -400,6 +414,10 @@ impl Store for MemStore {
             .map_err(|message| AgentError::Store(message.into()))?;
         if document.media_type.is_empty()
             || document.source_uri.as_deref() == Some("")
+            || (document.chat_id.is_some() && document.project_id.is_some())
+            || document
+                .chat_id
+                .is_some_and(|id| !self.chats.lock().unwrap().contains_key(&id))
             || document
                 .project_id
                 .is_some_and(|id| !self.projects.lock().unwrap().contains_key(&id))
@@ -407,11 +425,9 @@ impl Store for MemStore {
             return Err(AgentError::Store("invalid document upsert".into()));
         }
         let mut state = self.document_state.lock().unwrap();
-        if state
-            .documents
-            .get(&document.id)
-            .is_some_and(|existing| existing.project_id != document.project_id)
-        {
+        if state.documents.get(&document.id).is_some_and(|existing| {
+            existing.chat_id != document.chat_id || existing.project_id != document.project_id
+        }) {
             return Err(AgentError::Store(format!(
                 "document {} cannot move between project corpora",
                 document.id
@@ -423,6 +439,7 @@ impl Store for MemStore {
             .map_or(document.updated_at, |existing| existing.created_at);
         let generation = allocate_mem_generation(&mut state, document.id)?;
         let record = DocumentRecord {
+            chat_id: document.chat_id,
             id: document.id,
             project_id: document.project_id,
             source_uri: document.source_uri.clone(),
@@ -457,6 +474,10 @@ impl Store for MemStore {
             || max_attempts < 1
             || document.media_type.is_empty()
             || document.source_uri.as_deref() == Some("")
+            || (document.chat_id.is_some() && document.project_id.is_some())
+            || document
+                .chat_id
+                .is_some_and(|id| !self.chats.lock().unwrap().contains_key(&id))
             || document
                 .project_id
                 .is_some_and(|id| !self.projects.lock().unwrap().contains_key(&id))
@@ -465,18 +486,17 @@ impl Store for MemStore {
         }
 
         let mut state = self.document_state.lock().unwrap();
-        if state
-            .documents
-            .get(&document.id)
-            .is_some_and(|existing| existing.project_id != document.project_id)
-        {
+        if state.documents.get(&document.id).is_some_and(|existing| {
+            existing.chat_id != document.chat_id || existing.project_id != document.project_id
+        }) {
             return Err(AgentError::Store(format!(
                 "document {} cannot move between project corpora",
                 document.id
             )));
         }
         if let Some(existing) = state.documents.get(&document.id).filter(|existing| {
-            existing.project_id == document.project_id
+            existing.chat_id == document.chat_id
+                && existing.project_id == document.project_id
                 && existing.source_uri == document.source_uri
                 && existing.media_type == document.media_type
                 && existing.title == document.title
@@ -501,6 +521,7 @@ impl Store for MemStore {
             .map_or(document.updated_at, |existing| existing.created_at);
         let generation = allocate_mem_generation(&mut state, document.id)?;
         let record = DocumentRecord {
+            chat_id: document.chat_id,
             id: document.id,
             project_id: document.project_id,
             source_uri: document.source_uri.clone(),
@@ -1953,6 +1974,7 @@ impl Store for MemStore {
 
 fn document_summary(document: &DocumentRecord) -> DocumentSummaryRecord {
     DocumentSummaryRecord {
+        chat_id: document.chat_id,
         id: document.id,
         project_id: document.project_id,
         source_uri: document.source_uri.clone(),
@@ -1973,6 +1995,7 @@ fn mem_store_create_document_rejects_an_unknown_project() {
     let store = MemStore::default();
     let now = chrono::Utc::now();
     let document = DocumentRecord {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: Some(ProjectId::new()),
         source_uri: None,
@@ -2024,6 +2047,7 @@ fn store_is_object_safe_and_roundtrips() {
     );
 
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///mem-store.txt".into()),
@@ -2130,6 +2154,7 @@ fn mem_store_rejects_moving_a_live_document_between_corpora() {
     block_on(store.create_project(&project_a)).unwrap();
     block_on(store.create_project(&project_b)).unwrap();
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: Some(project_a.id),
         source_uri: Some("file:///scoped.txt".into()),
@@ -2158,6 +2183,7 @@ fn mem_store_rejects_moving_a_live_document_between_corpora() {
 fn mem_index_maintenance_requeues_or_advances_by_reason() {
     let store = MemStore::default();
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///maintenance.txt".into()),
@@ -2263,6 +2289,7 @@ fn mem_index_maintenance_requeues_or_advances_by_reason() {
 fn mem_store_generation_overflow_leaves_source_job_and_clock_unchanged() {
     let store = MemStore::default();
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: None,
@@ -2340,6 +2367,7 @@ fn mem_store_generation_overflow_leaves_source_job_and_clock_unchanged() {
 fn mem_store_document_retirement_is_durable_state_with_exact_completion() {
     let store = MemStore::default();
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: None,
@@ -2452,6 +2480,7 @@ fn mem_store_ensure_parse_job_advances_parser_changes_once() {
         state.documents.insert(
             document_id,
             DocumentRecord {
+                chat_id: None,
                 id: document_id,
                 project_id: None,
                 source_uri: Some("file:///parser-upgrade.txt".into()),
@@ -2521,6 +2550,7 @@ fn mem_store_ensure_parse_job_advances_parser_changes_once() {
 fn mem_store_explicit_retry_only_revives_current_failed_index_job() {
     let store = MemStore::default();
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: None,
@@ -2743,6 +2773,7 @@ fn mem_store_explicit_retry_revives_only_pending_parse_stage() {
         state.documents.insert(
             document_id,
             DocumentRecord {
+                chat_id: None,
                 id: document_id,
                 project_id: None,
                 source_uri: Some("file:///report.pdf".into()),

@@ -7,7 +7,7 @@
 //! and it gives every answer a precise, verifiable pointer back into the source.
 
 pub use openwave_core::{ByteSpan, SourceLocation, SourceRegion};
-use openwave_core::{DocumentGeneration, ProjectId};
+use openwave_core::{ChatId, DocumentGeneration, ProjectId};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -58,7 +58,9 @@ impl DocumentSource {
 pub struct Document {
     /// Stable identifier for this document.
     pub id: DocumentId,
-    /// Project corpus this document belongs to, or `None` for the unscoped corpus.
+    /// Conversation that owns this document for current product retrieval.
+    pub chat_id: Option<ChatId>,
+    /// Legacy project corpus this document belongs to.
     pub project_id: Option<ProjectId>,
     /// Where the document came from.
     pub source: DocumentSource,
@@ -94,6 +96,7 @@ impl Document {
     ) -> Self {
         Self {
             id,
+            chat_id: None,
             project_id: None,
             source,
             media_type: media_type.into(),
@@ -124,7 +127,28 @@ impl Document {
     ) -> Self {
         Self {
             id,
+            chat_id: None,
             project_id: Some(project_id),
+            source,
+            media_type: media_type.into(),
+            text: text.into(),
+            source_regions: Vec::new(),
+        }
+    }
+
+    /// Assemble a conversation-scoped document with a caller-supplied id.
+    #[must_use]
+    pub fn with_id_for_chat(
+        id: DocumentId,
+        chat_id: ChatId,
+        source: DocumentSource,
+        media_type: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            chat_id: Some(chat_id),
+            project_id: None,
             source,
             media_type: media_type.into(),
             text: text.into(),

@@ -179,10 +179,10 @@ impl DocumentId {
     /// persisted identity contract and must remain stable.
     const NAMESPACE: Uuid = Uuid::from_u128(0x1d0c_7a44_9e21_4b83_bc55_6677_8899_aabb);
 
-    /// Derive a stable id from a source URI in the unscoped corpus.
+    /// Derive a legacy stable id from only a source URI.
     ///
-    /// Project-owned documents must use [`DocumentId::derive_for_project`] so
-    /// the same URI can belong to more than one corpus without aliasing.
+    /// New conversation-owned documents must use [`DocumentId::derive_for_chat`]
+    /// so the same URI can be attached to more than one conversation.
     #[must_use]
     pub fn derive(uri: &str) -> Self {
         Self(Uuid::new_v5(&Self::NAMESPACE, uri.as_bytes()))
@@ -193,6 +193,13 @@ impl DocumentId {
     pub fn derive_for_project(project_id: ProjectId, uri: &str) -> Self {
         let project_namespace = Uuid::new_v5(&Self::NAMESPACE, project_id.as_uuid().as_bytes());
         Self(Uuid::new_v5(&project_namespace, uri.as_bytes()))
+    }
+
+    /// Derive a stable id from a conversation and source URI.
+    #[must_use]
+    pub fn derive_for_chat(chat_id: ChatId, uri: &str) -> Self {
+        let chat_namespace = Uuid::new_v5(&Self::NAMESPACE, chat_id.as_uuid().as_bytes());
+        Self(Uuid::new_v5(&chat_namespace, uri.as_bytes()))
     }
 }
 id_type!(
@@ -425,6 +432,21 @@ mod tests {
         );
         assert_ne!(
             DocumentId::derive_for_project(project_a, "file:///a.txt"),
+            DocumentId::derive("file:///a.txt")
+        );
+
+        let chat_a = ChatId::new();
+        let chat_b = ChatId::new();
+        assert_eq!(
+            DocumentId::derive_for_chat(chat_a, "file:///a.txt"),
+            DocumentId::derive_for_chat(chat_a, "file:///a.txt")
+        );
+        assert_ne!(
+            DocumentId::derive_for_chat(chat_a, "file:///a.txt"),
+            DocumentId::derive_for_chat(chat_b, "file:///a.txt")
+        );
+        assert_ne!(
+            DocumentId::derive_for_chat(chat_a, "file:///a.txt"),
             DocumentId::derive("file:///a.txt")
         );
     }

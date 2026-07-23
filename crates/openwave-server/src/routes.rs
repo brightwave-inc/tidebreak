@@ -705,7 +705,11 @@ pub async fn delete_chat(
     Path(id): Path<ChatId>,
 ) -> Result<StatusCode, ServerError> {
     match state.store.delete_chat(id).await? {
-        DeleteChatOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteChatOutcome::Deleted => {
+            state.document_job_wake.notify_one();
+            state.blob_retirement_wake.notify_one();
+            Ok(StatusCode::NO_CONTENT)
+        }
         DeleteChatOutcome::NotFound => Err(ServerError::not_found(format!("chat {id} not found"))),
         DeleteChatOutcome::ActiveWork => Err(ServerError::conflict_kind(
             "chat_active",

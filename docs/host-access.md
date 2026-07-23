@@ -18,34 +18,37 @@ one folder all conversations work in.
 
 A folder elsewhere on the machine is a **connected root**. It becomes available
 only after the user chooses it through a trusted desktop action, such as a native
-folder picker. Different projects or conversations can resolve to different
-host-access contexts, and each context can contain more than one connected root.
+folder picker. The current product resolves that access through the exact
+conversation, and each conversation can contain more than one connected root.
 
 In practical terms:
 
 - OpenWave may always use its own private application data and scratch space.
-- A project can have its own ordered set of connected folders.
-- A standalone conversation can have its own ordered set of connected folders.
-- A conversation in a project can use project roots plus an explicit attached
-  subset or conversation-specific roots. Adding a project root must not silently
-  widen an already-running turn.
+- Each conversation has its own ordered set of connected folders.
+- A new conversation does not inherit another conversation's roots or fall back
+  to a shared workspace.
 - The model sees an opaque root identifier, a display name, and root-relative
   paths. It never receives authority by naming an absolute host path.
 - Connecting one folder never grants access to its siblings, the user's whole
-  home directory, or another project's roots.
+  home directory, or another conversation's roots.
 - An agent can request access to another folder, including familiar locations
   such as Documents or Downloads. The request can explain why and suggest where
   to open the picker, but only the folder the user actually selects is granted.
 
-Projects and chats now persist only ordered opaque root IDs plus an attachment
-revision. Project defaults are snapshotted into a new chat's exact attachment
-set; later project changes cannot silently widen that chat. These product rows
-are not grants: they contain no path, capability, consent, or display name, and
-host access still requires the broker's live attachment and authorization. The
-product store has a durable attachment-change state machine and a native-only
-HTTP boundary for driving it. Both user-facing connected-folder actions and
-agent-approved picker requests now converge the broker attachment and product
-projection through that state machine before reporting success.
+Chats persist only ordered opaque root IDs plus an attachment revision. These
+product rows are not grants: they contain no path, capability, consent, or
+display name, and host access still requires the broker's live attachment and
+authorization. The product store has a durable attachment-change state machine
+and a native-only HTTP boundary for driving it. Both user-facing connected-folder
+actions and agent-approved picker requests now converge the broker attachment
+and product projection through that state machine before reporting success.
+
+Project rows and lower-level project APIs remain in the runtime but are dormant
+in the current desktop product. Those APIs can still create a project-scoped
+chat and snapshot its project's opaque root projection into the new chat. This
+is compatibility behavior, not a surfaced workflow or a promise of automatic
+Project inheritance. If Projects return, they should be a completely optional
+layer above otherwise self-contained conversations.
 
 ### Native attachment-change boundary
 
@@ -194,10 +197,12 @@ shells cannot contend for the same broker state.
 
 The Tauri host—not the renderer—owns the control handle. It opens the native
 folder picker, resolves the renderer's chat ID against the server's authoritative
-store, derives project or standalone ownership from that record, and forwards
-the picker result. Re-registering the same pinned filesystem object for the same
-subject reuses the root. A separate product attachment change then confirms the
-exact conversation attachment before the renderer sees it as connected.
+store, derives the trusted ownership subject from that record, and forwards the
+picker result. Current desktop chats use their conversation subject; dormant
+project-scoped API chats retain their legacy project subject. Re-registering the
+same pinned filesystem object for the same subject reuses the root. A separate
+product attachment change then confirms the exact conversation attachment before
+the renderer sees it as connected.
 
 The **renderer** presents connected folders and permission choices. It receives
 safe summaries, not the broker's persisted absolute-path registry.
@@ -252,11 +257,11 @@ the broker confirms it is detached. The final projection and terminal receipt
 commit together. A crash therefore leaves durable work that a native reconciler
 can resume instead of an ambiguous half-update.
 
-The store derives the broker subject from the locked chat: project chats use the
-project subject, while standalone chats use the conversation subject. Callers
-provide only the stable operation ID, chat, executor, root, action, expected
-revision, and creation time. They cannot choose a project, path, projection
-position, or provenance.
+The store derives the broker subject from the locked chat. Current desktop chats
+use the conversation subject; a chat created through the dormant project API
+continues to use its project subject. Callers provide only the stable operation
+ID, chat, executor, root, action, expected revision, and creation time. They
+cannot choose a project, path, projection position, or provenance.
 
 The native reconciler must derive its stable executor identity from its private
 authenticated session; renderer input cannot choose or learn that identity. It
@@ -269,8 +274,8 @@ and must be escalated rather than converted into an ordinary failure.
 
 The host-access context and the conversation's attached-root set are supplied by
 trusted conversation execution state, not by model-generated tool arguments.
-This stops a model from selecting a different project's context even if it
-guesses an identifier.
+This stops a model from selecting a different conversation's context—or a
+dormant project subject—even if it guesses an identifier.
 
 ## Agent-requested access
 

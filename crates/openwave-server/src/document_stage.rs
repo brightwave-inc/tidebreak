@@ -61,6 +61,7 @@ mod tests {
     ) -> DocumentRecord {
         let now = chrono::Utc::now();
         DocumentRecord {
+            chat_id: None,
             id: DocumentId::new(),
             project_id: None,
             source_uri: None,

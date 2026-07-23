@@ -15,16 +15,17 @@ use crate::document::{Chunk, DocumentSource, ScoredChunk};
 use crate::embed::Embedding;
 use crate::error::{Result, RetrievalError};
 use crate::id::DocumentId;
-use openwave_core::DocumentGeneration;
-use openwave_core::ProjectId;
+use openwave_core::{ChatId, DocumentGeneration, ProjectId};
 
 /// Corpus boundary applied to every retrieval query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchScope {
-    /// Only documents not assigned to a project.
+    /// Only legacy documents not assigned to a conversation or project.
     Unscoped,
-    /// Only documents assigned to this project.
+    /// Only legacy documents assigned to this project.
     Project(ProjectId),
+    /// Only documents owned by this conversation.
+    Chat(ChatId),
 }
 
 /// Default semantic quality floor for dense retrieval candidates.
@@ -70,10 +71,11 @@ impl SearchOptions {
 }
 
 impl SearchScope {
-    fn includes(self, project_id: Option<ProjectId>) -> bool {
+    fn includes(self, chat_id: Option<ChatId>, project_id: Option<ProjectId>) -> bool {
         match self {
-            Self::Unscoped => project_id.is_none(),
-            Self::Project(expected) => project_id == Some(expected),
+            Self::Unscoped => chat_id.is_none() && project_id.is_none(),
+            Self::Project(expected) => chat_id.is_none() && project_id == Some(expected),
+            Self::Chat(expected) => chat_id == Some(expected),
         }
     }
 }
@@ -81,7 +83,9 @@ impl SearchScope {
 /// A chunk together with its embedding, ready to store.
 #[derive(Debug, Clone)]
 pub struct VectorRecord {
-    /// Project corpus this vector belongs to, or `None` for the unscoped corpus.
+    /// Conversation that owns this vector for current product retrieval.
+    pub chat_id: Option<ChatId>,
+    /// Legacy project corpus this vector belongs to.
     pub project_id: Option<ProjectId>,
     /// Immutable source provenance captured with this indexed generation.
     pub source: DocumentSource,
@@ -327,6 +331,11 @@ impl InMemoryVectorStore {
 
     fn validate_record(&self, record: &VectorRecord) -> Result<()> {
         self.check_dims(&record.embedding)?;
+        if record.chat_id.is_some() && record.project_id.is_some() {
+            return Err(RetrievalError::vector_store(
+                "vector record cannot belong to both a conversation and a project",
+            ));
+        }
         record.source.validate()?;
         record.chunk.validate_source_regions()
     }
@@ -335,8 +344,10 @@ impl InMemoryVectorStore {
         &self,
         document_id: DocumentId,
         records: &[VectorRecord],
-    ) -> Result<Option<Option<ProjectId>>> {
-        let project_id = records.first().map(|record| record.project_id);
+    ) -> Result<Option<(Option<ChatId>, Option<ProjectId>)>> {
+        let scope = records
+            .first()
+            .map(|record| (record.chat_id, record.project_id));
         for record in records {
             self.validate_record(record)?;
             if record.chunk.document_id != document_id {
@@ -345,18 +356,18 @@ impl InMemoryVectorStore {
                     record.chunk.id, record.chunk.document_id
                 )));
             }
-            if Some(record.project_id) != project_id {
+            if Some((record.chat_id, record.project_id)) != scope {
                 return Err(RetrievalError::vector_store(format!(
-                    "records for document {document_id} span multiple project corpora"
+                    "records for document {document_id} span multiple document corpora"
                 )));
             }
         }
-        Ok(project_id)
+        Ok(scope)
     }
 
     fn ensure_scope_unchanged<'a>(
         document_id: DocumentId,
-        requested: Option<Option<ProjectId>>,
+        requested: Option<(Option<ChatId>, Option<ProjectId>)>,
         existing: impl Iterator<Item = &'a VectorRecord>,
     ) -> Result<()> {
         let Some(requested) = requested else {
@@ -364,10 +375,10 @@ impl InMemoryVectorStore {
         };
         if existing
             .filter(|record| record.chunk.document_id == document_id)
-            .any(|record| record.project_id != requested)
+            .any(|record| (record.chat_id, record.project_id) != requested)
         {
             return Err(RetrievalError::vector_store(format!(
-                "document {document_id} cannot move between project corpora while it has indexed records"
+                "document {document_id} cannot move between document corpora while it has indexed records"
             )));
         }
         Ok(())
@@ -391,13 +402,13 @@ impl VectorStore for InMemoryVectorStore {
             self.validate_record(record)?;
             match scopes.entry(record.chunk.document_id) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(record.project_id);
+                    entry.insert((record.chat_id, record.project_id));
                 }
                 std::collections::hash_map::Entry::Occupied(entry)
-                    if *entry.get() != record.project_id =>
+                    if *entry.get() != (record.chat_id, record.project_id) =>
                 {
                     return Err(RetrievalError::vector_store(format!(
-                        "records for document {} span multiple project corpora",
+                        "records for document {} span multiple document corpora",
                         record.chunk.document_id
                     )));
                 }
@@ -416,10 +427,10 @@ impl VectorStore for InMemoryVectorStore {
                 "legacy upsert cannot modify a generation-managed document",
             ));
         }
-        for (document_id, project_id) in scopes {
+        for (document_id, scope) in scopes {
             Self::ensure_scope_unchanged(
                 document_id,
-                Some(project_id),
+                Some(scope),
                 store.unversioned_records.iter(),
             )?;
         }
@@ -454,7 +465,7 @@ impl VectorStore for InMemoryVectorStore {
                 .flat_map(|active| active.records.iter()),
         );
         let visible = visible
-            .filter(|record| options.scope.includes(record.project_id))
+            .filter(|record| options.scope.includes(record.chat_id, record.project_id))
             .collect::<Vec<_>>();
         if query_text.trim().is_empty() {
             Ok(crate::hybrid::dense(
@@ -484,7 +495,7 @@ impl VectorStore for InMemoryVectorStore {
                 "legacy replacement cannot accept generation-stamped records",
             ));
         }
-        let project_id = self.validate_document_records(document_id, &records)?;
+        let scope = self.validate_document_records(document_id, &records)?;
         // Delete + insert under a single write lock, so a concurrent ingest can't
         // observe or race a half-applied replacement.
         let mut store = self
@@ -496,7 +507,7 @@ impl VectorStore for InMemoryVectorStore {
                 "legacy replacement cannot modify a generation-managed document",
             ));
         }
-        Self::ensure_scope_unchanged(document_id, project_id, store.unversioned_records.iter())?;
+        Self::ensure_scope_unchanged(document_id, scope, store.unversioned_records.iter())?;
         store
             .unversioned_records
             .retain(|r| r.chunk.document_id != document_id);
@@ -539,7 +550,7 @@ impl VectorStore for InMemoryVectorStore {
                 _ => record.generation = Some(generation),
             }
         }
-        let project_id = self.validate_document_records(document_id, &records)?;
+        let scope = self.validate_document_records(document_id, &records)?;
         let records = dedupe_records(records);
         let mut state = self
             .state
@@ -559,15 +570,11 @@ impl VectorStore for InMemoryVectorStore {
                             .into_iter()
                             .flat_map(|generation| generation.records.iter()),
                     );
-                Self::ensure_scope_unchanged(document_id, project_id, existing)?;
+                Self::ensure_scope_unchanged(document_id, scope, existing)?;
             }
         }
         if !records.is_empty() {
-            Self::ensure_scope_unchanged(
-                document_id,
-                project_id,
-                state.unversioned_records.iter(),
-            )?;
+            Self::ensure_scope_unchanged(document_id, scope, state.unversioned_records.iter())?;
         }
         let publication = state.publications.entry(document_id).or_default();
         let newest = publication
@@ -760,6 +767,7 @@ mod tests {
     fn record(doc: DocumentId, ordinal: usize, text: &str, vector: Vec<f32>) -> VectorRecord {
         let span = ByteSpan::new(ordinal * 100, ordinal * 100 + text.len());
         VectorRecord {
+            chat_id: None,
             project_id: None,
             source: DocumentSource::Inline,
             generation: None,
@@ -776,8 +784,17 @@ mod tests {
         vector: Vec<f32>,
     ) -> VectorRecord {
         VectorRecord {
+            chat_id: None,
             project_id: Some(project_id),
             ..record(doc, ordinal, text, vector)
+        }
+    }
+
+    fn chat_record(doc: DocumentId, chat_id: ChatId, text: &str, vector: Vec<f32>) -> VectorRecord {
+        VectorRecord {
+            chat_id: Some(chat_id),
+            project_id: None,
+            ..record(doc, 0, text, vector)
         }
     }
 
@@ -1029,6 +1046,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_scope_filters_before_top_k_and_excludes_legacy_corpora() {
+        let store = InMemoryVectorStore::new(2);
+        let first = ChatId::new();
+        let second = ChatId::new();
+        store
+            .upsert(vec![
+                chat_record(
+                    DocumentId::new(),
+                    first,
+                    "weaker owning-chat hit",
+                    vec![0.8, 0.6],
+                ),
+                chat_record(
+                    DocumentId::new(),
+                    second,
+                    "stronger other-chat hit",
+                    vec![1.0, 0.0],
+                ),
+                record(
+                    DocumentId::new(),
+                    0,
+                    "stronger legacy-unscoped hit",
+                    vec![1.0, 0.0],
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let hits = store
+            .query("", &Embedding(vec![1.0, 0.0]), 1, SearchScope::Chat(first))
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.text, "weaker owning-chat hit");
+
+        let mut double_scoped = chat_record(DocumentId::new(), first, "invalid", vec![1.0, 0.0]);
+        double_scoped.project_id = Some(ProjectId::new());
+        assert!(store
+            .upsert(vec![double_scoped])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("both a conversation and a project"));
+    }
+
+    #[tokio::test]
     async fn hybrid_query_fuses_lexical_and_dense_candidates_within_scope() {
         let store = InMemoryVectorStore::new(2);
         let project = ProjectId::new();
@@ -1129,12 +1192,14 @@ mod tests {
             .unwrap_err();
         assert!(replacement_error
             .to_string()
-            .contains("multiple project corpora"));
+            .contains("multiple document corpora"));
         let stage_error = store
             .stage_document_generation(doc, generation(1), records)
             .await
             .unwrap_err();
-        assert!(stage_error.to_string().contains("multiple project corpora"));
+        assert!(stage_error
+            .to_string()
+            .contains("multiple document corpora"));
         assert!(store.is_empty().await.unwrap());
     }
 
@@ -1152,7 +1217,9 @@ mod tests {
             ])
             .await
             .unwrap_err();
-        assert!(mixed_error.to_string().contains("multiple project corpora"));
+        assert!(mixed_error
+            .to_string()
+            .contains("multiple document corpora"));
         assert!(store.is_empty().await.unwrap());
 
         store

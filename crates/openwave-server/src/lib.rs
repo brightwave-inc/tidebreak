@@ -78,6 +78,27 @@ pub fn app(state: AppState) -> Router {
     // unknown path still answers `404` (not `401`), and `/healthz` stays open.
     let document_api = Router::new()
         .route(
+            "/chats/{chat_id}/documents",
+            post(routes::ingest_chat_document).get(routes::list_chat_documents),
+        )
+        .route(
+            "/chats/{chat_id}/documents/raw",
+            post(routes::ingest_raw_chat_document)
+                .layer(DefaultBodyLimit::max(MAX_RAW_DOCUMENT_BYTES)),
+        )
+        .route(
+            "/chats/{chat_id}/documents/{document_id}",
+            get(routes::get_chat_document).delete(routes::delete_chat_document),
+        )
+        .route(
+            "/chats/{chat_id}/documents/{document_id}/retry",
+            post(routes::retry_chat_document),
+        )
+        .route(
+            "/chats/{chat_id}/search",
+            post(routes::search_chat_documents),
+        )
+        .route(
             "/projects/{project_id}/documents",
             post(routes::ingest_project_document).get(routes::list_project_documents),
         )

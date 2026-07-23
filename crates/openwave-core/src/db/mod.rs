@@ -78,6 +78,7 @@ pub struct DbStore {
 #[derive(Debug, FromQueryResult)]
 struct DocumentSummaryRow {
     id: uuid::Uuid,
+    chat_id: Option<uuid::Uuid>,
     project_id: Option<uuid::Uuid>,
     source_uri: Option<String>,
     media_type: String,
@@ -237,8 +238,9 @@ impl Store for DbStore {
             .map(validate_document_source_blob)
             .transpose()?;
         let transaction = self.conn.begin().await.map_err(store_err)?;
+        ops::require_document_scope_write_lock(&transaction, document.chat_id, document.project_id)
+            .await?;
         acquire_document_write_lock(&transaction, document.id).await?;
-        ops::require_project_write_lock(&transaction, document.project_id).await?;
         let revision_token = uuid::Uuid::new_v4();
         entities::document_generation::ActiveModel {
             document_id: Set(document.id.0),
@@ -254,6 +256,7 @@ impl Store for DbStore {
         .map_err(store_err)?;
         entities::document::ActiveModel {
             id: Set(document.id.0),
+            chat_id: Set(document.chat_id.map(|id| id.0)),
             project_id: Set(document.project_id.map(|id| id.0)),
             source_uri: Set(document.source_uri.clone()),
             media_type: Set(document.media_type.clone()),
@@ -299,12 +302,13 @@ impl Store for DbStore {
         let mut query = entities::document::Entity::find();
         query = match scope {
             DocumentScope::All => query,
-            DocumentScope::Unscoped => {
-                query.filter(entities::document::Column::ProjectId.is_null())
-            }
-            DocumentScope::Project(id) => {
-                query.filter(entities::document::Column::ProjectId.eq(id.0))
-            }
+            DocumentScope::Unscoped => query
+                .filter(entities::document::Column::ChatId.is_null())
+                .filter(entities::document::Column::ProjectId.is_null()),
+            DocumentScope::Project(id) => query
+                .filter(entities::document::Column::ChatId.is_null())
+                .filter(entities::document::Column::ProjectId.eq(id.0)),
+            DocumentScope::Chat(id) => query.filter(entities::document::Column::ChatId.eq(id.0)),
         };
         query
             .order_by_desc(entities::document::Column::CreatedAt)
@@ -325,12 +329,13 @@ impl Store for DbStore {
         let mut query = entities::document::Entity::find();
         query = match scope {
             DocumentScope::All => query,
-            DocumentScope::Unscoped => {
-                query.filter(entities::document::Column::ProjectId.is_null())
-            }
-            DocumentScope::Project(id) => {
-                query.filter(entities::document::Column::ProjectId.eq(id.0))
-            }
+            DocumentScope::Unscoped => query
+                .filter(entities::document::Column::ChatId.is_null())
+                .filter(entities::document::Column::ProjectId.is_null()),
+            DocumentScope::Project(id) => query
+                .filter(entities::document::Column::ChatId.is_null())
+                .filter(entities::document::Column::ProjectId.eq(id.0)),
+            DocumentScope::Chat(id) => query.filter(entities::document::Column::ChatId.eq(id.0)),
         };
         if let Some(cursor) = after {
             query = query.filter(
@@ -348,6 +353,7 @@ impl Store for DbStore {
             .select_only()
             .columns([
                 entities::document::Column::Id,
+                entities::document::Column::ChatId,
                 entities::document::Column::ProjectId,
                 entities::document::Column::SourceUri,
                 entities::document::Column::MediaType,
@@ -378,12 +384,13 @@ impl Store for DbStore {
             .column(entities::document::Column::Id);
         query = match scope {
             DocumentScope::All => query,
-            DocumentScope::Unscoped => {
-                query.filter(entities::document::Column::ProjectId.is_null())
-            }
-            DocumentScope::Project(id) => {
-                query.filter(entities::document::Column::ProjectId.eq(id.0))
-            }
+            DocumentScope::Unscoped => query
+                .filter(entities::document::Column::ChatId.is_null())
+                .filter(entities::document::Column::ProjectId.is_null()),
+            DocumentScope::Project(id) => query
+                .filter(entities::document::Column::ChatId.is_null())
+                .filter(entities::document::Column::ProjectId.eq(id.0)),
+            DocumentScope::Chat(id) => query.filter(entities::document::Column::ChatId.eq(id.0)),
         };
         Ok(query
             .order_by_desc(entities::document::Column::CreatedAt)
@@ -636,8 +643,13 @@ impl Store for DbStore {
         validate_document_source_regions(&document.canonical_text, &document.source_regions)?;
         loop {
             let transaction = self.conn.begin().await.map_err(store_err)?;
+            ops::require_document_scope_write_lock(
+                &transaction,
+                document.chat_id,
+                document.project_id,
+            )
+            .await?;
             acquire_document_write_lock(&transaction, document.id).await?;
-            ops::require_project_write_lock(&transaction, document.project_id).await?;
             match try_upsert_document_on(&transaction, document).await? {
                 Some(record) => {
                     transaction.commit().await.map_err(store_err)?;
@@ -672,8 +684,13 @@ impl Store for DbStore {
 
         loop {
             let transaction = self.conn.begin().await.map_err(store_err)?;
+            ops::require_document_scope_write_lock(
+                &transaction,
+                document.chat_id,
+                document.project_id,
+            )
+            .await?;
             acquire_document_write_lock(&transaction, document.id).await?;
-            ops::require_project_write_lock(&transaction, document.project_id).await?;
             if let Some(current) = entities::document::Entity::find_by_id(document.id.0)
                 .one(&transaction)
                 .await
@@ -3145,6 +3162,7 @@ fn document_upsert_matches(current: &entities::document::Model, document: &Docum
         && current.source_sha256.is_none()
         && current.source_byte_len.is_none()
         && current.canonical_fingerprint.is_none()
+        && current.chat_id == document.chat_id.map(|id| id.0)
         && current.project_id == document.project_id.map(|id| id.0)
         && current.source_uri == document.source_uri
         && current.media_type == document.media_type
@@ -3305,9 +3323,11 @@ where
                 "raw-source documents require the staged source workflow".into(),
             ));
         }
-        if existing.project_id != document.project_id.map(|id| id.0) {
+        if existing.chat_id != document.chat_id.map(|id| id.0)
+            || existing.project_id != document.project_id.map(|id| id.0)
+        {
             return Err(AgentError::Store(format!(
-                "document {} cannot move between project corpora",
+                "document {} cannot move between document corpora",
                 document.id
             )));
         }
@@ -3329,6 +3349,10 @@ where
             )));
         }
         let result = entities::document::Entity::update_many()
+            .col_expr(
+                entities::document::Column::ChatId,
+                sea_orm::sea_query::Expr::value(document.chat_id.map(|id| id.0)),
+            )
             .col_expr(
                 entities::document::Column::ProjectId,
                 sea_orm::sea_query::Expr::value(document.project_id.map(|id| id.0)),
@@ -3400,6 +3424,7 @@ where
 
     let inserted = entities::document::Entity::insert(entities::document::ActiveModel {
         id: Set(document.id.0),
+        chat_id: Set(document.chat_id.map(|id| id.0)),
         project_id: Set(document.project_id.map(|id| id.0)),
         source_uri: Set(document.source_uri.clone()),
         media_type: Set(document.media_type.clone()),
@@ -3580,6 +3605,7 @@ fn document_from_model(model: entities::document::Model) -> Result<DocumentRecor
     validate_document_source_regions(&model.canonical_text, &source_regions)?;
     Ok(DocumentRecord {
         id: DocumentId(model.id),
+        chat_id: model.chat_id.map(ChatId),
         project_id: model.project_id.map(ProjectId),
         source_uri: model.source_uri,
         media_type: model.media_type,
@@ -3606,6 +3632,7 @@ fn document_from_model(model: entities::document::Model) -> Result<DocumentRecor
 fn document_summary_from_row(row: DocumentSummaryRow) -> Result<DocumentSummaryRecord> {
     Ok(DocumentSummaryRecord {
         id: DocumentId(row.id),
+        chat_id: row.chat_id.map(ChatId),
         project_id: row.project_id.map(ProjectId),
         source_uri: row.source_uri,
         media_type: row.media_type,
@@ -3628,6 +3655,7 @@ fn document_from_upsert(
 ) -> DocumentRecord {
     DocumentRecord {
         id: document.id,
+        chat_id: document.chat_id,
         project_id: document.project_id,
         source_uri: document.source_uri.clone(),
         media_type: document.media_type.clone(),

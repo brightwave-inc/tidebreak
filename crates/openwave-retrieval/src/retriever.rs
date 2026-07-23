@@ -234,6 +234,7 @@ impl Retriever {
                 .into_iter()
                 .zip(embeddings)
                 .map(|(chunk, embedding)| VectorRecord {
+                    chat_id: document.chat_id,
                     project_id: document.project_id,
                     source: document.source.clone(),
                     generation: None,
@@ -293,6 +294,11 @@ impl Retriever {
 }
 
 fn validate_document_source_regions(document: &Document) -> Result<()> {
+    if document.chat_id.is_some() && document.project_id.is_some() {
+        return Err(RetrievalError::parse(
+            "document cannot belong to both a conversation and a project",
+        ));
+    }
     openwave_core::validate_source_regions(&document.text, &document.source_regions)
         .map_err(RetrievalError::parse)
 }
@@ -981,6 +987,7 @@ The Great Barrier Reef is the world's largest coral reef system.";
             .into_iter()
             .zip(embeddings)
             .map(|(chunk, embedding)| VectorRecord {
+                chat_id: None,
                 project_id: None,
                 source: doc.source.clone(),
                 generation: None,

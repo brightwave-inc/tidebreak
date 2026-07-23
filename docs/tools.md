@@ -14,7 +14,7 @@ The current foreground agent surface contains ten tools:
 | `read_file` | Read UTF-8 text from private per-chat scratch | Server, read-only |
 | `list_dir` | List a private-scratch directory | Server, read-only |
 | `write_file` | Atomically write private-scratch text | Server, workspace |
-| `search` | Search locally indexed project/chat documents | Server, read-only |
+| `search` | Search sources indexed for this exact conversation | Server, read-only |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
 | `list_folder` | List one directory below an attached root | Native client continuation |
@@ -82,7 +82,7 @@ advertise every installed integration to every model call.
 
 The foreground coordinator needs tools for:
 
-- local corpus search plus document list/read;
+- conversation-scoped source search plus source list/read;
 - web search and page retrieval;
 - connected-root list/read/import and explicit export;
 - asking the user a structured question;
@@ -216,7 +216,7 @@ request and its journal event atomically, freezes a renderer-safe approval kind,
 and uses exact idempotent decisions. A reclaimed turn resumes persisted pending
 calls before requesting another model step, so restart recovery cannot silently
 skip an approval or execute a call under a newly relaxed tool policy. Search
-consent tells the user that the query and potentially matching document excerpts
+consent tells the user that the query and potentially matching source excerpts
 may leave OpenWave for the configured AI service.
 
 ## Reliability rules

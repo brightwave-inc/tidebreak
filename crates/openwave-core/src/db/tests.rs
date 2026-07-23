@@ -79,6 +79,7 @@ fn sample_raw_source(
 ) -> DocumentSourceUpsert {
     DocumentSourceUpsert {
         id,
+        chat_id: None,
         project_id: None,
         source_uri: Some(uri.into()),
         media_type: "application/octet-stream".into(),
@@ -91,6 +92,7 @@ fn sample_raw_source(
 fn sample_document(project_id: Option<ProjectId>) -> DocumentRecord {
     let created_at = DateTime::<Utc>::from_timestamp(1_700_000_100, 0).unwrap();
     DocumentRecord {
+        chat_id: None,
         id: DocumentId::new(),
         project_id,
         source_uri: Some("file:///資料/notes.md".into()),
@@ -624,6 +626,7 @@ async fn every_project_scoped_first_write_reports_a_typed_missing_project() {
     ));
 
     let canonical = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: Some(missing),
         source_uri: Some("file:///missing-project.txt".into()),
@@ -695,6 +698,7 @@ async fn documents_roundtrip_and_list_by_corpus_scope() {
     in_b = store.get_document(in_b.id).await.unwrap().unwrap();
 
     let legacy_replacement = DocumentUpsert {
+        chat_id: None,
         id: in_b.id,
         project_id: in_b.project_id,
         source_uri: in_b.source_uri.clone(),
@@ -863,6 +867,7 @@ async fn live_document_cannot_move_between_project_corpora() {
     store.create_project(&project_a).await.unwrap();
     store.create_project(&project_b).await.unwrap();
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: Some(project_a.id),
         source_uri: Some("file:///scoped.txt".into()),
@@ -996,6 +1001,7 @@ async fn source_regions_roundtrip_and_provenance_changes_advance_revision() {
         },
     };
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///report.pdf".into()),
@@ -1041,6 +1047,7 @@ async fn source_regions_roundtrip_and_provenance_changes_advance_revision() {
 async fn raw_source_parse_completion_atomically_enqueues_index() {
     let (_dir, store) = temp_store().await;
     let source = DocumentSourceUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///report.pdf".into()),
@@ -2224,6 +2231,7 @@ async fn concurrent_blob_retirement_claimers_never_share_a_blob() {
 async fn ensure_parse_job_advances_parser_changes_and_reuses_the_transition() {
     let (_dir, store) = temp_store().await;
     let source = DocumentSourceUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///parser-upgrade.txt".into()),
@@ -2245,6 +2253,7 @@ async fn ensure_parse_job_advances_parser_changes_and_reuses_the_transition() {
     );
 
     let repair_source = DocumentSourceUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         source_uri: Some("file:///repair-missing-parse.txt".into()),
         source_blob: DocumentSourceBlob::from_digest([0x33; 32], 64),
@@ -2353,6 +2362,7 @@ async fn ensure_parse_job_advances_parser_changes_and_reuses_the_transition() {
     );
 
     let canonical = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: None,
@@ -2414,6 +2424,7 @@ async fn ensure_parse_job_advances_parser_changes_and_reuses_the_transition() {
 async fn concurrent_ensure_parse_advances_once_and_fences_stale_callers() {
     let (_dir, store) = temp_store().await;
     let source = DocumentSourceUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///concurrent-parser-upgrade.txt".into()),
@@ -2709,6 +2720,7 @@ async fn ready_document(store: &DbStore, source: &DocumentUpsert) -> DocumentRec
 async fn missing_derived_state_requeues_succeeded_job_without_advancing_generation() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///missing-derived.txt".into()),
@@ -2749,6 +2761,7 @@ async fn missing_derived_state_requeues_succeeded_job_without_advancing_generati
 async fn index_maintenance_does_not_implicitly_revive_failed_job() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///failed-maintenance.txt".into()),
@@ -2813,6 +2826,7 @@ async fn index_maintenance_does_not_implicitly_revive_failed_job() {
 async fn incomplete_succeeded_generation_advances_once_and_reuses_the_new_job() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///incomplete-derived.txt".into()),
@@ -2867,6 +2881,7 @@ async fn incomplete_succeeded_generation_advances_once_and_reuses_the_new_job() 
 async fn concurrent_pipeline_change_advances_once_and_preserves_source() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///pipeline-change.txt".into()),
@@ -2936,6 +2951,7 @@ async fn source_revision_and_index_job_commit_and_supersede_together() {
     let document_id = DocumentId::new();
     let first_at = DateTime::<Utc>::from_timestamp(10_000, 0).unwrap();
     let first_source = DocumentUpsert {
+        chat_id: None,
         id: document_id,
         project_id: None,
         source_uri: Some("file:///async.txt".into()),
@@ -3036,6 +3052,7 @@ async fn source_revision_and_index_job_commit_and_supersede_together() {
     assert_eq!(jobs[1], second_job);
 
     let unknown = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         ..second_source
     };
@@ -3051,6 +3068,7 @@ async fn source_revision_and_index_job_commit_and_supersede_together() {
     assert_eq!(store.list_document_jobs(unknown.id).await.unwrap(), vec![]);
 
     let orphan = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: Some(ProjectId::new()),
         ..unknown
@@ -3079,6 +3097,7 @@ async fn enqueue_rolls_back_source_when_job_insert_fails() {
         .unwrap();
 
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///rollback.txt".into()),
@@ -3104,6 +3123,7 @@ async fn enqueue_rolls_back_source_when_job_insert_fails() {
 async fn replacement_enqueue_failure_restores_source_and_live_job() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///replacement-rollback.txt".into()),
@@ -3205,6 +3225,7 @@ async fn replacement_enqueue_failure_restores_source_and_live_job() {
 async fn document_delete_failure_rolls_back_tombstone_source_and_jobs() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///delete-rollback.txt".into()),
@@ -3253,6 +3274,7 @@ async fn concurrent_source_enqueues_leave_one_current_revision_and_job() {
             store
                 .upsert_document_and_enqueue_index(
                     &DocumentUpsert {
+                        chat_id: None,
                         id: document_id,
                         project_id: None,
                         source_uri: Some("file:///concurrent-async.txt".into()),
@@ -3308,6 +3330,7 @@ async fn concurrent_identical_first_enqueues_reuse_one_revision_and_job() {
             store
                 .upsert_document_and_enqueue_index(
                     &DocumentUpsert {
+                        chat_id: None,
                         id: document_id,
                         project_id: None,
                         source_uri: Some("file:///identical-concurrent.txt".into()),
@@ -3342,6 +3365,7 @@ async fn concurrent_identical_first_enqueues_reuse_one_revision_and_job() {
 async fn document_job_claim_and_heartbeat_require_the_live_lease() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///claim.txt".into()),
@@ -3438,6 +3462,7 @@ async fn document_job_claim_and_heartbeat_require_the_live_lease() {
 async fn live_document_job_completion_atomically_publishes_ready_watermark() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///complete-job.txt".into()),
@@ -3498,6 +3523,7 @@ async fn live_document_job_completion_atomically_publishes_ready_watermark() {
 async fn live_document_job_failure_retries_then_fails_permanently() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///fail-job.txt".into()),
@@ -3597,6 +3623,7 @@ async fn live_document_job_failure_retries_then_fails_permanently() {
 async fn document_job_failure_validates_details_and_exhausts_retry_budget() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///exhaust-failure.txt".into()),
@@ -3688,6 +3715,7 @@ async fn document_job_failure_validates_details_and_exhausts_retry_budget() {
 async fn explicit_retry_only_revives_current_failed_index_job() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: None,
@@ -3897,6 +3925,7 @@ async fn explicit_retry_only_revives_current_failed_index_job() {
 async fn explicit_retry_revives_only_the_pending_parse_stage() {
     let (_dir, store) = temp_store().await;
     let source = DocumentSourceUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///retry-report.pdf".into()),
@@ -4003,6 +4032,7 @@ async fn explicit_retry_revives_only_the_pending_parse_stage() {
 async fn completion_document_failure_rolls_back_the_job_transition() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///complete-rollback.txt".into()),
@@ -4056,6 +4086,7 @@ async fn completion_document_failure_rolls_back_the_job_transition() {
 async fn expired_document_job_leases_are_reclaimed_then_fail_at_the_attempt_limit() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///lease-recovery.txt".into()),
@@ -4099,6 +4130,7 @@ async fn expired_document_job_leases_are_reclaimed_then_fail_at_the_attempt_limi
         .unwrap());
 
     let fallback_source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         source_uri: Some("file:///after-exhausted-lease.txt".into()),
         canonical_text: "claim after cleanup".into(),
@@ -4152,6 +4184,7 @@ async fn expired_document_job_leases_are_reclaimed_then_fail_at_the_attempt_limi
 async fn claim_cancels_a_superseded_candidate_then_claims_the_next_job() {
     let (_dir, store) = temp_store().await;
     let first_source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///stale-claim.txt".into()),
@@ -4166,6 +4199,7 @@ async fn claim_cancels_a_superseded_candidate_then_claims_the_next_job() {
         .await
         .unwrap();
     let second_source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         source_uri: Some("file:///next-claim.txt".into()),
         canonical_text: "next".into(),
@@ -4213,6 +4247,7 @@ async fn claim_cancels_a_superseded_candidate_then_claims_the_next_job() {
 async fn claim_reports_exact_identity_status_corruption_without_cancelling() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///claim-corruption.txt".into()),
@@ -4251,6 +4286,7 @@ async fn claim_reports_exact_identity_status_corruption_without_cancelling() {
 async fn claim_orders_expired_and_queued_jobs_by_effective_due_time() {
     let (_dir, store) = temp_store().await;
     let running_source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///expired-first.txt".into()),
@@ -4273,6 +4309,7 @@ async fn claim_orders_expired_and_queued_jobs_by_effective_due_time() {
         .unwrap();
 
     let queued_source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         source_uri: Some("file:///queued-second.txt".into()),
         canonical_text: "queued second".into(),
@@ -4324,6 +4361,7 @@ async fn concurrent_document_job_claimers_never_share_a_job() {
         let (_, job) = store
             .upsert_document_and_enqueue_index(
                 &DocumentUpsert {
+                    chat_id: None,
                     id: DocumentId::new(),
                     project_id: None,
                     source_uri: Some(format!("file:///claim-{index}.txt")),
@@ -4368,6 +4406,7 @@ async fn concurrent_claim_and_replacement_enqueue_preserve_one_current_job() {
     let store = std::sync::Arc::new(store);
     for iteration in 0..8 {
         let source = DocumentUpsert {
+            chat_id: None,
             id: DocumentId::new(),
             project_id: None,
             source_uri: Some(format!("file:///claim-enqueue-{iteration}.txt")),
@@ -4428,6 +4467,7 @@ async fn concurrent_delete_and_enqueue_leave_one_coherent_generation() {
     let store = std::sync::Arc::new(store);
     for iteration in 0..8 {
         let source = DocumentUpsert {
+            chat_id: None,
             id: DocumentId::new(),
             project_id: None,
             source_uri: Some(format!("file:///delete-enqueue-{iteration}.txt")),
@@ -4505,6 +4545,7 @@ async fn document_upsert_revisions_and_index_watermark_are_compare_and_set() {
     let first_at = DateTime::<Utc>::from_timestamp(10_000, 0).unwrap();
     let first = DocumentUpsert {
         id,
+        chat_id: None,
         project_id: None,
         source_uri: Some("file:///report.txt".into()),
         media_type: "text/plain".into(),
@@ -4605,6 +4646,7 @@ async fn document_upsert_revisions_and_index_watermark_are_compare_and_set() {
 async fn stale_revision_token_cannot_mark_a_recreated_document_indexed() {
     let (_dir, store) = temp_store().await;
     let first = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: None,
@@ -4619,6 +4661,7 @@ async fn stale_revision_token_cannot_mark_a_recreated_document_indexed() {
     let recreated_at = DateTime::<Utc>::from_timestamp(2, 0).unwrap();
     let recreated = store
         .upsert_document(&DocumentUpsert {
+            chat_id: None,
             id: old.id,
             project_id: old.project_id,
             source_uri: old.source_uri.clone(),
@@ -4671,6 +4714,7 @@ async fn document_generation_clock_survives_unknown_delete_and_recreation() {
 
     let source = DocumentUpsert {
         id,
+        chat_id: None,
         project_id: None,
         source_uri: Some("file:///generation-clock.txt".into()),
         media_type: "text/plain".into(),
@@ -4714,6 +4758,7 @@ async fn pending_document_retirement_survives_reopen_and_uses_exact_cas() {
     let id = DocumentId::new();
     let source = DocumentUpsert {
         id,
+        chat_id: None,
         project_id: None,
         source_uri: None,
         media_type: "text/plain".into(),
@@ -4838,6 +4883,7 @@ async fn pending_document_retirement_cursor_advances_and_can_wrap() {
 async fn document_generation_overflow_leaves_source_and_clock_unchanged() {
     let (_dir, store) = temp_store().await;
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: None,
@@ -4909,6 +4955,7 @@ async fn document_generation_overflow_leaves_source_and_clock_unchanged() {
 async fn concurrent_first_document_upserts_allocate_distinct_revisions() {
     let (_dir, store) = temp_store().await;
     let first = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: None,
@@ -4940,6 +4987,7 @@ async fn concurrent_first_document_upserts_allocate_distinct_revisions() {
 async fn document_upsert_rolls_back_when_project_is_unknown() {
     let (_dir, store) = temp_store().await;
     let upsert = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: Some(ProjectId::new()),
         source_uri: None,
@@ -4961,6 +5009,7 @@ async fn document_upsert_rolls_back_when_project_is_unknown() {
 async fn concurrent_document_upserts_allocate_distinct_revisions() {
     let (_dir, store) = temp_store().await;
     let base = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: None,
@@ -5008,6 +5057,7 @@ async fn high_contention_document_upserts_do_not_drop_writers() {
             store
                 .upsert_document(&DocumentUpsert {
                     id,
+                    chat_id: None,
                     project_id: None,
                     source_uri: None,
                     media_type: "text/plain".into(),
@@ -5062,6 +5112,62 @@ async fn m0006_upgrades_an_existing_store_without_losing_records() {
     assert_ne!(stored.revision_token, supplied_token);
     document.revision_token = stored.revision_token;
     assert_eq!(stored, document);
+}
+
+#[tokio::test]
+async fn m0011_preserves_legacy_documents_as_conversationless() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("document-chat-upgrade.db").display()
+    );
+    let conn = Database::connect(&url).await.unwrap();
+    migration::Migrator::up(&conn, Some(10)).await.unwrap();
+    let document_id = DocumentId::new();
+    let revision_token = uuid::Uuid::new_v4();
+    conn.execute_unprepared(&format!(
+        "INSERT INTO document_generation \
+         (document_id, content_revision, revision_token, tombstone, retirement_pending) \
+         VALUES (X'{}', 1, X'{}', 0, 0)",
+        document_id.0.simple(),
+        revision_token.simple()
+    ))
+    .await
+    .unwrap();
+    conn.execute_unprepared(&format!(
+        "INSERT INTO document \
+         (id, project_id, source_uri, media_type, title, source_blob_id, source_sha256, \
+          source_byte_len, canonical_text, canonical_fingerprint, source_regions, \
+         content_revision, revision_token, processing_status, indexed_revision, \
+          index_fingerprint, created_at, updated_at, indexed_at) \
+         VALUES (X'{}', NULL, 'file:///legacy.txt', 'text/plain', NULL, NULL, \
+          NULL, NULL, 'legacy source', NULL, '[]', 1, X'{}', 'queued', \
+          NULL, NULL, '2026-07-22 00:00:00+00:00', '2026-07-22 00:00:00+00:00', NULL)",
+        document_id.0.simple(),
+        revision_token.simple()
+    ))
+    .await
+    .unwrap();
+
+    migration::Migrator::up(&conn, None).await.unwrap();
+    let store = DbStore { conn: conn.clone() };
+    let legacy = store.get_document(document_id).await.unwrap().unwrap();
+    assert_eq!(legacy.chat_id, None);
+    assert_eq!(
+        store.list_documents(DocumentScope::Unscoped).await.unwrap(),
+        vec![legacy]
+    );
+    let columns = conn
+        .query_all_raw(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "PRAGMA table_info(document)".to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert!(columns.iter().any(|row| {
+        row.try_get::<String>("", "name")
+            .is_ok_and(|name| name == "chat_id")
+    }));
 }
 
 #[tokio::test]
@@ -9460,6 +9566,121 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
 }
 
 #[tokio::test]
+async fn delete_chat_atomically_retires_only_its_owned_sources() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    let mut owned = sample_document(None);
+    owned.chat_id = Some(chat.id);
+    owned.source_blob = Some(DocumentSourceBlob::from_bytes(b"owned source bytes"));
+    let owned_id = owned.id;
+    let blob_id = owned.source_blob.as_ref().unwrap().id;
+    store.create_document(&owned).await.unwrap();
+
+    let legacy = sample_document(None);
+    let legacy_id = legacy.id;
+    store.create_document(&legacy).await.unwrap();
+
+    assert_eq!(
+        store
+            .list_document_ids(DocumentScope::Chat(chat.id))
+            .await
+            .unwrap(),
+        vec![owned_id]
+    );
+    assert_eq!(
+        store.delete_chat(chat.id).await.unwrap(),
+        DeleteChatOutcome::Deleted
+    );
+    assert_eq!(store.get_chat(chat.id).await.unwrap(), None);
+    assert_eq!(store.get_document(owned_id).await.unwrap(), None);
+    let tombstone = store
+        .get_pending_document_retirement(owned_id)
+        .await
+        .unwrap()
+        .expect("chat deletion must publish a pending vector tombstone");
+    assert_eq!(tombstone.content_revision, 2);
+    assert_eq!(
+        store
+            .get_blob_retirement(blob_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        BlobRetirementStatus::Queued
+    );
+    assert!(store.get_document(legacy_id).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn document_chat_scope_is_isolated_and_mutually_exclusive_with_project_scope() {
+    let (_dir, store) = temp_store().await;
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    let project = sample_project();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    store.create_project(&project).await.unwrap();
+
+    let uri = "file:///shared-name.txt";
+    let first_id = DocumentId::derive_for_chat(first_chat.id, uri);
+    let second_id = DocumentId::derive_for_chat(second_chat.id, uri);
+    assert_ne!(first_id, second_id);
+    for (chat_id, id, text) in [
+        (first_chat.id, first_id, "first"),
+        (second_chat.id, second_id, "second"),
+    ] {
+        store
+            .upsert_document(&DocumentUpsert {
+                id,
+                chat_id: Some(chat_id),
+                project_id: None,
+                source_uri: Some(uri.into()),
+                media_type: "text/plain".into(),
+                title: None,
+                canonical_text: text.into(),
+                source_regions: Vec::new(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .list_document_ids(DocumentScope::Chat(first_chat.id))
+            .await
+            .unwrap(),
+        vec![first_id]
+    );
+    assert_eq!(
+        store
+            .list_document_ids(DocumentScope::Chat(second_chat.id))
+            .await
+            .unwrap(),
+        vec![second_id]
+    );
+
+    let error = store
+        .upsert_document(&DocumentUpsert {
+            id: DocumentId::new(),
+            chat_id: Some(first_chat.id),
+            project_id: Some(project.id),
+            source_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "invalid double scope".into(),
+            source_regions: Vec::new(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("both a conversation and a project"));
+}
+
+#[tokio::test]
 async fn event_journal_assigns_per_chat_seq_and_replays_after_cursor() {
     use crate::event::AgentEvent;
     use crate::id::TurnId;
@@ -10078,6 +10299,7 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     store.create_chat(&chat).await.unwrap();
     let updated_at = DateTime::<Utc>::from_timestamp(1_700_001_000, 0).unwrap();
     let source = DocumentUpsert {
+        chat_id: None,
         id: DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///facts.txt".into()),

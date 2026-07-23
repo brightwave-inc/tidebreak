@@ -41,7 +41,7 @@ export function DocumentsView({
       setError(null);
     } catch (err) {
       if (!mountedRef.current || request !== catalogRequestRef.current) return;
-      setError(friendlyError(err, "Could not load your documents."));
+      setError(friendlyError(err, "Could not load this conversation's sources."));
     } finally {
       if (mountedRef.current && request === catalogRequestRef.current) {
         setLoading(false);
@@ -89,7 +89,7 @@ export function DocumentsView({
       await refreshCatalog();
     } catch (err) {
       if (mountedRef.current) {
-        setError(friendlyError(err, "Could not import that document."));
+        setError(friendlyError(err, "Could not add that source."));
       }
     } finally {
       if (mountedRef.current) setImporting(false);
@@ -109,7 +109,9 @@ export function DocumentsView({
       setResults(next);
     } catch (err) {
       if (!mountedRef.current || request !== searchRequestRef.current) return;
-      setSearchError(friendlyError(err, "Could not search your documents."));
+      setSearchError(
+        friendlyError(err, "Could not search this conversation's sources."),
+      );
       setResults(null);
     } finally {
       if (mountedRef.current && request === searchRequestRef.current) {
@@ -126,12 +128,11 @@ export function DocumentsView({
     <section className="documents-view" aria-labelledby="documents-title">
       <header className="documents-header">
         <div>
-          <p className="eyebrow">Local library</p>
-          <h1 id="documents-title">Documents</h1>
+          <p className="eyebrow">This conversation</p>
+          <h1 id="documents-title">Sources</h1>
           <p>
-            Import any file. Text and PDF documents are indexed so you can search
-            the passages OpenWave has prepared on this device; other files are
-            kept in the library to work with.
+            Add files for OpenWave to use in this conversation. Supported sources
+            are prepared for search on this device.
           </p>
         </div>
         <div className="documents-header-actions">
@@ -144,7 +145,7 @@ export function DocumentsView({
             disabled={importing}
             onClick={() => void onImport()}
           >
-            {importing ? "Importing…" : "Import document…"}
+            {importing ? "Adding…" : "Add source…"}
           </button>
         </div>
       </header>
@@ -152,8 +153,8 @@ export function DocumentsView({
       <div className="documents-content">
         {imported && (
           <div className="document-notice" role="status">
-            <strong>{imported.displayName}</strong> was added. OpenWave is preparing
-            it for search.
+            <strong>{imported.displayName}</strong> was added to this conversation.
+            OpenWave is preparing it for search.
           </div>
         )}
         {error && (
@@ -167,12 +168,12 @@ export function DocumentsView({
 
         <section className="document-search" aria-labelledby="document-search-title">
           <div>
-            <h2 id="document-search-title">Search your library</h2>
-            <p>Search finds relevant passages in documents that are ready.</p>
+            <h2 id="document-search-title">Search this conversation</h2>
+            <p>Find relevant passages in sources that are ready.</p>
           </div>
           <form onSubmit={(event) => void onSearch(event)}>
             <input
-              aria-label="Search documents"
+              aria-label="Search sources"
               placeholder="What are you looking for?"
               maxLength={500}
               value={query}
@@ -201,7 +202,7 @@ export function DocumentsView({
                 results.map((result, index) => (
                   <article className="document-result" key={`${result.documentId}-${index}`}>
                     <div className="document-result-source">
-                      <strong>{titles.get(result.documentId) ?? "Local document"}</strong>
+                      <strong>{titles.get(result.documentId) ?? "Source"}</strong>
                       {result.heading && <span>{result.heading}</span>}
                     </div>
                     <p>{result.snippet}</p>
@@ -215,10 +216,10 @@ export function DocumentsView({
         <section className="document-catalog" aria-labelledby="document-catalog-title">
           <div className="document-section-heading">
             <div>
-              <h2 id="document-catalog-title">Your documents</h2>
-              <p>{documents.length} {documents.length === 1 ? "document" : "documents"}</p>
+              <h2 id="document-catalog-title">Conversation sources</h2>
+              <p>{documents.length} {documents.length === 1 ? "source" : "sources"}</p>
               {catalogTruncated && (
-                <p>Showing the newest 1,000 documents.</p>
+                <p>Showing the newest 1,000 sources.</p>
               )}
             </div>
             <button
@@ -233,12 +234,12 @@ export function DocumentsView({
 
           {loading && documents.length === 0 ? (
             <div className="document-empty" role="status">
-              Loading your document library…
+              Loading sources for this conversation…
             </div>
           ) : documents.length === 0 && !error ? (
             <div className="document-empty">
-              <strong>Your library is empty</strong>
-              <span>Import any file — text and PDFs become searchable.</span>
+              <strong>No sources yet</strong>
+              <span>Add a file to use it in this conversation.</span>
             </div>
           ) : (
             <div className="document-list">
@@ -267,17 +268,15 @@ export function DocumentsView({
 function DocumentStatus({ status }: { status: LibraryDocument["processingStatus"] }) {
   const label =
     status === "ready"
-      ? "Ready"
+      ? "Available"
       : status === "failed"
         ? "Needs attention"
-        : status === "processing"
-          ? "Processing"
-          : "Queued";
+        : "Preparing";
   return <span className={`document-status is-${status}`}>{label}</span>;
 }
 
 function documentTitle(document: LibraryDocument): string {
-  return document.title?.trim() || `Document ${document.documentId.slice(0, 8)}`;
+  return document.title?.trim() || `Source ${document.documentId.slice(0, 8)}`;
 }
 
 function mediaTypeLabel(mediaType: string): string {

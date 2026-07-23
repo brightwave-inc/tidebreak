@@ -302,20 +302,28 @@ fn canonical_document(record: &openwave_core::DocumentRecord) -> Document {
         Some(uri) => DocumentSource::uri(uri),
         None => DocumentSource::Inline,
     };
-    let document = match record.project_id {
-        Some(project_id) => Document::with_id_scoped(
+    let document = match (record.chat_id, record.project_id) {
+        (Some(chat_id), None) => Document::with_id_for_chat(
+            record.id,
+            chat_id,
+            source,
+            record.media_type.clone(),
+            record.canonical_text.clone(),
+        ),
+        (None, Some(project_id)) => Document::with_id_scoped(
             record.id,
             project_id,
             source,
             record.media_type.clone(),
             record.canonical_text.clone(),
         ),
-        None => Document::with_id(
+        (None, None) => Document::with_id(
             record.id,
             source,
             record.media_type.clone(),
             record.canonical_text.clone(),
         ),
+        (Some(_), Some(_)) => unreachable!("store rejects documents with two owning scopes"),
     };
     document.with_source_regions(record.source_regions.clone())
 }
@@ -356,6 +364,7 @@ mod tests {
     fn source(id: DocumentId, text: &str) -> DocumentUpsert {
         DocumentUpsert {
             id,
+            chat_id: None,
             project_id: None,
             source_uri: None,
             media_type: "text/plain".into(),
@@ -369,6 +378,7 @@ mod tests {
     fn raw_source(id: DocumentId) -> DocumentSourceUpsert {
         DocumentSourceUpsert {
             id,
+            chat_id: None,
             project_id: None,
             source_uri: Some("file:///audited-source.txt".into()),
             media_type: "text/plain".into(),
