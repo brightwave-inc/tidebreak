@@ -7,6 +7,7 @@ import type {
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import { isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
+import { useUiStore } from "./UiStore";
 import { Composer } from "./Composer";
 import type { FolderAccessDecision } from "./host";
 import { MessageList } from "./MessageList";
@@ -17,7 +18,6 @@ export type ChatViewProps = {
   status: string;
   hydrated: boolean;
   nativeHost: boolean;
-  foldersPanelOpen: boolean;
   deletingChat: boolean;
   agentRuns: AgentRun[];
   agentRunsLoading: boolean;
@@ -53,9 +53,6 @@ export type ChatViewProps = {
   onSend: () => Promise<void>;
   onSteer: () => Promise<void>;
   onStop: () => Promise<void>;
-  onShowDocuments: () => void;
-  onToggleFolders: () => void;
-  onShowSettings: () => void;
 };
 
 /**
@@ -68,7 +65,6 @@ export function ChatView({
   status,
   hydrated,
   nativeHost,
-  foldersPanelOpen,
   deletingChat,
   agentRuns,
   agentRunsLoading,
@@ -97,10 +93,13 @@ export function ChatView({
   onSend,
   onSteer,
   onStop,
-  onShowDocuments,
-  onToggleFolders,
-  onShowSettings,
 }: ChatViewProps) {
+  const foldersPanelOpen = useUiStore(
+    (state) => state.settingsPanel === "folders",
+  );
+  const showDocuments = useUiStore((state) => state.showDocuments);
+  const showSettings = useUiStore((state) => state.showSettings);
+  const toggleFoldersPanel = useUiStore((state) => state.toggleFoldersPanel);
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
@@ -149,7 +148,7 @@ export function ChatView({
                 type="button"
                 className="btn"
                 aria-label="Sources"
-                onClick={onShowDocuments}
+                onClick={showDocuments}
               >
                 <LibraryBig size={14} />
               </button>
@@ -159,7 +158,7 @@ export function ChatView({
                 type="button"
                 className={`btn${foldersPanelOpen ? " is-active" : ""}`}
                 aria-label="Folders"
-                onClick={onToggleFolders}
+                onClick={() => toggleFoldersPanel()}
               >
                 <FolderOpen size={14} />
               </button>
@@ -168,7 +167,7 @@ export function ChatView({
               type="button"
               className="btn"
               aria-label="Settings"
-              onClick={onShowSettings}
+              onClick={showSettings}
             >
               <Settings size={14} />
             </button>

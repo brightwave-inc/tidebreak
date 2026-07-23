@@ -22,19 +22,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { ThemeMode } from "./theme";
+import { useChatListStore } from "./ChatListStore";
+import { useUiStore } from "./UiStore";
 
 export type SidebarProps = {
-  chats: Chat[];
-  activeChatId: string;
-  chatsError: string | null;
-  primaryView: "chat" | "documents" | "settings";
-  foldersPanelOpen: boolean;
   nativeHost: boolean;
-  creatingChat: boolean;
-  deletingChatId: string | null;
-  renamingChatId: string | null;
-  renameChatDraft: string;
-  savingTitle: boolean;
   themeMode: ThemeMode;
   updateReady: boolean;
   updateVersion: string | null;
@@ -42,29 +34,20 @@ export type SidebarProps = {
   onNewChat: () => void;
   onSelectChat: (chat: Chat) => void;
   onStartRename: (chat: Chat) => void;
-  onRenameDraftChange: (value: string) => void;
   onCommitRename: (chat: Chat) => void;
   onCancelRename: () => void;
   onDeleteChat: (chat: Chat) => void;
-  onShowDocuments: () => void;
-  onToggleFolders: () => void;
-  onShowSettings: () => void;
   onRestartForUpdate: () => void;
 };
 
-/** The navigation aside: brand/theme, chat list, and footer actions. */
+/**
+ * The navigation aside: brand/theme, chat list, and footer actions. List and
+ * view state come straight from the chat-list and UI stores; the callback
+ * props are the mutations whose orchestration (fences, confirm dialog,
+ * session lifecycle) lives with the owner.
+ */
 export function Sidebar({
-  chats,
-  activeChatId,
-  chatsError,
-  primaryView,
-  foldersPanelOpen,
   nativeHost,
-  creatingChat,
-  deletingChatId,
-  renamingChatId,
-  renameChatDraft,
-  savingTitle,
   themeMode,
   updateReady,
   updateVersion,
@@ -72,15 +55,27 @@ export function Sidebar({
   onNewChat,
   onSelectChat,
   onStartRename,
-  onRenameDraftChange,
   onCommitRename,
   onCancelRename,
   onDeleteChat,
-  onShowDocuments,
-  onToggleFolders,
-  onShowSettings,
   onRestartForUpdate,
 }: SidebarProps) {
+  const chats = useChatListStore((state) => state.chats);
+  const activeChatId = useChatListStore((state) => state.selected?.id ?? null);
+  const chatsError = useChatListStore((state) => state.chatsError);
+  const creatingChat = useChatListStore((state) => state.creatingChat);
+  const deletingChatId = useChatListStore((state) => state.deletingChatId);
+  const renamingChatId = useChatListStore((state) => state.renamingChatId);
+  const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
+  const savingTitle = useChatListStore((state) => state.savingTitle);
+  const setRenameDraft = useChatListStore((state) => state.setRenameDraft);
+  const primaryView = useUiStore((state) => state.primaryView);
+  const foldersPanelOpen = useUiStore(
+    (state) => state.settingsPanel === "folders",
+  );
+  const showDocuments = useUiStore((state) => state.showDocuments);
+  const showSettings = useUiStore((state) => state.showSettings);
+  const toggleFoldersPanel = useUiStore((state) => state.toggleFoldersPanel);
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -125,7 +120,7 @@ export function Sidebar({
         <button
           type="button"
           className={`sidebar-action sidebar-library${primaryView === "documents" ? " is-active" : ""}`}
-          onClick={onShowDocuments}
+          onClick={showDocuments}
         >
           <LibraryBig size={16} />
           Sources
@@ -149,9 +144,7 @@ export function Sidebar({
                     aria-label="Chat title"
                     value={renameChatDraft}
                     disabled={savingTitle}
-                    onChange={(event) =>
-                      onRenameDraftChange(event.target.value)
-                    }
+                    onChange={(event) => setRenameDraft(event.target.value)}
                     onBlur={() => onCommitRename(item)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter") {
@@ -234,7 +227,7 @@ export function Sidebar({
           <button
             type="button"
             className={`sidebar-action${primaryView === "chat" && foldersPanelOpen ? " is-active" : ""}`}
-            onClick={onToggleFolders}
+            onClick={() => toggleFoldersPanel({ showChat: true })}
           >
             <FolderOpen size={16} />
             Folders
@@ -243,7 +236,7 @@ export function Sidebar({
         <button
           type="button"
           className={`sidebar-action${primaryView === "settings" ? " is-active" : ""}`}
-          onClick={onShowSettings}
+          onClick={showSettings}
         >
           <Settings size={16} />
           Settings

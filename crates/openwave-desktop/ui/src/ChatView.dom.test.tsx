@@ -13,7 +13,6 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
     status: "chat chat-1 · live",
     hydrated: true,
     nativeHost: false,
-    foldersPanelOpen: false,
     deletingChat: false,
     agentRuns: [],
     agentRunsLoading: false,
@@ -42,9 +41,6 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
     onSend: vi.fn(async () => {}),
     onSteer: vi.fn(async () => {}),
     onStop: vi.fn(async () => {}),
-    onShowDocuments: vi.fn(),
-    onToggleFolders: vi.fn(),
-    onShowSettings: vi.fn(),
     ...overrides,
   };
   render(<ChatView {...props} />);
