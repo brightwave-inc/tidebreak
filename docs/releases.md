@@ -179,18 +179,21 @@ releases can advance automatically.
 two architecture jobs compile the desktop app with `--no-bundle`. This keeps a
 later UI setup or compilation failure from also losing newly downloaded Cargo
 dependencies. Each architecture then saves one unsigned archive containing
-Cargo fingerprints, build-script outputs, and compiled dependency files. The
-archive is saved before a failed compile is reported, so successful partial
-work remains reusable. None of these jobs load the `desktop-production`
-environment, sign, or publish. Because cache warming has its own workflow and
-failure boundary, a later signing, notarization, or publication failure cannot
-prevent that main-tip cache run from finishing. If the shared cache is empty or
-has been evicted, manually run **Warm macOS release cache** from `main`; the
-production release workflow also compiles the exact tag and product version in
-a credential-free prerequisite. That prerequisite saves its release-specific
-unsigned archive before reporting a compile failure. The later
-`desktop-production` jobs are restore-only, so signing and notarization can be
-retried without losing completed Rust work.
+Cargo fingerprints, build-script outputs, compiled dependency files, and the
+credential-free Rust products produced by `--no-bundle`: the desktop
+executable, host broker, desktop libraries, and staged PDFium runtime. Keeping
+those final unsigned products lets an exact-source build skip the otherwise
+expensive desktop relink. The archive is saved before a failed compile is
+reported, so successful partial work remains reusable. None of these jobs load
+the `desktop-production` environment, sign, or publish. Because cache warming
+has its own workflow and failure boundary, a later signing, notarization, or
+publication failure cannot prevent that main-tip cache run from finishing. If
+the shared cache is empty or has been evicted, manually run **Warm macOS release
+cache** from `main`; the production release workflow also compiles the exact tag
+and product version in a credential-free prerequisite. That prerequisite saves
+its release-specific unsigned archive before reporting a compile failure. The
+later `desktop-production` jobs are restore-only, so signing and notarization
+can be retried without losing completed Rust work.
 
 ### Production environment configuration
 
@@ -257,11 +260,13 @@ Treat the release workflow as public even while the repository is private:
   and version with `--no-bundle`, and saves a release-specific archive before
   reporting failure. It has no production environment or secrets. The
   secret-bearing jobs only restore that archive, before loading production
-  secrets. Both cache writers include only Cargo fingerprints, build-script
-  outputs, and dependency files—not bundle directories, signed apps, DMGs,
-  updater archives, signatures, or temporary Apple key files. `sccache` remains
-  a read-only fallback because GitHub throttles its many small writes; the
-  separate Cargo download cache retains `cache-targets: false`.
+  secrets. Both cache writers include Cargo fingerprints, build-script outputs,
+  dependency files, and explicitly named unsigned compiler products created
+  without the production environment. They never include bundle directories,
+  signed apps, DMGs, updater archives, signatures, keychains, or temporary
+  Apple key files. `sccache` remains a read-only fallback because GitHub
+  throttles its many small writes; the separate Cargo download cache retains
+  `cache-targets: false`.
 - The independent cache-warm workflow runs only for relevant pushes to `main`
   or an explicit manual dispatch. It has no production environment and receives
   no Apple, Tauri, or AWS credentials. It fetches Cargo dependencies early and
@@ -334,6 +339,7 @@ commits to maintaining multiple release lines.
 ## Required repository settings
 
 Keep squash merge as the only merge method and set its defaults to **Pull
-request title** and **Pull request body**. Keep the protected aggregate CI and
-secret-scan checks required on `main`. The release-draft workflow uses the
-built-in `GITHUB_TOKEN`; it does not require a personal access token.
+request title** and **Pull request body**. Keep the protected aggregate CI,
+PostgreSQL state-machine, secret-scan, semantic-title, and release-policy checks
+required on `main`. The release-draft workflow uses the built-in
+`GITHUB_TOKEN`; it does not require a personal access token.
