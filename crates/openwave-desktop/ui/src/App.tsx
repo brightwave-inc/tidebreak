@@ -22,6 +22,8 @@ import { SettingsView } from "./SettingsView";
 import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { ChatSessionController } from "./ChatSessionController";
 import { useChatSessionStore } from "./ChatSessionStore";
+import { useChatListStore } from "./ChatListStore";
+import { useUiStore } from "./UiStore";
 import { DocumentsView } from "./DocumentsView";
 import { reconcilePendingApprovalCards } from "./ApprovalHistory";
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
@@ -66,14 +68,23 @@ const sessionDeps = {
   now: () => new Date().toISOString(),
 };
 
+// Store actions are stable for the store's lifetime; these handles are for
+// calling actions only — never read state fields from them.
+const chatListActions = useChatListStore.getState();
+const uiActions = useUiStore.getState();
+
 export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [info, setInfo] = useState<ServerInfo | null>(null);
   const [client, setClient] = useState<ApiClient | null>(null);
-  const [chat, setChat] = useState<Chat | null>(null);
   const [hydratedChatId, setHydratedChatId] = useState<string | null>(null);
-  const [chats, setChats] = useState<Chat[]>([]);
-  const [chatsError, setChatsError] = useState<string | null>(null);
+  const chat = useChatListStore((state) => state.selected);
+  const creatingChat = useChatListStore((state) => state.creatingChat);
+  const deletingChatId = useChatListStore((state) => state.deletingChatId);
+  const savingTitle = useChatListStore((state) => state.savingTitle);
+  const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
+  const primaryView = useUiStore((state) => state.primaryView);
+  const settingsPanel = useUiStore((state) => state.settingsPanel);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const busy = useChatSessionStore((session) => session.busy);
@@ -113,16 +124,7 @@ export default function App() {
   );
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
-  const [creatingChat, setCreatingChat] = useState(false);
-  const [deletingChatId, setDeletingChatId] = useState<string | null>(null);
-  const [savingTitle, setSavingTitle] = useState(false);
-  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
-  const [renameChatDraft, setRenameChatDraft] = useState("");
   const skipRenameCommitRef = useRef(false);
-  const [settingsPanel, setSettingsPanel] = useState<"folders" | null>(null);
-  const [primaryView, setPrimaryView] = useState<
-    "chat" | "documents" | "settings"
-  >("chat");
   const [status, setStatus] = useState("starting…");
   // Owns the selected chat's event socket; chat switches dispose it eagerly
   // and the connection effect below constructs a fresh one.
@@ -179,12 +181,12 @@ export default function App() {
         if (cancelled) return;
         setModels(catalog.models);
         setProviders(providerList.providers);
-        setChats(existingChats);
+        chatListActions.setChats(existingChats);
         const created =
           existingChats[0] ??
           (await client.createChat(catalog.models[0]?.id));
         if (cancelled) return;
-        if (existingChats.length === 0) setChats([created]);
+        if (existingChats.length === 0) chatListActions.setChats([created]);
         activateChat(created);
         setStatus(`chat ${created.id.slice(0, 8)}…`);
       } catch (err) {
@@ -672,8 +674,8 @@ export default function App() {
   async function onNewChat() {
     if (!client || creationInFlightRef.current || deletionInFlightRef.current) return;
     creationInFlightRef.current = true;
-    setCreatingChat(true);
-    setPrimaryView("chat");
+    chatListActions.setCreatingChat(true);
+    uiActions.showChat({ keepPanels: true });
     try {
       const created = await client.createChat(
         chat?.model ?? models[0]?.id,
@@ -694,12 +696,12 @@ export default function App() {
       }));
     } finally {
       creationInFlightRef.current = false;
-      setCreatingChat(false);
+      chatListActions.setCreatingChat(false);
     }
   }
 
   function openCreatedChat(created: Chat) {
-    setPrimaryView("chat");
+    uiActions.showChat({ keepPanels: true });
     controllerRef.current?.dispose();
     controllerRef.current = null;
     useChatSessionStore.getState().reset();
@@ -716,8 +718,8 @@ export default function App() {
     cancelRequestTurnRef.current = null;
     clearSteerRequestState();
     activateChat(created);
-    setChats((current) => [created, ...current]);
-    setChatsError(null);
+    chatListActions.prependChat(created);
+    chatListActions.setChatsError(null);
     setStatus(`chat ${created.id.slice(0, 8)}…`);
   }
 
@@ -733,8 +735,8 @@ export default function App() {
     if (!confirmed) return;
 
     deletionInFlightRef.current = true;
-    setDeletingChatId(target.id);
-    setChatsError(null);
+    chatListActions.setDeletingChatId(target.id);
+    chatListActions.setChatsError(null);
     const deletingSelectedChat = chat?.id === target.id;
     if (deletingSelectedChat) {
       // This invalidates callbacks that captured the deleted selection. The
@@ -749,7 +751,7 @@ export default function App() {
       await client.deleteChat(target.id);
       let refreshed = await client.listChats();
       if (!deletingSelectedChat) {
-        setChats(refreshed);
+        chatListActions.setChats(refreshed);
         return;
       }
 
@@ -758,13 +760,13 @@ export default function App() {
         next = await client.createChat(models[0]?.id, null);
         refreshed = prependReplacementChat(refreshed, next);
       }
-      setChats(refreshed);
+      chatListActions.setChats(refreshed);
       selectChat(next, true);
     } catch (err) {
-      setChatsError(`Could not delete chat: ${String(err)}`);
+      chatListActions.setChatsError(`Could not delete chat: ${String(err)}`);
     } finally {
       deletionInFlightRef.current = false;
-      setDeletingChatId(null);
+      chatListActions.setDeletingChatId(null);
     }
   }
 
@@ -779,12 +781,11 @@ export default function App() {
       ...session,
       markerScrubber: new AssistantSourceMarkerStreamScrubber(),
     }));
-    setChat(next);
+    chatListActions.setSelected(next);
   }
 
   function selectChat(next: Chat, force = false) {
-    setPrimaryView("chat");
-    setSettingsPanel(null);
+    uiActions.showChat();
     if (
       next.id === chat?.id ||
       creatingChat ||
@@ -814,14 +815,12 @@ export default function App() {
 
   function startChatRename(target: Chat) {
     skipRenameCommitRef.current = false;
-    setRenameChatDraft(target.title ?? "");
-    setRenamingChatId(target.id);
+    chatListActions.beginRename(target);
   }
 
   function cancelChatRename() {
     skipRenameCommitRef.current = true;
-    setRenamingChatId(null);
-    setRenameChatDraft("");
+    chatListActions.endRename();
   }
 
   async function commitChatRename(target: Chat) {
@@ -835,34 +834,26 @@ export default function App() {
     if (!client || savingTitle || deletionInFlightRef.current) return;
     const trimmed = renameChatDraft.trim();
     if (trimmed === (target.title?.trim() ?? "")) {
-      setRenamingChatId(null);
-      setRenameChatDraft("");
+      chatListActions.endRename();
       return;
     }
     const selection = chatSelectionRef.current;
-    setSavingTitle(true);
+    chatListActions.setSavingTitle(true);
     try {
       const updated = await client.patchChatTitle(target.id, trimmed || null);
-      setChats((current) =>
-        current.map((item) => (item.id === updated.id ? updated : item)),
-      );
-      if (chat?.id === updated.id && chatSelectionRef.current === selection) {
-        setChat(updated);
-      }
-      setRenamingChatId(null);
-      setRenameChatDraft("");
+      chatListActions.replaceChat(updated);
+      chatListActions.endRename();
     } catch (err) {
       // If the user has since switched conversations, abandon this stale edit
       // silently. Otherwise keep the editor open with the typed draft so the
       // rename can be retried instead of being discarded.
       if (chatSelectionRef.current === selection) {
-        setChatsError(`Could not rename chat: ${String(err)}`);
+        chatListActions.setChatsError(`Could not rename chat: ${String(err)}`);
       } else {
-        setRenamingChatId(null);
-        setRenameChatDraft("");
+        chatListActions.endRename();
       }
     } finally {
-      setSavingTitle(false);
+      chatListActions.setSavingTitle(false);
     }
   }
 
@@ -871,16 +862,10 @@ export default function App() {
     const chatId = chat.id;
     const selection = chatSelectionRef.current;
     const updated = await client.patchChatModel(chatId, modelId || null);
-    if (chatSelectionRef.current !== selection) {
-      setChats((current) =>
-        current.map((item) => (item.id === updated.id ? updated : item)),
-      );
-      return;
-    }
-    setChat(updated);
-    setChats((current) =>
-      current.map((item) => (item.id === updated.id ? updated : item)),
-    );
+    // replaceChat updates the list and, when ids match, the selection too;
+    // after a selection change the ids differ, so this stays fence-safe.
+    chatListActions.replaceChat(updated);
+    void selection;
   }
 
   async function onReasoningEffortChange(effort: ReasoningEffort | null) {
@@ -888,16 +873,10 @@ export default function App() {
     const chatId = chat.id;
     const selection = chatSelectionRef.current;
     const updated = await client.patchChatReasoningEffort(chatId, effort);
-    if (chatSelectionRef.current !== selection) {
-      setChats((current) =>
-        current.map((item) => (item.id === updated.id ? updated : item)),
-      );
-      return;
-    }
-    setChat(updated);
-    setChats((current) =>
-      current.map((item) => (item.id === updated.id ? updated : item)),
-    );
+    // replaceChat updates the list and, when ids match, the selection too;
+    // after a selection change the ids differ, so this stays fence-safe.
+    chatListActions.replaceChat(updated);
+    void selection;
   }
 
   async function onApproval(
@@ -1031,23 +1010,12 @@ export default function App() {
     );
   }
 
-  const visibleChats = chats;
 
   return (
     <div className="app-shell">
       {confirmDialog}
       <Sidebar
-        chats={visibleChats}
-        activeChatId={chat.id}
-        chatsError={chatsError}
-        primaryView={primaryView}
-        foldersPanelOpen={settingsPanel === "folders"}
         nativeHost={hasNativeHost()}
-        creatingChat={creatingChat}
-        deletingChatId={deletingChatId}
-        renamingChatId={renamingChatId}
-        renameChatDraft={renameChatDraft}
-        savingTitle={savingTitle}
         themeMode={themeMode}
         updateReady={desktopUpdates.state.status === "ready"}
         updateVersion={desktopUpdates.state.version ?? null}
@@ -1055,22 +1023,9 @@ export default function App() {
         onNewChat={() => void onNewChat()}
         onSelectChat={selectChat}
         onStartRename={startChatRename}
-        onRenameDraftChange={setRenameChatDraft}
         onCommitRename={(target) => void commitChatRename(target)}
         onCancelRename={cancelChatRename}
         onDeleteChat={(target) => void onDeleteChat(target)}
-        onShowDocuments={() => {
-          setSettingsPanel(null);
-          setPrimaryView("documents");
-        }}
-        onToggleFolders={() => {
-          setPrimaryView("chat");
-          setSettingsPanel((panel) => (panel === "folders" ? null : "folders"));
-        }}
-        onShowSettings={() => {
-          setSettingsPanel(null);
-          setPrimaryView("settings");
-        }}
         onRestartForUpdate={() => void onRestartForUpdate()}
       />
 
@@ -1078,14 +1033,14 @@ export default function App() {
         className={`main${primaryView === "chat" && settingsPanel ? " with-settings" : ""}`}
       >
         {primaryView === "documents" ? (
-          <DocumentsView chatId={chat.id} onBack={() => setPrimaryView("chat")} />
+          <DocumentsView chatId={chat.id} onBack={() => uiActions.showChat({ keepPanels: true })} />
         ) : primaryView === "settings" ? (
           <SettingsView
             client={client}
             models={models}
             providers={providers}
             onProvidersChanged={() => void refreshCatalog()}
-            onBack={() => setPrimaryView("chat")}
+            onBack={() => uiActions.showChat({ keepPanels: true })}
             themeMode={themeMode}
             onThemeChange={setThemeMode}
             updateState={desktopUpdates.state}
@@ -1100,7 +1055,6 @@ export default function App() {
           status={status}
           hydrated={hydratedChatId === chat.id}
           nativeHost={hasNativeHost()}
-          foldersPanelOpen={settingsPanel === "folders"}
           deletingChat={deletingChatId !== null}
           agentRuns={visibleAgentRuns}
           agentRunsLoading={
@@ -1154,17 +1108,6 @@ export default function App() {
           onSend={onSend}
           onSteer={onSteerActiveTurn}
           onStop={onCancelActiveTurn}
-          onShowDocuments={() => {
-            setSettingsPanel(null);
-            setPrimaryView("documents");
-          }}
-          onToggleFolders={() =>
-            setSettingsPanel((panel) => (panel === "folders" ? null : "folders"))
-          }
-          onShowSettings={() => {
-            setSettingsPanel(null);
-            setPrimaryView("settings");
-          }}
         />
 
         {settingsPanel === "folders" && (
