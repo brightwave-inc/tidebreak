@@ -132,8 +132,9 @@ their own proxy, allow-list, audit, or test client through the same seam.
 and bounded request timeout. Its depth-one sandbox loop may durably checkpoint
 the one fixed `web_search` contract, and the server worker resolves that exact
 checkpoint under a fenced lease. The foreground registry and recursive
-sandboxes never receive this contract. The follow-on slice defines the
-outbound-domain policy before expanding the search surface.
+sandboxes never receive this contract. The concrete host client is bound to the
+selected provider's exact HTTPS API domain before credentials are attached;
+scheme, authority, explicit-port, or userinfo deviations fail before dispatch.
 
 **Depends on:** `openwave-core`.
 
