@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+
+# Cargo runner for macOS (wired up in `.cargo/config.toml`): re-sign the
+# freshly built binary with a stable code-signing identity, then launch it.
+#
+# Why: OpenWave stores secrets in the macOS login keychain, and keychain
+# access approvals are tied to the binary's code signature. Dev builds are
+# only ad-hoc signed by the linker, so every rebuild produces a new
+# signature and the "OpenWave wants to use your confidential information"
+# prompt returns — "Always Allow" can never stick. Signing with a real,
+# stable identity gives the binary a stable designated requirement, so one
+# approval per binary persists across rebuilds.
+#
+# Identity, in order of preference:
+#   1. $OPENWAVE_DEV_SIGNING_IDENTITY (set to opt out with an empty value)
+#   2. an "openwave-dev" self-signed certificate, if one exists
+#   3. the first "Apple Development" identity in the keychain
+# With no identity available the binary runs unsigned, exactly as before.
+
+set -euo pipefail
+
+bin="$1"
+shift
+
+find_identity() {
+  local identities
+  identities="$(security find-identity -v -p codesigning 2>/dev/null)" || return 0
+  local pattern
+  for pattern in '"\(openwave-dev\)"' '"\(Apple Development: [^"]*\)"'; do
+    local match
+    match="$(sed -n "s/.*${pattern}.*/\\1/p" <<<"$identities" | head -n 1)"
+    if [[ -n "$match" ]]; then
+      printf '%s' "$match"
+      return 0
+    fi
+  done
+}
+
+identity="${OPENWAVE_DEV_SIGNING_IDENTITY-$(find_identity)}"
+
+if [[ -n "$identity" ]]; then
+  # Unchanged binaries keep their signature from the previous run; re-signing
+  # only when the identity differs leaves them untouched.
+  current="$(codesign --display --verbose=2 "$bin" 2>&1 || true)"
+  if [[ "$current" != *"Authority=$identity"* ]]; then
+    codesign --force --sign "$identity" "$bin" 2>/dev/null ||
+      echo "warning: codesign with '$identity' failed; running unsigned" >&2
+  fi
+fi
+
+exec "$bin" "$@"

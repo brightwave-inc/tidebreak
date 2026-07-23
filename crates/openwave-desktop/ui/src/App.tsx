@@ -121,6 +121,12 @@ export default function App() {
   const [folderAccessErrors, setFolderAccessErrors] = useState<
     Record<string, string>
   >({});
+  const [decidingApprovalCalls, setDecidingApprovalCalls] = useState<
+    Set<string>
+  >(new Set());
+  const [approvalErrors, setApprovalErrors] = useState<Record<string, string>>(
+    {},
+  );
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
@@ -160,6 +166,7 @@ export default function App() {
   const refreshFolderAccessRef = useRef<(() => void) | null>(null);
   const refreshAgentRunsRef = useRef<(() => void) | null>(null);
   const resolvingFolderCallsRef = useRef<Set<string>>(new Set());
+  const decidingApprovalCallsRef = useRef<Set<string>>(new Set());
   const visibleFolderCallIdsRef = useRef<Set<string>>(new Set());
   const cancelRequestTurnRef = useRef<string | null>(null);
   const activeTurnIdRef = useRef<string | null>(null);
@@ -930,6 +937,9 @@ export default function App() {
     setAgentRunsError(null);
     setFolderAccessRequests([]);
     setFolderAccessErrors({});
+    decidingApprovalCallsRef.current = new Set();
+    setDecidingApprovalCalls(new Set());
+    setApprovalErrors({});
     setComposerDraft("");
     setBusy(false);
     setCurrentActiveTurnId(null);
@@ -1027,6 +1037,9 @@ export default function App() {
     setAgentRunsError(null);
     setFolderAccessRequests([]);
     setFolderAccessErrors({});
+    decidingApprovalCallsRef.current = new Set();
+    setDecidingApprovalCalls(new Set());
+    setApprovalErrors({});
     setComposerDraft("");
     setBusy(false);
     setCurrentActiveTurnId(null);
@@ -1133,14 +1146,36 @@ export default function App() {
     remember = false,
   ) {
     if (!client || !chat) return;
-    await client.decideApproval(chat.id, callId, decision, remember);
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.role === "approval" && m.callId === callId
-          ? { ...m, resolved: true }
-          : m,
-      ),
-    );
+    if (decidingApprovalCallsRef.current.has(callId)) return;
+    decidingApprovalCallsRef.current.add(callId);
+    setDecidingApprovalCalls((calls) => new Set(calls).add(callId));
+    setApprovalErrors((errors) => {
+      const next = { ...errors };
+      delete next[callId];
+      return next;
+    });
+    try {
+      await client.decideApproval(chat.id, callId, decision, remember);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.role === "approval" && m.callId === callId
+            ? { ...m, resolved: true }
+            : m,
+        ),
+      );
+    } catch (err) {
+      setApprovalErrors((errors) => ({
+        ...errors,
+        [callId]: `Could not send your decision: ${String(err)}`,
+      }));
+    } finally {
+      decidingApprovalCallsRef.current.delete(callId);
+      setDecidingApprovalCalls((calls) => {
+        const next = new Set(calls);
+        next.delete(callId);
+        return next;
+      });
+    }
   }
 
   async function onFolderAccessDecision(
@@ -1490,6 +1525,8 @@ export default function App() {
               nativeBusy={resolvingFolderCalls.size > 0}
               resolvingFolderCalls={resolvingFolderCalls}
               folderAccessErrors={folderAccessErrors}
+              decidingApprovalCalls={decidingApprovalCalls}
+              approvalErrors={approvalErrors}
               busy={busy}
               scrollRef={scrollRef}
               onScroll={(event) => {
@@ -1497,7 +1534,9 @@ export default function App() {
                 followsLatestRef.current = followsLatest;
                 if (followsLatest) setHasUnreadActivity(false);
               }}
-              onApproval={(callId, decision) => void onApproval(callId, decision)}
+              onApproval={(callId, decision, remember) =>
+                void onApproval(callId, decision, remember)
+              }
               onFolderAccessDecision={(callId, decision) =>
                 void onFolderAccessDecision(callId, decision)
               }

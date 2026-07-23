@@ -1241,6 +1241,13 @@ body {
   font-size: 0.84rem;
 }
 
+.message-approval .approval-error {
+  margin-top: 0.5rem;
+  color: var(--danger);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
 /* ---------- Markdown ---------- */
 
 .message-markdown {
@@ -1319,6 +1326,14 @@ body {
 .message-markdown ul,
 .message-markdown ol {
   padding-left: 1.35rem;
+}
+
+.message-markdown ul {
+  list-style: disc;
+}
+
+.message-markdown ol {
+  list-style: decimal;
 }
 
 .message-markdown li + li {

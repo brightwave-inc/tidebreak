@@ -1,0 +1,5 @@
+# On macOS, launch dev binaries through a wrapper that gives them a stable
+# code signature first — otherwise every rebuild re-triggers the keychain
+# access prompt. See scripts/macos-dev-sign-runner.sh for details.
+[target.'cfg(target_os = "macos")']
+runner = "scripts/macos-dev-sign-runner.sh"
