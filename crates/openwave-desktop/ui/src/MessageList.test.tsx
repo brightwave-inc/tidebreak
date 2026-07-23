@@ -53,6 +53,8 @@ describe("MessageBubble", () => {
         nativeBusy={false}
         resolvingFolderCalls={new Set()}
         folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
         busy
         scrollRef={{ current: null }}
         onScroll={noop}
@@ -83,6 +85,8 @@ describe("MessageBubble", () => {
         nativeBusy={false}
         resolvingFolderCalls={new Set()}
         folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
         busy
         scrollRef={{ current: null }}
         onScroll={noop}
@@ -114,6 +118,8 @@ describe("MessageBubble", () => {
         nativeBusy={false}
         resolvingFolderCalls={new Set()}
         folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
         busy
         scrollRef={{ current: null }}
         onScroll={noop}
@@ -168,6 +174,8 @@ describe("MessageBubble", () => {
         nativeBusy={false}
         resolvingFolderCalls={new Set()}
         folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
         busy={false}
         scrollRef={{ current: null }}
         onScroll={noop}
@@ -207,6 +215,8 @@ describe("MessageBubble", () => {
         nativeBusy={false}
         resolvingFolderCalls={new Set()}
         folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
         busy={false}
         scrollRef={{ current: null }}
         onScroll={noop}
@@ -240,6 +250,8 @@ describe("MessageBubble", () => {
         nativeBusy={false}
         resolvingFolderCalls={new Set()}
         folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
         busy={false}
         scrollRef={{ current: null }}
         onScroll={noop}
@@ -287,6 +299,8 @@ describe("MessageBubble", () => {
         nativeBusy={false}
         resolvingFolderCalls={new Set()}
         folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
         busy={false}
         scrollRef={{ current: null }}
         onScroll={noop}
@@ -337,6 +351,8 @@ describe("MessageBubble", () => {
         nativeBusy={false}
         resolvingFolderCalls={new Set()}
         folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
         busy
         scrollRef={{ current: null }}
         onScroll={noop}
@@ -372,6 +388,8 @@ describe("MessageBubble", () => {
         nativeBusy={false}
         resolvingFolderCalls={new Set()}
         folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
         busy={false}
         scrollRef={{ current: null }}
         onScroll={noop}
@@ -409,6 +427,8 @@ describe("MessageBubble", () => {
         nativeBusy={false}
         resolvingFolderCalls={new Set()}
         folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
         busy
         scrollRef={{ current: null }}
         onScroll={noop}
@@ -421,5 +441,87 @@ describe("MessageBubble", () => {
     expect(markup).toContain('aria-label="Copy"');
     expect(markup).toContain('dateTime="2026-07-20T10:00:00Z"');
     expect(markup).toContain('dateTime="2026-07-20T10:01:00Z"');
+  });
+});
+
+describe("approval decision feedback", () => {
+  const approval: ChatMessage = {
+    id: "approval-1",
+    role: "approval",
+    callId: "call-1",
+    summary: "Search a site",
+    canApprove: true,
+  };
+
+  it("disables the decision buttons while a decision is in flight", () => {
+    const markup = renderToStaticMarkup(
+      <MessageBubble
+        message={approval}
+        busy={false}
+        onApproval={noop}
+        approvalState={{
+          decidingApprovalCalls: new Set(["call-1"]),
+          approvalErrors: {},
+        }}
+      />,
+    );
+
+    expect(markup).toContain('aria-busy="true"');
+    expect((markup.match(/disabled=""/g) ?? []).length).toBe(3);
+  });
+
+  it("renders a per-card error and keeps the buttons actionable for retry", () => {
+    const markup = renderToStaticMarkup(
+      <MessageBubble
+        message={approval}
+        busy={false}
+        onApproval={noop}
+        approvalState={{
+          decidingApprovalCalls: new Set(),
+          approvalErrors: {
+            "call-1": "Could not send your decision: Error: 500: boom",
+          },
+        }}
+      />,
+    );
+
+    expect(markup).toContain('class="approval-error"');
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain("Could not send your decision");
+    expect(markup).not.toContain("disabled");
+  });
+
+  it("hides the error once the approval is resolved", () => {
+    const markup = renderToStaticMarkup(
+      <MessageBubble
+        message={{ ...approval, resolved: true }}
+        busy={false}
+        onApproval={noop}
+        approvalState={{
+          decidingApprovalCalls: new Set(),
+          approvalErrors: { "call-1": "Could not send your decision: nope" },
+        }}
+      />,
+    );
+
+    expect(markup).not.toContain("approval-error");
+    expect(markup).not.toContain("Could not send your decision");
+  });
+
+  it("shows no error for a card whose call has none", () => {
+    const markup = renderToStaticMarkup(
+      <MessageBubble
+        message={approval}
+        busy={false}
+        onApproval={noop}
+        approvalState={{
+          decidingApprovalCalls: new Set(["other-call"]),
+          approvalErrors: { "other-call": "Could not send your decision: x" },
+        }}
+      />,
+    );
+
+    expect(markup).not.toContain("approval-error");
+    expect(markup).not.toContain("disabled");
   });
 });

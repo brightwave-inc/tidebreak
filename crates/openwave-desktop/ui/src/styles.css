@@ -1433,6 +1433,13 @@ body {
   font-size: 0.84rem;
 }
 
+.message-approval .approval-error {
+  margin-top: 0.5rem;
+  color: var(--danger);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
 /* ---------- Markdown ---------- */
 
 .message-markdown {
