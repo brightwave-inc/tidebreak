@@ -22,6 +22,10 @@ use openwave_core::{
 use openwave_retrieval::{
     Embedding, InMemoryVectorStore, RetrievalError, ScoredChunk, VectorRecord,
 };
+use openwave_web_search::{
+    WebSearchError, WebSearchProvider, WebSearchProviderKind, WebSearchRequest, WebSearchResolver,
+    WebSearchResolverError, WebSearchResponse, WebSearchResult, WebSearchTool,
+};
 use resolver::ProviderResolver;
 use serde::de::DeserializeOwned;
 use tokio::sync::Notify;
@@ -11084,6 +11088,275 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
             .count(),
         1,
     );
+}
+
+struct FixedWebSearchResolver {
+    provider: Arc<dyn WebSearchProvider>,
+}
+
+#[async_trait]
+impl WebSearchResolver for FixedWebSearchResolver {
+    async fn resolve(&self) -> Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError> {
+        Ok(Some(self.provider.clone()))
+    }
+}
+
+struct RecordingWebSearchProvider {
+    requests: Arc<std::sync::Mutex<Vec<WebSearchRequest>>>,
+}
+
+#[async_trait]
+impl WebSearchProvider for RecordingWebSearchProvider {
+    fn kind(&self) -> WebSearchProviderKind {
+        WebSearchProviderKind::Exa
+    }
+
+    async fn search(&self, request: WebSearchRequest) -> Result<WebSearchResponse, WebSearchError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(WebSearchResponse::new(
+            WebSearchProviderKind::Exa,
+            vec![WebSearchResult::new(
+                "https://example.com/openwave",
+                "OpenWave release",
+                "OpenWave web search is ready.",
+                None,
+                Some(0.99),
+                None,
+                None,
+                std::collections::BTreeMap::new(),
+            )?],
+        ))
+    }
+}
+
+struct WebSearchFlowModelProvider {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for WebSearchFlowModelProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("web-search-flow")
+    }
+
+    async fn stream(
+        &self,
+        request: ChatRequest,
+    ) -> openwave_core::Result<BoxStream<'static, ProviderEvent>> {
+        let events = match self.calls.fetch_add(1, Ordering::SeqCst) {
+            0 => {
+                let spec = request
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name == "web_search")
+                    .expect("foreground agent must advertise web_search");
+                assert_eq!(
+                    spec.input_schema["properties"]["query"]["maxLength"],
+                    openwave_web_search::MAX_QUERY_CHARS
+                );
+                assert_eq!(spec.input_schema["additionalProperties"], false);
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_web_search".into(),
+                        name: "web_search".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: serde_json::json!({
+                            "query": " OpenWave release ",
+                            "max_results": 3,
+                            "domains": ["Example.com"],
+                        })
+                        .to_string(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            }
+            1 => {
+                let result = request
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .find_map(|block| match block {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } if tool_use_id == "call_web_search" => Some((content, is_error)),
+                        _ => None,
+                    })
+                    .expect("normalized web-search result must return to the model");
+                assert!(!result.1);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(result.0).unwrap(),
+                    serde_json::json!({
+                        "provider": "exa",
+                        "results": [{
+                            "url": "https://example.com/openwave",
+                            "title": "OpenWave release",
+                            "snippet": "OpenWave web search is ready.",
+                            "score": 0.99,
+                        }],
+                    })
+                );
+                vec![
+                    ProviderEvent::TextDelta {
+                        text: "Ready. [OpenWave release](https://example.com/openwave)".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            }
+            call => panic!("unexpected model call {call}"),
+        };
+        Ok(stream::iter(events).boxed())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn foreground_web_search_runs_end_to_end_through_durable_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = Arc::new(RecordingWebSearchProvider {
+        requests: requests.clone(),
+    });
+    let tools = Arc::new(
+        ToolRegistry::new().with(Box::new(WebSearchTool::new(Arc::new(
+            FixedWebSearchResolver { provider },
+        )))),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(WebSearchFlowModelProvider {
+            calls: AtomicUsize::new(0),
+        }))),
+        Arc::new(MemSecrets::default()),
+        tools,
+        build_retrieval(
+            Arc::new(HashEmbedder::default()),
+            Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        )
+        .0,
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "Is web search ready?").await,
+        StatusCode::ACCEPTED
+    );
+
+    let (call_id, approval_kind) = {
+        let mut found = None;
+        for _ in 0..200 {
+            let events = store.list_events(chat.id, 0).await.unwrap();
+            if let Some(approval) = events.iter().find_map(|event| match &event.event {
+                AgentEvent::ApprovalRequired {
+                    call_id,
+                    tool_name,
+                    kind,
+                    ..
+                } if tool_name == "web_search" => Some((*call_id, *kind)),
+                _ => None,
+            }) {
+                found = Some(approval);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        found.expect("web search should park on durable approval")
+    };
+    assert_eq!(
+        approval_kind,
+        openwave_core::ToolApprovalKind::WebSearchMayShareQuery
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "provider egress must not occur before approval"
+    );
+
+    let pending = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/chats/{}/approvals", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.status(), StatusCode::OK);
+    let pending: serde_json::Value = json_body(pending).await;
+    assert_eq!(pending[0]["action"], "web_search");
+    assert_eq!(pending[0]["approval"], "web_search_may_share_query");
+    assert_eq!(pending[0]["class"], "sensitive");
+    assert_eq!(pending[0]["can_approve"], true);
+    let pending_json = pending.to_string();
+    assert!(!pending_json.contains("OpenWave release"));
+    assert!(!pending_json.contains("Example.com"));
+
+    let decide = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/approvals/{call_id}", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"decision": "approve"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(decide.status(), StatusCode::NO_CONTENT);
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        AgentEvent::ApprovalDecided { approved: true, .. }
+    )));
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].query, "OpenWave release");
+        assert_eq!(requests[0].max_results, 3);
+        assert_eq!(requests[0].domains[0].as_str(), "example.com");
+    }
+
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert!(messages.iter().any(|message| {
+        message.role == Role::Assistant
+            && message.content == "Ready. [OpenWave release](https://example.com/openwave)"
+    }));
 }
 
 /// End-to-end integration test that drives the whole product path as a single
