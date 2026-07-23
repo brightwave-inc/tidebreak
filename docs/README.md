@@ -15,6 +15,9 @@ Project documentation, versioned alongside the code.
   foreground/sandbox split, provider boundaries, and web-search plan.
 - [Web search configuration](web-search.md) — the local host-owned Exa/Tavily
   selection boundary and its current no-tool state.
+- [Code execution](code-execution.md) — the provider-neutral `exec` contract,
+  native local sandbox, configuration boundary, and managed-provider extension
+  path.
 - [Releases and versioning](releases.md) — semantic PR titles, native release
   drafts, tag-derived macOS builds, and the deliberate path to `1.0.0`.
 

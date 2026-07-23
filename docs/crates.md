@@ -11,10 +11,9 @@ libraries.
                                │                 │
                                └────── openwave-server
                                             │
-      libraries          openwave-mcp   openwave-retrieval   openwave-router
-                         openwave-web-search   openwave-host-broker │
-                               │             │              │      │
-                               └─────────────┴──────────────┴──────┘
+      libraries          openwave-mcp          openwave-retrieval
+                         openwave-router       openwave-web-search
+                         openwave-host-broker  openwave-code-execution
                                             │
       the seam                         openwave-core
 
@@ -137,6 +136,24 @@ Sensitive tool over the same live resolver and durable approval boundary;
 recursive sandboxes remain unavailable. The concrete host client is bound to
 the selected provider's exact HTTPS API domain before credentials are attached;
 scheme, authority, explicit-port, or userinfo deviations fail before dispatch.
+
+**Depends on:** `openwave-core`.
+
+## `openwave-code-execution` — provider-neutral command execution 🟢
+
+The stable `exec` tool, normalized request/result contract, and native local
+sandbox. Requests carry a canonical execution id for retry reconciliation and
+an opaque workspace id that providers interpret without exposing a host path to
+the model.
+
+The initial local provider is macOS Seatbelt: no network, no inherited
+environment or stdin, writes confined to private chat scratch, bounded time and
+output, process-group cleanup, and private running/terminal receipts. Other
+platforms fail closed rather than running unconfined. `openwave-server` owns the
+runtime provider/timeout setting and can later resolve E2B or another managed
+adapter behind the same contract.
+
+See [Code execution](code-execution.md).
 
 **Depends on:** `openwave-core`.
 

@@ -6,6 +6,7 @@ import {
   KeyRound,
   Palette,
   RefreshCw,
+  SquareTerminal,
 } from "lucide-react";
 import type { ApiClient, ModelInfo, ProviderInfo } from "./api";
 import type { ThemeMode } from "./theme";
@@ -14,12 +15,14 @@ import { ProvidersPanel } from "./settings/ProvidersPanel";
 import { WebSearchPanel } from "./settings/WebSearchPanel";
 import { ModelsPanel } from "./settings/ModelsPanel";
 import { AppearancePanel } from "./settings/AppearancePanel";
+import { CodeExecutionPanel } from "./settings/CodeExecutionPanel";
 import { UpdatesPanel } from "./settings/UpdatesPanel";
 
 type SettingsSectionKey =
   | "providers"
   | "models"
   | "web-search"
+  | "code-execution"
   | "appearance"
   | "updates";
 
@@ -31,6 +34,7 @@ const SECTIONS: {
   { key: "providers", label: "Providers", icon: KeyRound },
   { key: "models", label: "Models", icon: Cpu },
   { key: "web-search", label: "Web search", icon: Globe },
+  { key: "code-execution", label: "Code execution", icon: SquareTerminal },
   { key: "appearance", label: "Appearance", icon: Palette },
   { key: "updates", label: "Updates", icon: RefreshCw },
 ];
@@ -102,6 +106,9 @@ export function SettingsView({
           <ModelsPanel client={client} models={models} />
         )}
         {section === "web-search" && <WebSearchPanel client={client} />}
+        {section === "code-execution" && (
+          <CodeExecutionPanel client={client} />
+        )}
         {section === "appearance" && (
           <AppearancePanel mode={themeMode} onChange={onThemeChange} />
         )}

@@ -2110,10 +2110,15 @@ impl Agent {
         if self.cancel.is_cancelled() {
             return ToolOutput::error("turn cancelled before tool execution");
         }
-        let ctx = self.config.tool_scratch.as_ref().map_or_else(
-            || ToolCtx::without_private_scratch(chat.id, chat.project_id),
-            |scratch| ToolCtx::with_private_scratch(chat.id, chat.project_id, scratch.clone()),
-        );
+        let ctx = self
+            .config
+            .tool_scratch
+            .as_ref()
+            .map_or_else(
+                || ToolCtx::without_private_scratch(chat.id, chat.project_id),
+                |scratch| ToolCtx::with_private_scratch(chat.id, chat.project_id, scratch.clone()),
+            )
+            .with_call_id(call.call_id);
         // `future::select` polls cancellation first. If it wins, dropping the
         // unselected execution future propagates cancellation into async tools
         // such as reqwest instead of leaving egress alive after the turn ends.
@@ -2761,6 +2766,7 @@ mod tests {
 
     struct ContextRecordingTool {
         observed_project: Arc<Mutex<Option<Option<ProjectId>>>>,
+        observed_call: Arc<Mutex<Option<CallId>>>,
     }
 
     struct CitationSearchTool {
@@ -2947,6 +2953,7 @@ mod tests {
 
         async fn execute(&self, ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
             *self.observed_project.lock().unwrap() = Some(ctx.project_id);
+            *self.observed_call.lock().unwrap() = ctx.call_id;
             Ok(ToolOutput::text("recorded"))
         }
     }
@@ -4027,8 +4034,10 @@ mod tests {
         };
         store.create_chat(&chat).await.unwrap();
         let observed_project = Arc::new(Mutex::new(None));
+        let observed_call = Arc::new(Mutex::new(None));
         let tools = Arc::new(ToolRegistry::new().with(Box::new(ContextRecordingTool {
             observed_project: observed_project.clone(),
+            observed_call: observed_call.clone(),
         })));
         let agent = Agent::new(
             Arc::new(FakeProvider {
@@ -4045,6 +4054,10 @@ mod tests {
         let (tx, _rx) = unbounded();
         agent.run_turn(&chat, "inspect context", &tx).await.unwrap();
         assert_eq!(*observed_project.lock().unwrap(), Some(Some(project.id)));
+        assert!(
+            observed_call.lock().unwrap().is_some(),
+            "provider adapters need the canonical call id for reconciliation"
+        );
     }
 
     #[tokio::test]
