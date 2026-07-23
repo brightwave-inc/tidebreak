@@ -1,0 +1,103 @@
+import type { SequencedEvent } from "./api";
+
+export const INITIAL_RECONNECT_DELAY_MS = 250;
+export const MAX_RECONNECT_DELAY_MS = 5_000;
+
+/** The next bounded backoff value after scheduling one reconnect attempt. */
+export function nextReconnectDelay(delayMs: number): number {
+  return Math.min(delayMs * 2, MAX_RECONNECT_DELAY_MS);
+}
+
+export type ChatConnectionState = "live" | "reconnecting";
+
+export type ChatSessionControllerOptions = {
+  /**
+   * Open the chat's event socket resuming after the given seq. The callback
+   * carries parsed frames; the controller decides whether they are current.
+   */
+  openSocket: (
+    after: number,
+    onEvent: (event: SequencedEvent) => void,
+  ) => WebSocket;
+  /** Read the resume cursor freshly on every (re)connect attempt. */
+  getAfter: () => number;
+  onEvent: (event: SequencedEvent) => void;
+  onConnectionState: (state: ChatConnectionState) => void;
+};
+
+/**
+ * Owns one chat's event-stream connection: connect, deliver, and reconnect
+ * with bounded backoff. Instances are single-use — switching chats means
+ * disposing this controller and constructing a new one, which is what fences
+ * stale sockets and timers (no generation counters, no borrowed refs).
+ */
+export class ChatSessionController {
+  private disposed = false;
+  private socket: WebSocket | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+
+  constructor(private readonly options: ChatSessionControllerOptions) {}
+
+  start(): void {
+    this.connect();
+  }
+
+  /** Close the socket and silence every callback and pending timer, forever. */
+  dispose(): void {
+    this.disposed = true;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.socket) {
+      this.socket.close();
+      this.socket = null;
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.disposed || this.reconnectTimer !== null) return;
+    this.options.onConnectionState("reconnecting");
+    const delay = this.reconnectDelayMs;
+    this.reconnectDelayMs = nextReconnectDelay(this.reconnectDelayMs);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+  }
+
+  private connect(): void {
+    if (this.disposed) return;
+    let socket: WebSocket;
+    try {
+      socket = this.options.openSocket(this.options.getAfter(), (event) => {
+        if (!this.disposed && this.socket === socket) {
+          this.options.onEvent(event);
+        }
+      });
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
+
+    this.socket = socket;
+    socket.onopen = () => {
+      if (this.disposed || this.socket !== socket) return;
+      this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+      this.options.onConnectionState("live");
+    };
+    socket.onerror = () => {
+      if (this.disposed || this.socket !== socket) return;
+      // Browser error events are not required to be followed by close. Close
+      // this socket so the one reconnect path owns recovery in either case.
+      socket.close();
+      this.scheduleReconnect();
+    };
+    socket.onclose = () => {
+      if (this.socket !== socket) return;
+      this.socket = null;
+      this.scheduleReconnect();
+    };
+  }
+}

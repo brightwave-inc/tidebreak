@@ -22,7 +22,7 @@ import {
 } from "./host";
 import { Logomark } from "./Logomark";
 import { Composer } from "./Composer";
-import { MessageList, type ChatMessage } from "./MessageList";
+import { MessageList } from "./MessageList";
 import {
   ArrowDown,
   Ellipsis,
@@ -49,7 +49,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { useChatEventStream } from "./ChatEventStream";
+import { ChatSessionController } from "./ChatSessionController";
+import { useChatSessionStore } from "./ChatSessionStore";
 import { isNearBottom, scrollToLatest } from "./ChatScroll";
 import { DocumentsView } from "./DocumentsView";
 import { reconcilePendingApprovalCards } from "./ApprovalHistory";
@@ -57,8 +58,6 @@ import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import {
   applyTerminalHydration,
-  initialChatSessionState,
-  reduceChatSessionEvent,
   type ChatSessionEffect,
   type ChatSessionState,
 } from "./ChatSessionReducer";
@@ -83,8 +82,6 @@ import { useConfirm } from "./components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
 import { useDesktopUpdates } from "./updates";
 
-type Msg = ChatMessage;
-
 let msgSeq = 0;
 
 function nextId(): string {
@@ -107,7 +104,9 @@ export default function App() {
   const [chatsError, setChatsError] = useState<string | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [messages, setMessages] = useState<Msg[]>([]);
+  const messages = useChatSessionStore((session) => session.messages);
+  const busy = useChatSessionStore((session) => session.busy);
+  const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
   const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
   const [agentRunsChatId, setAgentRunsChatId] = useState<string | null>(null);
   const [agentRunsLoading, setAgentRunsLoading] = useState(false);
@@ -134,8 +133,6 @@ export default function App() {
     {},
   );
   const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [cancelPendingTurnId, setCancelPendingTurnId] = useState<string | null>(
     null,
   );
@@ -157,14 +154,11 @@ export default function App() {
   >("chat");
   const [status, setStatus] = useState("starting…");
   const [hasUnreadActivity, setHasUnreadActivity] = useState(false);
-  const socketRef = useRef<WebSocket | null>(null);
-  const socketGenerationRef = useRef(0);
+  // Owns the selected chat's event socket; chat switches dispose it eagerly
+  // and the connection effect below constructs a fresh one.
+  const controllerRef = useRef<ChatSessionController | null>(null);
+  const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
   const chatSelectionRef = useRef(0);
-  // The chat session's live state machine. `sessionRef` is the source of
-  // truth; React state (`messages`, `busy`, `activeTurnId`) and the two
-  // mirrors below are projections refreshed by `commitSession`.
-  const sessionRef = useRef<ChatSessionState>(initialChatSessionState());
-  const lastSeqRef = useRef(0);
   const terminalHydrationGenerationRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followsLatestRef = useRef(true);
@@ -174,7 +168,6 @@ export default function App() {
   const decidingApprovalCallsRef = useRef<Set<string>>(new Set());
   const visibleFolderCallIdsRef = useRef<Set<string>>(new Set());
   const cancelRequestTurnRef = useRef<string | null>(null);
-  const activeTurnIdRef = useRef<string | null>(null);
   const draftRef = useRef("");
   const selectedChatIdRef = useRef<string | null>(null);
   const steerFenceRef = useRef(new ActiveTurnSteerFence());
@@ -290,19 +283,25 @@ export default function App() {
     };
   }, [client, chat?.id]);
 
-  useChatEventStream({
-    client,
-    chatId: chat?.id ?? null,
-    ready: hydratedChatId === chat?.id,
-    afterRef: lastSeqRef,
-    socketRef,
-    generationRef: socketGenerationRef,
-    onEvent: handleEvent,
-    onConnectionState: (connectionState) =>
-      setStatus((current) =>
-        `${withoutConnectionState(current)} · ${connectionState}`,
-      ),
-  });
+  useEffect(() => {
+    if (!client || !chat || hydratedChatId !== chat.id) return;
+    const chatId = chat.id;
+    const controller = new ChatSessionController({
+      openSocket: (after, onEvent) => client.openEvents(chatId, after, onEvent),
+      getAfter: () => useChatSessionStore.getState().lastSeq,
+      onEvent: (event) => handleEventRef.current(event),
+      onConnectionState: (connectionState) =>
+        setStatus(
+          (current) => `${withoutConnectionState(current)} · ${connectionState}`,
+        ),
+    });
+    controllerRef.current = controller;
+    controller.start();
+    return () => {
+      controller.dispose();
+      if (controllerRef.current === controller) controllerRef.current = null;
+    };
+  }, [client, chat?.id, hydratedChatId]);
 
   useEffect(() => {
     if (!client || !chat) return;
@@ -476,28 +475,17 @@ export default function App() {
     }
   }, [folderAccessRequests]);
 
-  function commitSession(next: ChatSessionState) {
-    sessionRef.current = next;
-    lastSeqRef.current = next.lastSeq;
-    activeTurnIdRef.current = next.activeTurnId;
-    setMessages(next.messages);
-    setBusy(next.busy);
-    setActiveTurnId(next.activeTurnId);
-  }
-
   function updateSession(update: (state: ChatSessionState) => ChatSessionState) {
-    commitSession(update(sessionRef.current));
+    useChatSessionStore.getState().update(update);
   }
 
   function handleEvent(framed: SequencedEvent) {
-    const { state, effects } = reduceChatSessionEvent(
-      sessionRef.current,
-      framed,
-      sessionDeps,
-    );
-    commitSession(state);
+    const effects = useChatSessionStore
+      .getState()
+      .applyEvent(framed, sessionDeps);
     for (const effect of effects) applySessionEffect(effect);
   }
+  handleEventRef.current = handleEvent;
 
   function applySessionEffect(effect: ChatSessionEffect) {
     switch (effect.type) {
@@ -639,7 +627,7 @@ export default function App() {
   async function onSteerActiveTurn() {
     const admission = {
       busy,
-      turnId: activeTurnIdRef.current,
+      turnId: useChatSessionStore.getState().activeTurnId,
       cancelRequestTurnId: cancelRequestTurnRef.current,
       deletionInFlight: deletionInFlightRef.current,
     };
@@ -678,7 +666,7 @@ export default function App() {
       if (
         !steerFenceRef.current.canApplyResponse(request, {
           chatId: selectedChatIdRef.current ?? "",
-          turnId: activeTurnIdRef.current ?? "",
+          turnId: useChatSessionStore.getState().activeTurnId ?? "",
           selection: chatSelectionRef.current,
         })
       ) {
@@ -695,7 +683,7 @@ export default function App() {
       if (
         !steerFenceRef.current.canApplyResponse(request, {
           chatId: selectedChatIdRef.current ?? "",
-          turnId: activeTurnIdRef.current ?? "",
+          turnId: useChatSessionStore.getState().activeTurnId ?? "",
           selection: chatSelectionRef.current,
         })
       ) {
@@ -771,10 +759,9 @@ export default function App() {
 
   function openCreatedChat(created: Chat) {
     setPrimaryView("chat");
-    socketGenerationRef.current += 1;
-    socketRef.current?.close();
-    socketRef.current = null;
-    commitSession(initialChatSessionState());
+    controllerRef.current?.dispose();
+    controllerRef.current = null;
+    useChatSessionStore.getState().reset();
     followsLatestRef.current = true;
     setHasUnreadActivity(false);
     setAgentRuns([]);
@@ -866,10 +853,9 @@ export default function App() {
     ) {
       return;
     }
-    socketGenerationRef.current += 1;
-    socketRef.current?.close();
-    socketRef.current = null;
-    commitSession(initialChatSessionState());
+    controllerRef.current?.dispose();
+    controllerRef.current = null;
+    useChatSessionStore.getState().reset();
     followsLatestRef.current = true;
     setHasUnreadActivity(false);
     setAgentRuns([]);
