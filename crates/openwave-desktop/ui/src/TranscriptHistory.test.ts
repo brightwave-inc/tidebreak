@@ -81,6 +81,35 @@ describe("hydrateTranscriptHistory", () => {
     expect(JSON.stringify(entries)).not.toContain("finished_at");
   });
 
+  it("hydrates source discovery, direct reads, and semantic search distinctly", () => {
+    const entries = hydrateTranscriptHistory([], [
+      {
+        title: "Check sources",
+        status: "completed",
+        started_at: "2026-07-16T10:00:00Z",
+        finished_at: "2026-07-16T10:00:00Z",
+      },
+      {
+        title: "Read a source",
+        status: "completed",
+        started_at: "2026-07-16T10:00:01Z",
+        finished_at: "2026-07-16T10:00:01Z",
+      },
+      {
+        title: "Search sources",
+        status: "completed",
+        started_at: "2026-07-16T10:00:02Z",
+        finished_at: "2026-07-16T10:00:02Z",
+      },
+    ]);
+
+    expect(entries).toEqual([
+      expect.objectContaining({ name: "list_sources" }),
+      expect.objectContaining({ name: "read_source" }),
+      expect.objectContaining({ name: "search" }),
+    ]);
+  });
+
   it("attaches sources only to their exact owning assistant message", () => {
     const entries = hydrateTranscriptHistory(
       [

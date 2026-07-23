@@ -7,7 +7,7 @@ identity.
 
 ## What exists today
 
-The current foreground agent surface contains twelve tools:
+The current foreground agent surface contains fourteen tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
@@ -16,6 +16,8 @@ The current foreground agent surface contains twelve tools:
 | `write_file` | Atomically write private-scratch text | Server, workspace |
 | `exec` | Run a bounded command through the configured execution provider | Server, sensitive native sandbox |
 | `search` | Search sources indexed for this exact conversation | Server, read-only |
+| `list_sources` | List bounded metadata for sources in this exact conversation | Server, read-only |
+| `read_source` | Read a bounded canonical-text range from one source and create citable evidence | Server, read-only |
 | `web_search` | Search the public web through the configured Exa or Tavily provider | Server, sensitive approval |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
@@ -35,6 +37,13 @@ an opaque root ID and a bounded root-relative path; native code recovers the
 stored chat context, reauthorizes with the broker, and persists the exact
 model-facing result before resolving the parked turn. Requesting access and
 using an approved root remain separate operations.
+
+Source access is tiered rather than search-only. `list_sources` discovers the
+conversation's exact corpus without loading content. `read_source` reads one
+bounded Unicode-character range as soon as parser output exists—even while the
+embedding job is still running—and returns an opaque reference that produces
+the same durable citation cards as `search`. Semantic search remains the
+efficient choice for finding passages across a large ready corpus.
 
 ## Core module layout
 

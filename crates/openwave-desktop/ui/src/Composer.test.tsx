@@ -234,4 +234,36 @@ describe("Composer", () => {
     expect(markup).toContain('type="submit"');
     expect(markup).toContain('disabled=""');
   });
+
+  it("keeps source attachment inside the conversation composer", () => {
+    const markup = renderToStaticMarkup(
+      <Composer
+        activeTurnId={null}
+        busy={false}
+        cancelError={null}
+        cancelPending={false}
+        disabled={false}
+        draft="Summarize this"
+        canAttachSource
+        attachingSource={false}
+        attachedSourceName="brief.pdf"
+        sourceAttachmentError={null}
+        onAddSource={noop}
+        onDismissAttachedSource={vi.fn()}
+        onDraftChange={vi.fn()}
+        onSend={noop}
+        onSteer={noop}
+        onStop={noop}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Add source"');
+    expect(markup).toContain("brief.pdf");
+    expect(markup).toContain("Added to this conversation");
+    expect(markup).toContain('aria-label="Dismiss brief.pdf"');
+  });
 });

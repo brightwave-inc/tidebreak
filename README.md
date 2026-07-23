@@ -74,7 +74,9 @@ registry; configuration UI and indexed search wiring remain in development.
 
 Pre-alpha, built in the open. The current product is conversation-first: each
 chat is its own workspace, with exact conversation-scoped sources and retrieval
-rather than a shared fallback corpus. The stack includes local file tools,
+rather than a shared fallback corpus. Sources can be added from the composer,
+read directly after parsing, or searched semantically at corpus scale, with
+grounded citations in each path. The stack includes local file tools,
 multi-provider model routing, a turn engine with live journaled WebSocket events,
 a workspace-style desktop conversation shell, a bounded foreground/sandbox
 agent-run foundation, and durable asynchronous source ingestion/retrieval with

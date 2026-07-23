@@ -114,6 +114,9 @@ export type ChatMessageCitation = {
 /** A fixed, terminal tool-card projection with no canonical tool data. */
 export type ChatToolActivity = {
   title:
+    | "Search sources"
+    | "Check sources"
+    | "Read a source"
     | "Search the web"
     | "Read a delegated file"
     | "Read a file"
@@ -215,6 +218,8 @@ export type AgentEvent =
 
 export type RendererToolName =
   | "search"
+  | "list_sources"
+  | "read_source"
   | "web_search"
   | "read_delegated_file"
   | "read_file"
@@ -728,6 +733,8 @@ export function parsePendingToolApproval(
 function isRendererToolName(value: unknown): value is RendererToolName {
   return (
     value === "search" ||
+    value === "list_sources" ||
+    value === "read_source" ||
     value === "web_search" ||
     value === "read_delegated_file" ||
     value === "read_file" ||

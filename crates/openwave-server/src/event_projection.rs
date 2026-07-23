@@ -71,6 +71,8 @@ pub(crate) enum RendererAgentEvent {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RendererToolName {
     Search,
+    ListSources,
+    ReadSource,
     WebSearch,
     ReadDelegatedFile,
     ReadFile,
@@ -98,6 +100,8 @@ impl From<&str> for RendererToolName {
     fn from(name: &str) -> Self {
         match name {
             "search" => Self::Search,
+            crate::source_tools::LIST_SOURCES_TOOL => Self::ListSources,
+            crate::source_tools::READ_SOURCE_TOOL => Self::ReadSource,
             "web_search" => Self::WebSearch,
             openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL => Self::ReadDelegatedFile,
             "read_file" => Self::ReadFile,
@@ -257,6 +261,18 @@ mod tests {
         assert!(serialized.contains(r#""action":"other""#));
         assert!(serialized.contains(r#""status":"failed""#));
         assert!(serialized.contains(r#""text":"visible steer text""#));
+    }
+
+    #[test]
+    fn source_tools_use_fixed_renderer_names() {
+        assert_eq!(
+            RendererToolName::from(crate::source_tools::LIST_SOURCES_TOOL),
+            RendererToolName::ListSources
+        );
+        assert_eq!(
+            RendererToolName::from(crate::source_tools::READ_SOURCE_TOOL),
+            RendererToolName::ReadSource
+        );
     }
 
     #[test]

@@ -685,6 +685,9 @@ fn tool_activity_from_call(call: ToolCallRecord) -> ChatToolActivitySnapshot {
 /// this explicit vocabulary and collapse anything else to a generic action.
 fn historical_tool_title(name: &str) -> &'static str {
     match name {
+        "search" => "Search sources",
+        "list_sources" => "Check sources",
+        "read_source" => "Read a source",
         "web_search" => "Search the web",
         crate::SANDBOX_READ_DELEGATED_FILE_TOOL => "Read a delegated file",
         "read_file" | "read_connected_file" => "Read a file",
@@ -1123,5 +1126,8 @@ mod historical_tool_title_tests {
             "Read a delegated file"
         );
         assert_eq!(historical_tool_title("private_read_variant"), "Use a tool");
+        assert_eq!(historical_tool_title("search"), "Search sources");
+        assert_eq!(historical_tool_title("list_sources"), "Check sources");
+        assert_eq!(historical_tool_title("read_source"), "Read a source");
     }
 }

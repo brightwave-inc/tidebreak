@@ -639,7 +639,7 @@ fn validate_evidence_request(
         return Ok(());
     }
     if call.execution != ToolCallExecution::Server.as_str()
-        || call.name != "search"
+        || !matches!(call.name.as_str(), "search" | "read_source")
         || !matches!(resolution, ToolCallResolution::Completed { .. })
         || evidence.len() > RetrievalEvidenceInput::MAX_RESULTS
     {

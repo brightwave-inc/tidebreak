@@ -25,6 +25,10 @@ import { useChatSessionStore } from "./ChatSessionStore";
 import { useChatListStore } from "./ChatListStore";
 import { useUiStore } from "./UiStore";
 import { DocumentsView } from "./DocumentsView";
+import {
+  importLibraryDocument,
+  type ImportedDocument,
+} from "./documents";
 import { reconcilePendingApprovalCards } from "./ApprovalHistory";
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
@@ -115,6 +119,17 @@ export default function App() {
     {},
   );
   const [draft, setDraft] = useState("");
+  const [addingSourceChatId, setAddingSourceChatId] = useState<string | null>(
+    null,
+  );
+  const [recentSource, setRecentSource] = useState<{
+    chatId: string;
+    source: ImportedDocument;
+  } | null>(null);
+  const [sourceAttachmentError, setSourceAttachmentError] = useState<{
+    chatId: string;
+    message: string;
+  } | null>(null);
   const [cancelPendingTurnId, setCancelPendingTurnId] = useState<string | null>(
     null,
   );
@@ -553,6 +568,9 @@ export default function App() {
     try {
       await client.postMessage(chatId, turnId, content);
       if (chatSelectionRef.current !== selection) return;
+      setRecentSource((current) =>
+        current?.chatId === chatId ? null : current,
+      );
       refreshAgentRunsRef.current?.();
     } catch (err) {
       if (chatSelectionRef.current !== selection) return;
@@ -564,6 +582,27 @@ export default function App() {
           { id: nextId(), role: "error", text: String(err) },
         ],
       }));
+    }
+  }
+
+  async function onAddSource() {
+    if (!chat || addingSourceChatId !== null || deletionInFlightRef.current) return;
+    const chatId = chat.id;
+    setAddingSourceChatId(chatId);
+    setSourceAttachmentError(null);
+    try {
+      const source = await importLibraryDocument(chatId);
+      if (!source || selectedChatIdRef.current !== chatId) return;
+      setRecentSource({ chatId, source });
+    } catch (err) {
+      if (selectedChatIdRef.current === chatId) {
+        setSourceAttachmentError({
+          chatId,
+          message: friendlySourceAttachmentError(err),
+        });
+      }
+    } finally {
+      setAddingSourceChatId(null);
     }
   }
 
@@ -713,6 +752,8 @@ export default function App() {
     setDecidingApprovalCalls(new Set());
     setApprovalErrors({});
     setComposerDraft("");
+    setRecentSource(null);
+    setSourceAttachmentError(null);
     setCancelPendingTurnId(null);
     setCancelError(null);
     cancelRequestTurnRef.current = null;
@@ -804,6 +845,8 @@ export default function App() {
     setDecidingApprovalCalls(new Set());
     setApprovalErrors({});
     setComposerDraft("");
+    setRecentSource(null);
+    setSourceAttachmentError(null);
     setCancelPendingTurnId(null);
     setCancelError(null);
     cancelRequestTurnRef.current = null;
@@ -1080,6 +1123,17 @@ export default function App() {
             void onFolderAccessCancel(callId, turnId)
           }
           draft={draft}
+          attachingSource={addingSourceChatId !== null}
+          attachedSourceName={
+            recentSource && recentSource.chatId === chat.id
+              ? recentSource.source.displayName
+              : null
+          }
+          sourceAttachmentError={
+            sourceAttachmentError && sourceAttachmentError.chatId === chat.id
+              ? sourceAttachmentError.message
+              : null
+          }
           composerModelMenu={
             <>
               <ModelMenu
@@ -1104,6 +1158,8 @@ export default function App() {
           steerStatus={steerStatus}
           steerPendingTurnId={steerPendingTurnId}
           onDraftChange={onComposerDraftChange}
+          onAddSource={onAddSource}
+          onDismissAttachedSource={() => setRecentSource(null)}
           onSelectPrompt={setComposerDraft}
           onSend={onSend}
           onSteer={onSteerActiveTurn}
@@ -1124,4 +1180,9 @@ export default function App() {
 
 function withoutConnectionState(status: string): string {
   return status.replace(/ · (?:live|reconnecting)$/, "");
+}
+
+function friendlySourceAttachmentError(error: unknown): string {
+  const message = String(error).replace(/^Error:\s*/, "").trim();
+  return message && message.length <= 240 ? message : "Could not add that file.";
 }

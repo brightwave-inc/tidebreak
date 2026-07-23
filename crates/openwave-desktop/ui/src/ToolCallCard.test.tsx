@@ -48,6 +48,19 @@ describe("ToolCallCard", () => {
     expect(markup).toContain("Source search complete");
   });
 
+  it("distinguishes source discovery from direct source reads", () => {
+    const listing = renderToStaticMarkup(
+      <ToolCallCard name="list_sources" status="running" />,
+    );
+    const reading = renderToStaticMarkup(
+      <ToolCallCard name="read_source" status="completed" />,
+    );
+
+    expect(listing).toContain("Checking sources");
+    expect(reading).toContain("Read a source");
+    expect(reading).toContain("Source read complete");
+  });
+
   it("renders a fixed delegated-file presentation without resource details", () => {
     const markup = renderToStaticMarkup(
       <ToolCallCard name="read_delegated_file" status="running" />,

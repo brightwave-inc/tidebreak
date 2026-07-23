@@ -23,6 +23,9 @@ export type HydratedTranscriptEntry =
 // the renderer on an explicit inverse allowlist so a server-side title change
 // cannot become a display path for provider names, arguments, or output.
 const HISTORY_TOOL_NAMES: Record<ChatToolActivity["title"], string> = {
+  "Search sources": "search",
+  "Check sources": "list_sources",
+  "Read a source": "read_source",
   "Search the web": "web_search",
   "Read a delegated file": "read_delegated_file",
   "Read a file": "read_file",

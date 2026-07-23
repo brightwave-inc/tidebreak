@@ -5,7 +5,7 @@ import {
   useLayoutEffect,
   useRef,
 } from "react";
-import { ArrowUp, Square } from "lucide-react";
+import { ArrowUp, FileText, Paperclip, Square, X } from "lucide-react";
 import { MAX_STEER_CHARACTERS } from "./ActiveTurnSteer";
 import { WithTooltip } from "@/components/ui/tooltip";
 
@@ -80,6 +80,12 @@ export type ComposerProps = {
   disabled: boolean;
   draft: string;
   modelMenu?: ReactNode;
+  canAttachSource?: boolean;
+  attachingSource?: boolean;
+  attachedSourceName?: string | null;
+  sourceAttachmentError?: string | null;
+  onAddSource?: () => Promise<void>;
+  onDismissAttachedSource?: () => void;
   onDraftChange: (draft: string) => void;
   onSend: () => Promise<void>;
   onSteer: () => Promise<void>;
@@ -98,6 +104,12 @@ export function Composer({
   disabled,
   draft,
   modelMenu,
+  canAttachSource = false,
+  attachingSource = false,
+  attachedSourceName = null,
+  sourceAttachmentError = null,
+  onAddSource,
+  onDismissAttachedSource,
   onDraftChange,
   onSend,
   onSteer,
@@ -165,6 +177,24 @@ export function Composer({
           void submit();
         }}
       >
+        {attachedSourceName && (
+          <div className="composer-source" role="status">
+            <FileText size={15} aria-hidden="true" />
+            <span>
+              <strong>{attachedSourceName}</strong>
+              <small>Added to this conversation</small>
+            </span>
+            {onDismissAttachedSource && (
+              <button
+                type="button"
+                aria-label={`Dismiss ${attachedSourceName}`}
+                onClick={onDismissAttachedSource}
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        )}
         <textarea
           ref={textareaRef}
           value={draft}
@@ -181,7 +211,22 @@ export function Composer({
           }}
         />
         <div className="composer-actions">
-          <div className="composer-actions-left">{modelMenu}</div>
+          <div className="composer-actions-left">
+            {canAttachSource && onAddSource && (
+              <WithTooltip label={attachingSource ? "Adding source…" : "Add source"}>
+                <button
+                  type="button"
+                  className="composer-attach"
+                  aria-label={attachingSource ? "Adding source" : "Add source"}
+                  disabled={inputDisabled || attachingSource || busy}
+                  onClick={() => void onAddSource()}
+                >
+                  <Paperclip size={15} aria-hidden="true" />
+                </button>
+              </WithTooltip>
+            )}
+            {modelMenu}
+          </div>
           <div className="composer-actions-right">
             {active ? (
               <>
@@ -249,6 +294,11 @@ export function Composer({
         {steerHasUnsupportedCharacter && (
           <span className="composer-turn-error" role="alert">
             Guidance contains an unsupported character.
+          </span>
+        )}
+        {sourceAttachmentError && (
+          <span className="composer-turn-error" role="alert">
+            Couldn’t add source: {sourceAttachmentError}
           </span>
         )}
       </form>

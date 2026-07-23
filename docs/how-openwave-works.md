@@ -500,7 +500,7 @@ surfaces, but the desktop does not use them as a fallback.
 > **Pre-1.0 upgrade note:** Sources created through the older shared or
 > project-scoped desktop flow are retained in their legacy corpus, but they are
 > not automatically attached to a conversation. Re-add any source you still
-> need from that conversation's Sources view. An explicit legacy re-attachment
+> need from that conversation's composer or Sources view. An explicit legacy re-attachment
 > flow can be added before compatibility guarantees begin.
 
 ### 1. Publish immutable source bytes
@@ -700,11 +700,12 @@ promise project source/folder inheritance.
 The UI provides a durable active-turn redirect control: guidance is admitted with
 a stable identity and the composer waits for authoritative events rather than
 treating the request as locally applied. Completed assistant messages render the
-closed structured source cards described above. The Sources surface lists only
-the authoritative current chat's catalog, adds a user-picked file to that exact
-conversation, polls durable processing status, and searches only its ready
-passages. Switching conversations switches this scope; there is no shared
-standalone-chat corpus.
+closed structured source cards described above. A native composer action adds a
+user-picked file directly to the current conversation and confirms it inline;
+the Sources surface remains the durable catalog/search view. It lists only the
+authoritative current chat's catalog, polls durable processing status, and
+searches only its ready passages. Switching conversations switches this scope;
+there is no shared standalone-chat corpus.
 Native code reads the selected file and calls the conversation-scoped local
 document APIs. The renderer sees only bounded titles, lifecycle states, and
 plain-text search passages, never the source path, source bytes, generation
@@ -721,7 +722,10 @@ those routes on their primary bearer because they do not have a webview trust
 boundary. The native document bridge follows bounded catalog cursors and reports
 when it has intentionally stopped at the newest 1,000 records.
 
-The chat's `search` tool can see only documents owned by that exact conversation.
+The chat's `list_sources`, `read_source`, and `search` tools can see only
+documents owned by that exact conversation. Direct reads become available as
+soon as parsing publishes canonical text, without waiting for embedding, and
+produce the same durable grounded-citation evidence as semantic search.
 Conversationless legacy documents, project-scoped documents, and sources owned
 by other chats are not reachable through the current desktop journey.
 

@@ -1814,6 +1814,7 @@ body {
 .composer-actions-left {
   display: flex;
   align-items: center;
+  gap: 0.4rem;
   min-width: 0;
 }
 
@@ -1822,6 +1823,77 @@ body {
   align-items: center;
   gap: 0.45rem;
   margin-left: auto;
+}
+
+.composer-attach {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0;
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.composer-attach:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--muted);
+}
+
+.composer-attach:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
+
+.composer-source {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+
+.composer-source > span {
+  display: grid;
+  min-width: 0;
+}
+
+.composer-source strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-source small {
+  font-size: 0.68rem;
+}
+
+.composer-source button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.15rem;
+  color: inherit;
+  background: transparent;
+}
+
+.composer-source button:hover {
+  color: var(--ink);
+  background: var(--bg-elevated);
 }
 
 /* ---------- Model menu (composer) ---------- */

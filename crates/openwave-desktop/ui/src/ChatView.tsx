@@ -43,12 +43,17 @@ export type ChatViewProps = {
   onFolderAccessCancel: (callId: string, turnId: string) => void;
   draft: string;
   composerModelMenu: ReactNode;
+  attachingSource: boolean;
+  attachedSourceName: string | null;
+  sourceAttachmentError: string | null;
   cancelError: string | null;
   cancelPendingTurnId: string | null;
   steerError: string | null;
   steerStatus: string | null;
   steerPendingTurnId: string | null;
   onDraftChange: (value: string) => void;
+  onAddSource: () => Promise<void>;
+  onDismissAttachedSource: () => void;
   onSelectPrompt: (prompt: string) => void;
   onSend: () => Promise<void>;
   onSteer: () => Promise<void>;
@@ -83,12 +88,17 @@ export function ChatView({
   onFolderAccessCancel,
   draft,
   composerModelMenu,
+  attachingSource,
+  attachedSourceName,
+  sourceAttachmentError,
   cancelError,
   cancelPendingTurnId,
   steerError,
   steerStatus,
   steerPendingTurnId,
   onDraftChange,
+  onAddSource,
+  onDismissAttachedSource,
   onSelectPrompt,
   onSend,
   onSteer,
@@ -237,6 +247,12 @@ export function ChatView({
         disabled={deletingChat}
         draft={draft}
         modelMenu={composerModelMenu}
+        canAttachSource={nativeHost}
+        attachingSource={attachingSource}
+        attachedSourceName={attachedSourceName}
+        sourceAttachmentError={sourceAttachmentError}
+        onAddSource={onAddSource}
+        onDismissAttachedSource={onDismissAttachedSource}
         onDraftChange={onDraftChange}
         onSend={onSend}
         onSteer={onSteer}
