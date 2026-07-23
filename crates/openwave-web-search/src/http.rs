@@ -136,15 +136,20 @@ fn redacted_json(value: &Value) -> Value {
 #[derive(Clone, Debug)]
 pub struct ReqwestHttpClient {
     client: reqwest::Client,
+    allowed_domain: &'static str,
 }
 
 #[cfg(feature = "http")]
 impl ReqwestHttpClient {
-    /// Build a client with one bounded end-to-end request timeout.
+    /// Build a client for one provider with a bounded end-to-end timeout.
     ///
-    /// The caller owns the policy for the value. Redirects stay disabled for
-    /// every timeout so credentials are never replayed to another origin.
-    pub fn with_timeout(timeout: std::time::Duration) -> Result<Self, WebSearchError> {
+    /// The selected provider fixes the only HTTPS domain this client may
+    /// contact. Redirects stay disabled so credentials are never replayed to
+    /// another origin.
+    pub fn with_timeout(
+        provider: crate::WebSearchProviderKind,
+        timeout: std::time::Duration,
+    ) -> Result<Self, WebSearchError> {
         if timeout.is_zero() {
             return Err(WebSearchError::Transport(
                 "web search timeout must be greater than zero".into(),
@@ -159,11 +164,14 @@ impl ReqwestHttpClient {
             .timeout(timeout)
             .build()
             .map_err(|error| WebSearchError::Transport(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            allowed_domain: provider.outbound_domain(),
+        })
     }
 
-    pub fn new() -> Result<Self, WebSearchError> {
-        Self::with_timeout(std::time::Duration::from_secs(20))
+    pub fn new(provider: crate::WebSearchProviderKind) -> Result<Self, WebSearchError> {
+        Self::with_timeout(provider, std::time::Duration::from_secs(20))
     }
 }
 
@@ -173,6 +181,7 @@ impl HttpClient for ReqwestHttpClient {
     async fn post_json(&self, request: HttpRequest) -> Result<HttpResponse, WebSearchError> {
         use futures::StreamExt;
 
+        validate_outbound_url(&request.url, self.allowed_domain)?;
         let mut builder = self.client.post(request.url).json(&request.body);
         for (name, value) in request.headers {
             builder = builder.header(name, value);
@@ -195,6 +204,24 @@ impl HttpClient for ReqwestHttpClient {
         }
         Ok(HttpResponse { status, body })
     }
+}
+
+#[cfg(feature = "http")]
+fn validate_outbound_url(value: &str, allowed_domain: &str) -> Result<(), WebSearchError> {
+    let parsed = Url::parse(value).map_err(|_| WebSearchError::OutboundNotAllowed)?;
+    let authority = value
+        .strip_prefix("https://")
+        .and_then(|remainder| remainder.split(['/', '?', '#']).next());
+    if authority != Some(allowed_domain)
+        || parsed.scheme() != "https"
+        || parsed.host_str() != Some(allowed_domain)
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+    {
+        return Err(WebSearchError::OutboundNotAllowed);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -242,6 +269,46 @@ mod tests {
 
     #[cfg(feature = "http")]
     #[tokio::test]
+    async fn reqwest_client_rejects_requests_outside_its_provider_domain() {
+        let client = ReqwestHttpClient::new(crate::WebSearchProviderKind::Exa).unwrap();
+        for url in [
+            "http://api.exa.ai/search",
+            "https://api.tavily.com/search",
+            "https://api.exa.ai:443/search",
+            "https://api.exa.ai.evil.example/search",
+            "https://api.exa.ai./search",
+            "https://user:password@api.exa.ai/search",
+        ] {
+            let error = client
+                .post_json(HttpRequest {
+                    url: url.into(),
+                    headers: vec![("x-api-key".into(), "must-not-egress".into())],
+                    body: serde_json::json!({ "query": "openwave" }),
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, WebSearchError::OutboundNotAllowed),
+                "unexpected result for {url}: {error}"
+            );
+        }
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn provider_endpoints_satisfy_their_fixed_domain_policy() {
+        for provider in [
+            crate::WebSearchProviderKind::Exa,
+            crate::WebSearchProviderKind::Tavily,
+        ] {
+            assert!(
+                validate_outbound_url(provider.search_url(), provider.outbound_domain()).is_ok()
+            );
+        }
+    }
+
+    #[cfg(feature = "http")]
+    #[tokio::test]
     async fn reqwest_client_does_not_follow_cross_host_redirects_with_credentials() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -266,17 +333,17 @@ mod tests {
                 .unwrap();
         });
 
-        let client = ReqwestHttpClient::new().unwrap();
+        let client = ReqwestHttpClient::new(crate::WebSearchProviderKind::Exa).unwrap();
         let response = client
-            .post_json(HttpRequest {
-                url: format!("http://{source_address}/search"),
-                headers: vec![("x-api-key".into(), "not-for-the-redirect-target".into())],
-                body: serde_json::json!({ "query": "openwave" }),
-            })
+            .client
+            .post(format!("http://{source_address}/search"))
+            .header("x-api-key", "not-for-the-redirect-target")
+            .json(&serde_json::json!({ "query": "openwave" }))
+            .send()
             .await
             .unwrap();
 
-        assert_eq!(response.status, 307);
+        assert_eq!(response.status().as_u16(), 307);
         source_task.await.unwrap();
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(150), target.accept())

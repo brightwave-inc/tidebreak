@@ -12,8 +12,6 @@ use crate::{
     WebSearchProviderKind, WebSearchRequest, WebSearchResponse, WebSearchResult,
 };
 
-const EXA_SEARCH_URL: &str = "https://api.exa.ai/search";
-
 /// Exa adapter backed by an injected HTTP client.
 ///
 /// It has no default constructor because the host must explicitly decide which
@@ -44,7 +42,7 @@ impl<C: HttpClient> WebSearchProvider for ExaProvider<C> {
         let response = self
             .client
             .post_json(HttpRequest {
-                url: EXA_SEARCH_URL.into(),
+                url: self.kind().search_url().into(),
                 headers: vec![
                     ("x-api-key".into(), self.credential.api_key().into()),
                     ("content-type".into(), "application/json".into()),
@@ -211,7 +209,7 @@ mod tests {
         assert_eq!(response.results[0].snippet, "short summary");
         let sent = seen.lock().unwrap();
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].url, EXA_SEARCH_URL);
+        assert_eq!(sent[0].url, WebSearchProviderKind::Exa.search_url());
         assert_eq!(sent[0].body["numResults"], 2);
         assert_eq!(sent[0].body["includeDomains"][0], "docs.example.com");
         assert_eq!(sent[0].headers[0], ("x-api-key".into(), "exa-key".into()));

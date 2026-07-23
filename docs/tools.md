@@ -193,8 +193,9 @@ and unavailable/error cases resolve a bounded immutable failure receipt. The
 sandbox model loop may now emit the one fixed checkpoint, with a bounded
 argument collector and deterministic rejection of unknown, partial, or
 multiple calls. The foreground loop remains separate and does not receive this
-tool. Outbound-domain policy is the next hardening slice before broadening the
-search surface.
+tool. The concrete host transport is bound to the selected provider's exact
+HTTPS API domain and rejects scheme, authority, explicit-port, or userinfo
+deviations before credentials can leave the process.
 
 The normalized contract should cover query text, optional date/domain filters,
 bounded result count, canonical URL, title, snippet or extracted text, rank or
