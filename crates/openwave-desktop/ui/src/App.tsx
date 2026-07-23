@@ -31,6 +31,7 @@ import {
   Monitor,
   Moon,
   Pencil,
+  RotateCw,
   Settings,
   SquarePen,
   Sun,
@@ -81,6 +82,7 @@ import {
 import { prependReplacementChat } from "./ChatDeletion";
 import { useConfirm } from "./components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
+import { useDesktopUpdates } from "./updates";
 
 type Msg = ChatMessage;
 
@@ -179,6 +181,7 @@ export default function App() {
   const deletionInFlightRef = useRef(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const { mode: themeMode, cycle: cycleTheme, setMode: setThemeMode } = useTheme();
+  const desktopUpdates = useDesktopUpdates();
 
   useEffect(() => {
     let cancelled = false;
@@ -1236,6 +1239,16 @@ export default function App() {
     }
   }
 
+  async function onRestartForUpdate() {
+    const version = desktopUpdates.state.version;
+    const confirmed = await confirm({
+      title: "Restart OpenWave to update?",
+      description: `${version ? `Version ${version}` : "The update"} is ready. OpenWave will close and reopen. Wait for active work to finish before restarting.`,
+      confirmLabel: "Restart and update",
+    });
+    if (confirmed) await desktopUpdates.restart();
+  }
+
   if (bootError) {
     return (
       <div className="boot">
@@ -1408,6 +1421,21 @@ export default function App() {
         </div>
 
         <div className="sidebar-footer">
+          {desktopUpdates.state.status === "ready" && (
+            <button
+              type="button"
+              className="sidebar-action sidebar-update"
+              onClick={() => void onRestartForUpdate()}
+            >
+              <RotateCw size={16} />
+              <span>Restart to update</span>
+              {desktopUpdates.state.version && (
+                <span className="sidebar-update-version">
+                  v{desktopUpdates.state.version}
+                </span>
+              )}
+            </button>
+          )}
           {hasNativeHost() && (
             <button
               type="button"
@@ -1451,6 +1479,9 @@ export default function App() {
             onBack={() => setPrimaryView("chat")}
             themeMode={themeMode}
             onThemeChange={setThemeMode}
+            updateState={desktopUpdates.state}
+            onCheckForUpdate={desktopUpdates.check}
+            onRestartForUpdate={onRestartForUpdate}
           />
         ) : (
           <>
