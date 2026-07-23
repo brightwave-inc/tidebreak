@@ -8,6 +8,7 @@ import {
   createReleaseManifests,
   MACOS_ARCHITECTURES,
 } from "./create-release-manifests.mjs";
+import { preparePublishedRelease } from "./prepare-published-release.mjs";
 
 function releaseFixture() {
   const dist = mkdtempSync(path.join(tmpdir(), "openwave-release-"));
@@ -99,5 +100,41 @@ test("rejects mismatched tags and non-production hosts", () => {
         baseUrl: "https://example.com/openwave",
       }),
     /downloads\.brightwave\.io/,
+  );
+});
+
+test("recreates latest metadata from an authoritative published manifest", () => {
+  const dist = releaseFixture();
+  const created = createReleaseManifests({ dist, ...RELEASE });
+  const latestPath = path.join(dist, "resumed-latest.json");
+  const resumed = preparePublishedRelease({
+    manifestPath: path.join(dist, "manifest.json"),
+    latestPath,
+    ...RELEASE,
+  });
+
+  assert.deepEqual(resumed.latest, created.latest);
+  assert.deepEqual(
+    JSON.parse(readFileSync(latestPath, "utf8")),
+    created.latest,
+  );
+});
+
+test("rejects a published manifest that points outside its immutable prefix", () => {
+  const dist = releaseFixture();
+  createReleaseManifests({ dist, ...RELEASE });
+  const manifestPath = path.join(dist, "manifest.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.artifacts[0].url = "https://example.com/OpenWave.dmg";
+  writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+
+  assert.throws(
+    () =>
+      preparePublishedRelease({
+        manifestPath,
+        latestPath: path.join(dist, "latest-resumed.json"),
+        ...RELEASE,
+      }),
+    /unexpected artifact URL/,
   );
 });

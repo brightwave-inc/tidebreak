@@ -106,9 +106,251 @@ jobs:
             exit 1
           }
 
-  build-macos:
-    name: macOS · ${{ matrix.arch }}
+  inspect_hosted:
+    name: inspect hosted release
     needs: validate
+    runs-on: ubuntu-latest
+    environment:
+      name: desktop-production
+      url: https://downloads.brightwave.io/openwave/manifest.json
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      exists: ${{ steps.release.outputs.exists }}
+    env:
+      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+      RELEASE_PUBLISHED_AT: ${{ needs.validate.outputs.published_at }}
+      RELEASE_BASE_URL: https://downloads.brightwave.io/openwave
+      AWS_REGION: ${{ vars.DOWNLOADS_AWS_REGION || 'us-east-1' }}
+      AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+      DOWNLOADS_S3_BUCKET: ${{ vars.DOWNLOADS_S3_BUCKET }}
+    steps:
+      - name: Check out trusted release automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Validate hosting configuration
+        run: |
+          missing=()
+          for name in AWS_REGION AWS_RELEASE_ROLE_ARN DOWNLOADS_S3_BUCKET; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing desktop-production hosting configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        with:
+          role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
+          role-session-name: openwave-inspect-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate any existing immutable release
+        id: release
+        run: |
+          release_prefix="openwave/releases/v$OPENWAVE_VERSION"
+          manifest_key="$release_prefix/manifest.json"
+          head_error="$RUNNER_TEMP/manifest-head-error"
+          if ! manifest_head="$(aws s3api head-object \
+            --bucket "$DOWNLOADS_S3_BUCKET" \
+            --key "$manifest_key" \
+            --output json 2>"$head_error")"; then
+            error="$(<"$head_error")"
+            case "$error" in
+              *404*|*Not\ Found*)
+                echo "No immutable release exists for $RELEASE_TAG."
+                echo "exists=false" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              *) printf '%s\n' "$error" >&2; exit 1 ;;
+            esac
+          fi
+
+          manifest_path="$RUNNER_TEMP/hosted-manifest.json"
+          latest_path="$RUNNER_TEMP/hosted-latest.json"
+          aws s3 cp \
+            "s3://$DOWNLOADS_S3_BUCKET/$manifest_key" \
+            "$manifest_path" >/dev/null
+          node scripts/prepare-published-release.mjs \
+            --manifest "$manifest_path" \
+            --latest "$latest_path" \
+            --version "$OPENWAVE_VERSION" \
+            --tag "$RELEASE_TAG" \
+            --sha "$RELEASE_SHA" \
+            --published-at "$RELEASE_PUBLISHED_AT" \
+            --base-url "$RELEASE_BASE_URL"
+
+          manifest_digest="$(sha256sum "$manifest_path" | cut -d ' ' -f 1)"
+          [[ "$(jq -r '.Metadata.sha256 // empty' <<<"$manifest_head")" = "$manifest_digest" ]] || {
+            echo "The immutable release manifest has invalid S3 digest metadata." >&2
+            exit 1
+          }
+
+          while IFS=$'\t' read -r filename size digest checksum signature signature_digest; do
+            object_info="$(aws s3api head-object \
+              --bucket "$DOWNLOADS_S3_BUCKET" \
+              --key "$release_prefix/$filename" \
+              --query '[ContentLength, Metadata.sha256]' \
+              --output text)"
+            read -r remote_size remote_digest <<<"$object_info"
+            [[ "$remote_size" = "$size" && "$remote_digest" = "$digest" ]] || {
+              echo "Hosted artifact metadata does not match the immutable manifest: $filename" >&2
+              exit 1
+            }
+            aws s3api head-object \
+              --bucket "$DOWNLOADS_S3_BUCKET" \
+              --key "$release_prefix/$checksum" >/dev/null
+
+            if [[ "$signature" != "-" ]]; then
+              remote_signature_digest="$(aws s3api head-object \
+                --bucket "$DOWNLOADS_S3_BUCKET" \
+                --key "$release_prefix/$signature" \
+                --query Metadata.sha256 \
+                --output text)"
+              [[ "$remote_signature_digest" = "$signature_digest" ]] || {
+                echo "Hosted signature metadata does not match the immutable manifest: $signature" >&2
+                exit 1
+              }
+              aws s3api head-object \
+                --bucket "$DOWNLOADS_S3_BUCKET" \
+                --key "$release_prefix/$signature.sha256" >/dev/null
+            fi
+          done < <(jq -r \
+            '.artifacts[] | [
+              .filename,
+              (.size | tostring),
+              .sha256,
+              .checksum_filename,
+              (.signature_filename // "-"),
+              (.signature_sha256 // "-")
+            ] | @tsv' \
+            "$manifest_path")
+
+          echo "Validated the complete immutable release for $RELEASE_TAG."
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+
+  prepare_macos:
+    name: prepare unsigned macOS · ${{ matrix.arch }}
+    needs: [validate, inspect_hosted]
+    if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    env:
+      CARGO_INCREMENTAL: 0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+
+      - name: Install Rust target
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - name: Restore unsigned Rust build cache
+        id: rust-build-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+          key: macos-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+          restore-keys: |
+            macos-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
+            macos-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
+            macos-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: macos-release-cargo-registry-v1
+          add-job-id-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/openwave-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: crates/openwave-desktop/ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Compile without production credentials or bundles
+        id: compile
+        continue-on-error: true
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        with:
+          projectPath: crates/openwave-desktop
+          args: --target ${{ matrix.target }} --no-bundle --ci
+
+      - name: Save release-specific unsigned Rust build cache
+        if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+          key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
+
+      - name: Require a successful unsigned compilation
+        if: ${{ steps.compile.outcome != 'success' }}
+        run: exit 1
+
+  build_macos:
+    name: macOS · ${{ matrix.arch }}
+    needs: [validate, inspect_hosted, prepare_macos]
+    if: >-
+      ${{
+        always()
+        && needs.validate.result == 'success'
+        && needs.inspect_hosted.result == 'success'
+        && needs.inspect_hosted.outputs.exists != 'true'
+        && needs.prepare_macos.result == 'success'
+      }}
     runs-on: macos-latest
     environment:
       name: desktop-production
@@ -141,7 +383,7 @@ jobs:
           ref: ${{ needs.validate.outputs.sha }}
 
       # This restore-only step runs before production secrets are loaded. The
-      # matching cache is written only by the credential-free main workflow.
+      # matching cache is written by a credential-free prerequisite job.
       - name: Restore unsigned Rust build cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -154,8 +396,10 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
-          key: macos-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
+          key: macos-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
+            macos-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
+            macos-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
             macos-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       - name: Validate production signing configuration
@@ -440,7 +684,17 @@ jobs:
 
   publish:
     name: publish downloads.brightwave.io
-    needs: [validate, build-macos]
+    needs: [validate, inspect_hosted, build_macos]
+    if: >-
+      ${{
+        always()
+        && needs.validate.result == 'success'
+        && needs.inspect_hosted.result == 'success'
+        && (
+          needs.inspect_hosted.outputs.exists == 'true'
+          || needs.build_macos.result == 'success'
+        )
+      }}
     runs-on: ubuntu-latest
     environment:
       name: desktop-production
@@ -459,9 +713,10 @@ jobs:
       DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID }}
       DOWNLOADS_S3_BUCKET: ${{ vars.DOWNLOADS_S3_BUCKET }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check out trusted release automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.validate.outputs.sha }}
+          ref: ${{ github.sha }}
 
       - name: Validate hosting configuration
         run: |
@@ -478,19 +733,29 @@ jobs:
             exit 1
           fi
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        with:
+          role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
+          role-session-name: openwave-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Download Apple Silicon artifacts
+        if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: openwave-macos-aarch64-${{ needs.validate.outputs.version }}
           path: dist/macos/aarch64
 
       - name: Download Intel artifacts
+        if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: openwave-macos-x86_64-${{ needs.validate.outputs.version }}
           path: dist/macos/x86_64
 
       - name: Create release manifests and checksums
+        if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
         run: >-
           node scripts/create-release-manifests.mjs
           --dist dist
@@ -500,12 +765,21 @@ jobs:
           --published-at "$RELEASE_PUBLISHED_AT"
           --base-url "$RELEASE_BASE_URL"
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
-        with:
-          role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
-          role-session-name: openwave-${{ github.run_id }}
-          aws-region: ${{ env.AWS_REGION }}
+      - name: Resume from the hosted immutable release
+        if: ${{ needs.inspect_hosted.outputs.exists == 'true' }}
+        run: |
+          mkdir -p dist
+          aws s3 cp \
+            "s3://$DOWNLOADS_S3_BUCKET/openwave/releases/v$OPENWAVE_VERSION/manifest.json" \
+            dist/manifest.json >/dev/null
+          node scripts/prepare-published-release.mjs \
+            --manifest dist/manifest.json \
+            --latest dist/latest.json \
+            --version "$OPENWAVE_VERSION" \
+            --tag "$RELEASE_TAG" \
+            --sha "$RELEASE_SHA" \
+            --published-at "$RELEASE_PUBLISHED_AT" \
+            --base-url "$RELEASE_BASE_URL"
 
       - name: Prevent latest-version regression
         run: |
@@ -527,6 +801,7 @@ jobs:
           fi
 
       - name: Upload immutable release files
+        if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
         run: |
           release_prefix="openwave/releases/v$OPENWAVE_VERSION"
           head_error="$RUNNER_TEMP/release-head-error"

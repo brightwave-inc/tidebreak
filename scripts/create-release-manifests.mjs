@@ -56,6 +56,42 @@ function requireFile(file) {
   }
 }
 
+export function createLatestDocument({ version, publishedAt, artifacts }) {
+  const updaterArtifacts = new Map();
+  for (const artifact of artifacts) {
+    if (artifact.platform !== "macos" || artifact.format !== "app.tar.gz") {
+      continue;
+    }
+    if (
+      !MACOS_ARCHITECTURES.includes(artifact.arch) ||
+      typeof artifact.signature !== "string" ||
+      !artifact.signature
+    ) {
+      throw new Error("invalid macOS updater artifact in release manifest");
+    }
+    updaterArtifacts.set(artifact.arch, artifact);
+  }
+
+  return {
+    version,
+    pub_date: publishedAt,
+    platforms: Object.fromEntries(
+      MACOS_ARCHITECTURES.map((arch) => {
+        const artifact = updaterArtifacts.get(arch);
+        if (!artifact) {
+          throw new Error(
+            `missing ${arch} updater artifact in release manifest`,
+          );
+        }
+        return [
+          `darwin-${arch}`,
+          { signature: artifact.signature, url: artifact.url },
+        ];
+      }),
+    ),
+  };
+}
+
 export function createReleaseManifests({
   dist,
   version,
@@ -85,7 +121,6 @@ export function createReleaseManifests({
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
   const distPath = path.resolve(dist);
   const artifacts = [];
-  const updaterArtifacts = new Map();
 
   for (const arch of MACOS_ARCHITECTURES) {
     const directory = path.join(distPath, "macos", arch);
@@ -137,7 +172,6 @@ export function createReleaseManifests({
           version,
           `${artifact.signature_filename}.sha256`,
         );
-        updaterArtifacts.set(arch, artifact);
       }
 
       artifacts.push(artifact);
@@ -152,19 +186,11 @@ export function createReleaseManifests({
     published_at: publishedAt,
     artifacts,
   };
-  const latest = {
+  const latest = createLatestDocument({
     version,
-    pub_date: publishedAt,
-    platforms: Object.fromEntries(
-      MACOS_ARCHITECTURES.map((arch) => {
-        const artifact = updaterArtifacts.get(arch);
-        return [
-          `darwin-${arch}`,
-          { signature: artifact.signature, url: artifact.url },
-        ];
-      }),
-    ),
-  };
+    publishedAt,
+    artifacts,
+  });
 
   writeFileSync(
     path.join(distPath, "manifest.json"),

@@ -117,12 +117,20 @@ the maintained draft and its proposed version automatic.
    published release, checks out that exact tag, rejects malformed tags,
    prereleases, drafts, or commits outside `main`, and pins all later jobs to
    the resolved commit SHA.
-5. The dispatched workflow builds Apple Silicon and Intel apps, signs them with
-   the production Developer ID identity, notarizes and staples the app and DMG,
-   verifies them with Apple tooling, and creates signed Tauri updater archives.
-6. Only after both architectures pass does the publisher upload immutable
+5. The dispatched workflow first checks whether that exact tag, commit, and
+   publication date already have a complete immutable release on S3. A
+   credential-free Apple Silicon and Intel prerequisite otherwise compiles the
+   tag with its product version and saves unsigned Cargo outputs before any
+   signing or notarization can fail.
+6. The production jobs restore those exact prepared outputs, sign the apps with
+   the Developer ID identity, notarize and staple the app and DMG, verify them
+   with Apple tooling, and create signed Tauri updater archives.
+7. Only after both architectures pass does the publisher upload immutable
    versioned files, advance the public manifests, invalidate their CDN paths,
-   and smoke-test the hosted release.
+   and smoke-test the hosted release. If a prior attempt already uploaded the
+   complete immutable prefix, a new dispatch validates and reuses those bytes,
+   skips both desktop builds, and resumes only mutable metadata publication,
+   CDN invalidation, and smoke testing.
 
 Publishing the native draft is the only release boundary. Merging ordinary PRs
 updates the draft but never builds or ships a desktop version. A published
@@ -169,7 +177,11 @@ environment, sign, or publish. Because cache warming has its own workflow and
 failure boundary, a later signing, notarization, or publication failure cannot
 prevent that main-tip cache run from finishing. If the shared cache is empty or
 has been evicted, manually run **Warm macOS release cache** from `main`; the
-production release workflow remains exclusively a shipping action.
+production release workflow also compiles the exact tag and product version in
+a credential-free prerequisite. That prerequisite saves its release-specific
+unsigned archive before reporting a compile failure. The later
+`desktop-production` jobs are restore-only, so signing and notarization can be
+retried without losing completed Rust work.
 
 ### Production environment configuration
 
@@ -231,14 +243,16 @@ Treat the release workflow as public even while the repository is private:
   verifies the configured identity is available, then deletes the keychain and
   decoded certificate even when the build fails.
 - The dispatched builds run under the shared protected `main` cache scope, so
-  later release tags can reuse earlier compiler outputs. The production
-  workflow restores but never writes the architecture-specific Rust build
-  archive, and it restores that archive before loading production secrets. The
-  credential-free warmer is its only writer. It caches only Cargo fingerprints,
-  build-script outputs, and dependency files—not bundle directories, signed
-  apps, DMGs, updater archives, signatures, or temporary Apple key files.
-  `sccache` remains a read-only fallback because GitHub throttles its many small
-  writes; the separate Cargo download cache retains `cache-targets: false`.
+  later release tags can reuse earlier compiler outputs. A credential-free
+  release prerequisite restores the main-tip archive, compiles the exact tag
+  and version with `--no-bundle`, and saves a release-specific archive before
+  reporting failure. It has no production environment or secrets. The
+  secret-bearing jobs only restore that archive, before loading production
+  secrets. Both cache writers include only Cargo fingerprints, build-script
+  outputs, and dependency files—not bundle directories, signed apps, DMGs,
+  updater archives, signatures, or temporary Apple key files. `sccache` remains
+  a read-only fallback because GitHub throttles its many small writes; the
+  separate Cargo download cache retains `cache-targets: false`.
 - The independent cache-warm workflow runs only for relevant pushes to `main`
   or an explicit manual dispatch. It has no production environment and receives
   no Apple, Tauri, or AWS credentials. It fetches Cargo dependencies early and
@@ -248,6 +262,12 @@ Treat the release workflow as public even while the repository is private:
 - Production artifacts are collected only after code-signing, notarization,
   stapling, and local verification succeed. The temporary App Store Connect key
   is removed even when the build fails.
+- A retry never overwrites an immutable signed release. The preflight requires
+  an existing manifest to match the requested version, tag, commit,
+  publication date, filenames, URLs, sizes, and S3 digest metadata before it
+  can skip rebuilding. The publisher then derives `latest.json` from that
+  authoritative manifest and reruns metadata publication, CloudFront
+  invalidation, and the complete hosted smoke test.
 - Tauri notarizes and staples the app bundle. The workflow separately submits
   the signed DMG to Apple's notary service, requires an accepted result, and
   staples its ticket before artifact verification or upload.
