@@ -34,6 +34,7 @@ mod resolver;
 mod routes;
 mod sandbox_agent_run_worker;
 mod sandbox_web_search_worker;
+mod source_tools;
 mod state;
 mod turn_worker;
 /// Host-owned, inert web-search configuration and provider selection.
@@ -486,6 +487,7 @@ async fn bind_inner(
         vector_store,
         code_execution,
         foreground_web_search,
+        store.clone(),
     );
     mcp_servers.mount(&mut tools).await?;
     let tools = Arc::new(tools);
@@ -622,6 +624,7 @@ fn agent_deps(
     store: Arc<dyn VectorStore>,
     code_execution: Arc<dyn openwave_code_execution::CodeExecutionProvider>,
     web_search: Box<dyn Tool>,
+    source_store: Arc<dyn Store>,
 ) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
     let (retrieval, search) = build_retrieval(embedder, store);
     let mut tools = ToolRegistry::new()
@@ -630,6 +633,10 @@ fn agent_deps(
         .with(Box::new(WriteFile))
         .with(Box::new(ExecTool::new(code_execution)))
         .with(search)
+        .with(Box::new(source_tools::ListSourcesTool::new(
+            source_store.clone(),
+        )))
+        .with(Box::new(source_tools::ReadSourceTool::new(source_store)))
         .with(web_search);
     tools.register_validated_client(
         request_folder_access_tool_spec(),

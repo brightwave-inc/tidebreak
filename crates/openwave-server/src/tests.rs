@@ -6304,14 +6304,23 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
         Arc::new(UnavailableCodeExecution),
         Box::new(web_search::foreground_tool(
-            store,
+            store.clone(),
             Arc::new(MemSecrets::default()),
         )),
+        store,
     );
     let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
     assert!(
         names.iter().any(|n| n == "search"),
         "search tool registered"
+    );
+    assert!(
+        names.iter().any(|n| n == "list_sources"),
+        "source listing tool registered"
+    );
+    assert!(
+        names.iter().any(|n| n == "read_source"),
+        "direct source read tool registered"
     );
     assert!(
         names.iter().any(|n| n == "read_file"),

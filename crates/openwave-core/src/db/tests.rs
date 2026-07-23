@@ -10381,6 +10381,40 @@ async fn retrieval_evidence_is_atomic_generation_fenced_and_survives_source_chan
     assert_eq!(stored[0].turn_id, call.turn_id);
     assert_eq!(stored[0].evidence, evidence);
 
+    // Direct source reads create the same durable citation evidence as semantic
+    // search. No other server tool may attach this private sidecar.
+    let read_call = ToolCallRecord {
+        id: CallId::new(),
+        provider_id: "read_source_1".into(),
+        name: "read_source".into(),
+        arguments: serde_json::json!({"document_id": source.id}),
+        created_at: updated_at + chrono::Duration::microseconds(500),
+        ..call.clone()
+    };
+    store.accept_tool_call(&read_call).await.unwrap();
+    let read_evidence = RetrievalEvidenceInput {
+        source_token: uuid::Uuid::new_v4(),
+        ..evidence.clone()
+    };
+    assert_eq!(
+        store
+            .resolve_server_tool_call_with_evidence(
+                read_call.id,
+                &ToolCallResolution::Completed {
+                    result: "Read source range".into(),
+                },
+                resolved_at,
+                std::slice::from_ref(&read_evidence),
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Resolved
+    );
+    assert_eq!(
+        store.list_retrieval_evidence(read_call.id).await.unwrap()[0].evidence,
+        read_evidence
+    );
+
     let second_call = ToolCallRecord {
         id: CallId::new(),
         provider_id: "search_2".into(),

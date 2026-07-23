@@ -48,6 +48,18 @@ const TOOL_PRESENTATIONS: Record<string, ToolPresentation> = {
     complete: "Source search complete",
     settled: "Searched sources",
   },
+  list_sources: {
+    label: "Check sources",
+    active: "Checking sources",
+    complete: "Sources checked",
+    settled: "Checked sources",
+  },
+  read_source: {
+    label: "Read a source",
+    active: "Reading a source",
+    complete: "Source read complete",
+    settled: "Read a source",
+  },
   web_search: {
     label: "Search the web",
     active: "Searching the web",
