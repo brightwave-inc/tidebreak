@@ -506,6 +506,28 @@ body {
   margin-top: auto;
 }
 
+.sidebar-update {
+  color: var(--success-foreground);
+  background: var(--success-background);
+}
+
+.sidebar-update:hover {
+  color: var(--success-foreground);
+  background: color-mix(in srgb, var(--success-background) 78%, var(--success));
+}
+
+.sidebar-update svg,
+.sidebar-update:hover svg {
+  color: var(--success-foreground);
+}
+
+.sidebar-update-version {
+  margin-left: auto;
+  color: inherit;
+  font-size: 0.7rem;
+  opacity: 0.75;
+}
+
 /* ---------- Buttons ---------- */
 
 .btn {

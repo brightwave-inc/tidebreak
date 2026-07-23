@@ -5,22 +5,26 @@ import {
   Globe,
   KeyRound,
   Palette,
+  RefreshCw,
   SquareTerminal,
 } from "lucide-react";
 import type { ApiClient, ModelInfo, ProviderInfo } from "./api";
 import type { ThemeMode } from "./theme";
+import type { DesktopUpdateState } from "./updates";
 import { ProvidersPanel } from "./settings/ProvidersPanel";
 import { WebSearchPanel } from "./settings/WebSearchPanel";
 import { ModelsPanel } from "./settings/ModelsPanel";
 import { AppearancePanel } from "./settings/AppearancePanel";
 import { CodeExecutionPanel } from "./settings/CodeExecutionPanel";
+import { UpdatesPanel } from "./settings/UpdatesPanel";
 
 type SettingsSectionKey =
   | "providers"
   | "models"
   | "web-search"
   | "code-execution"
-  | "appearance";
+  | "appearance"
+  | "updates";
 
 const SECTIONS: {
   key: SettingsSectionKey;
@@ -32,6 +36,7 @@ const SECTIONS: {
   { key: "web-search", label: "Web search", icon: Globe },
   { key: "code-execution", label: "Code execution", icon: SquareTerminal },
   { key: "appearance", label: "Appearance", icon: Palette },
+  { key: "updates", label: "Updates", icon: RefreshCw },
 ];
 
 export function SettingsView({
@@ -42,6 +47,9 @@ export function SettingsView({
   onBack,
   themeMode,
   onThemeChange,
+  updateState,
+  onCheckForUpdate,
+  onRestartForUpdate,
 }: {
   client: ApiClient;
   models: ModelInfo[];
@@ -50,6 +58,9 @@ export function SettingsView({
   onBack: () => void;
   themeMode: ThemeMode;
   onThemeChange: (mode: ThemeMode) => void;
+  updateState: DesktopUpdateState;
+  onCheckForUpdate: () => Promise<DesktopUpdateState>;
+  onRestartForUpdate: () => Promise<void>;
 }) {
   const [section, setSection] = useState<SettingsSectionKey>("providers");
 
@@ -100,6 +111,13 @@ export function SettingsView({
         )}
         {section === "appearance" && (
           <AppearancePanel mode={themeMode} onChange={onThemeChange} />
+        )}
+        {section === "updates" && (
+          <UpdatesPanel
+            state={updateState}
+            onCheck={onCheckForUpdate}
+            onRestart={onRestartForUpdate}
+          />
         )}
       </div>
     </section>

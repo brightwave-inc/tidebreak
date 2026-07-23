@@ -18,6 +18,7 @@ mod broker;
 mod client_execution;
 mod documents;
 mod host_access;
+mod updater;
 
 /// Connection details the webview needs to reach the in-process API.
 #[derive(Clone, Serialize)]
@@ -140,7 +141,9 @@ pub fn run() {
     let app = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
+        .manage(updater::UpdateManager::default())
         .invoke_handler(tauri::generate_handler![
             server_info,
             documents::import_library_document,
@@ -149,11 +152,15 @@ pub fn run() {
             client_execution::resolve_folder_access_request,
             host_access::connect_folder,
             host_access::list_connected_folders,
-            host_access::disconnect_folder
+            host_access::disconnect_folder,
+            updater::desktop_update_state,
+            updater::check_for_update,
+            updater::restart_for_update
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
             point_pdfium_at_bundle(&handle);
+            updater::spawn_update_loop(handle.clone());
             let data = data_dir(&handle)?;
             let home = home_dir(&handle)?;
             let host_access = host_access::HostAccess::new(handle.clone(), data.clone(), home)?;
