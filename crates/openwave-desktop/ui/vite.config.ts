@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -12,6 +13,12 @@ export default defineConfig(async () => ({
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
+  },
+  test: {
+    // Pure-logic and SSR-markup tests run in node; DOM interaction tests opt
+    // in per file with an `@vitest-environment jsdom` docblock.
+    environment: "node",
+    setupFiles: ["./src/test/setup.ts"],
   },
   clearScreen: false,
   server: {

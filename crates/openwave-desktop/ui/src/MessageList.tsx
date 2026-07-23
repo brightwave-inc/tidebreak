@@ -1,3 +1,4 @@
+import { memo, useMemo } from "react";
 import type { ReactNode, RefObject, UIEvent } from "react";
 import type { PendingFolderAccessRequest } from "./api";
 import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
@@ -81,10 +82,18 @@ export function MessageList({
   onSelectPrompt,
   hydrated = true,
 }: MessageListProps) {
-  const messageItems = groupMessageItems(messages, busy, onApproval, {
-    decidingApprovalCalls,
-    approvalErrors,
-  });
+  // Stable identity between renders so memoized rows only re-render when the
+  // approval state itself changes, not on every streamed token.
+  const approvalState = useMemo(
+    () => ({ decidingApprovalCalls, approvalErrors }),
+    [decidingApprovalCalls, approvalErrors],
+  );
+  const messageItems = groupMessageItems(
+    messages,
+    busy,
+    onApproval,
+    approvalState,
+  );
   // Only greet a genuinely empty, fully-hydrated conversation. While an
   // existing chat's transcript is still loading it is transiently empty; showing
   // the welcome there would flash "How can I help?" before its history renders.
@@ -234,7 +243,14 @@ export function groupMessageItems(
   return items;
 }
 
-export function MessageBubble({
+/**
+ * Memoized row: settled messages keep referential identity across reducer
+ * transitions, so during streaming only the live assistant bubble (whose
+ * message object changes each token) re-renders.
+ */
+export const MessageBubble = memo(MessageBubbleImpl);
+
+function MessageBubbleImpl({
   message,
   busy,
   onApproval,

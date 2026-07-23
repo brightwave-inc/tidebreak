@@ -253,6 +253,18 @@ test("release caches restore only unsigned compiler outputs", () => {
     assert.match(cacheStep, /target\/\$\{\{ matrix\.target \}\}\/release\/deps/);
     assert.doesNotMatch(cacheStep, /bundle|\.app|dmg|signature|keychain/i);
   }
+
+  for (const restoreStep of [
+    releasePrepareCache,
+    releaseBuildCache,
+    warmBuildCache,
+  ]) {
+    assert.match(
+      restoreStep,
+      /macos-release-target-v1-\$\{\{ matrix\.arch \}\}-/,
+      "unsigned target caches should fall back across lockfile changes",
+    );
+  }
 });
 
 test("an existing immutable release resumes without rebuilding or overwriting", () => {
