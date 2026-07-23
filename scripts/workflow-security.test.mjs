@@ -318,7 +318,12 @@ test("the packaged desktop activates the signed updater feed", () => {
   assert.match(desktopHost, /updater::check_for_update/);
   assert.match(desktopHost, /updater::restart_for_update/);
   assert.match(desktopUpdater, /updater\.check\(\)\.await/);
-  assert.match(desktopUpdater, /update\s*\.download_and_install/);
+  assert.match(desktopUpdater, /update\.download\(/);
+  assert.doesNotMatch(desktopUpdater, /download_and_install/);
+  assert.match(
+    desktopUpdater,
+    /state::<HostAccess>\(\)\.shutdown\(\)\.await[\s\S]*staged\.update\.install\(&staged\.bytes\)/,
+  );
   assert.match(desktopUpdater, /app\.restart\(\)/);
   assert.match(
     desktopUpdater,
