@@ -44,6 +44,8 @@ type MessageListProps = {
   nativeBusy: boolean;
   resolvingFolderCalls: Set<string>;
   folderAccessErrors: Record<string, string>;
+  decidingApprovalCalls: Set<string>;
+  approvalErrors: Record<string, string>;
   busy: boolean;
   scrollRef: RefObject<HTMLDivElement | null>;
   onScroll: (event: UIEvent<HTMLDivElement>) => void;
@@ -68,6 +70,8 @@ export function MessageList({
   nativeBusy,
   resolvingFolderCalls,
   folderAccessErrors,
+  decidingApprovalCalls,
+  approvalErrors,
   busy,
   scrollRef,
   onScroll,
@@ -77,7 +81,10 @@ export function MessageList({
   onSelectPrompt,
   hydrated = true,
 }: MessageListProps) {
-  const messageItems = groupMessageItems(messages, busy, onApproval);
+  const messageItems = groupMessageItems(messages, busy, onApproval, {
+    decidingApprovalCalls,
+    approvalErrors,
+  });
   // Only greet a genuinely empty, fully-hydrated conversation. While an
   // existing chat's transcript is still loading it is transiently empty; showing
   // the welcome there would flash "How can I help?" before its history renders.
@@ -146,6 +153,10 @@ export function groupMessageItems(
     decision: "approve" | "reject",
     remember?: boolean,
   ) => void,
+  approvalState?: {
+    decidingApprovalCalls: Set<string>;
+    approvalErrors: Record<string, string>;
+  },
 ) {
   const items: ReactNode[] = [];
   let index = 0;
@@ -178,6 +189,7 @@ export function groupMessageItems(
           message={message}
           busy={message.id === streamingAssistantId}
           onApproval={onApproval}
+          approvalState={approvalState}
         />,
       );
       index += 1;
@@ -203,6 +215,7 @@ export function groupMessageItems(
           message={message}
           busy={message.id === streamingAssistantId}
           onApproval={onApproval}
+          approvalState={approvalState}
         />,
       );
       continue;
@@ -225,6 +238,7 @@ export function MessageBubble({
   message,
   busy,
   onApproval,
+  approvalState,
 }: {
   message: ChatMessage;
   busy: boolean;
@@ -233,14 +247,25 @@ export function MessageBubble({
     decision: "approve" | "reject",
     remember?: boolean,
   ) => void;
+  approvalState?: {
+    decidingApprovalCalls: Set<string>;
+    approvalErrors: Record<string, string>;
+  };
 }) {
   if (message.role === "tool") {
     return <ToolCallCard name={message.name} status={message.status} />;
   }
 
   if (message.role === "approval") {
+    const deciding =
+      approvalState?.decidingApprovalCalls.has(message.callId) ?? false;
+    const error = approvalState?.approvalErrors[message.callId];
     return (
-      <section className="message-approval" aria-label="Approval needed">
+      <section
+        className="message-approval"
+        aria-label="Approval needed"
+        aria-busy={deciding}
+      >
         <p>Approval needed: {message.summary}</p>
         {!message.resolved && (
           <div className="approval">
@@ -249,6 +274,7 @@ export function MessageBubble({
                 <button
                   type="button"
                   className="btn btn-primary"
+                  disabled={deciding}
                   onClick={() => onApproval(message.callId, "approve")}
                 >
                   Approve once
@@ -256,6 +282,7 @@ export function MessageBubble({
                 <button
                   type="button"
                   className="btn"
+                  disabled={deciding}
                   onClick={() => onApproval(message.callId, "approve", true)}
                 >
                   Allow for this chat
@@ -265,11 +292,17 @@ export function MessageBubble({
             <button
               type="button"
               className="btn"
+              disabled={deciding}
               onClick={() => onApproval(message.callId, "reject")}
             >
               Reject
             </button>
           </div>
+        )}
+        {!message.resolved && error && (
+          <p className="approval-error" role="alert">
+            {error}
+          </p>
         )}
       </section>
     );
