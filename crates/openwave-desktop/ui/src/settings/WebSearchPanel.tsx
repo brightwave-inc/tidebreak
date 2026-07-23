@@ -136,7 +136,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
   return (
     <SettingsPanel
       title="Web search"
-      description="Choose a local provider and a bounded request timeout. Existing keys are never shown here."
+      description="Choose the provider agents may use and bound every request. Existing keys are never shown here."
       busy={loading}
     >
       {loading ? (
@@ -249,8 +249,9 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
           )}
 
           <p className="text-sm leading-relaxed text-muted-foreground">
-            This configures host-owned search access only. Search is not yet a
-            chat tool in this build.
+            Foreground and background agents can request configured search.
+            Foreground requests ask for approval before the query leaves
+            OpenWave.
           </p>
         </>
       )}

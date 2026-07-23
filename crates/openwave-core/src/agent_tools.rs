@@ -20,8 +20,10 @@ use crate::tool::ToolSpec;
 pub const SPAWN_SANDBOX_AGENT_TOOL: &str = "spawn_sandbox_agent";
 /// Stable name for the prepared foreground-only multi-child wait tool.
 pub const WAIT_FOR_AGENTS_TOOL: &str = "wait_for_agents";
-/// Public-web tool a depth-one sandbox may receive.
-pub const SANDBOX_WEB_SEARCH_TOOL: &str = "web_search";
+/// Stable name for the provider-backed public-web search tool.
+pub const WEB_SEARCH_TOOL: &str = "web_search";
+/// Compatibility name for the same contract when checkpointed by a sandbox.
+pub const SANDBOX_WEB_SEARCH_TOOL: &str = WEB_SEARCH_TOOL;
 /// Stable name for the native-executed exact delegated file read.
 pub const SANDBOX_READ_DELEGATED_FILE_TOOL: &str = "read_delegated_file";
 
@@ -323,20 +325,20 @@ pub fn wait_for_agents_tool_spec() -> ToolSpec {
     }
 }
 
-/// Narrow, host-executed web-search contract for an isolated sandbox run.
+/// Narrow, host-executed web-search contract shared by trusted runtimes.
 ///
-/// This is deliberately not registered in the foreground tool registry. The
-/// sandbox worker checkpoints it under its own durable lease, and the host
-/// decides whether any configured provider may execute it.
+/// The provider-backed implementation belongs to `openwave-web-search`; core
+/// owns this schema because the sandbox checkpoint protocol must advertise the
+/// same closed arguments without depending on a network integration crate.
 #[must_use]
-pub fn sandbox_web_search_tool_spec() -> ToolSpec {
+pub fn web_search_tool_spec() -> ToolSpec {
     ToolSpec {
-        name: SANDBOX_WEB_SEARCH_TOOL.into(),
-        description: "Search the public web for current information. Use at most once, with a focused query. Results may be unavailable when the host has not configured web search.".into(),
+        name: WEB_SEARCH_TOOL.into(),
+        description: "Search the public web for current information. Use focused queries and cite sources with the exact result URLs. Results may be unavailable when the host has not configured web search.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                "query": { "type": "string", "minLength": 1, "maxLength": 400 },
                 "max_results": { "type": "integer", "minimum": 1, "maximum": 10 },
                 "domains": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
                 "start_published_at": { "type": "string", "format": "date-time" },
@@ -346,6 +348,18 @@ pub fn sandbox_web_search_tool_spec() -> ToolSpec {
             "additionalProperties": false
         }),
     }
+}
+
+/// Sandbox-specific presentation of the shared web-search contract.
+///
+/// The checkpoint worker, not the ordinary tool registry, executes this
+/// definition under its own durable lease. The one-call instruction matches
+/// the sandbox state machine's admission bound.
+#[must_use]
+pub fn sandbox_web_search_tool_spec() -> ToolSpec {
+    let mut spec = web_search_tool_spec();
+    spec.description = "Search the public web for current information. Use at most once, with a focused query, and cite sources with the exact result URLs. Results may be unavailable when the host has not configured web search.".into();
+    spec
 }
 
 /// Native-executed contract for reading the exact file delegated at spawn.
@@ -578,6 +592,30 @@ mod tests {
         assert!(!validate_sandbox_read_delegated_file_arguments(
             &serde_json::Value::Null
         ));
+    }
+
+    #[test]
+    fn foreground_and_sandbox_web_search_share_one_bounded_schema() {
+        let foreground = web_search_tool_spec();
+        let sandbox = sandbox_web_search_tool_spec();
+
+        assert_eq!(foreground.name, WEB_SEARCH_TOOL);
+        assert_eq!(sandbox.input_schema, foreground.input_schema);
+        assert_eq!(
+            foreground.input_schema["properties"]["query"]["maxLength"],
+            400
+        );
+        assert_eq!(
+            foreground.input_schema["properties"]["max_results"]["maximum"],
+            10
+        );
+        assert_eq!(
+            foreground.input_schema["properties"]["domains"]["maxItems"],
+            20
+        );
+        assert_eq!(foreground.input_schema["additionalProperties"], false);
+        assert!(foreground.description.contains("exact result URLs"));
+        assert!(sandbox.description.contains("at most once"));
     }
 
     #[test]

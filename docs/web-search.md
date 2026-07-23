@@ -1,9 +1,10 @@
 # Web search configuration
 
 OpenWave has a bounded `openwave-web-search` library for direct Exa and Tavily
-search. It is intentionally separate from the model tool registry and agent
-workers. At this stage, configuring web search does not give an agent network
-access and does not cause any outbound request.
+search. The crate owns the provider-neutral request/result contract, HTTP
+adapters, and foreground `WebSearchTool`; the server supplies current host
+policy and credentials through a resolver. Configuration alone performs no
+outbound request.
 
 ## Local API
 
@@ -55,13 +56,21 @@ selection are deliberately separate actions, matching the API boundary above.
 ## Current boundary
 
 `openwave-server::web_search::resolve_provider` is the host-only construction
-seam. It is inert until a caller invokes `search`; no route invokes it. The
-server's sandbox checkpoint executor may invoke it only after it has claimed a
-persisted `web_search` checkpoint. It resolves host settings and credentials,
-then revalidates the exact lease, cancellation state, and run deadline with the
-database clock immediately before calling the provider. It keeps its local
-execution timeout below that database-derived lease budget and resolves one
-immutable receipt.
+seam. It is inert until a caller invokes `search`; no route invokes it.
+Foreground agents receive a Sensitive `web_search` tool. Each exact call is
+persisted and parked on the durable approval gate before execution; renderer
+copy describes only that the query and explicit filters will leave OpenWave,
+without exposing model-authored arguments. Approval resolves the provider from
+current settings, so enabling, disabling, or changing providers takes effect
+without rebuilding the registry. Cancelling the turn races and drops an
+in-flight tool future, which aborts the underlying HTTP request.
+
+The server's sandbox checkpoint executor invokes the same resolver and strict
+argument decoder only after it has claimed a persisted `web_search`
+checkpoint. It then revalidates the exact lease, cancellation state, and run
+deadline with the database clock immediately before calling the provider. It
+keeps its local execution timeout below that database-derived lease budget and
+resolves one immutable receipt.
 
 Malformed arguments, disabled selection, missing credentials, provider failure,
 timeout, and invalid output resolve a bounded redacted
@@ -69,8 +78,9 @@ failure receipt rather than leaving a sandbox waiting. The depth-one sandbox
 model loop may advertise only this fixed `web_search` schema, at most once and
 only when two model steps remain. It parks the immutable call before any
 egress; when the receipt resolves, its next claim rebuilds the same
-`ToolUse`/`ToolResult` pair and may finalize. No foreground or recursive agent
-receives the schema. The concrete transport enforces an exact HTTPS
+`ToolUse`/`ToolResult` pair and may finalize. Sandbox checkpoint authority does
+not cross into the foreground registry: that path uses the ordinary durable
+tool-call and approval state machine, while recursive agents remain impossible.
+The concrete transport enforces an exact HTTPS
 outbound-domain policy (`api.exa.ai` for Exa and `api.tavily.com` for Tavily)
-outside model-controlled arguments. Broader search surfaces still require
-their own approval and outbound policy.
+outside model-controlled arguments.

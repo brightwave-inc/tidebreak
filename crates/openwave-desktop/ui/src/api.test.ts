@@ -147,6 +147,28 @@ describe("pending approval recovery", () => {
     ).toBeNull();
   });
 
+  it("recovers the narrow foreground web-search approval", () => {
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "web_search",
+        approval: "web_search_may_share_query",
+      }),
+    ).toMatchObject({
+      action: "web_search",
+      approval: "web_search_may_share_query",
+      canApprove: true,
+    });
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "web_search",
+        approval: "web_search_may_share_query",
+        can_approve: false,
+      }),
+    ).toBeNull();
+  });
+
   it("recognizes the fixed background wait name without accepting extensions", () => {
     expect(
       parsePendingToolApproval({

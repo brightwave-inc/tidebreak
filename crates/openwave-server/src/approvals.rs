@@ -332,6 +332,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_search_consent_kind_survives_durable_recovery() {
+        let (store, request) = setup("web_search").await;
+        assert_eq!(
+            request.kind,
+            openwave_core::ToolApprovalKind::WebSearchMayShareQuery
+        );
+        let first = ApprovalBroker::new(store.clone());
+        let pending = first.register(request.clone(), None).await;
+        drop(pending.decision);
+        let persisted = store
+            .get_tool_call_approval(request.call_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.kind,
+            openwave_core::ToolApprovalKind::WebSearchMayShareQuery
+        );
+
+        assert_eq!(
+            first
+                .resolve(request.chat_id, request.call_id, ApprovalDecision::Approve)
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+        assert_eq!(
+            ApprovalBroker::new(store)
+                .register(request, None)
+                .await
+                .decision
+                .await,
+            ApprovalDecision::Approve
+        );
+    }
+
+    #[tokio::test]
     async fn decisions_are_exact_and_idempotent() {
         let (store, request) = setup("search").await;
         let broker = ApprovalBroker::new(store);
