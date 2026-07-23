@@ -424,3 +424,28 @@ describe("applyTerminalHydration", () => {
     expect(ahead.lastSeq).toBe(99);
   });
 });
+
+describe("referential stability for memoized rows", () => {
+  it("text_delta preserves the identity of every settled message", () => {
+    const base = play([
+      TURN,
+      { type: "tool_call_started", call_id: "c1", name: "search" },
+      { type: "tool_call_completed", call_id: "c1", status: "completed" },
+      { type: "text_delta", text: "first" },
+    ]);
+    const settled = base.state.messages.slice(0, -1);
+    const next = reduceChatSessionEvent(
+      base.state,
+      framed(base.state.lastSeq + 1, { type: "text_delta", text: " second" }),
+      makeDeps(),
+    );
+    // Only the streaming tail changed; every settled row is the same object,
+    // which is what lets React.memo skip re-rendering them per token.
+    next.state.messages.slice(0, -1).forEach((message, index) => {
+      expect(message).toBe(settled[index]);
+    });
+    expect(next.state.messages[next.state.messages.length - 1]).not.toBe(
+      base.state.messages[base.state.messages.length - 1],
+    );
+  });
+});
