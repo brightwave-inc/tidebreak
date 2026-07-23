@@ -94,6 +94,7 @@ test("cache warming cannot access production credentials or publish", () => {
   assert.match(cache, /cargo fetch --locked --target x86_64-apple-darwin/);
   assert.match(cache, /cancel-in-progress: false/);
   assert.match(cache, /--no-bundle --ci/);
+  assert.match(cache, /continue-on-error: true/);
   assert.doesNotMatch(cache, /^    environment:/m);
   assert.doesNotMatch(cache, /secrets\./);
   assert.doesNotMatch(cache, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_/);
@@ -104,15 +105,54 @@ test("cache warming cannot access production credentials or publish", () => {
   assert.doesNotMatch(release, /^  warm-macos-cache:/m);
 });
 
-test("release caches exclude signed artifacts and target directories", () => {
+test("release caches restore only unsigned compiler outputs", () => {
   const release = workflows["release.yml"];
   const cache = workflows["cache-macos.yml"];
+  const releaseBuildCache = release.match(
+    /- name: Restore unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  const warmBuildCache = cache.match(
+    /- name: Restore unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  const warmBuildCacheSave = cache.match(
+    /- name: Save unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(releaseBuildCache);
+  assert.ok(warmBuildCache);
+  assert.ok(warmBuildCacheSave);
+
   assert.match(release, /SCCACHE_GHA_ENABLED: "true"/);
+  assert.match(release, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
   assert.match(release, /cache-targets: false/);
-  assert.doesNotMatch(release, /actions\/cache/);
+  assert.match(releaseBuildCache, /actions\/cache\/restore@[0-9a-f]{40}/);
+  assert.doesNotMatch(release, /actions\/cache\/save/);
+  assert.equal(release.match(/actions\/cache\//g)?.length, 1);
+  assert.ok(
+    release.indexOf("Restore unsigned Rust build cache") <
+      release.indexOf("Validate production signing configuration"),
+    "the build cache must be restored before production secrets are loaded",
+  );
+
   assert.match(cache, /SCCACHE_GHA_ENABLED: "true"/);
+  assert.match(cache, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
   assert.match(cache, /cache-targets: false/);
-  assert.doesNotMatch(cache, /actions\/cache/);
+  assert.match(warmBuildCache, /actions\/cache\/restore@[0-9a-f]{40}/);
+  assert.match(cache, /actions\/cache\/save@[0-9a-f]{40}/);
+  assert.ok(
+    cache.indexOf("Save unsigned Rust build cache") <
+      cache.indexOf("Require a successful cache-warm compilation"),
+    "partial successful compiler outputs must be saved before a later failure is reported",
+  );
+
+  for (const cacheStep of [
+    releaseBuildCache,
+    warmBuildCache,
+    warmBuildCacheSave,
+  ]) {
+    assert.match(cacheStep, /target\/release\/\.fingerprint/);
+    assert.match(cacheStep, /target\/\$\{\{ matrix\.target \}\}\/release\/deps/);
+    assert.doesNotMatch(cacheStep, /bundle|\.app|dmg|signature|keychain/i);
+  }
 });
 
 test("the updater private key is isolated from compilation", () => {

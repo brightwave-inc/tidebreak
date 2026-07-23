@@ -59,7 +59,10 @@ jobs:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_WRITE
+      # GitHub throttles sccache's many small writes. Retain its existing
+      # object cache as a read-only fallback and persist build outputs below
+      # with one cache archive per architecture.
+      SCCACHE_GHA_RW_MODE: READ_ONLY
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -67,6 +70,23 @@ jobs:
         run: |
           rustup show
           rustup target add "${{ matrix.target }}"
+
+      - name: Restore unsigned Rust build cache
+        id: rust-build-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+          key: macos-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            macos-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
@@ -98,7 +118,36 @@ jobs:
         run: brew install protobuf
 
       - name: Compile without production credentials or bundles
+        id: compile
+        continue-on-error: true
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: crates/openwave-desktop
           args: --target ${{ matrix.target }} --no-bundle --ci
+
+      - name: Report unsigned Rust build cache size
+        if: ${{ !cancelled() }}
+        run: |
+          du -ch \
+            target/release/{.cargo-lock,.fingerprint,build,deps} \
+            target/${{ matrix.target }}/release/{.cargo-lock,.fingerprint,build,deps} \
+            2>/dev/null | tail -1 || true
+
+      - name: Save unsigned Rust build cache
+        if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+          key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
+
+      - name: Require a successful cache-warm compilation
+        if: ${{ steps.compile.outcome != 'success' }}
+        run: exit 1

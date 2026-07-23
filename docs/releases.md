@@ -161,12 +161,14 @@ stable server-side updater contract for that client integration.
 `main`. A short prerequisite job saves Cargo dependency downloads before the
 two architecture jobs compile the desktop app with `--no-bundle`. This keeps a
 later UI setup or compilation failure from also losing newly downloaded Cargo
-dependencies. The architecture jobs stream Rust compiler outputs to sccache as
-they compile. None of these jobs load the `desktop-production` environment,
-sign, or publish. Because cache warming has its own workflow and failure
-boundary, a later signing, notarization, or publication failure cannot prevent
-that main-tip cache run from finishing. If the shared cache is empty or has
-been evicted, manually run **Warm macOS release cache** from `main`; the
+dependencies. Each architecture then saves one unsigned archive containing
+Cargo fingerprints, build-script outputs, and compiled dependency files. The
+archive is saved before a failed compile is reported, so successful partial
+work remains reusable. None of these jobs load the `desktop-production`
+environment, sign, or publish. Because cache warming has its own workflow and
+failure boundary, a later signing, notarization, or publication failure cannot
+prevent that main-tip cache run from finishing. If the shared cache is empty or
+has been evicted, manually run **Warm macOS release cache** from `main`; the
 production release workflow remains exclusively a shipping action.
 
 ### Production environment configuration
@@ -229,10 +231,14 @@ Treat the release workflow as public even while the repository is private:
   verifies the configured identity is available, then deletes the keychain and
   decoded certificate even when the build fails.
 - The dispatched builds run under the shared protected `main` cache scope, so
-  later release tags can reuse earlier compiler outputs. `sccache` stores
-  individual Rust compiler outputs. The Cargo cache stores dependency downloads
-  with `cache-targets: false`; neither cache archives `target/`, signed apps,
-  DMGs, updater archives, signatures, or temporary Apple key files.
+  later release tags can reuse earlier compiler outputs. The production
+  workflow restores but never writes the architecture-specific Rust build
+  archive, and it restores that archive before loading production secrets. The
+  credential-free warmer is its only writer. It caches only Cargo fingerprints,
+  build-script outputs, and dependency files—not bundle directories, signed
+  apps, DMGs, updater archives, signatures, or temporary Apple key files.
+  `sccache` remains a read-only fallback because GitHub throttles its many small
+  writes; the separate Cargo download cache retains `cache-targets: false`.
 - The independent cache-warm workflow runs only for relevant pushes to `main`
   or an explicit manual dispatch. It has no production environment and receives
   no Apple, Tauri, or AWS credentials. It fetches Cargo dependencies early and
