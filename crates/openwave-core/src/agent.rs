@@ -2119,9 +2119,20 @@ impl Agent {
                 |scratch| ToolCtx::with_private_scratch(chat.id, chat.project_id, scratch.clone()),
             )
             .with_call_id(call.call_id);
-        let mut output = match tool.execute(&ctx, parse_args(&call.args)).await {
-            Ok(output) => output,
-            Err(err) => ToolOutput::error(err.to_string()),
+        // `future::select` polls cancellation first. If it wins, dropping the
+        // unselected execution future propagates cancellation into async tools
+        // such as reqwest instead of leaving egress alive after the turn ends.
+        // Recheck after the execution arm wins to close a same-tick race.
+        let executing = tool.execute(&ctx, parse_args(&call.args));
+        let mut output = match future::select(self.cancel.cancelled(), executing).await {
+            Either::Left(((), _)) => ToolOutput::error("turn cancelled during tool execution"),
+            Either::Right((_, _)) if self.cancel.is_cancelled() => {
+                ToolOutput::error("turn cancelled during tool execution")
+            }
+            Either::Right((result, _)) => match result {
+                Ok(output) => output,
+                Err(err) => ToolOutput::error(err.to_string()),
+            },
         };
         if let Some(truncated) =
             truncate_to_bytes(&output.content, self.config.max_tool_result_bytes)
@@ -2628,7 +2639,7 @@ fn parse_client_args(raw: &str) -> Option<Value> {
 // The end-to-end test needs the SQLite store and the built-in tools.
 #[cfg(all(test, feature = "sqlite", feature = "tools"))]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use async_trait::async_trait;
@@ -5072,6 +5083,67 @@ mod tests {
         (store, chat, workspace)
     }
 
+    struct ToolFutureDropMarker(Arc<AtomicBool>);
+
+    impl Drop for ToolFutureDropMarker {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct BlockingTool {
+        entered: Arc<tokio::sync::Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Tool for BlockingTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "blocking".into(),
+                description: "wait until the turn is cancelled".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::ReadOnly
+        }
+
+        async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+            let _drop = ToolFutureDropMarker(self.dropped.clone());
+            self.entered.notify_one();
+            future::pending().await
+        }
+    }
+
+    struct BlockingToolProvider;
+
+    #[async_trait]
+    impl ModelProvider for BlockingToolProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("blocking-tool")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            Ok(stream::iter(vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "blocking_1".into(),
+                    name: "blocking".into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: "{}".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ])
+            .boxed())
+        }
+    }
+
     #[tokio::test]
     async fn cancel_before_the_turn_stops_before_any_model_call() {
         let (store, chat, _workspace) = cancel_test_chat().await;
@@ -5225,6 +5297,54 @@ mod tests {
             .map(|m| m.role)
             .collect();
         assert_eq!(roles, vec![Role::User]);
+    }
+
+    #[tokio::test]
+    async fn cancel_drops_an_in_flight_server_tool_future() {
+        let (store, chat, _workspace) = cancel_test_chat().await;
+        let cancel = CancelToken::new();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let agent = Agent::new(
+            Arc::new(BlockingToolProvider),
+            Arc::new(ToolRegistry::new().with(Box::new(BlockingTool {
+                entered: entered.clone(),
+                dropped: dropped.clone(),
+            }))),
+            store,
+            AgentConfig {
+                model: "blocking-tool".into(),
+                ..Default::default()
+            },
+        )
+        .with_cancel(cancel.clone());
+
+        let (tx, rx) = unbounded();
+        let handle = tokio::spawn(async move {
+            agent.run_turn(&chat, "go", &tx).await.unwrap();
+        });
+
+        entered.notified().await;
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("cancellation should stop an in-flight tool promptly")
+            .unwrap();
+        let events = rx.collect::<Vec<_>>().await;
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "cancellation must drop the tool future so its HTTP request can abort"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallCompleted { output, .. }
+                if output.is_error && output.content == "turn cancelled during tool execution"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCancelled { .. })
+        ));
     }
 
     #[tokio::test]

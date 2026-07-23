@@ -6269,8 +6269,8 @@ async fn root_search_never_returns_project_owned_vectors() {
     assert!(results["citations"].as_array().unwrap().is_empty());
 }
 
-#[test]
-fn agent_deps_registers_server_tools_and_closed_foreground_orchestration() {
+#[tokio::test]
+async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration() {
     struct UnavailableCodeExecution;
 
     #[async_trait::async_trait]
@@ -6286,10 +6286,23 @@ fn agent_deps_registers_server_tools_and_closed_foreground_orchestration() {
         }
     }
 
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("agent-deps.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
     let (_retrieval, tools, _config) = agent_deps(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
         Arc::new(UnavailableCodeExecution),
+        Box::new(web_search::foreground_tool(
+            store,
+            Arc::new(MemSecrets::default()),
+        )),
     );
     let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
     assert!(
@@ -6305,6 +6318,14 @@ fn agent_deps_registers_server_tools_and_closed_foreground_orchestration() {
             .iter()
             .any(|n| n == openwave_code_execution::EXEC_TOOL_NAME),
         "code execution tool registered"
+    );
+    assert!(
+        names.iter().any(|n| n == "web_search"),
+        "foreground web search registered"
+    );
+    assert_eq!(
+        tools.get("web_search").unwrap().approval_class(),
+        ApprovalClass::Sensitive
     );
     assert!([
         openwave_core::SPAWN_SANDBOX_AGENT_TOOL,

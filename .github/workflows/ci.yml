@@ -3,9 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-  # During active single-maintainer development, PRs run the change detector,
-  # secret scan, relevant lightweight checks, and aggregate gate. The expensive
-  # Rust lanes run on the merged main tip (and on explicit manual dispatch).
   pull_request:
     types:
       [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review]
@@ -17,9 +14,9 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Superseded PR heads can stop immediately. Main runs must finish so their
-  # trusted compiler artifacts become available to the next PR in a merge train.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Only the newest commit on a branch matters. sccache publishes compiler
+  # objects as they are produced, so superseded main runs do not need to finish.
+  cancel-in-progress: true
 
 jobs:
   pr-title:
@@ -218,64 +215,22 @@ jobs:
             protobuf-compiler
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: cargo-registry-v2
+          shared-key: cargo-registry-v3
+          key: ${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
+          # This cache contains downloads only. Compiler flags must not split it
+          # into separate mold/non-mold caches; Cargo.lock provides invalidation.
+          add-rust-environment-hash-key: "false"
           cache-bin: false
           # Keep Cargo downloads cached, but never restore the multi-gigabyte
           # target archive that previously exhausted a hosted runner. sccache
           # reuses individual compiler outputs without pre-filling target/.
           cache-targets: false
           # Every lane restores the shared trusted-main registry cache; only the
-          # comprehensive build job below publishes a new immutable key.
+          # comprehensive headless test job below publishes a new immutable key.
           save-if: false
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  build:
-    name: build
-    needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
-      RUSTC_WRAPPER: sccache
-      RUSTFLAGS: -C link-arg=-fuse-ld=mold
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install toolchain (honors rust-toolchain.toml)
-        run: rustup show
-      - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-        with:
-          version: v0.16.0
-      - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            libprotobuf-dev \
-            librsvg2-dev \
-            mold \
-            patchelf \
-            protobuf-compiler
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: cargo-registry-v2
-          add-job-id-key: "false"
-          cache-bin: false
-          cache-targets: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Fetch the complete workspace lockfile
-        if: ${{ github.ref == 'refs/heads/main' }}
-        run: cargo fetch --locked
-      - name: build
-        run: cargo build --workspace --locked
 
   desktop:
     name: desktop test
@@ -312,8 +267,10 @@ jobs:
             protobuf-compiler
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: cargo-registry-v2
+          shared-key: cargo-registry-v3
+          key: ${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
           cache-bin: false
           cache-targets: false
           save-if: false
@@ -351,20 +308,28 @@ jobs:
             protobuf-compiler
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: cargo-registry-v2
+          shared-key: cargo-registry-v3
+          key: ${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
           cache-bin: false
           cache-targets: false
-          save-if: false
+          # This is the single Cargo-download writer. sccache remains the
+          # compiler-output cache used independently by every Rust lane.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Fetch the complete workspace lockfile
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: cargo fetch --locked
       - name: headless tests
         run: cargo test --workspace --exclude openwave-desktop --locked
 
   postgres:
     name: postgres state machine
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' && github.event_name != 'pull_request' }}
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
@@ -398,8 +363,10 @@ jobs:
           version: v0.16.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: cargo-registry-v2
+          shared-key: cargo-registry-v3
+          key: ${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
           cache-bin: false
           cache-targets: false
           save-if: false
@@ -435,6 +402,8 @@ jobs:
         run: pnpm build
 
   rust:
+    # Keep this historical name stable because branch protection requires it.
+    # PostgreSQL is part of this gate even though the old display name omits it.
     name: fmt · clippy · build · test
     if: ${{ always() }}
     needs:
@@ -444,7 +413,6 @@ jobs:
         changes,
         fmt,
         lint,
-        build,
         desktop,
         test,
         postgres,
@@ -456,7 +424,6 @@ jobs:
         env:
           FMT_RESULT: ${{ needs.fmt.result }}
           LINT_RESULT: ${{ needs.lint.result }}
-          BUILD_RESULT: ${{ needs.build.result }}
           DESKTOP_RESULT: ${{ needs.desktop.result }}
           TEST_RESULT: ${{ needs.test.result }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
@@ -487,27 +454,14 @@ jobs:
           case "$RUST_CHANGED" in
             true)
               test "$FMT_RESULT" = success
-              if [[ "$EVENT_NAME" = pull_request ]]; then
-                # Correctness lanes run on PRs so breakage is caught before merge.
-                test "$LINT_RESULT" = success
-                test "$DESKTOP_RESULT" = success
-                test "$TEST_RESULT" = success
-                # build is redundant with lint+test (both compile the workspace)
-                # and postgres is a heavy service lane — keep them push-only.
-                test "$BUILD_RESULT" = skipped
-                test "$POSTGRES_RESULT" = skipped
-              else
-                test "$LINT_RESULT" = success
-                test "$BUILD_RESULT" = success
-                test "$DESKTOP_RESULT" = success
-                test "$TEST_RESULT" = success
-                test "$POSTGRES_RESULT" = success
-              fi
+              test "$LINT_RESULT" = success
+              test "$DESKTOP_RESULT" = success
+              test "$TEST_RESULT" = success
+              test "$POSTGRES_RESULT" = success
               ;;
             false)
               test "$FMT_RESULT" = skipped
               test "$LINT_RESULT" = skipped
-              test "$BUILD_RESULT" = skipped
               test "$DESKTOP_RESULT" = skipped
               test "$TEST_RESULT" = skipped
               test "$POSTGRES_RESULT" = skipped

@@ -1,28 +1,28 @@
 //! Durable execution of the one sandbox-safe web-search checkpoint.
 //!
-//! A model loop still has no advertised web-search tool. Only a durably
-//! accepted checkpoint can arrive here, where its exact executor lease is the
-//! authority for the bounded outbound operation.
+//! Only a durably accepted sandbox checkpoint can arrive here; foreground
+//! agents use the ordinary tool registry and approval path. The checkpoint's
+//! exact executor lease is the authority for this bounded outbound operation.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+#[cfg(test)]
+use chrono::Utc;
 use openwave_core::{
     AgentError, ClaimSandboxToolCallOutcome, Result, SandboxToolCall, Store, ToolCallResolution,
 };
 use openwave_web_search::{
-    SearchDomain, WebSearchProvider, WebSearchRequest, WebSearchResponse, MAX_OUTPUT_BYTES,
+    request_from_tool_arguments, WebSearchProvider, WebSearchRequest, WebSearchResponse,
+    MAX_OUTPUT_BYTES,
 };
-use serde::Deserialize;
 use tokio::sync::Notify;
 
 use crate::state::SandboxAttemptGuard;
 use crate::web_search;
 
 const WEB_SEARCH_TOOL: &str = "web_search";
-const DEFAULT_MAX_RESULTS: usize = 5;
 const CANDIDATE_BATCH_SIZE: u64 = 16;
 const EGRESS_SAFETY_MARGIN: Duration = Duration::from_millis(250);
 
@@ -321,24 +321,6 @@ impl SandboxWebSearchWorker {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WebSearchArguments {
-    query: String,
-    #[serde(default = "default_max_results")]
-    max_results: usize,
-    #[serde(default)]
-    domains: Vec<String>,
-    #[serde(default)]
-    start_published_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    end_published_at: Option<DateTime<Utc>>,
-}
-
-const fn default_max_results() -> usize {
-    DEFAULT_MAX_RESULTS
-}
-
 fn parse_web_search_request(
     call: &SandboxToolCall,
 ) -> std::result::Result<WebSearchRequest, ToolCallResolution> {
@@ -348,35 +330,12 @@ fn parse_web_search_request(
             "This sandbox tool is not available.",
         ));
     }
-    let arguments: WebSearchArguments =
-        serde_json::from_value(call.arguments.clone()).map_err(|_| {
-            failed_resolution(
-                "invalid_web_search_arguments",
-                "Web search arguments are invalid.",
-            )
-        })?;
-    let domains = arguments
-        .domains
-        .into_iter()
-        .map(SearchDomain::parse)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|_| {
-            failed_resolution(
-                "invalid_web_search_arguments",
-                "Web search arguments are invalid.",
-            )
-        })?;
-    WebSearchRequest::new(arguments.query, arguments.max_results)
-        .and_then(|request| request.with_domains(domains))
-        .and_then(|request| {
-            request.with_published_between(arguments.start_published_at, arguments.end_published_at)
-        })
-        .map_err(|_| {
-            failed_resolution(
-                "invalid_web_search_arguments",
-                "Web search arguments are invalid.",
-            )
-        })
+    request_from_tool_arguments(call.arguments.clone()).map_err(|_| {
+        failed_resolution(
+            "invalid_web_search_arguments",
+            "Web search arguments are invalid.",
+        )
+    })
 }
 
 fn remaining_execution_time(remaining: chrono::Duration) -> Option<Duration> {
@@ -633,7 +592,7 @@ mod tests {
         );
         assert_eq!(
             provider.requests.lock().unwrap()[0].max_results,
-            DEFAULT_MAX_RESULTS
+            openwave_web_search::DEFAULT_MAX_RESULTS
         );
         let receipt = store
             .get_sandbox_tool_call_receipt(call.id)

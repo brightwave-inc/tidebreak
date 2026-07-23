@@ -59,7 +59,7 @@ use openwave_core::{
     request_folder_access_tool_spec, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments,
     validate_request_folder_access_arguments, AgentConfig, AgentError, Config,
-    KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store,
+    KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool,
     ToolRegistry, WriteFile,
 };
 use openwave_retrieval::{
@@ -479,7 +479,14 @@ async fn bind_inner(
         store.clone(),
         config.data_dir.join("scratch"),
     ));
-    let (retrieval, mut tools, agent_config) = agent_deps(embedder, vector_store, code_execution);
+    let foreground_web_search =
+        Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
+    let (retrieval, mut tools, agent_config) = agent_deps(
+        embedder,
+        vector_store,
+        code_execution,
+        foreground_web_search,
+    );
     mcp_servers.mount(&mut tools).await?;
     let tools = Arc::new(tools);
     let state = match client_executor_id {
@@ -614,6 +621,7 @@ fn agent_deps(
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn VectorStore>,
     code_execution: Arc<dyn openwave_code_execution::CodeExecutionProvider>,
+    web_search: Box<dyn Tool>,
 ) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
     let (retrieval, search) = build_retrieval(embedder, store);
     let mut tools = ToolRegistry::new()
@@ -621,7 +629,8 @@ fn agent_deps(
         .with(Box::new(ListDir))
         .with(Box::new(WriteFile))
         .with(Box::new(ExecTool::new(code_execution)))
-        .with(search);
+        .with(search)
+        .with(web_search);
     tools.register_validated_client(
         request_folder_access_tool_spec(),
         validate_request_folder_access_arguments,

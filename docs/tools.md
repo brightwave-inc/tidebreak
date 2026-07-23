@@ -7,7 +7,7 @@ identity.
 
 ## What exists today
 
-The current foreground agent surface contains eleven tools:
+The current foreground agent surface contains twelve tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
@@ -16,6 +16,7 @@ The current foreground agent surface contains eleven tools:
 | `write_file` | Atomically write private-scratch text | Server, workspace |
 | `exec` | Run a bounded command through the configured execution provider | Server, sensitive native sandbox |
 | `search` | Search sources indexed for this exact conversation | Server, read-only |
+| `web_search` | Search the public web through the configured Exa or Tavily provider | Server, sensitive approval |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
 | `list_folder` | List one directory below an attached root | Native client continuation |
@@ -200,23 +201,24 @@ WebSearchTool
 └── optional durable web-document ingestion
 ```
 
-The first slice supplies the normalized bounded contract, fixed secret keys,
-and direct Exa/Tavily adapters through an injected HTTP seam. The server now
-also owns a disabled-by-default provider selection and a 1–60 second request
-timeout at `GET`/`PUT /web-search`. That setting has no endpoint or credential
-reference, returns only whether the selected fixed key is present, and does not
-construct or call a provider. It does **not** register `WebSearchTool` or grant
-any worker network access. Constructing an adapter is inert; only an explicit
-`search` call can send a request. A separate sandbox checkpoint executor now
-attaches the host policy only after claiming and revalidating an exact durable
-`web_search` checkpoint. Its strict argument contract rejects unknown fields,
-and unavailable/error cases resolve a bounded immutable failure receipt. The
-sandbox model loop may now emit the one fixed checkpoint, with a bounded
-argument collector and deterministic rejection of unknown, partial, or
-multiple calls. The foreground loop remains separate and does not receive this
-tool. The concrete host transport is bound to the selected provider's exact
-HTTPS API domain and rejects scheme, authority, explicit-port, or userinfo
-deviations before credentials can leave the process.
+The crate supplies the normalized bounded contract, fixed secret keys, direct
+Exa/Tavily adapters through an injected HTTP seam, strict tool-argument
+decoding, and the foreground `WebSearchTool`. The server owns a
+disabled-by-default provider selection and a 1–60 second request timeout at
+`GET`/`PUT /web-search`. That setting has no endpoint or credential reference,
+returns only whether the selected fixed key is present, and does not construct
+or call a provider.
+
+The foreground registry advertises `web_search` as Sensitive. A call is
+persisted, durably approved for sharing the query and explicit filters, and
+only then resolves current host policy and credentials. Turn cancellation drops
+an in-flight tool future, aborting its HTTP request. The sandbox path remains a
+separate checkpoint executor: it attaches host policy only after claiming and
+revalidating an exact durable `web_search` checkpoint. Both paths share the
+same strict decoder, so unknown fields and out-of-range requests fail before
+egress. The concrete transport is bound to the selected provider's exact HTTPS
+API domain and rejects scheme, authority, explicit-port, or userinfo deviations
+before credentials can leave the process.
 
 The normalized contract should cover query text, optional date/domain filters,
 bounded result count, canonical URL, title, snippet or extracted text, rank or
