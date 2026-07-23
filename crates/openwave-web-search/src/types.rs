@@ -55,6 +55,26 @@ impl WebSearchProviderKind {
             Self::Tavily => "web_search.tavily.api_key",
         }
     }
+
+    pub(crate) const fn search_url(self) -> &'static str {
+        match self {
+            Self::Exa => "https://api.exa.ai/search",
+            Self::Tavily => "https://api.tavily.com/search",
+        }
+    }
+
+    /// Exact HTTPS domain the host transport may contact for this provider.
+    ///
+    /// Keeping this mapping beside the fixed credential key and endpoint
+    /// prevents host configuration or model arguments from selecting an
+    /// outbound target.
+    #[must_use]
+    pub const fn outbound_domain(self) -> &'static str {
+        match self {
+            Self::Exa => "api.exa.ai",
+            Self::Tavily => "api.tavily.com",
+        }
+    }
 }
 
 impl std::fmt::Display for WebSearchProviderKind {
@@ -373,6 +393,8 @@ pub enum WebSearchError {
     NotConfigured(WebSearchProviderKind),
     #[error("web search transport failed: {0}")]
     Transport(String),
+    #[error("web search outbound request is not allowed")]
+    OutboundNotAllowed,
     #[error("web search provider {provider} returned HTTP {status}")]
     HttpStatus {
         provider: WebSearchProviderKind,
