@@ -162,8 +162,17 @@ The root `manifest.json` and Tauri-compatible `latest.json` are the only mutable
 objects. The workflow refuses to overwrite a versioned object with different
 bytes or move `latest.json` to an older version.
 
-The current app does not yet install updates automatically; `latest.json` is the
-stable server-side updater contract for that client integration.
+Packaged macOS apps check `latest.json` 15 seconds after launch and every five
+minutes. When a newer signed version is available, the Tauri updater downloads
+and installs it in place, then emits a ready state to the UI. The user must
+choose **Restart to update** before OpenWave relaunches; the app never
+interrupts active work automatically. Development and unsupported-platform
+builds do not contact the production update feed.
+
+The first release containing this client integration is a bootstrap release:
+older installed binaries have no updater and therefore cannot discover it.
+Users must install that first updater-enabled release manually; subsequent
+releases can advance automatically.
 
 **Warm macOS release cache** runs independently after relevant changes land on
 `main`. A short prerequisite job saves Cargo dependency downloads before the

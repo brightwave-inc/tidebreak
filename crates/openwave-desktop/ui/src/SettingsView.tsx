@@ -1,13 +1,27 @@
 import { useState, type ComponentType } from "react";
-import { ArrowLeft, Cpu, Globe, KeyRound, Palette } from "lucide-react";
+import {
+  ArrowLeft,
+  Cpu,
+  Globe,
+  KeyRound,
+  Palette,
+  RefreshCw,
+} from "lucide-react";
 import type { ApiClient, ModelInfo, ProviderInfo } from "./api";
 import type { ThemeMode } from "./theme";
+import type { DesktopUpdateState } from "./updates";
 import { ProvidersPanel } from "./settings/ProvidersPanel";
 import { WebSearchPanel } from "./settings/WebSearchPanel";
 import { ModelsPanel } from "./settings/ModelsPanel";
 import { AppearancePanel } from "./settings/AppearancePanel";
+import { UpdatesPanel } from "./settings/UpdatesPanel";
 
-type SettingsSectionKey = "providers" | "models" | "web-search" | "appearance";
+type SettingsSectionKey =
+  | "providers"
+  | "models"
+  | "web-search"
+  | "appearance"
+  | "updates";
 
 const SECTIONS: {
   key: SettingsSectionKey;
@@ -18,6 +32,7 @@ const SECTIONS: {
   { key: "models", label: "Models", icon: Cpu },
   { key: "web-search", label: "Web search", icon: Globe },
   { key: "appearance", label: "Appearance", icon: Palette },
+  { key: "updates", label: "Updates", icon: RefreshCw },
 ];
 
 export function SettingsView({
@@ -28,6 +43,9 @@ export function SettingsView({
   onBack,
   themeMode,
   onThemeChange,
+  updateState,
+  onCheckForUpdate,
+  onRestartForUpdate,
 }: {
   client: ApiClient;
   models: ModelInfo[];
@@ -36,6 +54,9 @@ export function SettingsView({
   onBack: () => void;
   themeMode: ThemeMode;
   onThemeChange: (mode: ThemeMode) => void;
+  updateState: DesktopUpdateState;
+  onCheckForUpdate: () => Promise<DesktopUpdateState>;
+  onRestartForUpdate: () => Promise<void>;
 }) {
   const [section, setSection] = useState<SettingsSectionKey>("providers");
 
@@ -83,6 +104,13 @@ export function SettingsView({
         {section === "web-search" && <WebSearchPanel client={client} />}
         {section === "appearance" && (
           <AppearancePanel mode={themeMode} onChange={onThemeChange} />
+        )}
+        {section === "updates" && (
+          <UpdatesPanel
+            state={updateState}
+            onCheck={onCheckForUpdate}
+            onRestart={onRestartForUpdate}
+          />
         )}
       </div>
     </section>
