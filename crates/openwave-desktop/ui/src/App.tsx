@@ -22,7 +22,7 @@ import {
 } from "./host";
 import { Logomark } from "./Logomark";
 import { Composer } from "./Composer";
-import { MessageList, type ChatMessage } from "./MessageList";
+import { MessageList } from "./MessageList";
 import {
   ArrowDown,
   Ellipsis,
@@ -31,6 +31,7 @@ import {
   Monitor,
   Moon,
   Pencil,
+  RotateCw,
   Settings,
   SquarePen,
   Sun,
@@ -48,19 +49,18 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
-import {
-  toolApprovalPresentation,
-  type ToolCallStatus,
-} from "./ToolCallCard";
-import { useChatEventStream } from "./ChatEventStream";
+import { ChatSessionController } from "./ChatSessionController";
+import { useChatSessionStore } from "./ChatSessionStore";
 import { isNearBottom, scrollToLatest } from "./ChatScroll";
 import { DocumentsView } from "./DocumentsView";
-import {
-  reconcilePendingApprovalCards,
-  upsertPendingApprovalCard,
-} from "./ApprovalHistory";
+import { reconcilePendingApprovalCards } from "./ApprovalHistory";
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
+import {
+  applyTerminalHydration,
+  type ChatSessionEffect,
+  type ChatSessionState,
+} from "./ChatSessionReducer";
 import {
   ActiveTurnSteerFence,
   canBeginActiveTurnSteer,
@@ -71,7 +71,6 @@ import {
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
 import { AgentActivityPanel, agentRunsForChat } from "./AgentActivityPanel";
-import { shouldRefreshAgentRunsAfterToolEvent } from "./AgentRunRefresh";
 import {
   SandboxAgentStopFence,
   canStopSandboxAgentRun,
@@ -81,8 +80,7 @@ import {
 import { prependReplacementChat } from "./ChatDeletion";
 import { useConfirm } from "./components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
-
-type Msg = ChatMessage;
+import { useDesktopUpdates } from "./updates";
 
 let msgSeq = 0;
 
@@ -90,6 +88,11 @@ function nextId(): string {
   msgSeq += 1;
   return `m${msgSeq}`;
 }
+
+const sessionDeps = {
+  nextId,
+  now: () => new Date().toISOString(),
+};
 
 export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
@@ -101,7 +104,9 @@ export default function App() {
   const [chatsError, setChatsError] = useState<string | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [messages, setMessages] = useState<Msg[]>([]);
+  const messages = useChatSessionStore((session) => session.messages);
+  const busy = useChatSessionStore((session) => session.busy);
+  const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
   const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
   const [agentRunsChatId, setAgentRunsChatId] = useState<string | null>(null);
   const [agentRunsLoading, setAgentRunsLoading] = useState(false);
@@ -128,8 +133,6 @@ export default function App() {
     {},
   );
   const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [cancelPendingTurnId, setCancelPendingTurnId] = useState<string | null>(
     null,
   );
@@ -151,15 +154,11 @@ export default function App() {
   >("chat");
   const [status, setStatus] = useState("starting…");
   const [hasUnreadActivity, setHasUnreadActivity] = useState(false);
-  const socketRef = useRef<WebSocket | null>(null);
-  const socketGenerationRef = useRef(0);
+  // Owns the selected chat's event socket; chat switches dispose it eagerly
+  // and the connection effect below constructs a fresh one.
+  const controllerRef = useRef<ChatSessionController | null>(null);
+  const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
   const chatSelectionRef = useRef(0);
-  const hydratedMessageIdsRef = useRef<Set<string>>(new Set());
-  const lastSeqRef = useRef(0);
-  const assistantBufRef = useRef("");
-  const assistantMarkerScrubberRef = useRef(
-    new AssistantSourceMarkerStreamScrubber(),
-  );
   const terminalHydrationGenerationRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followsLatestRef = useRef(true);
@@ -169,16 +168,15 @@ export default function App() {
   const decidingApprovalCallsRef = useRef<Set<string>>(new Set());
   const visibleFolderCallIdsRef = useRef<Set<string>>(new Set());
   const cancelRequestTurnRef = useRef<string | null>(null);
-  const activeTurnIdRef = useRef<string | null>(null);
   const draftRef = useRef("");
   const selectedChatIdRef = useRef<string | null>(null);
   const steerFenceRef = useRef(new ActiveTurnSteerFence());
   const sandboxStopFenceRef = useRef(new SandboxAgentStopFence());
-  const provisionalToolCallIdsRef = useRef<Set<string>>(new Set());
   const creationInFlightRef = useRef(false);
   const deletionInFlightRef = useRef(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const { mode: themeMode, cycle: cycleTheme, setMode: setThemeMode } = useTheme();
+  const desktopUpdates = useDesktopUpdates();
 
   useEffect(() => {
     let cancelled = false;
@@ -236,8 +234,11 @@ export default function App() {
     let cancelled = false;
     const selection = chatSelectionRef.current;
     setHydratedChatId(null);
-    setMessages([]);
-    hydratedMessageIdsRef.current = new Set();
+    updateSession((session) => ({
+      ...session,
+      messages: [],
+      hydratedMessageIds: new Set(),
+    }));
     (async () => {
       try {
         const hydration = await loadChatApprovalHydration(
@@ -247,26 +248,33 @@ export default function App() {
         );
         if (!hydration) return;
         const { transcript, pendingApprovals } = hydration;
-        lastSeqRef.current = transcript.last_event_seq;
         const presented = presentChatTranscript(transcript);
-        hydratedMessageIdsRef.current = presented.messageIds;
-        setMessages(
-          reconcilePendingApprovalCards(presented.messages, pendingApprovals),
-        );
         const pendingTurnId = pendingApprovals[0]?.turnId ?? null;
-        setCurrentActiveTurnId(pendingTurnId);
-        setBusy(pendingTurnId !== null);
+        updateSession((session) => ({
+          ...session,
+          lastSeq: transcript.last_event_seq,
+          hydratedMessageIds: presented.messageIds,
+          messages: reconcilePendingApprovalCards(
+            presented.messages,
+            pendingApprovals,
+          ),
+          activeTurnId: pendingTurnId,
+          busy: pendingTurnId !== null,
+        }));
         setHydratedChatId(chat.id);
       } catch (err) {
         if (!cancelled && selection === chatSelectionRef.current) {
-          setBusy(true);
-          setMessages([
-            {
-              id: nextId(),
-              role: "error",
-              text: `Could not load this chat: ${String(err)}`,
-            },
-          ]);
+          updateSession((session) => ({
+            ...session,
+            busy: true,
+            messages: [
+              {
+                id: nextId(),
+                role: "error",
+                text: `Could not load this chat: ${String(err)}`,
+              },
+            ],
+          }));
         }
       }
     })();
@@ -275,19 +283,25 @@ export default function App() {
     };
   }, [client, chat?.id]);
 
-  useChatEventStream({
-    client,
-    chatId: chat?.id ?? null,
-    ready: hydratedChatId === chat?.id,
-    afterRef: lastSeqRef,
-    socketRef,
-    generationRef: socketGenerationRef,
-    onEvent: handleEvent,
-    onConnectionState: (connectionState) =>
-      setStatus((current) =>
-        `${withoutConnectionState(current)} · ${connectionState}`,
-      ),
-  });
+  useEffect(() => {
+    if (!client || !chat || hydratedChatId !== chat.id) return;
+    const chatId = chat.id;
+    const controller = new ChatSessionController({
+      openSocket: (after, onEvent) => client.openEvents(chatId, after, onEvent),
+      getAfter: () => useChatSessionStore.getState().lastSeq,
+      onEvent: (event) => handleEventRef.current(event),
+      onConnectionState: (connectionState) =>
+        setStatus(
+          (current) => `${withoutConnectionState(current)} · ${connectionState}`,
+        ),
+    });
+    controllerRef.current = controller;
+    controller.start();
+    return () => {
+      controller.dispose();
+      if (controllerRef.current === controller) controllerRef.current = null;
+    };
+  }, [client, chat?.id, hydratedChatId]);
 
   useEffect(() => {
     if (!client || !chat) return;
@@ -461,228 +475,50 @@ export default function App() {
     }
   }, [folderAccessRequests]);
 
-  function handleEvent(framed: SequencedEvent) {
-    if (framed.seq <= lastSeqRef.current) return;
-    lastSeqRef.current = framed.seq;
-    const event = framed.event;
-
-    if (shouldRefreshAgentRunsAfterToolEvent(event)) {
-      refreshAgentRunsRef.current?.();
-    }
-
-    if (event.type === "turn_started") {
-      const startsDifferentTurn = activeTurnIdRef.current !== event.turn_id;
-      refreshAgentRunsRef.current?.();
-      terminalHydrationGenerationRef.current += 1;
-      assistantBufRef.current = "";
-      assistantMarkerScrubberRef.current =
-        new AssistantSourceMarkerStreamScrubber();
-      provisionalToolCallIdsRef.current = new Set();
-      setBusy(true);
-      setCurrentActiveTurnId(event.turn_id);
-      setCancelPendingTurnId(null);
-      setCancelError(null);
-      cancelRequestTurnRef.current = null;
-      if (startsDifferentTurn) clearSteerRequestState();
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextId(),
-          role: "assistant",
-          text: "",
-          sources: [],
-          createdAt: new Date().toISOString(),
-        },
-      ]);
-      return;
-    }
-
-    if (event.type === "text_delta") {
-      assistantBufRef.current += assistantMarkerScrubberRef.current.push(
-        event.text,
-      );
-      const text = assistantBufRef.current;
-      setMessages((prev) => {
-        const copy = [...prev];
-        const last = copy[copy.length - 1];
-        if (last?.role === "assistant") {
-          copy[copy.length - 1] = { ...last, text };
-        } else {
-          copy.push({
-            id: nextId(),
-            role: "assistant",
-            text,
-            sources: [],
-            createdAt: new Date().toISOString(),
-          });
-        }
-        return copy;
-      });
-      return;
-    }
-
-    if (event.type === "stream_interrupted") {
-      // The whole optimistic candidate is invalidated at this boundary. Finish
-      // clears any withheld marker-like tail before the replacement starts.
-      assistantMarkerScrubberRef.current.finish();
-      assistantBufRef.current = "";
-      const provisionalCallIds = provisionalToolCallIdsRef.current;
-      provisionalToolCallIdsRef.current = new Set();
-      setMessages((prev) => {
-        const copy = discardToolCalls(prev, provisionalCallIds);
-        if (copy[copy.length - 1]?.role === "assistant") {
-          copy.pop();
-        }
-        return copy;
-      });
-      return;
-    }
-
-    if (event.type === "tool_call_started") {
-      flushAssistantMarkerTail();
-      if (provisionalToolCallIdsRef.current.size === 0) {
-        assistantBufRef.current = "";
-        assistantMarkerScrubberRef.current =
-          new AssistantSourceMarkerStreamScrubber();
-      }
-      if (event.name === "request_folder_access") {
-        refreshFolderAccessRef.current?.();
-      }
-      provisionalToolCallIdsRef.current.add(event.call_id);
-      setMessages((prev) =>
-        upsertToolCall(prev, event.call_id, event.name, "running"),
-      );
-      return;
-    }
-
-    if (event.type === "tool_call_args_delta") {
-      // Arguments are intentionally not retained in renderer state. They can
-      // contain paths, file content, credentials, or provider-specific data.
-      setMessages((prev) =>
-        updateToolCall(prev, event.call_id, (tool) => ({
-          ...tool,
-          status: tool.status === "waiting_approval" ? tool.status : "running",
-        })),
-      );
-      return;
-    }
-
-    if (event.type === "approval_required") {
-      const approval = toolApprovalPresentation(event.approval);
-      provisionalToolCallIdsRef.current.delete(event.call_id);
-      setMessages((prev) =>
-        upsertPendingApprovalCard(prev, {
-          callId: event.call_id,
-          action: event.action,
-          approval: event.approval,
-          canApprove: approval.canApprove,
-        }),
-      );
-      return;
-    }
-
-    if (event.type === "approval_decided") {
-      setMessages((prev) =>
-        updateApprovalAndToolCall(prev, event.call_id, event.approved),
-      );
-      return;
-    }
-
-    if (event.type === "tool_call_completed") {
-      provisionalToolCallIdsRef.current.delete(event.call_id);
-      setMessages((prev) =>
-        updateToolCall(prev, event.call_id, (tool) => ({
-          ...tool,
-          status:
-            tool.status === "cancelled"
-              ? "cancelled"
-              : event.status === "failed"
-                ? "failed"
-                : "completed",
-        })),
-      );
-      return;
-    }
-
-    if (event.type === "user_steered") {
-      if (hydratedMessageIdsRef.current.has(event.message_id)) return;
-      hydratedMessageIdsRef.current.add(event.message_id);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: event.message_id,
-          role: "user",
-          text: event.text,
-          createdAt: new Date().toISOString(),
-        },
-      ]);
-      return;
-    }
-
-    if (event.type === "turn_completed") {
-      flushAssistantMarkerTail();
-      provisionalToolCallIdsRef.current = new Set();
-      resolveActiveTurn();
-      refreshAgentRunsRef.current?.();
-      const selection = chatSelectionRef.current;
-      const generation = ++terminalHydrationGenerationRef.current;
-      if (chat) {
-        void refreshTerminalTranscript(chat.id, selection, generation);
-      }
-      return;
-    }
-
-    if (event.type === "turn_cancelled") {
-      flushAssistantMarkerTail();
-      terminalHydrationGenerationRef.current += 1;
-      provisionalToolCallIdsRef.current = new Set();
-      resolveActiveTurn();
-      refreshAgentRunsRef.current?.();
-      setMessages((prev) => [
-        ...settleActiveToolCalls(prev, "cancelled"),
-        { id: nextId(), role: "system", text: "turn cancelled" },
-      ]);
-      return;
-    }
-
-    if (event.type === "turn_failed") {
-      flushAssistantMarkerTail();
-      terminalHydrationGenerationRef.current += 1;
-      provisionalToolCallIdsRef.current = new Set();
-      resolveActiveTurn();
-      refreshAgentRunsRef.current?.();
-      setMessages((prev) => [
-        ...settleActiveToolCalls(prev, "failed"),
-        {
-          id: nextId(),
-          role: "error",
-          text: "The turn could not be completed.",
-        },
-      ]);
-    }
+  function updateSession(update: (state: ChatSessionState) => ChatSessionState) {
+    useChatSessionStore.getState().update(update);
   }
 
-  function flushAssistantMarkerTail() {
-    const tail = assistantMarkerScrubberRef.current.finish();
-    if (!tail) return;
-    assistantBufRef.current += tail;
-    const text = assistantBufRef.current;
-    setMessages((previous) => {
-      const copy = [...previous];
-      const last = copy[copy.length - 1];
-      if (last?.role === "assistant") {
-        copy[copy.length - 1] = { ...last, text };
-      } else {
-        copy.push({
-          id: nextId(),
-          role: "assistant",
-          text,
-          sources: [],
-          createdAt: new Date().toISOString(),
-        });
+  function handleEvent(framed: SequencedEvent) {
+    const effects = useChatSessionStore
+      .getState()
+      .applyEvent(framed, sessionDeps);
+    for (const effect of effects) applySessionEffect(effect);
+  }
+  handleEventRef.current = handleEvent;
+
+  function applySessionEffect(effect: ChatSessionEffect) {
+    switch (effect.type) {
+      case "refresh_agent_runs":
+        refreshAgentRunsRef.current?.();
+        return;
+      case "refresh_folder_access":
+        refreshFolderAccessRef.current?.();
+        return;
+      case "turn_began":
+        setCancelPendingTurnId(null);
+        setCancelError(null);
+        cancelRequestTurnRef.current = null;
+        if (effect.startsDifferentTurn) clearSteerRequestState();
+        return;
+      case "turn_resolved":
+        setCancelPendingTurnId(null);
+        setCancelError(null);
+        cancelRequestTurnRef.current = null;
+        clearSteerRequestState();
+        return;
+      case "invalidate_terminal_hydration":
+        terminalHydrationGenerationRef.current += 1;
+        return;
+      case "hydrate_terminal_transcript": {
+        const selection = chatSelectionRef.current;
+        const generation = ++terminalHydrationGenerationRef.current;
+        if (chat) {
+          void refreshTerminalTranscript(chat.id, selection, generation);
+        }
+        return;
       }
-      return copy;
-    });
+    }
   }
 
   async function refreshTerminalTranscript(
@@ -700,12 +536,7 @@ export default function App() {
           terminalHydrationGenerationRef.current === generation,
       );
       if (!presented) return;
-      lastSeqRef.current = Math.max(
-        lastSeqRef.current,
-        presented.lastEventSeq,
-      );
-      hydratedMessageIdsRef.current = presented.messageIds;
-      setMessages(presented.messages);
+      updateSession((session) => applyTerminalHydration(session, presented));
     } catch {
       // The scrubbed optimistic response remains safe and visible. Reopening
       // the conversation will load a fresh authoritative snapshot.
@@ -713,17 +544,15 @@ export default function App() {
   }
 
   function resolveActiveTurn() {
-    setBusy(false);
-    setCurrentActiveTurnId(null);
+    updateSession((session) => ({
+      ...session,
+      busy: false,
+      activeTurnId: null,
+    }));
     setCancelPendingTurnId(null);
     setCancelError(null);
     cancelRequestTurnRef.current = null;
     clearSteerRequestState();
-  }
-
-  function setCurrentActiveTurnId(turnId: string | null) {
-    activeTurnIdRef.current = turnId;
-    setActiveTurnId(turnId);
   }
 
   function setComposerDraft(nextDraft: string) {
@@ -762,17 +591,20 @@ export default function App() {
     const turnId = crypto.randomUUID();
     terminalHydrationGenerationRef.current += 1;
     setComposerDraft("");
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: nextId(),
-        role: "user",
-        text: content,
-        createdAt: new Date().toISOString(),
-      },
-    ]);
-    setBusy(true);
-    setCurrentActiveTurnId(turnId);
+    updateSession((session) => ({
+      ...session,
+      busy: true,
+      activeTurnId: turnId,
+      messages: [
+        ...session.messages,
+        {
+          id: nextId(),
+          role: "user",
+          text: content,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    }));
     setCancelPendingTurnId(null);
     setCancelError(null);
     try {
@@ -782,17 +614,20 @@ export default function App() {
     } catch (err) {
       if (chatSelectionRef.current !== selection) return;
       resolveActiveTurn();
-      setMessages((prev) => [
-        ...prev,
-        { id: nextId(), role: "error", text: String(err) },
-      ]);
+      updateSession((session) => ({
+        ...session,
+        messages: [
+          ...session.messages,
+          { id: nextId(), role: "error", text: String(err) },
+        ],
+      }));
     }
   }
 
   async function onSteerActiveTurn() {
     const admission = {
       busy,
-      turnId: activeTurnIdRef.current,
+      turnId: useChatSessionStore.getState().activeTurnId,
       cancelRequestTurnId: cancelRequestTurnRef.current,
       deletionInFlight: deletionInFlightRef.current,
     };
@@ -831,7 +666,7 @@ export default function App() {
       if (
         !steerFenceRef.current.canApplyResponse(request, {
           chatId: selectedChatIdRef.current ?? "",
-          turnId: activeTurnIdRef.current ?? "",
+          turnId: useChatSessionStore.getState().activeTurnId ?? "",
           selection: chatSelectionRef.current,
         })
       ) {
@@ -848,7 +683,7 @@ export default function App() {
       if (
         !steerFenceRef.current.canApplyResponse(request, {
           chatId: selectedChatIdRef.current ?? "",
-          turnId: activeTurnIdRef.current ?? "",
+          turnId: useChatSessionStore.getState().activeTurnId ?? "",
           selection: chatSelectionRef.current,
         })
       ) {
@@ -905,14 +740,17 @@ export default function App() {
       );
       openCreatedChat(created);
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextId(),
-          role: "error",
-          text: `Could not create a chat: ${String(err)}`,
-        },
-      ]);
+      updateSession((session) => ({
+        ...session,
+        messages: [
+          ...session.messages,
+          {
+            id: nextId(),
+            role: "error",
+            text: `Could not create a chat: ${String(err)}`,
+          },
+        ],
+      }));
     } finally {
       creationInFlightRef.current = false;
       setCreatingChat(false);
@@ -921,18 +759,11 @@ export default function App() {
 
   function openCreatedChat(created: Chat) {
     setPrimaryView("chat");
-    socketGenerationRef.current += 1;
-    socketRef.current?.close();
-    socketRef.current = null;
-    assistantBufRef.current = "";
-    assistantMarkerScrubberRef.current =
-      new AssistantSourceMarkerStreamScrubber();
-    provisionalToolCallIdsRef.current = new Set();
-    lastSeqRef.current = 0;
+    controllerRef.current?.dispose();
+    controllerRef.current = null;
+    useChatSessionStore.getState().reset();
     followsLatestRef.current = true;
     setHasUnreadActivity(false);
-    setMessages([]);
-    hydratedMessageIdsRef.current = new Set();
     setAgentRuns([]);
     setAgentRunsError(null);
     setFolderAccessRequests([]);
@@ -941,8 +772,6 @@ export default function App() {
     setDecidingApprovalCalls(new Set());
     setApprovalErrors({});
     setComposerDraft("");
-    setBusy(false);
-    setCurrentActiveTurnId(null);
     setCancelPendingTurnId(null);
     setCancelError(null);
     cancelRequestTurnRef.current = null;
@@ -1007,8 +836,10 @@ export default function App() {
     sandboxStopFenceRef.current.invalidate();
     setStoppingSandboxRunKeys(new Set());
     setSandboxStopErrorKeys(new Set());
-    assistantMarkerScrubberRef.current =
-      new AssistantSourceMarkerStreamScrubber();
+    updateSession((session) => ({
+      ...session,
+      markerScrubber: new AssistantSourceMarkerStreamScrubber(),
+    }));
     setChat(next);
   }
 
@@ -1022,17 +853,11 @@ export default function App() {
     ) {
       return;
     }
-    socketGenerationRef.current += 1;
-    socketRef.current?.close();
-    socketRef.current = null;
-    assistantBufRef.current = "";
-    assistantMarkerScrubberRef.current =
-      new AssistantSourceMarkerStreamScrubber();
-    lastSeqRef.current = 0;
+    controllerRef.current?.dispose();
+    controllerRef.current = null;
+    useChatSessionStore.getState().reset();
     followsLatestRef.current = true;
     setHasUnreadActivity(false);
-    setMessages([]);
-    hydratedMessageIdsRef.current = new Set();
     setAgentRuns([]);
     setAgentRunsError(null);
     setFolderAccessRequests([]);
@@ -1041,8 +866,6 @@ export default function App() {
     setDecidingApprovalCalls(new Set());
     setApprovalErrors({});
     setComposerDraft("");
-    setBusy(false);
-    setCurrentActiveTurnId(null);
     setCancelPendingTurnId(null);
     setCancelError(null);
     cancelRequestTurnRef.current = null;
@@ -1156,13 +979,14 @@ export default function App() {
     });
     try {
       await client.decideApproval(chat.id, callId, decision, remember);
-      setMessages((prev) =>
-        prev.map((m) =>
+      updateSession((session) => ({
+        ...session,
+        messages: session.messages.map((m) =>
           m.role === "approval" && m.callId === callId
             ? { ...m, resolved: true }
             : m,
         ),
-      );
+      }));
     } catch (err) {
       setApprovalErrors((errors) => ({
         ...errors,
@@ -1234,6 +1058,16 @@ export default function App() {
       });
       refreshFolderAccessRef.current?.();
     }
+  }
+
+  async function onRestartForUpdate() {
+    const version = desktopUpdates.state.version;
+    const confirmed = await confirm({
+      title: "Restart OpenWave to update?",
+      description: `${version ? `Version ${version}` : "The update"} is ready. OpenWave will close and reopen. Wait for active work to finish before restarting.`,
+      confirmLabel: "Restart and update",
+    });
+    if (confirmed) await desktopUpdates.restart();
   }
 
   if (bootError) {
@@ -1408,6 +1242,21 @@ export default function App() {
         </div>
 
         <div className="sidebar-footer">
+          {desktopUpdates.state.status === "ready" && (
+            <button
+              type="button"
+              className="sidebar-action sidebar-update"
+              onClick={() => void onRestartForUpdate()}
+            >
+              <RotateCw size={16} />
+              <span>Restart to update</span>
+              {desktopUpdates.state.version && (
+                <span className="sidebar-update-version">
+                  v{desktopUpdates.state.version}
+                </span>
+              )}
+            </button>
+          )}
           {hasNativeHost() && (
             <button
               type="button"
@@ -1451,6 +1300,9 @@ export default function App() {
             onBack={() => setPrimaryView("chat")}
             themeMode={themeMode}
             onThemeChange={setThemeMode}
+            updateState={desktopUpdates.state}
+            onCheckForUpdate={desktopUpdates.check}
+            onRestartForUpdate={onRestartForUpdate}
           />
         ) : (
           <>
@@ -1611,82 +1463,6 @@ export default function App() {
         )}
       </div>
     </div>
-  );
-}
-
-function upsertToolCall(
-  messages: Msg[],
-  callId: string,
-  name: string,
-  status: ToolCallStatus,
-): Msg[] {
-  const existing = messages.findIndex(
-    (message) => message.role === "tool" && message.callId === callId,
-  );
-  if (existing >= 0) {
-    return messages.map((message, index) =>
-      index === existing && message.role === "tool" ? { ...message, status } : message,
-    );
-  }
-  return [...messages, { id: nextId(), role: "tool", callId, name, status }];
-}
-
-function updateToolCall(
-  messages: Msg[],
-  callId: string,
-  update: (tool: Extract<Msg, { role: "tool" }>) => Extract<Msg, { role: "tool" }>,
-): Msg[] {
-  return messages.map((message) =>
-    message.role === "tool" && message.callId === callId ? update(message) : message,
-  );
-}
-
-function updateApprovalAndToolCall(
-  messages: Msg[],
-  callId: string,
-  approved: boolean,
-): Msg[] {
-  return messages.map((message) => {
-    if (message.role === "approval" && message.callId === callId) {
-      return { ...message, resolved: true };
-    }
-    if (message.role === "tool" && message.callId === callId) {
-      return {
-        ...message,
-        status: approved ? "running" : "cancelled",
-      };
-    }
-    return message;
-  });
-}
-
-function settleActiveToolCalls(
-  messages: Msg[],
-  status: Extract<ToolCallStatus, "failed" | "cancelled">,
-): Msg[] {
-  const activeCallIds = new Set(
-    messages.flatMap((message) =>
-      message.role === "tool" &&
-      (message.status === "running" || message.status === "waiting_approval")
-        ? [message.callId]
-        : [],
-    ),
-  );
-  return messages.map((message) =>
-    message.role === "tool" &&
-    (message.status === "running" || message.status === "waiting_approval")
-      ? { ...message, status }
-      : message.role === "approval" &&
-          !message.resolved &&
-          activeCallIds.has(message.callId)
-        ? { ...message, resolved: true }
-      : message,
-  );
-}
-
-function discardToolCalls(messages: Msg[], callIds: Set<string>): Msg[] {
-  return messages.filter(
-    (message) => message.role !== "tool" || !callIds.has(message.callId),
   );
 }
 

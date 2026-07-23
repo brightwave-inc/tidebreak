@@ -14,6 +14,18 @@ const tauriConfig = JSON.parse(
     "utf8",
   ),
 );
+const desktopCargo = readFileSync(
+  new URL("../crates/openwave-desktop/Cargo.toml", import.meta.url),
+  "utf8",
+);
+const desktopHost = readFileSync(
+  new URL("../crates/openwave-desktop/src/lib.rs", import.meta.url),
+  "utf8",
+);
+const desktopUpdater = readFileSync(
+  new URL("../crates/openwave-desktop/src/updater.rs", import.meta.url),
+  "utf8",
+);
 const macosResourceSigner = readFileSync(
   new URL("./sign-macos-release-resources.sh", import.meta.url),
   "utf8",
@@ -339,4 +351,37 @@ test("the packaged updater trusts the production signing key and endpoint", () =
   assert.deepEqual(updater.endpoints, [
     "https://downloads.brightwave.io/openwave/latest.json",
   ]);
+});
+
+test("the packaged desktop activates the signed updater feed", () => {
+  assert.match(desktopCargo, /tauri-plugin-updater = "=[^"]+"/);
+  assert.match(
+    desktopHost,
+    /\.plugin\(tauri_plugin_updater::Builder::new\(\)\.build\(\)\)/,
+  );
+  assert.match(desktopHost, /\.manage\(updater::UpdateManager::default\(\)\)/);
+  assert.match(desktopHost, /updater::spawn_update_loop\(handle\.clone\(\)\)/);
+  assert.match(desktopHost, /updater::desktop_update_state/);
+  assert.match(desktopHost, /updater::check_for_update/);
+  assert.match(desktopHost, /updater::restart_for_update/);
+  assert.match(desktopUpdater, /updater\.check\(\)\.await/);
+  assert.match(desktopUpdater, /update\.download\(/);
+  assert.doesNotMatch(desktopUpdater, /download_and_install/);
+  assert.match(
+    desktopUpdater,
+    /state::<HostAccess>\(\)\.shutdown\(\)\.await[\s\S]*staged\.update\.install\(&staged\.bytes\)/,
+  );
+  assert.match(desktopUpdater, /app\.restart\(\)/);
+  assert.match(
+    desktopUpdater,
+    /cfg!\(all\(not\(debug_assertions\), target_os = "macos"\)\)/,
+  );
+  assert.match(
+    desktopUpdater,
+    /const UPDATE_CHECK_STARTUP_DELAY: Duration = Duration::from_secs\(15\)/,
+  );
+  assert.match(
+    desktopUpdater,
+    /const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs\(5 \* 60\)/,
+  );
 });
