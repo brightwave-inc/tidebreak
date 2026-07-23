@@ -1513,6 +1513,14 @@ body {
   padding-left: 1.35rem;
 }
 
+.message-markdown ul {
+  list-style: disc;
+}
+
+.message-markdown ol {
+  list-style: decimal;
+}
+
 .message-markdown li + li {
   margin-top: 0.2rem;
 }
