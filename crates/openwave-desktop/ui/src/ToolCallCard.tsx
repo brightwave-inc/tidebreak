@@ -183,6 +183,13 @@ export function toolApprovalPresentation(
       canApprove: true,
     };
   }
+  if (kind === "web_search_may_share_query") {
+    return {
+      summary:
+        "Allow web search to send this query and its explicit filters to the configured search provider outside OpenWave?",
+      canApprove: true,
+    };
+  }
   if (kind === "exec_may_run_networked_command") {
     return {
       summary:

@@ -222,6 +222,7 @@ export type RendererToolName =
 
 export type RendererApprovalKind =
   | "search_may_share_query_and_excerpts"
+  | "web_search_may_share_query"
   | "exec_may_run_networked_command"
   | "unsupported";
 
@@ -229,6 +230,7 @@ export type RendererApprovalKind =
 export function isApprovableKind(kind: RendererApprovalKind): boolean {
   return (
     kind === "search_may_share_query_and_excerpts" ||
+    kind === "web_search_may_share_query" ||
     kind === "exec_may_run_networked_command"
   );
 }
@@ -721,6 +723,7 @@ function isRendererToolName(value: unknown): value is RendererToolName {
 function isRendererApprovalKind(value: unknown): value is RendererApprovalKind {
   return (
     value === "search_may_share_query_and_excerpts" ||
+    value === "web_search_may_share_query" ||
     value === "exec_may_run_networked_command" ||
     value === "unsupported"
   );
