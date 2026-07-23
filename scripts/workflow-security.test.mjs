@@ -175,7 +175,7 @@ test("cache warming cannot access production credentials or publish", () => {
   }
 });
 
-test("release caches restore only unsigned compiler outputs", () => {
+test("release caches restore only credential-free compiler products", () => {
   const release = workflows["release.yml"];
   const cache = workflows["cache-macos.yml"];
   const prepareJob = workflowJob(release, "prepare_macos");
@@ -251,6 +251,18 @@ test("release caches restore only unsigned compiler outputs", () => {
   ]) {
     assert.match(cacheStep, /target\/release\/\.fingerprint/);
     assert.match(cacheStep, /target\/\$\{\{ matrix\.target \}\}\/release\/deps/);
+    assert.match(
+      cacheStep,
+      /target\/\$\{\{ matrix\.target \}\}\/release\/openwave-desktop/,
+    );
+    assert.match(
+      cacheStep,
+      /target\/\$\{\{ matrix\.target \}\}\/release\/openwave-host-broker/,
+    );
+    assert.match(
+      cacheStep,
+      /crates\/openwave-desktop\/resources\/pdfium\/libpdfium\.dylib/,
+    );
     assert.doesNotMatch(cacheStep, /bundle|\.app|dmg|signature|keychain/i);
   }
 
@@ -261,8 +273,13 @@ test("release caches restore only unsigned compiler outputs", () => {
   ]) {
     assert.match(
       restoreStep,
+      /macos-release-target-v2-\$\{\{ matrix\.arch \}\}-/,
+      "unsigned product caches should be preferred when available",
+    );
+    assert.match(
+      restoreStep,
       /macos-release-target-v1-\$\{\{ matrix\.arch \}\}-/,
-      "unsigned target caches should fall back across lockfile changes",
+      "unsigned compiler-only caches should remain a migration fallback",
     );
   }
 });
