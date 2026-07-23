@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::Result;
-use crate::id::{ChatId, ProjectId};
+use crate::id::{CallId, ChatId, ProjectId};
 
 /// A pinned runtime-only directory capability for legacy private-scratch tools.
 ///
@@ -159,6 +159,9 @@ pub struct ToolCtx {
     pub chat_id: ChatId,
     /// Project corpus inherited from the chat, or `None` for a loose chat.
     pub project_id: Option<ProjectId>,
+    /// Stable identity of the canonical tool call, when execution came from an
+    /// agent turn. Legacy direct/MCP contexts leave this absent.
+    pub call_id: Option<CallId>,
     #[cfg(feature = "tools")]
     workspace: WorkspaceAccess,
 }
@@ -176,6 +179,7 @@ impl std::fmt::Debug for ToolCtx {
             .debug_struct("ToolCtx")
             .field("chat_id", &self.chat_id)
             .field("project_id", &self.project_id)
+            .field("call_id", &self.call_id)
             .field("private_scratch_available", &self.scratch_available())
             .finish_non_exhaustive()
     }
@@ -195,6 +199,7 @@ impl ToolCtx {
             Err(_error) => Self {
                 chat_id,
                 project_id,
+                call_id: None,
                 #[cfg(feature = "tools")]
                 workspace: WorkspaceAccess::Unavailable(_error.to_string().into()),
             },
@@ -212,6 +217,7 @@ impl ToolCtx {
         Ok(Self {
             chat_id,
             project_id,
+            call_id: None,
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Open(Arc::new(workspace)),
         })
@@ -227,6 +233,7 @@ impl ToolCtx {
         Self {
             chat_id,
             project_id,
+            call_id: None,
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Open(scratch.workspace),
         }
@@ -241,9 +248,17 @@ impl ToolCtx {
         Self {
             chat_id,
             project_id,
+            call_id: None,
             #[cfg(feature = "tools")]
             workspace: WorkspaceAccess::Unavailable("private scratch is unavailable".into()),
         }
+    }
+
+    /// Attach the canonical tool-call identity to this invocation context.
+    #[must_use]
+    pub fn with_call_id(mut self, call_id: CallId) -> Self {
+        self.call_id = Some(call_id);
+        self
     }
 
     fn scratch_available(&self) -> bool {

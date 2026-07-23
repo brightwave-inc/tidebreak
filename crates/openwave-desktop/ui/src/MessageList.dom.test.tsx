@@ -99,3 +99,11 @@ describe("approval card interactions", () => {
     expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
   });
 });
+
+describe("row memoization", () => {
+  it("MessageBubble is a memoized component", () => {
+    expect(
+      (MessageBubble as unknown as { $$typeof: symbol }).$$typeof,
+    ).toBe(Symbol.for("react.memo"));
+  });
+});

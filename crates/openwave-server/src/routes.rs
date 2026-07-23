@@ -22,6 +22,7 @@ use openwave_core::{
 };
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
+use crate::code_execution::{self, CodeExecutionConfigInfo, CodeExecutionConfigUpdate};
 use crate::error::ServerError;
 use crate::event_projection::RendererSequencedEvent;
 use crate::extract::{Json, Path, Query};
@@ -139,6 +140,24 @@ pub async fn put_web_search_config(
 ) -> Result<Json<WebSearchConfigInfo>, ServerError> {
     Ok(Json(
         web_search::update_config(&*state.store, &*state.secrets, body).await?,
+    ))
+}
+
+/// `GET /code-execution` — read host-owned provider selection, timeout policy,
+/// and native readiness. No executable or provider endpoint is accepted here.
+pub async fn get_code_execution_config(
+    State(state): State<AppState>,
+) -> Result<Json<CodeExecutionConfigInfo>, ServerError> {
+    Ok(Json(code_execution::config_info(&*state.store).await?))
+}
+
+/// `PUT /code-execution` — select a fixed provider and bounded host timeout.
+pub async fn put_code_execution_config(
+    State(state): State<AppState>,
+    Json(body): Json<CodeExecutionConfigUpdate>,
+) -> Result<Json<CodeExecutionConfigInfo>, ServerError> {
+    Ok(Json(
+        code_execution::update_config(&*state.store, body).await?,
     ))
 }
 

@@ -66,6 +66,16 @@ export type WebSearchCredentialReadiness = {
   has_credential: boolean;
 };
 
+/** The fixed, host-owned code-execution providers supported by this build. */
+export type CodeExecutionProviderKind = "local";
+
+/** Non-secret code-execution selection, timeout policy, and host readiness. */
+export type CodeExecutionConfigInfo = {
+  provider?: CodeExecutionProviderKind;
+  timeout_ms: number;
+  available: boolean;
+};
+
 export type Chat = {
   id: string;
   title: string | null;
@@ -388,6 +398,21 @@ export class ApiClient {
     return this.json(`/web-search/credentials/${provider}`, {
       method: "DELETE",
       headers: this.headers(),
+    });
+  }
+
+  getCodeExecutionConfig(): Promise<CodeExecutionConfigInfo> {
+    return this.json("/code-execution", { headers: this.headers() });
+  }
+
+  putCodeExecutionConfig(body: {
+    provider?: CodeExecutionProviderKind | null;
+    timeout_ms?: number;
+  }): Promise<CodeExecutionConfigInfo> {
+    return this.json("/code-execution", {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify(body),
     });
   }
 
