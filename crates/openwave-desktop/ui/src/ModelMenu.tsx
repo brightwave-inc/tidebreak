@@ -82,7 +82,7 @@ export function ModelCapabilities({ model }: { model: ModelInfo }) {
 /**
  * Per-chat model selector for the message bar. `null` means "use the default"
  * (the global default model, or the server default when none is set). Mirrors
- * the Brightwave composer picker: a compact pill that opens a grouped list.
+ * the OpenWave composer picker: a compact pill that opens a grouped list.
  */
 export function ModelMenu({
   models,

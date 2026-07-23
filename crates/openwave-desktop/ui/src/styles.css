@@ -4,7 +4,7 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  /* --- BW-aligned palette (oklch, light mode) --- */
+  /* --- OpenWave palette (oklch, light mode) --- */
   --background: oklch(1 0 0);
   --foreground: oklch(0 0 0);
   --page-background: oklch(98.2% 0 0);
@@ -34,8 +34,8 @@
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.984 0.003 247.858);
 
-  --color-brightwave: oklch(0.87 0.2 102);
-  --color-brightwave-light: oklch(0.966 0.155 102);
+  --color-openwave: oklch(0.87 0.2 102);
+  --color-openwave-light: oklch(0.966 0.155 102);
 
   /* Semantic status */
   --success: oklch(0.627 0.194 149.214);
@@ -83,7 +83,7 @@
 }
 
 .dark {
-  /* --- BW-aligned palette (oklch, dark mode) --- */
+  /* --- OpenWave palette (oklch, dark mode) --- */
   color-scheme: dark;
 
   --background: oklch(0.1993 0.01 85);
@@ -115,8 +115,8 @@
   --destructive: oklch(0.68 0.22 27.325);
   --destructive-foreground: oklch(0.95 0.005 247.858);
 
-  --color-brightwave: oklch(0.87 0.2 102);
-  --color-brightwave-light: oklch(0.68 0.14 102);
+  --color-openwave: oklch(0.87 0.2 102);
+  --color-openwave-light: oklch(0.68 0.14 102);
 
   /* Semantic status — dark */
   --success: oklch(0.792 0.209 151.711);
@@ -143,8 +143,8 @@
 }
 
 @theme inline {
-  --color-brightwave: var(--color-brightwave);
-  --color-brightwave-light: var(--color-brightwave-light);
+  --color-openwave: var(--color-openwave);
+  --color-openwave-light: var(--color-openwave-light);
 
   --color-page-background: var(--page-background);
   --color-border: var(--border);
@@ -718,8 +718,8 @@ body {
 }
 
 .agent-activity-group-indicator.is-active {
-  background: var(--color-brightwave);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brightwave) 14%, transparent);
+  background: var(--color-openwave);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-openwave) 14%, transparent);
 }
 
 .agent-activity-group-count {
@@ -812,17 +812,17 @@ body {
 .agent-activity-item.is-active .agent-activity-indicator,
 .agent-activity-item.is-running .agent-activity-indicator,
 .agent-activity-item.is-activity-running .agent-activity-indicator {
-  border-color: var(--color-brightwave);
-  background: var(--color-brightwave);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brightwave) 18%, transparent);
+  border-color: var(--color-openwave);
+  background: var(--color-openwave);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-openwave) 18%, transparent);
 }
 
 .agent-activity-item.is-queued .agent-activity-indicator,
 .agent-activity-item.is-waiting .agent-activity-indicator,
 .agent-activity-item.is-retry_wait .agent-activity-indicator,
 .agent-activity-item.is-cancelling .agent-activity-indicator {
-  border-color: color-mix(in srgb, var(--color-brightwave) 55%, var(--line));
-  background: color-mix(in srgb, var(--color-brightwave) 38%, var(--bg-elevated));
+  border-color: color-mix(in srgb, var(--color-openwave) 55%, var(--line));
+  background: color-mix(in srgb, var(--color-openwave) 38%, var(--bg-elevated));
 }
 
 .agent-activity-item.is-failed .agent-activity-indicator {
@@ -831,8 +831,8 @@ body {
 }
 
 .agent-activity-item.is-completed .agent-activity-indicator {
-  border-color: color-mix(in srgb, var(--color-brightwave) 55%, var(--line));
-  background: color-mix(in srgb, var(--color-brightwave) 26%, var(--bg-elevated));
+  border-color: color-mix(in srgb, var(--color-openwave) 55%, var(--line));
+  background: color-mix(in srgb, var(--color-openwave) 26%, var(--bg-elevated));
 }
 
 .agent-activity-state {
@@ -958,7 +958,7 @@ body {
 }
 
 .welcome-prompt:hover svg {
-  color: var(--color-brightwave);
+  color: var(--color-openwave);
 }
 
 @media (max-width: 720px) {
@@ -1251,7 +1251,7 @@ body {
 .message-approval {
   width: min(100%, 38rem);
   align-self: flex-start;
-  border: 1px solid color-mix(in srgb, var(--color-brightwave) 45%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--color-openwave) 45%, var(--line));
   border-radius: 8px;
   padding: 0.7rem 0.8rem;
   background: var(--card);
@@ -1401,7 +1401,7 @@ body {
 }
 
 .message-markdown blockquote {
-  border-left: 2px solid var(--color-brightwave);
+  border-left: 2px solid var(--color-openwave);
   padding-left: 0.75rem;
   color: var(--muted-foreground);
 }
@@ -1711,7 +1711,7 @@ body {
 .folder-consent {
   align-self: flex-start;
   width: min(100%, 34rem);
-  border: 1px solid color-mix(in srgb, var(--color-brightwave) 55%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--color-openwave) 55%, var(--line));
   border-radius: 8px;
   padding: 0.85rem;
   background: var(--bg-elevated);
@@ -2298,9 +2298,9 @@ body {
   justify-content: space-between;
   gap: 1rem;
   padding: 0.75rem 0.9rem;
-  border: 1px solid color-mix(in srgb, var(--color-brightwave) 48%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--color-openwave) 48%, var(--line));
   border-radius: 8px;
-  background: color-mix(in srgb, var(--color-brightwave) 7%, var(--bg-elevated));
+  background: color-mix(in srgb, var(--color-openwave) 7%, var(--bg-elevated));
   font-size: 0.84rem;
 }
 
@@ -2352,7 +2352,7 @@ body {
 }
 
 .document-search input:focus {
-  outline: 2px solid color-mix(in srgb, var(--color-brightwave) 40%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--color-openwave) 40%, transparent);
   outline-offset: 1px;
 }
 
