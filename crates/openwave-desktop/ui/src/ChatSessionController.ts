@@ -31,6 +31,22 @@ export type ChatSessionControllerOptions = {
  * disposing this controller and constructing a new one, which is what fences
  * stale sockets and timers (no generation counters, no borrowed refs).
  */
+/**
+ * Minimal envelope check for an incoming frame: a finite seq and an event
+ * object with a string type. Event payloads are typed downstream; unknown
+ * types are tolerated there, but a frame without this shape is undecodable.
+ */
+function isWellFormedFrame(frame: SequencedEvent): boolean {
+  return (
+    typeof frame === "object" &&
+    frame !== null &&
+    Number.isFinite(frame.seq) &&
+    typeof frame.event === "object" &&
+    frame.event !== null &&
+    typeof (frame.event as { type?: unknown }).type === "string"
+  );
+}
+
 export class ChatSessionController {
   private disposed = false;
   private socket: WebSocket | null = null;
@@ -72,9 +88,12 @@ export class ChatSessionController {
     let socket: WebSocket;
     try {
       socket = this.options.openSocket(this.options.getAfter(), (event) => {
-        if (!this.disposed && this.socket === socket) {
-          this.options.onEvent(event);
+        if (this.disposed || this.socket !== socket) return;
+        if (!isWellFormedFrame(event)) {
+          console.error("dropping malformed event frame", event);
+          return;
         }
+        this.options.onEvent(event);
       });
     } catch {
       this.scheduleReconnect();

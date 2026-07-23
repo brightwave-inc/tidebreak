@@ -353,6 +353,12 @@ export function reduceChatSessionEvent(
     case "context_truncated":
     case "event_omitted":
       return { state, effects };
+
+    // Event types this build does not know (a newer server) advance the
+    // cursor and change nothing — falling off the switch would return
+    // undefined and crash the caller once per frame.
+    default:
+      return { state, effects };
   }
 }
 

@@ -449,3 +449,19 @@ describe("referential stability for memoized rows", () => {
     );
   });
 });
+
+describe("forward compatibility", () => {
+  it("tolerates event types this build does not know", () => {
+    const { state, effects } = reduceChatSessionEvent(
+      initialChatSessionState(),
+      {
+        seq: 9,
+        event: { type: "hologram_delta" } as unknown as AgentEvent,
+      },
+      makeDeps(),
+    );
+    expect(state.lastSeq).toBe(9);
+    expect(state.messages).toEqual([]);
+    expect(effects).toEqual([]);
+  });
+});

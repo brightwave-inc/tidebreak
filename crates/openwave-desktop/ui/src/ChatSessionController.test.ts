@@ -176,3 +176,24 @@ describe("ChatSessionController", () => {
     expect(h.events).toEqual([FRAME]);
   });
 });
+
+describe("frame validation", () => {
+  it("drops undecodable frames instead of forwarding them", () => {
+    const h = harness();
+    h.controller.start();
+    h.latest().emit(null as unknown as SequencedEvent);
+    h.latest().emit({ seq: Number.NaN, event: FRAME.event });
+    h.latest().emit({ seq: 2, event: "nope" } as unknown as SequencedEvent);
+    h.latest().emit({
+      seq: 3,
+      event: { type: 42 },
+    } as unknown as SequencedEvent);
+    expect(h.events).toEqual([]);
+
+    h.latest().emit({
+      seq: 4,
+      event: { type: "future_thing" },
+    } as unknown as SequencedEvent);
+    expect(h.events).toHaveLength(1);
+  });
+});
