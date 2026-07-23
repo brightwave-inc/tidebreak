@@ -7873,9 +7873,17 @@ async fn models_catalog_is_served() {
         .find(|m| m["id"] == "claude-opus-4-8")
         .expect("curated Anthropic model is present");
     assert_eq!(opus["display_name"], "Claude Opus 4.8");
-    assert!(opus["context_window"].as_u64().unwrap() > 0);
+    assert_eq!(opus["context_window"], 1_000_000);
+    assert_eq!(opus["max_output_tokens"], 128_000);
+    assert_eq!(
+        opus["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
+    assert!(opus["supports_reasoning"].as_bool().unwrap());
     assert!(opus["multimodal"].as_bool().unwrap());
-    assert!(opus["supports_reasoning_effort"].as_bool().unwrap());
+    // Capabilities describe what the current adapter implements, not only
+    // what the upstream model could support with a different request shape.
+    assert!(!opus["supports_reasoning_effort"].as_bool().unwrap());
 }
 
 #[tokio::test]

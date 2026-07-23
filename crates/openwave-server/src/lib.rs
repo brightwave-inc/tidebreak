@@ -25,6 +25,7 @@ mod error;
 mod event_projection;
 mod extract;
 mod mcp_config;
+mod model_registry;
 mod provider;
 mod providers;
 mod resolver;

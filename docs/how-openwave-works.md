@@ -133,6 +133,13 @@ closed until a matching provider is enabled and credentialed. OpenAI-compatible
 routes currently require a nonempty credential even when a local endpoint would
 otherwise accept unauthenticated requests.
 
+Curated model metadata has one server-owned registry. It records the canonical
+provider ID, display name, token limits, accepted input modalities, and reasoning
+capabilities used by both `GET /models` and model-to-provider routing. Provider
+configuration filters that registry; it does not maintain a second list of model
+IDs. Custom OpenAI-compatible model IDs remain allowed outside the curated
+registry and receive a derived display name.
+
 ## What happens during a chat turn
 
 ### 1. The server accepts a turn
