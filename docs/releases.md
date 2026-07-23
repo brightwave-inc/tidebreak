@@ -157,11 +157,17 @@ bytes or move `latest.json` to an older version.
 The current app does not yet install updates automatically; `latest.json` is the
 stable server-side updater contract for that client integration.
 
-If the shared macOS compiler cache is empty or has been evicted, manually run
-**Publish macOS release** from `main` with an existing published tag and
-`cache_warm_only` enabled. The two architecture jobs compile the release app
-without loading the `desktop-production` environment, signing, bundling, or
-publishing. Normal native release publication leaves this input disabled.
+**Warm macOS release cache** runs independently after relevant changes land on
+`main`. A short prerequisite job saves Cargo dependency downloads before the
+two architecture jobs compile the desktop app with `--no-bundle`. This keeps a
+later UI setup or compilation failure from also losing newly downloaded Cargo
+dependencies. The architecture jobs stream Rust compiler outputs to sccache as
+they compile. None of these jobs load the `desktop-production` environment,
+sign, or publish. Because cache warming has its own workflow and failure
+boundary, a later signing, notarization, or publication failure cannot prevent
+that main-tip cache run from finishing. If the shared cache is empty or has
+been evicted, manually run **Warm macOS release cache** from `main`; the
+production release workflow remains exclusively a shipping action.
 
 ### Production environment configuration
 
@@ -227,9 +233,12 @@ Treat the release workflow as public even while the repository is private:
   individual Rust compiler outputs. The Cargo cache stores dependency downloads
   with `cache-targets: false`; neither cache archives `target/`, signed apps,
   DMGs, updater archives, signatures, or temporary Apple key files.
-- The optional cache-warm jobs have no production environment and receive no
-  Apple, Tauri, or AWS credentials. They stop after compiling with
-  `--no-bundle`; they cannot sign or publish a release.
+- The independent cache-warm workflow runs only for relevant pushes to `main`
+  or an explicit manual dispatch. It has no production environment and receives
+  no Apple, Tauri, or AWS credentials. It fetches Cargo dependencies early and
+  stops after compiling with `--no-bundle`; it cannot sign or publish a
+  release. Signing, notarization, or publication failures therefore do not
+  cancel or roll back the separate main-tip cache run.
 - Production artifacts are collected only after code-signing, notarization,
   stapling, and local verification succeed. The temporary App Store Connect key
   is removed even when the build fails.
