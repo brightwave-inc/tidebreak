@@ -292,8 +292,7 @@ jobs:
       - name: Cache Cargo downloads
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: macos-release-cargo-registry-v2
-          key: ${{ hashFiles('Cargo.lock') }}
+          shared-key: macos-release-cargo-registry-v2-${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
           add-rust-environment-hash-key: "false"
           cache-bin: false
@@ -492,8 +491,7 @@ jobs:
       - name: Cache Cargo downloads
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: macos-release-cargo-registry-v2
-          key: ${{ hashFiles('Cargo.lock') }}
+          shared-key: macos-release-cargo-registry-v2-${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
           add-rust-environment-hash-key: "false"
           cache-bin: false

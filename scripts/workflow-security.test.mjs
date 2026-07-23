@@ -83,8 +83,10 @@ test("Rust CI makes PostgreSQL required without a redundant build lane", () => {
     testJob,
     postgres,
   ]) {
-    assert.match(job, /shared-key: cargo-registry-v3/);
-    assert.match(job, /key: \$\{\{ hashFiles\('Cargo\.lock'\) \}\}/);
+    assert.match(
+      job,
+      /shared-key: cargo-registry-v3-\$\{\{ hashFiles\('Cargo\.lock'\) \}\}/,
+    );
     assert.match(job, /add-rust-environment-hash-key: "false"/);
     assert.match(job, /cache-targets: false/);
   }
@@ -151,8 +153,10 @@ test("cache warming cannot access production credentials or publish", () => {
     ].map((match) => match[0]);
     assert.ok(downloadCaches.length > 0);
     for (const step of downloadCaches) {
-      assert.match(step, /shared-key: macos-release-cargo-registry-v2/);
-      assert.match(step, /key: \$\{\{ hashFiles\('Cargo\.lock'\) \}\}/);
+      assert.match(
+        step,
+        /shared-key: macos-release-cargo-registry-v2-\$\{\{ hashFiles\('Cargo\.lock'\) \}\}/,
+      );
       assert.match(step, /add-rust-environment-hash-key: "false"/);
       assert.match(step, /cache-targets: false/);
     }
