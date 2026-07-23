@@ -29,7 +29,10 @@ Example:
 Timeouts must be between 1,000 and 60,000 milliseconds. There is no endpoint,
 proxy URL, arbitrary secret reference, or API-key field in this API. The Exa
 and Tavily adapters own their fixed HTTPS endpoints, disable redirects, and
-bound request input and retained response output.
+bound request input and retained response output. The host constructs the
+concrete HTTP client for the selected provider only; that client rejects any
+request whose scheme or exact authority differs from the provider's fixed API
+domain before dispatch.
 
 No response contains a credential. `/web-search` reports only
 `has_credential` for the currently selected provider, while
@@ -67,5 +70,7 @@ model loop may advertise only this fixed `web_search` schema, at most once and
 only when two model steps remain. It parks the immutable call before any
 egress; when the receipt resolves, its next claim rebuilds the same
 `ToolUse`/`ToolResult` pair and may finalize. No foreground or recursive agent
-receives the schema. An explicit outbound-domain policy remains the next
-hardening slice before broadening this search surface.
+receives the schema. The concrete transport enforces an exact HTTPS
+outbound-domain policy (`api.exa.ai` for Exa and `api.tavily.com` for Tavily)
+outside model-controlled arguments. Broader search surfaces still require
+their own approval and outbound policy.

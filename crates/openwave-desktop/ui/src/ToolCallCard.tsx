@@ -43,10 +43,10 @@ export type ToolApprovalPresentation = {
 // provider diagnostic.
 const TOOL_PRESENTATIONS: Record<string, ToolPresentation> = {
   search: {
-    label: "Search documents",
-    active: "Searching documents",
-    complete: "Document search complete",
-    settled: "Searched documents",
+    label: "Search sources",
+    active: "Searching sources",
+    complete: "Source search complete",
+    settled: "Searched sources",
   },
   web_search: {
     label: "Search the web",

@@ -358,6 +358,12 @@ pub struct ModelInfo {
     pub provider: String,
     /// Approximate context window in tokens.
     pub context_window: u32,
+    /// Maximum model output in tokens.
+    pub max_output_tokens: u32,
+    /// Input modalities accepted by the model.
+    pub input_modalities: Vec<String>,
+    /// Whether the model can produce an internal reasoning stream.
+    pub supports_reasoning: bool,
     /// Whether the model exposes a reasoning-effort control.
     pub supports_reasoning_effort: bool,
     /// Whether the model accepts image input alongside text.
@@ -381,11 +387,18 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
         .into_iter()
         .map(|spec| ModelInfo {
             id: spec.id.to_string(),
-            display_name: providers::display_name_for(spec.id),
+            display_name: crate::model_registry::display_name_for(spec.id),
             provider: spec.provider.as_str().to_string(),
             context_window: spec.context_window,
+            max_output_tokens: spec.max_output_tokens,
+            input_modalities: spec
+                .input_modalities
+                .iter()
+                .map(|modality| modality.as_str().to_string())
+                .collect(),
+            supports_reasoning: spec.supports_reasoning,
             supports_reasoning_effort: spec.supports_reasoning_effort,
-            multimodal: spec.multimodal,
+            multimodal: spec.accepts(crate::model_registry::InputModality::Image),
         })
         .collect();
     Ok(Json(ModelCatalog { models }))
@@ -711,7 +724,11 @@ pub async fn delete_chat(
     Path(id): Path<ChatId>,
 ) -> Result<StatusCode, ServerError> {
     match state.store.delete_chat(id).await? {
-        DeleteChatOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteChatOutcome::Deleted => {
+            state.document_job_wake.notify_one();
+            state.blob_retirement_wake.notify_one();
+            Ok(StatusCode::NO_CONTENT)
+        }
         DeleteChatOutcome::NotFound => Err(ServerError::not_found(format!("chat {id} not found"))),
         DeleteChatOutcome::ActiveWork => Err(ServerError::conflict_kind(
             "chat_active",

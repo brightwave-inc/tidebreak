@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 use openwave_core::{
-    DocumentJobId, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
+    ChatId, DocumentJobId, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
     DocumentSourceUpsert, DocumentSummaryRecord, ProjectId,
 };
 use openwave_retrieval::{
@@ -62,7 +62,9 @@ pub struct IngestResult {
 pub struct DocumentSummary {
     /// Stable identifier shared with citations and delete/get routes.
     pub document_id: DocumentId,
-    /// Owning project, or `None` for the unscoped corpus.
+    /// Owning conversation for conversation-scoped sources.
+    pub chat_id: Option<ChatId>,
+    /// Owning project, or `None` for a legacy unscoped source.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, or `None` for inline content.
     pub uri: Option<String>,
@@ -90,6 +92,7 @@ impl From<DocumentSummaryRecord> for DocumentSummary {
     fn from(document: DocumentSummaryRecord) -> Self {
         Self {
             document_id: document.id,
+            chat_id: document.chat_id,
             project_id: document.project_id,
             uri: document.source_uri,
             media_type: document.media_type,
@@ -109,6 +112,7 @@ impl From<&DocumentRecord> for DocumentSummary {
     fn from(document: &DocumentRecord) -> Self {
         Self {
             document_id: document.id,
+            chat_id: document.chat_id,
             project_id: document.project_id,
             uri: document.source_uri.clone(),
             media_type: document.media_type.clone(),
@@ -204,7 +208,7 @@ pub async fn ingest_document(
     State(state): State<AppState>,
     Json(body): Json<IngestDocument>,
 ) -> Result<impl IntoResponse, ServerError> {
-    ingest_document_in_scope(&state, None, body).await
+    ingest_document_in_scope(&state, None, None, body).await
 }
 
 /// `POST /projects/{project_id}/documents` — enqueue a document in one project corpus.
@@ -214,11 +218,22 @@ pub async fn ingest_project_document(
     Json(body): Json<IngestDocument>,
 ) -> Result<impl IntoResponse, ServerError> {
     require_project(&state, project_id).await?;
-    ingest_document_in_scope(&state, Some(project_id), body).await
+    ingest_document_in_scope(&state, None, Some(project_id), body).await
+}
+
+/// `POST /chats/{chat_id}/documents` — enqueue a source owned by one conversation.
+pub async fn ingest_chat_document(
+    State(state): State<AppState>,
+    Path(chat_id): Path<ChatId>,
+    Json(body): Json<IngestDocument>,
+) -> Result<impl IntoResponse, ServerError> {
+    require_chat(&state, chat_id).await?;
+    ingest_document_in_scope(&state, Some(chat_id), None, body).await
 }
 
 async fn ingest_document_in_scope(
     state: &AppState,
+    chat_id: Option<ChatId>,
     project_id: Option<ProjectId>,
     body: IngestDocument,
 ) -> Result<(StatusCode, Json<IngestResult>), ServerError> {
@@ -227,6 +242,7 @@ async fn ingest_document_in_scope(
     }
     publish_document_source(
         state,
+        chat_id,
         project_id,
         body.uri,
         None,
@@ -244,7 +260,7 @@ pub async fn ingest_raw_document(
     headers: HeaderMap,
     RawBytes(bytes): RawBytes,
 ) -> Result<impl IntoResponse, ServerError> {
-    ingest_raw_document_in_scope(&state, None, query, &headers, bytes.to_vec()).await
+    ingest_raw_document_in_scope(&state, None, None, query, &headers, bytes.to_vec()).await
 }
 
 /// `POST /projects/{project_id}/documents/raw` — retain exact bytes in one
@@ -257,11 +273,33 @@ pub async fn ingest_raw_project_document(
     RawBytes(bytes): RawBytes,
 ) -> Result<impl IntoResponse, ServerError> {
     require_project(&state, project_id).await?;
-    ingest_raw_document_in_scope(&state, Some(project_id), query, &headers, bytes.to_vec()).await
+    ingest_raw_document_in_scope(
+        &state,
+        None,
+        Some(project_id),
+        query,
+        &headers,
+        bytes.to_vec(),
+    )
+    .await
+}
+
+/// `POST /chats/{chat_id}/documents/raw` — retain exact source bytes for one
+/// conversation and enqueue asynchronous parsing.
+pub async fn ingest_raw_chat_document(
+    State(state): State<AppState>,
+    Path(chat_id): Path<ChatId>,
+    Query(query): Query<RawDocumentQuery>,
+    headers: HeaderMap,
+    RawBytes(bytes): RawBytes,
+) -> Result<impl IntoResponse, ServerError> {
+    require_chat(&state, chat_id).await?;
+    ingest_raw_document_in_scope(&state, Some(chat_id), None, query, &headers, bytes.to_vec()).await
 }
 
 async fn ingest_raw_document_in_scope(
     state: &AppState,
+    chat_id: Option<ChatId>,
     project_id: Option<ProjectId>,
     query: RawDocumentQuery,
     headers: &HeaderMap,
@@ -283,6 +321,7 @@ async fn ingest_raw_document_in_scope(
     }
     publish_document_source(
         state,
+        chat_id,
         project_id,
         query.uri,
         query.title,
@@ -294,6 +333,7 @@ async fn ingest_raw_document_in_scope(
 
 async fn publish_document_source(
     state: &AppState,
+    chat_id: Option<ChatId>,
     project_id: Option<ProjectId>,
     source_uri: Option<String>,
     title: Option<String>,
@@ -311,10 +351,16 @@ async fn publish_document_source(
         .retrieval
         .canonical_fingerprint_for(&media_type)
         .map_err(retrieval_error)?;
-    let document_id = match (project_id, source_uri.as_deref()) {
-        (Some(project_id), Some(uri)) => DocumentId::derive_for_project(project_id, uri),
-        (None, Some(uri)) => DocumentId::derive(uri),
-        (_, None) => DocumentId::new(),
+    let document_id = match (chat_id, project_id, source_uri.as_deref()) {
+        (Some(chat_id), None, Some(uri)) => DocumentId::derive_for_chat(chat_id, uri),
+        (None, Some(project_id), Some(uri)) => DocumentId::derive_for_project(project_id, uri),
+        (None, None, Some(uri)) => DocumentId::derive(uri),
+        (_, _, None) => DocumentId::new(),
+        (Some(_), Some(_), Some(_)) => {
+            return Err(ServerError::internal(
+                "document cannot belong to both a conversation and a project",
+            ));
+        }
     };
     let source_blob = DocumentSourceBlob::from_bytes(&source_bytes);
     // Serialize the entire source publication boundary for one document. If
@@ -334,6 +380,7 @@ async fn publish_document_source(
         .accept_document_source_and_enqueue_parse(
             &DocumentSourceUpsert {
                 id: document_id,
+                chat_id,
                 project_id,
                 source_uri,
                 media_type,
@@ -419,7 +466,7 @@ pub async fn retry_document(
     State(state): State<AppState>,
     Path(id): Path<DocumentId>,
 ) -> Result<impl IntoResponse, ServerError> {
-    retry_document_in_scope(&state, id, None).await
+    retry_document_in_scope(&state, id, None, None).await
 }
 
 /// `POST /projects/{project_id}/documents/{document_id}/retry` — revive an owned
@@ -429,12 +476,23 @@ pub async fn retry_project_document(
     Path((project_id, document_id)): Path<(ProjectId, DocumentId)>,
 ) -> Result<impl IntoResponse, ServerError> {
     require_project(&state, project_id).await?;
-    retry_document_in_scope(&state, document_id, Some(project_id)).await
+    retry_document_in_scope(&state, document_id, None, Some(project_id)).await
+}
+
+/// `POST /chats/{chat_id}/documents/{document_id}/retry` — revive a source
+/// owned by one conversation.
+pub async fn retry_chat_document(
+    State(state): State<AppState>,
+    Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
+) -> Result<impl IntoResponse, ServerError> {
+    require_chat(&state, chat_id).await?;
+    retry_document_in_scope(&state, document_id, Some(chat_id), None).await
 }
 
 async fn retry_document_in_scope(
     state: &AppState,
     id: DocumentId,
+    chat_id: Option<ChatId>,
     project_id: Option<ProjectId>,
 ) -> Result<(StatusCode, Json<IngestResult>), ServerError> {
     let _document_write = state.document_writes.acquire(id).await;
@@ -442,7 +500,7 @@ async fn retry_document_in_scope(
         .store
         .get_document(id)
         .await?
-        .filter(|document| document.project_id == project_id)
+        .filter(|document| document.chat_id == chat_id && document.project_id == project_id)
     else {
         return Err(ServerError::not_found(format!("document {id} not found")));
     };
@@ -466,7 +524,11 @@ async fn retry_document_in_scope(
         .store
         .get_document(id)
         .await?
-        .filter(|record| record.project_id == project_id && record.generation() == job.generation())
+        .filter(|record| {
+            record.chat_id == chat_id
+                && record.project_id == project_id
+                && record.generation() == job.generation()
+        })
         .ok_or_else(|| {
             ServerError::internal(format!(
                 "retried job {} no longer matches document {id}",
@@ -503,6 +565,16 @@ pub async fn list_project_documents(
 ) -> Result<Json<DocumentListPage>, ServerError> {
     require_project(&state, project_id).await?;
     list_documents_in_scope(&state, DocumentScope::Project(project_id), query).await
+}
+
+/// `GET /chats/{chat_id}/documents` — list only sources owned by one conversation.
+pub async fn list_chat_documents(
+    State(state): State<AppState>,
+    Path(chat_id): Path<ChatId>,
+    Query(query): Query<DocumentListQuery>,
+) -> Result<Json<DocumentListPage>, ServerError> {
+    require_chat(&state, chat_id).await?;
+    list_documents_in_scope(&state, DocumentScope::Chat(chat_id), query).await
 }
 
 async fn list_documents_in_scope(
@@ -551,7 +623,7 @@ pub async fn get_document(
         .store
         .get_document(id)
         .await?
-        .filter(|document| document.project_id.is_none())
+        .filter(|document| document.chat_id.is_none() && document.project_id.is_none())
         .map(DocumentDetail::from)
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("document {id} not found")))
@@ -567,7 +639,24 @@ pub async fn get_project_document(
         .store
         .get_document(document_id)
         .await?
-        .filter(|document| document.project_id == Some(project_id))
+        .filter(|document| document.chat_id.is_none() && document.project_id == Some(project_id))
+        .map(DocumentDetail::from)
+        .map(Json)
+        .ok_or_else(|| ServerError::not_found(format!("document {document_id} not found")))
+}
+
+/// `GET /chats/{chat_id}/documents/{document_id}` — fetch a source only when
+/// the path conversation owns it.
+pub async fn get_chat_document(
+    State(state): State<AppState>,
+    Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
+) -> Result<Json<DocumentDetail>, ServerError> {
+    require_chat(&state, chat_id).await?;
+    state
+        .store
+        .get_document(document_id)
+        .await?
+        .filter(|document| document.chat_id == Some(chat_id) && document.project_id.is_none())
         .map(DocumentDetail::from)
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("document {document_id} not found")))
@@ -584,7 +673,7 @@ pub async fn delete_document(
         .store
         .get_document(id)
         .await?
-        .is_some_and(|document| document.project_id.is_some())
+        .is_some_and(|document| document.chat_id.is_some() || document.project_id.is_some())
     {
         return Err(ServerError::not_found(format!("document {id} not found")));
     }
@@ -605,7 +694,33 @@ pub async fn delete_project_document(
         .store
         .get_document(document_id)
         .await?
-        .is_none_or(|document| document.project_id != Some(project_id))
+        .is_none_or(|document| {
+            document.chat_id.is_some() || document.project_id != Some(project_id)
+        })
+    {
+        return Err(ServerError::not_found(format!(
+            "document {document_id} not found"
+        )));
+    }
+    state.store.delete_document(document_id).await?;
+    state.document_job_wake.notify_one();
+    state.blob_retirement_wake.notify_one();
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// `DELETE /chats/{chat_id}/documents/{document_id}` — retire one source owned
+/// by a conversation without exposing another conversation's source identity.
+pub async fn delete_chat_document(
+    State(state): State<AppState>,
+    Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
+) -> Result<StatusCode, ServerError> {
+    require_chat(&state, chat_id).await?;
+    let _document_write = state.document_writes.acquire(document_id).await;
+    if state
+        .store
+        .get_document(document_id)
+        .await?
+        .is_none_or(|document| document.chat_id != Some(chat_id) || document.project_id.is_some())
     {
         return Err(ServerError::not_found(format!(
             "document {document_id} not found"
@@ -655,6 +770,16 @@ pub async fn search_project_documents(
     search_documents_in_scope(&state, SearchScope::Project(project_id), body).await
 }
 
+/// `POST /chats/{chat_id}/search` — search only the owning conversation's sources.
+pub async fn search_chat_documents(
+    State(state): State<AppState>,
+    Path(chat_id): Path<ChatId>,
+    Json(body): Json<SearchRequest>,
+) -> Result<Json<SearchResults>, ServerError> {
+    require_chat(&state, chat_id).await?;
+    search_documents_in_scope(&state, SearchScope::Chat(chat_id), body).await
+}
+
 async fn search_documents_in_scope(
     state: &AppState,
     scope: SearchScope,
@@ -681,6 +806,13 @@ async fn require_project(state: &AppState, project_id: ProjectId) -> Result<(), 
         return Err(ServerError::not_found(format!(
             "project {project_id} not found"
         )));
+    }
+    Ok(())
+}
+
+async fn require_chat(state: &AppState, chat_id: ChatId) -> Result<(), ServerError> {
+    if state.store.get_chat(chat_id).await?.is_none() {
+        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
     }
     Ok(())
 }

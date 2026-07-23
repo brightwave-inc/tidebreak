@@ -12,8 +12,6 @@ use crate::{
     WebSearchProviderKind, WebSearchRequest, WebSearchResponse, WebSearchResult,
 };
 
-const TAVILY_SEARCH_URL: &str = "https://api.tavily.com/search";
-
 /// Tavily adapter backed by an injected HTTP client.
 #[derive(Clone, Debug)]
 pub struct TavilyProvider<C> {
@@ -41,7 +39,7 @@ impl<C: HttpClient> WebSearchProvider for TavilyProvider<C> {
         let response = self
             .client
             .post_json(HttpRequest {
-                url: TAVILY_SEARCH_URL.into(),
+                url: self.kind().search_url().into(),
                 headers: vec![("content-type".into(), "application/json".into())],
                 body: request_body(&request, self.credential.api_key()),
             })
@@ -209,7 +207,7 @@ mod tests {
         );
         let sent = request.lock().unwrap();
         let sent = sent.as_ref().unwrap();
-        assert_eq!(sent.url, TAVILY_SEARCH_URL);
+        assert_eq!(sent.url, WebSearchProviderKind::Tavily.search_url());
         assert_eq!(sent.body["api_key"], "tavily-key");
         assert!(sent.headers.iter().all(|(_, value)| value != "tavily-key"));
     }

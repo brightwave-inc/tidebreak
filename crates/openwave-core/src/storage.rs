@@ -890,13 +890,12 @@ pub trait Store: Send + Sync {
 
     /// Persist a new authoritative document record.
     ///
-    /// `project_id`, when present, must identify an existing project. The default
-    /// database store enforces this with a restricting foreign key, so projects
-    /// cannot be deleted while they still own documents. The store replaces the
-    /// supplied `revision_token` with a fresh token so a deleted document
-    /// lifecycle cannot be recreated with stale identity. A live document's
-    /// ownership is immutable: callers must delete it before recreating the same
-    /// id in another corpus.
+    /// At most one of `chat_id` and `project_id` may be present, and it must
+    /// identify an existing owner. The store replaces the supplied
+    /// `revision_token` with a fresh token so a deleted document lifecycle
+    /// cannot be recreated with stale identity. A live document's ownership is
+    /// immutable: callers must delete it before recreating the same id in
+    /// another corpus.
     async fn create_document(&self, _document: &DocumentRecord) -> Result<()> {
         document_storage_unavailable()
     }
@@ -1315,7 +1314,9 @@ pub trait Store: Send + Sync {
     /// This deliberately fails closed while any turn can still run, while any
     /// root remains attached, or while broker reconciliation is pending. The
     /// caller must first finish cancellation and use the durable root-detach
-    /// flow; deletion never guesses at native broker state.
+    /// flow; deletion never guesses at native broker state. Conversation-owned
+    /// documents are atomically converted to pending generation tombstones, and
+    /// retained source blobs are enqueued for asynchronous retirement.
     async fn delete_chat(&self, _id: ChatId) -> Result<DeleteChatOutcome> {
         Err(AgentError::Store(
             "conversation deletion is not implemented by this Store".into(),

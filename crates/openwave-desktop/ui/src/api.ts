@@ -23,6 +23,12 @@ export type ModelInfo = {
   provider: string;
   /** Approximate context window in tokens. */
   context_window: number;
+  /** Maximum response size in tokens. */
+  max_output_tokens: number;
+  /** Input modalities accepted by the model. */
+  input_modalities: Array<"text" | "image">;
+  /** Whether the model can produce an internal reasoning stream. */
+  supports_reasoning: boolean;
   /** Whether the model exposes a reasoning-effort control. */
   supports_reasoning_effort: boolean;
   /** Whether the model accepts image input alongside text. */

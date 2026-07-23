@@ -28,6 +28,19 @@ cargo test --workspace
 The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml);
 `rustup` will pick it up automatically.
 
+### macOS keychain prompts
+
+OpenWave keeps secrets in the login keychain, and macOS ties keychain
+approvals to the binary's code signature — so unsigned dev builds would
+re-trigger the access prompt on every rebuild. To prevent that, `cargo run`
+and `cargo test` launch through
+[`scripts/macos-dev-sign-runner.sh`](scripts/macos-dev-sign-runner.sh), which
+signs the binary with your `openwave-dev` or `Apple Development` certificate
+(whichever exists) before running it. Click **Always Allow** once per binary
+and the prompt won't return. With no certificate in the keychain the wrapper
+is a no-op; you can also set `OPENWAVE_DEV_SIGNING_IDENTITY` to pick an
+identity explicitly, or set it empty to opt out.
+
 ### Desktop UI
 
 See [`crates/openwave-desktop/README.md`](crates/openwave-desktop/README.md).

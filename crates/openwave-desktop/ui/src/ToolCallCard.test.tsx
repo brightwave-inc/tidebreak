@@ -44,8 +44,8 @@ describe("ToolCallCard", () => {
       <ToolCallCard name="search" status="completed" />,
     );
 
-    expect(markup).toContain("Search documents");
-    expect(markup).toContain("Document search complete");
+    expect(markup).toContain("Search sources");
+    expect(markup).toContain("Source search complete");
   });
 
   it("renders a fixed delegated-file presentation without resource details", () => {

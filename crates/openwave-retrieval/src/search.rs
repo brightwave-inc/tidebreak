@@ -189,10 +189,7 @@ impl Tool for SearchTool {
             Ok(embedding) => embedding,
             Err(err) => return Ok(ToolOutput::error(format!("embedding failed: {err}"))),
         };
-        let scope = match ctx.project_id {
-            Some(project_id) => SearchScope::Project(project_id),
-            None => SearchScope::Unscoped,
-        };
+        let scope = SearchScope::Chat(ctx.chat_id);
         let candidates = match self
             .store
             .query(query, &embedding, candidate_limit(k), scope)
@@ -304,6 +301,7 @@ mod tests {
             .into_iter()
             .zip(embeddings)
             .map(|(chunk, embedding)| VectorRecord {
+                chat_id: Some(test_chat_id()),
                 project_id: None,
                 source: source.clone(),
                 generation: Some(generation),
@@ -327,8 +325,16 @@ mod tests {
         ctx_for(None)
     }
 
+    fn test_chat_id() -> ChatId {
+        ChatId(uuid::Uuid::from_u128(0x5100))
+    }
+
     fn ctx_for(project_id: Option<ProjectId>) -> ToolCtx {
-        ToolCtx::new_legacy_workspace(ChatId::new(), project_id, PathBuf::from("/tmp/unused"))
+        ToolCtx::new_legacy_workspace(test_chat_id(), project_id, PathBuf::from("/tmp/unused"))
+    }
+
+    fn ctx_for_chat(chat_id: ChatId) -> ToolCtx {
+        ToolCtx::new_legacy_workspace(chat_id, None, PathBuf::from("/tmp/unused"))
     }
 
     struct SpyVectorStore {
@@ -587,25 +593,27 @@ mod tests {
     async fn search_scope_is_inherited_from_tool_context_not_model_arguments() {
         let embedder = Arc::new(HashEmbedder::new(DIMS));
         let store = Arc::new(InMemoryVectorStore::new(DIMS));
-        let project_a = ProjectId::new();
-        let project_b = ProjectId::new();
+        let chat_a = ChatId::new();
+        let chat_b = ChatId::new();
         let documents = [
             Document::new(
                 DocumentSource::Inline,
                 "text/plain",
-                "unscoped lighthouse fact",
+                "legacy unscoped lighthouse fact",
             ),
-            Document::new_scoped(
-                project_a,
+            Document::with_id_for_chat(
+                DocumentId::new(),
+                chat_a,
                 DocumentSource::Inline,
                 "text/plain",
-                "project alpha lighthouse fact",
+                "chat alpha lighthouse fact",
             ),
-            Document::new_scoped(
-                project_b,
+            Document::with_id_for_chat(
+                DocumentId::new(),
+                chat_b,
                 DocumentSource::Inline,
                 "text/plain",
-                "project beta lighthouse fact",
+                "chat beta lighthouse fact",
             ),
         ];
         for document in documents {
@@ -624,6 +632,7 @@ mod tests {
                         .into_iter()
                         .zip(embeddings)
                         .map(|(chunk, embedding)| VectorRecord {
+                            chat_id: document.chat_id,
                             project_id: document.project_id,
                             source: document.source.clone(),
                             generation: Some(generation),
@@ -641,24 +650,25 @@ mod tests {
         }
         let tool = SearchTool::new(embedder, store);
 
-        let loose = tool
-            .execute(&ctx_for(None), json!({"query": "lighthouse fact", "k": 10}))
-            .await
-            .unwrap();
-        assert!(loose.content.contains("unscoped lighthouse"));
-        assert!(!loose.content.contains("project alpha"));
-        assert!(!loose.content.contains("project beta"));
-
-        let alpha = tool
+        let empty_chat = tool
             .execute(
-                &ctx_for(Some(project_a)),
+                &ctx_for_chat(ChatId::new()),
                 json!({"query": "lighthouse fact", "k": 10}),
             )
             .await
             .unwrap();
-        assert!(alpha.content.contains("project alpha"));
-        assert!(!alpha.content.contains("unscoped lighthouse"));
-        assert!(!alpha.content.contains("project beta"));
+        assert_eq!(empty_chat.content, "No matching passages found.");
+
+        let alpha = tool
+            .execute(
+                &ctx_for_chat(chat_a),
+                json!({"query": "lighthouse fact", "k": 10}),
+            )
+            .await
+            .unwrap();
+        assert!(alpha.content.contains("chat alpha"));
+        assert!(!alpha.content.contains("legacy unscoped"));
+        assert!(!alpha.content.contains("chat beta"));
     }
 
     #[tokio::test]
@@ -695,7 +705,7 @@ mod tests {
         assert!(output.content.contains("backfill"));
         assert_eq!(
             store.calls.lock().unwrap().as_slice(),
-            &[(8, SearchScope::Project(project_id))]
+            &[(8, SearchScope::Chat(test_chat_id()))]
         );
     }
 

@@ -4711,6 +4711,7 @@ async fn maximum_search_output_and_private_evidence_commit_together() {
                 document_id,
                 generation,
                 vec![VectorRecord {
+                    chat_id: Some(chat.id),
                     project_id: None,
                     source: openwave_retrieval::DocumentSource::Inline,
                     generation: Some(generation),
@@ -4981,6 +4982,164 @@ async fn project_document_routes_enforce_corpus_identity_and_ownership() {
 }
 
 #[tokio::test]
+async fn chat_document_routes_isolate_sources_search_and_delete_lifecycle() {
+    let embedder = Arc::new(HashEmbedder::default());
+    let vectors = Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS));
+    let (retrieval, _search) = build_retrieval(embedder.clone(), vectors.clone());
+    let (router, token, store, _dir) =
+        test_app_with_retrieval(Arc::new(FakeProvider), retrieval).await;
+    let bearer = format!("Bearer {token}");
+    let first = make_chat(&router, &bearer).await;
+    let second = make_chat(&router, &bearer).await;
+
+    let uri = "file:///shared-name.txt";
+    let first_ingest: serde_json::Value = json_body(
+        post_json(
+            &router,
+            &bearer,
+            &format!("/chats/{}/documents", first.id),
+            serde_json::json!({"uri": uri, "content": "first conversation source"}),
+        )
+        .await,
+    )
+    .await;
+    let second_ingest: serde_json::Value = json_body(
+        post_json(
+            &router,
+            &bearer,
+            &format!("/chats/{}/documents", second.id),
+            serde_json::json!({"uri": uri, "content": "second conversation source"}),
+        )
+        .await,
+    )
+    .await;
+    let first_id: openwave_core::DocumentId = first_ingest["document_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let second_id: openwave_core::DocumentId = second_ingest["document_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(first_id, second_id);
+    assert_eq!(
+        store.get_document(first_id).await.unwrap().unwrap().chat_id,
+        Some(first.id)
+    );
+    assert_eq!(
+        store
+            .get_document(second_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .chat_id,
+        Some(second.id)
+    );
+
+    let get = |uri: String| {
+        let router = router.clone();
+        let bearer = bearer.clone();
+        async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::AUTHORIZATION, bearer)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let first_list: serde_json::Value =
+        json_body(get(format!("/chats/{}/documents", first.id)).await).await;
+    let second_list: serde_json::Value =
+        json_body(get(format!("/chats/{}/documents", second.id)).await).await;
+    assert_eq!(first_list["documents"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        first_list["documents"][0]["document_id"],
+        first_id.to_string()
+    );
+    assert_eq!(second_list["documents"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        second_list["documents"][0]["document_id"],
+        second_id.to_string()
+    );
+    assert_eq!(
+        get(format!("/chats/{}/documents/{second_id}", first.id))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(format!("/documents/{first_id}")).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let legacy_list: serde_json::Value = json_body(get("/documents".into()).await).await;
+    assert!(legacy_list["documents"].as_array().unwrap().is_empty());
+
+    for (chat_id, text) in [
+        (first.id, "alpha-only evidence"),
+        (second.id, "beta-only evidence"),
+    ] {
+        let document_id = openwave_core::DocumentId::new();
+        vectors
+            .upsert(vec![VectorRecord {
+                chat_id: Some(chat_id),
+                project_id: None,
+                source: openwave_retrieval::DocumentSource::Inline,
+                generation: None,
+                chunk: openwave_retrieval::Chunk::new(
+                    document_id,
+                    0,
+                    openwave_retrieval::ByteSpan::new(0, text.len()),
+                    text,
+                ),
+                embedding: embedder.embed_query(text).await.unwrap(),
+            }])
+            .await
+            .unwrap();
+    }
+    let search: serde_json::Value = json_body(
+        post_json(
+            &router,
+            &bearer,
+            &format!("/chats/{}/search", first.id),
+            serde_json::json!({"query": "alpha-only evidence", "k": 10}),
+        )
+        .await,
+    )
+    .await;
+    let rendered = serde_json::to_string(&search).unwrap();
+    assert!(rendered.contains("alpha-only evidence"));
+    assert!(!rendered.contains("beta-only evidence"));
+
+    let deleted = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/chats/{}", first.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(store.get_document(first_id).await.unwrap(), None);
+    assert!(store
+        .get_pending_document_retirement(first_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store.get_document(second_id).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn failed_indexing_leaves_authoritative_source_stale_for_retry() {
     let retrieval = Arc::new(Retriever::new(
         Box::new(PlainTextParser::new()),
@@ -5102,6 +5261,7 @@ async fn explicit_retry_selects_the_failed_parse_stage() {
         .await
         .unwrap();
     let source = openwave_core::DocumentSourceUpsert {
+        chat_id: None,
         id: openwave_core::DocumentId::new(),
         project_id: None,
         source_uri: Some("file:///parse-retry.txt".into()),
@@ -5477,6 +5637,7 @@ async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
     let now = chrono::Utc::now();
     store
         .create_document(&openwave_core::DocumentRecord {
+            chat_id: None,
             id: project_document_id,
             project_id: Some(project.id),
             source_uri: Some("file:///project-secret.txt".into()),
@@ -5595,6 +5756,7 @@ async fn document_catalog_cursor_preserves_nanosecond_ordering() {
         store
             .create_document(&openwave_core::DocumentRecord {
                 id,
+                chat_id: None,
                 project_id: None,
                 source_uri: Some(format!("file:///{nanos}.txt")),
                 media_type: "text/plain".into(),
@@ -6077,6 +6239,7 @@ async fn root_search_never_returns_project_owned_vectors() {
     let vectors = Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS));
     vectors
         .upsert(vec![VectorRecord {
+            chat_id: None,
             project_id: Some(ProjectId::new()),
             source: openwave_retrieval::DocumentSource::Inline,
             generation: None,
@@ -6344,6 +6507,7 @@ async fn connect_vector_store_opens_a_durable_lance_index_under_data_dir() {
             openwave_retrieval::Chunk::new(doc, 0, openwave_retrieval::ByteSpan::new(0, 4), "note");
         store
             .upsert(vec![openwave_retrieval::VectorRecord {
+                chat_id: None,
                 project_id: None,
                 source: openwave_retrieval::DocumentSource::Inline,
                 generation: None,
@@ -7895,9 +8059,17 @@ async fn models_catalog_is_served() {
         .find(|m| m["id"] == "claude-opus-4-8")
         .expect("curated Anthropic model is present");
     assert_eq!(opus["display_name"], "Claude Opus 4.8");
-    assert!(opus["context_window"].as_u64().unwrap() > 0);
+    assert_eq!(opus["context_window"], 1_000_000);
+    assert_eq!(opus["max_output_tokens"], 128_000);
+    assert_eq!(
+        opus["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
+    assert!(opus["supports_reasoning"].as_bool().unwrap());
     assert!(opus["multimodal"].as_bool().unwrap());
-    assert!(opus["supports_reasoning_effort"].as_bool().unwrap());
+    // Capabilities describe what the current adapter implements, not only
+    // what the upstream model could support with a different request shape.
+    assert!(!opus["supports_reasoning_effort"].as_bool().unwrap());
 }
 
 #[tokio::test]

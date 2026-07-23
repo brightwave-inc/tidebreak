@@ -351,6 +351,7 @@ mod tests {
     fn source(id: DocumentId, blob: DocumentSourceBlob) -> DocumentSourceUpsert {
         DocumentSourceUpsert {
             id,
+            chat_id: None,
             project_id: None,
             source_uri: Some(format!("file:///{id}.bin")),
             media_type: "application/octet-stream".into(),

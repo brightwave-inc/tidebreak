@@ -15,7 +15,7 @@ The current foreground agent surface contains eleven tools:
 | `list_dir` | List a private-scratch directory | Server, read-only |
 | `write_file` | Atomically write private-scratch text | Server, workspace |
 | `exec` | Run a bounded command through the configured execution provider | Server, sensitive native sandbox |
-| `search` | Search locally indexed project/chat documents | Server, read-only |
+| `search` | Search sources indexed for this exact conversation | Server, read-only |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
 | `list_folder` | List one directory below an attached root | Native client continuation |
@@ -103,7 +103,7 @@ advertise every installed integration to every model call.
 
 The foreground coordinator needs tools for:
 
-- local corpus search plus document list/read;
+- conversation-scoped source search plus source list/read;
 - web search and page retrieval;
 - connected-root list/read/import and explicit export;
 - asking the user a structured question;
@@ -214,8 +214,9 @@ and unavailable/error cases resolve a bounded immutable failure receipt. The
 sandbox model loop may now emit the one fixed checkpoint, with a bounded
 argument collector and deterministic rejection of unknown, partial, or
 multiple calls. The foreground loop remains separate and does not receive this
-tool. Outbound-domain policy is the next hardening slice before broadening the
-search surface.
+tool. The concrete host transport is bound to the selected provider's exact
+HTTPS API domain and rejects scheme, authority, explicit-port, or userinfo
+deviations before credentials can leave the process.
 
 The normalized contract should cover query text, optional date/domain filters,
 bounded result count, canonical URL, title, snippet or extracted text, rank or
@@ -237,7 +238,7 @@ request and its journal event atomically, freezes a renderer-safe approval kind,
 and uses exact idempotent decisions. A reclaimed turn resumes persisted pending
 calls before requesting another model step, so restart recovery cannot silently
 skip an approval or execute a call under a newly relaxed tool policy. Search
-consent tells the user that the query and potentially matching document excerpts
+consent tells the user that the query and potentially matching source excerpts
 may leave OpenWave for the configured AI service.
 
 ## Reliability rules

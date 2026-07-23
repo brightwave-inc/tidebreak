@@ -185,6 +185,7 @@ mod tests {
     fn record(text: &str, vector: Vec<f32>) -> VectorRecord {
         let document_id = DocumentId::new();
         VectorRecord {
+            chat_id: None,
             project_id: None,
             source: crate::DocumentSource::Inline,
             generation: None,

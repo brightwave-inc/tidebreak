@@ -246,7 +246,7 @@ pub async fn resolve_provider(
     let Some(credential) = credential else {
         return Ok(None);
     };
-    let client = ReqwestHttpClient::with_timeout(Duration::from_millis(config.timeout_ms))
+    let client = ReqwestHttpClient::with_timeout(kind, Duration::from_millis(config.timeout_ms))
         .map_err(|_| ServerError::internal("web search configuration is unavailable"))?;
     let provider: Arc<dyn WebSearchProvider> = match kind {
         WebSearchProviderKind::Exa => Arc::new(

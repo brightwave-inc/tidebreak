@@ -346,198 +346,6 @@ body {
   overflow: hidden;
 }
 
-.project-navigation {
-  display: flex;
-  flex-direction: column;
-  flex: 0 0 auto;
-  min-height: 0;
-  margin-top: 0.5rem;
-  gap: 0.15rem;
-}
-
-.sidebar-section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
-.sidebar-add {
-  width: 1.6rem;
-  height: 1.6rem;
-  border: 0;
-  border-radius: 5px;
-  color: var(--muted-foreground);
-  background: transparent;
-  line-height: 1;
-}
-
-.sidebar-add:hover:not(:disabled) {
-  color: var(--ink);
-  background: var(--accent);
-}
-
-.project-list {
-  display: flex;
-  flex-direction: column;
-  max-height: min(20vh, 12rem);
-  gap: 1px;
-  overflow-y: auto;
-}
-
-.project-item {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  align-items: center;
-  gap: 0.5rem;
-  border: 0;
-  border-radius: 6px;
-  padding: 0.5rem;
-  color: var(--ink);
-  background: transparent;
-  font-size: 0.84rem;
-  font-weight: 500;
-  text-align: left;
-}
-
-.project-row {
-  display: flex;
-  flex: 0 0 auto;
-  min-width: 0;
-  align-items: center;
-  border-radius: 6px;
-}
-
-.project-row .project-item {
-  flex: 1 1 auto;
-}
-
-.project-row.is-active {
-  background: var(--accent);
-}
-
-.project-rename-action,
-.project-delete-action {
-  width: 1.8rem;
-  height: 1.65rem;
-  flex: 0 0 auto;
-  margin-right: 0.15rem;
-  border: 0;
-  border-radius: 5px;
-  color: var(--muted-foreground);
-  background: transparent;
-  line-height: 1;
-}
-
-.project-rename-action:hover:not(:disabled) {
-  color: var(--ink);
-  background: var(--bg-elevated);
-}
-
-.project-delete-action {
-  font-size: 1.1rem;
-  opacity: 0;
-}
-
-.project-row:hover .project-delete-action,
-.project-row.is-active .project-delete-action,
-.project-delete-action:focus-visible {
-  opacity: 1;
-}
-
-.project-delete-action:hover:not(:disabled) {
-  color: var(--danger);
-  background: var(--critical-background);
-}
-
-.project-rename {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 0.25rem;
-  align-items: center;
-  padding: 0.15rem 0.2rem;
-}
-
-.project-rename input {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 0.35rem 0.4rem;
-  background: var(--bg-elevated);
-  font-size: 0.8rem;
-}
-
-.project-rename button {
-  width: 1.6rem;
-  height: 1.6rem;
-  border: 0;
-  border-radius: 5px;
-  color: var(--muted-foreground);
-  background: transparent;
-}
-
-.project-rename button:hover:not(:disabled) {
-  color: var(--ink);
-  background: var(--accent);
-}
-
-.project-item:hover:not(:disabled),
-.project-item.is-active {
-  color: var(--ink);
-  background: var(--accent);
-}
-
-.project-item > span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.project-icon {
-  width: 0.75rem;
-  flex: 0 0 auto;
-  color: var(--color-brightwave);
-  text-align: center;
-  font-size: 0.58rem;
-}
-
-.project-create {
-  display: grid;
-  gap: 0.35rem;
-  padding: 0 0.25rem 0.3rem;
-}
-
-.project-create input {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.4rem 0.48rem;
-  background: var(--bg-elevated);
-  font-size: 0.8rem;
-}
-
-.project-create-actions {
-  display: flex;
-  gap: 0.35rem;
-}
-
-.project-create-actions button {
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 0.22rem 0.45rem;
-  background: var(--bg-elevated);
-  font-size: 0.72rem;
-}
-
-.project-create-actions button:first-child:not(:disabled) {
-  border-color: var(--ink);
-  color: var(--bg-elevated);
-  background: var(--ink);
-}
-
 .conversation-list {
   display: flex;
   flex-direction: column;
@@ -1433,6 +1241,13 @@ body {
   font-size: 0.84rem;
 }
 
+.message-approval .approval-error {
+  margin-top: 0.5rem;
+  color: var(--danger);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
 /* ---------- Markdown ---------- */
 
 .message-markdown {
@@ -1511,6 +1326,14 @@ body {
 .message-markdown ul,
 .message-markdown ol {
   padding-left: 1.35rem;
+}
+
+.message-markdown ul {
+  list-style: disc;
+}
+
+.message-markdown ol {
+  list-style: decimal;
 }
 
 .message-markdown li + li {

@@ -3,8 +3,9 @@
 //! This crate deliberately does not register a model tool, load credentials, or
 //! make network calls at construction time. A host explicitly resolves a
 //! provider's key from [`openwave_core::SecretProvider`], constructs an adapter,
-//! and calls [`WebSearchProvider::search`]. The same contract is therefore safe
-//! to use from a sandbox worker once that worker has an outbound-network policy.
+//! and calls [`WebSearchProvider::search`]. The concrete HTTP client binds each
+//! adapter to its provider's exact HTTPS domain before a sandbox worker can use
+//! it.
 //!
 //! The Exa and Tavily adapters use their public HTTP APIs through the small
 //! [`HttpClient`] seam; no vendor SDK is required. `ReqwestHttpClient` is opt-in

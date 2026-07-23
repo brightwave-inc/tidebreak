@@ -318,6 +318,7 @@ mod tests {
         let id = DocumentId::new();
         DocumentSourceUpsert {
             id,
+            chat_id: None,
             project_id: None,
             source_uri: Some(format!("file:///{id}.bin")),
             media_type: "application/octet-stream".into(),
