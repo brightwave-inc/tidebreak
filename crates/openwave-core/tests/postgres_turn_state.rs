@@ -1981,6 +1981,7 @@ async fn postgres_project_deletion_serializes_with_staged_source_ingestion() {
     let source = DocumentSourceUpsert {
         id: DocumentId::new(),
         project_id: Some(project.id),
+        chat_id: None,
         source_uri: Some("file:///postgres-project-race.bin".into()),
         media_type: "application/octet-stream".into(),
         title: None,

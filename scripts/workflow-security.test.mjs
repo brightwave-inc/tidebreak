@@ -64,6 +64,34 @@ test("workflow container images are pinned by digest", () => {
   assert.doesNotMatch(workflows["ci.yml"], /gitleaks\/gitleaks:latest/);
 });
 
+test("Rust CI makes PostgreSQL required without a redundant build lane", () => {
+  const ci = workflows["ci.yml"];
+  const postgres = workflowJob(ci, "postgres");
+  const testJob = workflowJob(ci, "test");
+  const aggregate = workflowJob(ci, "rust");
+
+  assert.doesNotMatch(ci, /^  build:$/m);
+  assert.match(postgres, /if:.*needs\.changes\.outputs\.rust == 'true'/);
+  assert.doesNotMatch(postgres, /github\.event_name != 'pull_request'/);
+  assert.match(postgres, /OPENWAVE_REQUIRE_POSTGRES_TEST: "true"/);
+  assert.match(aggregate, /^\s+postgres,$/m);
+  assert.match(aggregate, /test "\$POSTGRES_RESULT" = success/);
+
+  for (const job of [
+    workflowJob(ci, "lint"),
+    workflowJob(ci, "desktop"),
+    testJob,
+    postgres,
+  ]) {
+    assert.match(job, /shared-key: cargo-registry-v3/);
+    assert.match(job, /key: \$\{\{ hashFiles\('Cargo\.lock'\) \}\}/);
+    assert.match(job, /add-rust-environment-hash-key: "false"/);
+    assert.match(job, /cache-targets: false/);
+  }
+  assert.match(testJob, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
+  assert.match(testJob, /cache-on-failure: true/);
+});
+
 test("production secrets remain isolated to the release workflow", () => {
   const secretConsumers = Object.entries(workflows)
     .filter(([, source]) => source.includes("secrets."))
@@ -114,6 +142,21 @@ test("cache warming cannot access production credentials or publish", () => {
   const release = workflows["release.yml"];
   assert.doesNotMatch(release, /cache_warm_only/);
   assert.doesNotMatch(release, /^  warm-macos-cache:/m);
+
+  for (const workflow of [cache, release]) {
+    const downloadCaches = [
+      ...workflow.matchAll(
+        /- name: Cache Cargo downloads[\s\S]*?(?=\n\s+- (?:name:|uses:))/g,
+      ),
+    ].map((match) => match[0]);
+    assert.ok(downloadCaches.length > 0);
+    for (const step of downloadCaches) {
+      assert.match(step, /shared-key: macos-release-cargo-registry-v2/);
+      assert.match(step, /key: \$\{\{ hashFiles\('Cargo\.lock'\) \}\}/);
+      assert.match(step, /add-rust-environment-hash-key: "false"/);
+      assert.match(step, /cache-targets: false/);
+    }
+  }
 });
 
 test("release caches restore only unsigned compiler outputs", () => {
