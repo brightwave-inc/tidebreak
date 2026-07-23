@@ -278,11 +278,20 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
-          key: macos-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+            target/${{ matrix.target }}/release/openwave-desktop
+            target/${{ matrix.target }}/release/openwave-host-broker
+            target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
+            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
+            crates/openwave-desktop/resources/pdfium/libpdfium.dylib
+          key: macos-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
+            macos-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
             macos-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
+            macos-release-target-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
             macos-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
+            macos-release-target-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             macos-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            macos-release-target-v2-${{ matrix.arch }}-
             macos-release-target-v1-${{ matrix.arch }}-
 
       - name: Set up compiler cache
@@ -336,6 +345,11 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/openwave-desktop
+            target/${{ matrix.target }}/release/openwave-host-broker
+            target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
+            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
+            crates/openwave-desktop/resources/pdfium/libpdfium.dylib
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful unsigned compilation
@@ -398,11 +412,20 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
-          key: macos-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+            target/${{ matrix.target }}/release/openwave-desktop
+            target/${{ matrix.target }}/release/openwave-host-broker
+            target/${{ matrix.target }}/release/libopenwave_desktop_lib.*
+            crates/openwave-desktop/binaries/openwave-host-broker-${{ matrix.target }}
+            crates/openwave-desktop/resources/pdfium/libpdfium.dylib
+          key: macos-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
+            macos-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
             macos-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
+            macos-release-target-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
             macos-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
+            macos-release-target-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             macos-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            macos-release-target-v2-${{ matrix.arch }}-
             macos-release-target-v1-${{ matrix.arch }}-
 
       - name: Validate production signing configuration
