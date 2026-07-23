@@ -12,46 +12,16 @@ import {
 } from "./api";
 import { resolveServerInfo } from "./boot";
 import {
-  connectFolder,
-  disconnectFolder,
   hasNativeHost,
-  listConnectedFolders,
   resolveFolderAccessRequest,
-  type ConnectedFolder,
   type FolderAccessDecision,
 } from "./host";
 import { Logomark } from "./Logomark";
-import { Composer } from "./Composer";
-import { MessageList } from "./MessageList";
-import {
-  ArrowDown,
-  Ellipsis,
-  FolderOpen,
-  LibraryBig,
-  Monitor,
-  Moon,
-  Pencil,
-  RotateCw,
-  Settings,
-  SquarePen,
-  Sun,
-  Trash2,
-} from "lucide-react";
 import { useTheme } from "./theme";
 import { SettingsView } from "./SettingsView";
 import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
-import { SettingsError, SettingsPanel } from "./settings/primitives";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { WithTooltip } from "@/components/ui/tooltip";
 import { ChatSessionController } from "./ChatSessionController";
 import { useChatSessionStore } from "./ChatSessionStore";
-import { isNearBottom, scrollToLatest } from "./ChatScroll";
 import { DocumentsView } from "./DocumentsView";
 import { reconcilePendingApprovalCards } from "./ApprovalHistory";
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
@@ -70,7 +40,7 @@ import {
   loadCurrentTerminalTranscript,
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
-import { AgentActivityPanel, agentRunsForChat } from "./AgentActivityPanel";
+import { agentRunsForChat } from "./AgentActivityPanel";
 import {
   SandboxAgentStopFence,
   canStopSandboxAgentRun,
@@ -79,8 +49,10 @@ import {
 } from "./SandboxAgentStop";
 import { prependReplacementChat } from "./ChatDeletion";
 import { useConfirm } from "./components/ConfirmDialog";
-import { Button } from "@/components/ui/button";
 import { useDesktopUpdates } from "./updates";
+import { ChatView } from "./ChatView";
+import { FoldersPanel } from "./FoldersPanel";
+import { Sidebar } from "./Sidebar";
 
 let msgSeq = 0;
 
@@ -104,7 +76,6 @@ export default function App() {
   const [chatsError, setChatsError] = useState<string | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
   const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
@@ -153,20 +124,16 @@ export default function App() {
     "chat" | "documents" | "settings"
   >("chat");
   const [status, setStatus] = useState("starting…");
-  const [hasUnreadActivity, setHasUnreadActivity] = useState(false);
   // Owns the selected chat's event socket; chat switches dispose it eagerly
   // and the connection effect below constructs a fresh one.
   const controllerRef = useRef<ChatSessionController | null>(null);
   const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
   const chatSelectionRef = useRef(0);
   const terminalHydrationGenerationRef = useRef(0);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const followsLatestRef = useRef(true);
   const refreshFolderAccessRef = useRef<(() => void) | null>(null);
   const refreshAgentRunsRef = useRef<(() => void) | null>(null);
   const resolvingFolderCallsRef = useRef<Set<string>>(new Set());
   const decidingApprovalCallsRef = useRef<Set<string>>(new Set());
-  const visibleFolderCallIdsRef = useRef<Set<string>>(new Set());
   const cancelRequestTurnRef = useRef<string | null>(null);
   const draftRef = useRef("");
   const selectedChatIdRef = useRef<string | null>(null);
@@ -448,32 +415,6 @@ export default function App() {
       setFolderAccessRequests([]);
     };
   }, [client, chat?.id]);
-
-  useEffect(() => {
-    const scroll = scrollRef.current;
-    if (!scroll) return;
-    if (followsLatestRef.current) {
-      scrollToLatest(scroll);
-    } else {
-      setHasUnreadActivity(true);
-    }
-  }, [messages]);
-
-  useEffect(() => {
-    const next = new Set(folderAccessRequests.map((request) => request.callId));
-    const gainedRequest = [...next].some(
-      (callId) => !visibleFolderCallIdsRef.current.has(callId),
-    );
-    visibleFolderCallIdsRef.current = next;
-    if (!gainedRequest) return;
-    const scroll = scrollRef.current;
-    if (!scroll) return;
-    if (followsLatestRef.current) {
-      scrollToLatest(scroll);
-    } else {
-      setHasUnreadActivity(true);
-    }
-  }, [folderAccessRequests]);
 
   function updateSession(update: (state: ChatSessionState) => ChatSessionState) {
     useChatSessionStore.getState().update(update);
@@ -762,8 +703,6 @@ export default function App() {
     controllerRef.current?.dispose();
     controllerRef.current = null;
     useChatSessionStore.getState().reset();
-    followsLatestRef.current = true;
-    setHasUnreadActivity(false);
     setAgentRuns([]);
     setAgentRunsError(null);
     setFolderAccessRequests([]);
@@ -856,8 +795,6 @@ export default function App() {
     controllerRef.current?.dispose();
     controllerRef.current = null;
     useChatSessionStore.getState().reset();
-    followsLatestRef.current = true;
-    setHasUnreadActivity(false);
     setAgentRuns([]);
     setAgentRunsError(null);
     setFolderAccessRequests([]);
@@ -1099,192 +1036,43 @@ export default function App() {
   return (
     <div className="app-shell">
       {confirmDialog}
-      <aside className="sidebar">
-        <div className="sidebar-brand">
-          <Logomark />
-          <span>OpenWave</span>
-          <WithTooltip
-            label={`Theme: ${themeMode} — click to change`}
-            side="bottom"
-          >
-            <button
-              type="button"
-              className="theme-toggle"
-              aria-label={`Theme: ${themeMode}. Click to change.`}
-              onClick={cycleTheme}
-            >
-              {themeMode === "light" ? (
-                <Sun size={15} />
-              ) : themeMode === "dark" ? (
-                <Moon size={15} />
-              ) : (
-                <Monitor size={15} />
-              )}
-            </button>
-          </WithTooltip>
-        </div>
-
-        <button
-          type="button"
-          className="new-chat"
-          onClick={() => void onNewChat()}
-          disabled={creatingChat || deletingChatId !== null}
-        >
-          <SquarePen size={15} />
-          {creatingChat
-            ? "Starting…"
-            : deletingChatId
-              ? "Deleting…"
-              : "New chat"}
-        </button>
-
-        {hasNativeHost() && (
-          <button
-            type="button"
-            className={`sidebar-action sidebar-library${primaryView === "documents" ? " is-active" : ""}`}
-            onClick={() => {
-              setSettingsPanel(null);
-              setPrimaryView("documents");
-            }}
-          >
-            <LibraryBig size={16} />
-            Sources
-          </button>
-        )}
-
-        <div className="sidebar-section">
-          <span className="sidebar-label">Chats</span>
-          <div className="conversation-list" aria-label="Chats">
-            {visibleChats.map((item) => {
-              const chatTitle = item.title?.trim() || "New chat";
-              const isActive = primaryView === "chat" && item.id === chat.id;
-              const mutating = deletingChatId !== null || creatingChat;
-
-              if (renamingChatId === item.id) {
-                return (
-                  <div
-                    key={item.id}
-                    className="conversation-row is-renaming"
-                  >
-                    <input
-                      className="conversation-rename-input"
-                      autoFocus
-                      aria-label="Chat title"
-                      value={renameChatDraft}
-                      disabled={savingTitle}
-                      onChange={(event) =>
-                        setRenameChatDraft(event.target.value)
-                      }
-                      onBlur={() => void commitChatRename(item)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          event.currentTarget.blur();
-                        }
-                        if (event.key === "Escape") {
-                          event.preventDefault();
-                          cancelChatRename();
-                        }
-                      }}
-                    />
-                  </div>
-                );
-              }
-
-              return (
-                <div
-                  key={item.id}
-                  className={`conversation-row${isActive ? " is-active" : ""}`}
-                >
-                  <button
-                    type="button"
-                    className="conversation-item"
-                    aria-current={isActive ? "page" : undefined}
-                    disabled={mutating}
-                    onClick={() => selectChat(item)}
-                  >
-                    <span className="conversation-title">{chatTitle}</span>
-                  </button>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        type="button"
-                        className="conversation-menu"
-                        aria-label={`Actions for ${chatTitle}`}
-                        title="Chat actions"
-                        disabled={mutating}
-                      >
-                        <Ellipsis size={15} />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" side="right">
-                      <DropdownMenuItem
-                        onSelect={() => startChatRename(item)}
-                      >
-                        <Pencil />
-                        Rename
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        variant="destructive"
-                        onSelect={() => void onDeleteChat(item)}
-                      >
-                        <Trash2 />
-                        Delete
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </div>
-              );
-            })}
-          </div>
-          {chatsError && <p className="sidebar-error">{chatsError}</p>}
-        </div>
-
-        <div className="sidebar-footer">
-          {desktopUpdates.state.status === "ready" && (
-            <button
-              type="button"
-              className="sidebar-action sidebar-update"
-              onClick={() => void onRestartForUpdate()}
-            >
-              <RotateCw size={16} />
-              <span>Restart to update</span>
-              {desktopUpdates.state.version && (
-                <span className="sidebar-update-version">
-                  v{desktopUpdates.state.version}
-                </span>
-              )}
-            </button>
-          )}
-          {hasNativeHost() && (
-            <button
-              type="button"
-              className={`sidebar-action${primaryView === "chat" && settingsPanel === "folders" ? " is-active" : ""}`}
-              onClick={() => {
-                setPrimaryView("chat");
-                setSettingsPanel((panel) =>
-                  panel === "folders" ? null : "folders",
-                );
-              }}
-            >
-              <FolderOpen size={16} />
-              Folders
-            </button>
-          )}
-          <button
-            type="button"
-            className={`sidebar-action${primaryView === "settings" ? " is-active" : ""}`}
-            onClick={() => {
-              setSettingsPanel(null);
-              setPrimaryView("settings");
-            }}
-          >
-            <Settings size={16} />
-            Settings
-          </button>
-        </div>
-      </aside>
+      <Sidebar
+        chats={visibleChats}
+        activeChatId={chat.id}
+        chatsError={chatsError}
+        primaryView={primaryView}
+        foldersPanelOpen={settingsPanel === "folders"}
+        nativeHost={hasNativeHost()}
+        creatingChat={creatingChat}
+        deletingChatId={deletingChatId}
+        renamingChatId={renamingChatId}
+        renameChatDraft={renameChatDraft}
+        savingTitle={savingTitle}
+        themeMode={themeMode}
+        updateReady={desktopUpdates.state.status === "ready"}
+        updateVersion={desktopUpdates.state.version ?? null}
+        onCycleTheme={cycleTheme}
+        onNewChat={() => void onNewChat()}
+        onSelectChat={selectChat}
+        onStartRename={startChatRename}
+        onRenameDraftChange={setRenameChatDraft}
+        onCommitRename={(target) => void commitChatRename(target)}
+        onCancelRename={cancelChatRename}
+        onDeleteChat={(target) => void onDeleteChat(target)}
+        onShowDocuments={() => {
+          setSettingsPanel(null);
+          setPrimaryView("documents");
+        }}
+        onToggleFolders={() => {
+          setPrimaryView("chat");
+          setSettingsPanel((panel) => (panel === "folders" ? null : "folders"));
+        }}
+        onShowSettings={() => {
+          setSettingsPanel(null);
+          setPrimaryView("settings");
+        }}
+        onRestartForUpdate={() => void onRestartForUpdate()}
+      />
 
       <div
         className={`main${primaryView === "chat" && settingsPanel ? " with-settings" : ""}`}
@@ -1306,153 +1094,78 @@ export default function App() {
           />
         ) : (
           <>
-        <section className="chat-pane">
-          <header className="conversation-header">
-            <div className="conversation-title-row">
-              <h1>{chat.title?.trim() || "New chat"}</h1>
-            </div>
-            <div className="conversation-header-actions">
-              <div className="mobile-settings-actions">
-                {hasNativeHost() && (
-                  <button
-                    type="button"
-                    className="btn"
-                    aria-label="Sources"
-                    onClick={() => {
-                      setSettingsPanel(null);
-                      setPrimaryView("documents");
-                    }}
-                  >
-                    <LibraryBig size={14} />
-                  </button>
-                )}
-                {hasNativeHost() && (
-                  <button
-                    type="button"
-                    className={`btn${settingsPanel === "folders" ? " is-active" : ""}`}
-                    aria-label="Folders"
-                    onClick={() =>
-                      setSettingsPanel((panel) =>
-                        panel === "folders" ? null : "folders",
-                      )
-                    }
-                  >
-                    <FolderOpen size={14} />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn"
-                  aria-label="Settings"
-                  onClick={() => {
-                    setSettingsPanel(null);
-                    setPrimaryView("settings");
-                  }}
-                >
-                  <Settings size={14} />
-                </button>
-              </div>
-              <span className="status" title={status}>
-                {status}
-              </span>
-            </div>
-          </header>
-
-          <AgentActivityPanel
-            runs={visibleAgentRuns}
-            loading={agentRunsChatId === chat.id ? agentRunsLoading : true}
-            error={agentRunsChatId === chat.id ? agentRunsError : null}
-            onRetry={() => refreshAgentRunsRef.current?.()}
-            stoppingRunIds={visibleStoppingSandboxRunIds}
-            stopErrorRunIds={visibleSandboxStopErrorRunIds}
-            onStop={(runId) => void onStopSandboxAgentRun(runId)}
-          />
-
-          <div className="message-view">
-            <MessageList
-              key={chat.id}
-              messages={messages}
-              folderAccessRequests={folderAccessRequests}
-              nativeHost={hasNativeHost()}
-              nativeBusy={resolvingFolderCalls.size > 0}
-              resolvingFolderCalls={resolvingFolderCalls}
-              folderAccessErrors={folderAccessErrors}
-              decidingApprovalCalls={decidingApprovalCalls}
-              approvalErrors={approvalErrors}
-              busy={busy}
-              scrollRef={scrollRef}
-              onScroll={(event) => {
-                const followsLatest = isNearBottom(event.currentTarget);
-                followsLatestRef.current = followsLatest;
-                if (followsLatest) setHasUnreadActivity(false);
-              }}
-              onApproval={(callId, decision, remember) =>
-                void onApproval(callId, decision, remember)
-              }
-              onFolderAccessDecision={(callId, decision) =>
-                void onFolderAccessDecision(callId, decision)
-              }
-              onFolderAccessCancel={(callId, turnId) =>
-                void onFolderAccessCancel(callId, turnId)
-              }
-              onSelectPrompt={setComposerDraft}
-              hydrated={hydratedChatId === chat.id}
-            />
-            {hasUnreadActivity && (
-              <button
-                type="button"
-                className="new-activity"
-                onClick={() => {
-                  followsLatestRef.current = true;
-                  setHasUnreadActivity(false);
-                  if (scrollRef.current) scrollToLatest(scrollRef.current);
-                }}
-              >
-                New activity
-                <ArrowDown size={13} />
-              </button>
-            )}
-          </div>
-
-          <Composer
-            activeTurnId={activeTurnId}
-            busy={busy}
-            cancelError={cancelError}
-            cancelPending={
-              activeTurnId !== null && cancelPendingTurnId === activeTurnId
-            }
-            disabled={deletingChatId !== null}
-            draft={draft}
-            modelMenu={
-              <>
-                <ModelMenu
-                  models={models}
-                  value={chat.model}
+        <ChatView
+          key={chat.id}
+          chat={chat}
+          status={status}
+          hydrated={hydratedChatId === chat.id}
+          nativeHost={hasNativeHost()}
+          foldersPanelOpen={settingsPanel === "folders"}
+          deletingChat={deletingChatId !== null}
+          agentRuns={visibleAgentRuns}
+          agentRunsLoading={
+            agentRunsChatId === chat.id ? agentRunsLoading : true
+          }
+          agentRunsError={agentRunsChatId === chat.id ? agentRunsError : null}
+          stoppingRunIds={visibleStoppingSandboxRunIds}
+          stopErrorRunIds={visibleSandboxStopErrorRunIds}
+          onRetryAgentRuns={() => refreshAgentRunsRef.current?.()}
+          onStopSandboxRun={(runId) => void onStopSandboxAgentRun(runId)}
+          folderAccessRequests={folderAccessRequests}
+          resolvingFolderCalls={resolvingFolderCalls}
+          folderAccessErrors={folderAccessErrors}
+          decidingApprovalCalls={decidingApprovalCalls}
+          approvalErrors={approvalErrors}
+          onApproval={(callId, decision, remember) =>
+            void onApproval(callId, decision, remember)
+          }
+          onFolderAccessDecision={(callId, decision) =>
+            void onFolderAccessDecision(callId, decision)
+          }
+          onFolderAccessCancel={(callId, turnId) =>
+            void onFolderAccessCancel(callId, turnId)
+          }
+          draft={draft}
+          composerModelMenu={
+            <>
+              <ModelMenu
+                models={models}
+                value={chat.model}
+                disabled={deletingChatId !== null}
+                onChange={onModelChange}
+              />
+              {models.find((model) => model.id === chat.model)
+                ?.supports_reasoning_effort && (
+                <ReasoningEffortMenu
+                  value={chat.reasoning_effort}
                   disabled={deletingChatId !== null}
-                  onChange={onModelChange}
+                  onChange={onReasoningEffortChange}
                 />
-                {models.find((model) => model.id === chat.model)
-                  ?.supports_reasoning_effort && (
-                  <ReasoningEffortMenu
-                    value={chat.reasoning_effort}
-                    disabled={deletingChatId !== null}
-                    onChange={onReasoningEffortChange}
-                  />
-                )}
-              </>
-            }
-            onDraftChange={onComposerDraftChange}
-            onSend={onSend}
-            onSteer={onSteerActiveTurn}
-            onStop={onCancelActiveTurn}
-            resetKey={chat?.id ?? "no-chat"}
-            steerError={steerError}
-            steerPending={
-              activeTurnId !== null && steerPendingTurnId === activeTurnId
-            }
-            steerStatus={steerStatus}
-          />
-        </section>
+              )}
+            </>
+          }
+          cancelError={cancelError}
+          cancelPendingTurnId={cancelPendingTurnId}
+          steerError={steerError}
+          steerStatus={steerStatus}
+          steerPendingTurnId={steerPendingTurnId}
+          onDraftChange={onComposerDraftChange}
+          onSelectPrompt={setComposerDraft}
+          onSend={onSend}
+          onSteer={onSteerActiveTurn}
+          onStop={onCancelActiveTurn}
+          onShowDocuments={() => {
+            setSettingsPanel(null);
+            setPrimaryView("documents");
+          }}
+          onToggleFolders={() =>
+            setSettingsPanel((panel) => (panel === "folders" ? null : "folders"))
+          }
+          onShowSettings={() => {
+            setSettingsPanel(null);
+            setPrimaryView("settings");
+          }}
+        />
 
         {settingsPanel === "folders" && (
           <aside className="settings">
@@ -1468,97 +1181,4 @@ export default function App() {
 
 function withoutConnectionState(status: string): string {
   return status.replace(/ · (?:live|reconnecting)$/, "");
-}
-
-function FoldersPanel({ chat }: { chat: Chat }) {
-  const [folders, setFolders] = useState<ConnectedFolder[]>([]);
-  const [working, setWorking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const scopeLabel = "chat";
-
-  async function refresh() {
-    setError(null);
-    try {
-      setFolders(await listConnectedFolders(chat));
-    } catch (err) {
-      setError(String(err));
-    }
-  }
-
-  useEffect(() => {
-    void refresh();
-  }, [chat.id, chat.project_id]);
-
-  async function addFolder() {
-    setWorking(true);
-    setError(null);
-    try {
-      const connected = await connectFolder(chat);
-      if (connected) await refresh();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setWorking(false);
-    }
-  }
-
-  async function removeFolder(rootId: string) {
-    setWorking(true);
-    setError(null);
-    try {
-      await disconnectFolder(chat, rootId);
-      await refresh();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setWorking(false);
-    }
-  }
-
-  return (
-    <SettingsPanel
-      title="Connected folders"
-      description={`OpenWave can read only folders you choose for this ${scopeLabel}. Folder locations stay with the native host.`}
-    >
-      <Button
-        type="button"
-        variant="outline"
-        className="self-start"
-        disabled={working}
-        onClick={() => void addFolder()}
-      >
-        Choose folder…
-      </Button>
-      <div className="flex flex-col gap-2">
-        {folders.length === 0 && !error && (
-          <p className="text-sm text-muted-foreground">
-            No folders connected to this {scopeLabel}.
-          </p>
-        )}
-        {folders.map((folder) => (
-          <div
-            className="flex items-center justify-between gap-3 rounded-lg border border-border p-3"
-            key={folder.rootId}
-          >
-            <div className="min-w-0">
-              <strong className="block truncate text-sm font-medium">
-                {folder.displayName}
-              </strong>
-              <span className="text-xs text-muted-foreground">read access</span>
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={working}
-              onClick={() => void removeFolder(folder.rootId)}
-            >
-              Disconnect
-            </Button>
-          </div>
-        ))}
-      </div>
-      {error && <SettingsError>{error}</SettingsError>}
-    </SettingsPanel>
-  );
 }
