@@ -215,8 +215,7 @@ jobs:
             protobuf-compiler
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: cargo-registry-v3
-          key: ${{ hashFiles('Cargo.lock') }}
+          shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
           # This cache contains downloads only. Compiler flags must not split it
           # into separate mold/non-mold caches; Cargo.lock provides invalidation.
@@ -267,8 +266,7 @@ jobs:
             protobuf-compiler
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: cargo-registry-v3
-          key: ${{ hashFiles('Cargo.lock') }}
+          shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
           add-rust-environment-hash-key: "false"
           cache-bin: false
@@ -308,8 +306,7 @@ jobs:
             protobuf-compiler
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: cargo-registry-v3
-          key: ${{ hashFiles('Cargo.lock') }}
+          shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
           add-rust-environment-hash-key: "false"
           cache-bin: false
@@ -363,8 +360,7 @@ jobs:
           version: v0.16.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: cargo-registry-v3
-          key: ${{ hashFiles('Cargo.lock') }}
+          shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
           add-rust-environment-hash-key: "false"
           cache-bin: false
