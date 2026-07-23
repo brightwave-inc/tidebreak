@@ -7,13 +7,14 @@ identity.
 
 ## What exists today
 
-The current foreground agent surface contains ten tools:
+The current foreground agent surface contains eleven tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
 | `read_file` | Read UTF-8 text from private per-chat scratch | Server, read-only |
 | `list_dir` | List a private-scratch directory | Server, read-only |
 | `write_file` | Atomically write private-scratch text | Server, workspace |
+| `exec` | Run a bounded command through the configured execution provider | Server, sensitive native sandbox |
 | `search` | Search locally indexed project/chat documents | Server, read-only |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
@@ -54,6 +55,26 @@ tools/
 Provider-backed tools do not belong in core. Retrieval, web search, connectors,
 and sandbox execution should each supply tools from their owning crate behind
 the common `Tool` interface.
+
+## Code execution
+
+Command execution lives in `openwave-code-execution`, not in core. Its `exec`
+tool accepts one executable, direct argument vector, and private-scratch-relative
+working directory. The host—not the model—selects the provider and timeout
+through `GET`/`PUT /code-execution`.
+
+The provider contract includes both the canonical tool-call ID and an opaque
+chat workspace ID. The former is an idempotency key; the latter lets the local
+adapter address private chat scratch and gives future E2B-style adapters a
+stable remote-session key. Results normalize exit status, bounded stdout/stderr,
+timeout, truncation, provider kind, and duration.
+
+The first provider is local and macOS-native. Seatbelt denies network and
+outside-workspace writes, the child inherits no ambient environment or stdin,
+and time, output, file size, and open files are bounded. A private durable
+running/terminal receipt prevents an ambiguous command from being silently
+replayed. Unsupported hosts fail closed with no unconfined fallback. See
+[Code execution](code-execution.md).
 
 External MCP servers follow the same rule through `openwave-mcp`. A connected
 stdio server completes MCP initialization and paginated `tools/list` discovery

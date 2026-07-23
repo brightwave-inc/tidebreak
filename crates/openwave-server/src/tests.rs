@@ -6108,9 +6108,25 @@ async fn root_search_never_returns_project_owned_vectors() {
 
 #[test]
 fn agent_deps_registers_server_tools_and_closed_foreground_orchestration() {
+    struct UnavailableCodeExecution;
+
+    #[async_trait::async_trait]
+    impl openwave_code_execution::CodeExecutionProvider for UnavailableCodeExecution {
+        async fn execute(
+            &self,
+            _request: openwave_code_execution::CodeExecutionRequest,
+        ) -> std::result::Result<
+            openwave_code_execution::CodeExecutionResponse,
+            openwave_code_execution::CodeExecutionError,
+        > {
+            Err(openwave_code_execution::CodeExecutionError::NotConfigured)
+        }
+    }
+
     let (_retrieval, tools, _config) = agent_deps(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+        Arc::new(UnavailableCodeExecution),
     );
     let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
     assert!(
@@ -6120,6 +6136,12 @@ fn agent_deps_registers_server_tools_and_closed_foreground_orchestration() {
     assert!(
         names.iter().any(|n| n == "read_file"),
         "file tools still present"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|n| n == openwave_code_execution::EXEC_TOOL_NAME),
+        "code execution tool registered"
     );
     assert!([
         openwave_core::SPAWN_SANDBOX_AGENT_TOOL,
@@ -8888,6 +8910,92 @@ async fn web_search_credential_write_validates_fixed_provider_and_key_bounds() {
         .unwrap();
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
     assert!(secrets.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn code_execution_config_route_is_authenticated_and_preserves_explicit_disable() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let unauthenticated = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/code-execution")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let initial = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/code-execution")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(initial.status(), StatusCode::OK);
+    let initial: serde_json::Value = json_body(initial).await;
+    assert_eq!(initial["provider"], "local");
+    assert_eq!(
+        initial["timeout_ms"],
+        crate::code_execution::DEFAULT_TIMEOUT_MS
+    );
+    assert!(initial["available"].is_boolean());
+
+    let disabled = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/code-execution")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "provider": null,
+                        "timeout_ms": crate::code_execution::MIN_TIMEOUT_MS,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disabled.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<serde_json::Value>(disabled).await,
+        serde_json::json!({
+            "timeout_ms": crate::code_execution::MIN_TIMEOUT_MS,
+            "available": false,
+        })
+    );
+
+    let invalid = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/code-execution")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "provider": "e2b",
+                        "timeout_ms": crate::code_execution::DEFAULT_TIMEOUT_MS,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

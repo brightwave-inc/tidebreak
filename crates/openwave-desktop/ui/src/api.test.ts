@@ -357,6 +357,39 @@ describe("project-scoped conversation API", () => {
   });
 });
 
+describe("code-execution configuration API", () => {
+  it("updates only the fixed provider selection and bounded timeout", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          provider: "local",
+          timeout_ms: 30_000,
+          available: true,
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await client.putCodeExecutionConfig({
+      provider: "local",
+      timeout_ms: 30_000,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1/code-execution",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          provider: "local",
+          timeout_ms: 30_000,
+        }),
+      }),
+    );
+  });
+});
+
 describe("sandbox agent cancellation", () => {
   it("accepts only the closed cancellation projection", () => {
     expect(

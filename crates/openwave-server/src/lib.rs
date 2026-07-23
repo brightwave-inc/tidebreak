@@ -17,6 +17,8 @@ mod auth;
 mod blob_orphan_auditor;
 mod blob_retirement_worker;
 mod bus;
+/// Host-owned code-execution provider selection and policy.
+pub mod code_execution;
 mod desktop_schema;
 mod document_auditor;
 mod document_stage;
@@ -48,6 +50,7 @@ use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
+use openwave_code_execution::ExecTool;
 #[cfg(test)]
 use openwave_core::DbStore;
 use openwave_core::{
@@ -70,6 +73,7 @@ pub use state::AppState;
 
 const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
+const MAX_CODE_EXECUTION_CONFIG_BODY_BYTES: usize = 1_024;
 
 /// Build the router: unauthenticated health check plus the token-guarded API.
 pub fn app(state: AppState) -> Router {
@@ -198,6 +202,12 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/web-search",
             get(routes::get_web_search_config).put(routes::put_web_search_config),
+        )
+        .route(
+            "/code-execution",
+            get(routes::get_code_execution_config)
+                .put(routes::put_code_execution_config)
+                .layer(DefaultBodyLimit::max(MAX_CODE_EXECUTION_CONFIG_BODY_BYTES)),
         )
         .route(
             "/web-search/credentials",
@@ -443,7 +453,11 @@ async fn bind_inner(
     let resolver = Arc::new(KeyedResolver::new(store.clone(), secrets.clone()));
     let embedder = resolve_embedder(&*store, &*secrets).await;
     let vector_store = connect_vector_store(&config, embedder.dimensions()).await?;
-    let (retrieval, mut tools, agent_config) = agent_deps(embedder, vector_store);
+    let code_execution = Arc::new(code_execution::ConfiguredCodeExecutionProvider::new(
+        store.clone(),
+        config.data_dir.join("scratch"),
+    ));
+    let (retrieval, mut tools, agent_config) = agent_deps(embedder, vector_store, code_execution);
     mcp_servers.mount(&mut tools).await?;
     let tools = Arc::new(tools);
     let state = match client_executor_id {
@@ -577,12 +591,14 @@ async fn bind_inner(
 fn agent_deps(
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn VectorStore>,
+    code_execution: Arc<dyn openwave_code_execution::CodeExecutionProvider>,
 ) -> (Arc<Retriever>, ToolRegistry, AgentConfig) {
     let (retrieval, search) = build_retrieval(embedder, store);
     let mut tools = ToolRegistry::new()
         .with(Box::new(ReadFile))
         .with(Box::new(ListDir))
         .with(Box::new(WriteFile))
+        .with(Box::new(ExecTool::new(code_execution)))
         .with(search);
     tools.register_validated_client(
         request_folder_access_tool_spec(),

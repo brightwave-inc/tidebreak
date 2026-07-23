@@ -158,6 +158,7 @@ foreground/background execution model is described in
 | --- | --- |
 | [`openwave-core`](crates/openwave-core) | agent loop, tools, event stream, storage traits |
 | [`openwave-router`](crates/openwave-router) | Anthropic and OpenAI-compatible providers + model routing |
+| [`openwave-code-execution`](crates/openwave-code-execution) | provider-neutral command execution + native local sandbox |
 | [`openwave-server`](crates/openwave-server) | authenticated local HTTP/WebSocket API + durable workers |
 | [`openwave-connectors`](crates/openwave-connectors) | OAuth + source connectors |
 | [`openwave-retrieval`](crates/openwave-retrieval) | parsing, embeddings, hybrid search, citations |
