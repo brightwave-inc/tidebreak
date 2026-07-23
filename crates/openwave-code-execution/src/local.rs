@@ -168,25 +168,37 @@ enum ExecutionReceipt {
 }
 
 fn begin_execution(path: &Path, fingerprint: &str) -> Result<BeginExecution, CodeExecutionError> {
+    let receipt = ExecutionReceipt::Running {
+        fingerprint: fingerprint.into(),
+    };
+    let bytes = serde_json::to_vec(&receipt)
+        .map_err(|_| CodeExecutionError::Sandbox("could not encode receipt".into()))?;
+    begin_execution_with_persistence(path, fingerprint, |file| {
+        file.write_all(&bytes).and_then(|()| file.sync_all())
+    })
+}
+
+fn begin_execution_with_persistence(
+    path: &Path,
+    fingerprint: &str,
+    persist: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> Result<BeginExecution, CodeExecutionError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CodeExecutionError::Sandbox("execution receipt has no parent".into()))?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     match options.open(path) {
         Ok(mut file) => {
-            let receipt = ExecutionReceipt::Running {
-                fingerprint: fingerprint.into(),
-            };
-            let bytes = serde_json::to_vec(&receipt)
-                .map_err(|_| CodeExecutionError::Sandbox("could not encode receipt".into()))?;
-            file.write_all(&bytes)
-                .and_then(|()| file.sync_all())
-                .map_err(|_| CodeExecutionError::Sandbox("could not persist receipt".into()))?;
-            let parent = path.parent().ok_or_else(|| {
-                CodeExecutionError::Sandbox("execution receipt has no parent".into())
-            })?;
-            sync_dir(parent)
-                .map_err(|_| CodeExecutionError::Sandbox("could not persist receipt".into()))?;
+            if persist(&mut file).and_then(|()| sync_dir(parent)).is_err() {
+                drop(file);
+                discard_unstarted_receipt(path, parent)?;
+                return Err(CodeExecutionError::Sandbox(
+                    "could not persist receipt".into(),
+                ));
+            }
             Ok(BeginExecution::Started)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -218,6 +230,21 @@ fn begin_execution(path: &Path, fingerprint: &str) -> Result<BeginExecution, Cod
             "could not create execution receipt".into(),
         )),
     }
+}
+
+fn discard_unstarted_receipt(path: &Path, parent: &Path) -> Result<(), CodeExecutionError> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(CodeExecutionError::Sandbox(
+                "could not clean up incomplete execution receipt".into(),
+            ));
+        }
+    }
+    sync_dir(parent).map_err(|_| {
+        CodeExecutionError::Sandbox("could not clean up incomplete execution receipt".into())
+    })
 }
 
 fn ensure_same_fingerprint(existing: &str, expected: &str) -> Result<(), CodeExecutionError> {
@@ -652,11 +679,13 @@ fn escape_sbpl(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use crate::{ExecutionId, ExecutionWorkspaceId};
 
+    #[cfg(target_os = "macos")]
     fn request(workspace: &str, execution: &str, script: &str) -> CodeExecutionRequest {
         CodeExecutionRequest::new(
             ExecutionId::parse(execution).unwrap(),
@@ -668,6 +697,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(target_os = "macos")]
     fn fixture(timeout: Duration) -> (tempfile::TempDir, LocalExecutionProvider, String) {
         let root = tempfile::tempdir().unwrap();
         let workspace = "chat-1".to_string();
@@ -747,6 +777,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(conflict, CodeExecutionError::IdentityConflict));
+    }
+
+    #[test]
+    fn failed_begin_persistence_releases_the_execution_id_for_retry() {
+        let receipts = tempfile::tempdir().unwrap();
+        let path = receipts.path().join("call-retry.json");
+        let error = begin_execution_with_persistence(&path, "fingerprint", |file| {
+            file.write_all(b"{")?;
+            Err(std::io::Error::other("injected persistence failure"))
+        });
+        let error = match error {
+            Err(error) => error,
+            Ok(_) => panic!("injected persistence failure unexpectedly succeeded"),
+        };
+
+        assert!(matches!(error, CodeExecutionError::Sandbox(_)));
+        assert!(
+            !path.exists(),
+            "an unstarted partial claim must not block retries"
+        );
+        assert!(matches!(
+            begin_execution(&path, "fingerprint").unwrap(),
+            BeginExecution::Started
+        ));
     }
 
     #[cfg(target_os = "macos")]
