@@ -19,6 +19,17 @@ const macosResourceSigner = readFileSync(
   "utf8",
 );
 
+function workflowJob(source, name) {
+  const marker = `  ${name}:\n`;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `missing workflow job: ${name}`);
+  const remainder = source.slice(start + marker.length);
+  const next = remainder.search(/^  [a-zA-Z0-9_-]+:\n/m);
+  const end =
+    next === -1 ? source.length : start + marker.length + next;
+  return source.slice(start, end);
+}
+
 test("third-party workflow actions use immutable commit SHAs", () => {
   for (const [name, source] of Object.entries(workflows)) {
     for (const match of source.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)/gm)) {
@@ -108,7 +119,15 @@ test("cache warming cannot access production credentials or publish", () => {
 test("release caches restore only unsigned compiler outputs", () => {
   const release = workflows["release.yml"];
   const cache = workflows["cache-macos.yml"];
-  const releaseBuildCache = release.match(
+  const prepareJob = workflowJob(release, "prepare_macos");
+  const signedBuildJob = workflowJob(release, "build_macos");
+  const releasePrepareCache = prepareJob.match(
+    /- name: Restore unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  const releasePrepareCacheSave = prepareJob.match(
+    /- name: Save release-specific unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  const releaseBuildCache = signedBuildJob.match(
     /- name: Restore unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
   )?.[0];
   const warmBuildCache = cache.match(
@@ -117,19 +136,39 @@ test("release caches restore only unsigned compiler outputs", () => {
   const warmBuildCacheSave = cache.match(
     /- name: Save unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
   )?.[0];
+  assert.ok(releasePrepareCache);
+  assert.ok(releasePrepareCacheSave);
   assert.ok(releaseBuildCache);
   assert.ok(warmBuildCache);
   assert.ok(warmBuildCacheSave);
 
-  assert.match(release, /SCCACHE_GHA_ENABLED: "true"/);
-  assert.match(release, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
-  assert.match(release, /cache-targets: false/);
-  assert.match(releaseBuildCache, /actions\/cache\/restore@[0-9a-f]{40}/);
-  assert.doesNotMatch(release, /actions\/cache\/save/);
-  assert.equal(release.match(/actions\/cache\//g)?.length, 1);
+  assert.match(prepareJob, /SCCACHE_GHA_ENABLED: "true"/);
+  assert.match(prepareJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
+  assert.match(prepareJob, /cache-targets: false/);
+  assert.match(prepareJob, /--no-bundle --ci/);
+  assert.match(prepareJob, /continue-on-error: true/);
+  assert.match(releasePrepareCache, /actions\/cache\/restore@[0-9a-f]{40}/);
+  assert.match(releasePrepareCacheSave, /actions\/cache\/save@[0-9a-f]{40}/);
+  assert.doesNotMatch(prepareJob, /^    environment:/m);
+  assert.doesNotMatch(prepareJob, /secrets\./);
+  assert.doesNotMatch(
+    prepareJob,
+    /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_|actions\/upload-artifact/,
+  );
   assert.ok(
-    release.indexOf("Restore unsigned Rust build cache") <
-      release.indexOf("Validate production signing configuration"),
+    prepareJob.indexOf("Save release-specific unsigned Rust build cache") <
+      prepareJob.indexOf("Require a successful unsigned compilation"),
+    "release compiler outputs must be saved before a failed compile is reported",
+  );
+
+  assert.match(signedBuildJob, /SCCACHE_GHA_ENABLED: "true"/);
+  assert.match(signedBuildJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
+  assert.match(signedBuildJob, /cache-targets: false/);
+  assert.match(releaseBuildCache, /actions\/cache\/restore@[0-9a-f]{40}/);
+  assert.doesNotMatch(signedBuildJob, /actions\/cache\/save/);
+  assert.ok(
+    signedBuildJob.indexOf("Restore unsigned Rust build cache") <
+      signedBuildJob.indexOf("Validate production signing configuration"),
     "the build cache must be restored before production secrets are loaded",
   );
 
@@ -145,6 +184,8 @@ test("release caches restore only unsigned compiler outputs", () => {
   );
 
   for (const cacheStep of [
+    releasePrepareCache,
+    releasePrepareCacheSave,
     releaseBuildCache,
     warmBuildCache,
     warmBuildCacheSave,
@@ -153,6 +194,39 @@ test("release caches restore only unsigned compiler outputs", () => {
     assert.match(cacheStep, /target\/\$\{\{ matrix\.target \}\}\/release\/deps/);
     assert.doesNotMatch(cacheStep, /bundle|\.app|dmg|signature|keychain/i);
   }
+});
+
+test("an existing immutable release resumes without rebuilding or overwriting", () => {
+  const release = workflows["release.yml"];
+  const inspectJob = workflowJob(release, "inspect_hosted");
+  const prepareJob = workflowJob(release, "prepare_macos");
+  const signedBuildJob = workflowJob(release, "build_macos");
+  const publishJob = workflowJob(release, "publish");
+
+  assert.match(inspectJob, /id-token: write/);
+  assert.match(inspectJob, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(inspectJob, /prepare-published-release\.mjs/);
+  assert.match(inspectJob, /Validated the complete immutable release/);
+  assert.match(prepareJob, /needs\.inspect_hosted\.outputs\.exists != 'true'/);
+  assert.match(
+    signedBuildJob,
+    /needs\.inspect_hosted\.outputs\.exists != 'true'/,
+  );
+  assert.match(
+    publishJob,
+    /needs\.inspect_hosted\.outputs\.exists == 'true'/,
+  );
+  assert.match(publishJob, /Resume from the hosted immutable release/);
+  assert.match(publishJob, /ref: \$\{\{ github\.sha \}\}/);
+
+  const immutableUpload = publishJob.match(
+    /- name: Upload immutable release files[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(immutableUpload);
+  assert.match(
+    immutableUpload,
+    /if: \$\{\{ needs\.inspect_hosted\.outputs\.exists != 'true' \}\}/,
+  );
 });
 
 test("the updater private key is isolated from compilation", () => {
