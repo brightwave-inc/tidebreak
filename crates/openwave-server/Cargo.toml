@@ -48,6 +48,10 @@ unicode-general-category = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
 cap-std = { workspace = true }
+# Image header inspection only: format sniffing from magic bytes and reading
+# dimensions without decoding pixels. Default features are off so the lean build
+# pulls just the four codecs OpenWave's allowlist accepts.
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }

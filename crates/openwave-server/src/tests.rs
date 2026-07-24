@@ -33,6 +33,7 @@ use tower::ServiceExt;
 
 use crate::event_projection::{RendererAgentEvent, RendererSequencedEvent};
 
+mod image_attachment;
 mod root_attachment;
 
 #[test]
@@ -1208,18 +1209,24 @@ impl Store for PauseTerminalStore {
     async fn list_turn_runs(&self, chat_id: ChatId) -> Result<Vec<openwave_core::TurnRun>> {
         self.inner.list_turn_runs(chat_id).await
     }
-    async fn accept_turn(
+    // Hooked here rather than on `accept_turn`, because the trait's plain
+    // `accept_turn` delegates to this one — overriding only the former would
+    // leave a turn carrying attachments bypassing the pause entirely.
+    async fn accept_turn_with_attachments(
         &self,
         id: TurnId,
         chat_id: ChatId,
         model: &str,
         content: &str,
+        images: &[openwave_core::ImageRef],
     ) -> Result<openwave_core::AcceptTurnOutcome> {
         if self.pause_accept.swap(false, Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.notified().await;
         }
-        self.inner.accept_turn(id, chat_id, model, content).await
+        self.inner
+            .accept_turn_with_attachments(id, chat_id, model, content, images)
+            .await
     }
     async fn accept_turn_steer(
         &self,

@@ -44,7 +44,7 @@ use crate::context;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
-use crate::image::ImageRef;
+use crate::image::{ImageAttachments, ImageData, ImageRef};
 use crate::model::{
     Chat, Message, MessageAttachment, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution,
     ToolCallStatus, TurnRunStatus,
@@ -56,7 +56,7 @@ use crate::provider::{
 use crate::steer::SteerInbox;
 use crate::storage::{
     AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, AppendClaimedMessageOutcome,
-    ApplyTurnSteerOutcome, JournaledTurnSteerOutcome, ResolveToolCallOutcome, Store,
+    ApplyTurnSteerOutcome, BlobStore, JournaledTurnSteerOutcome, ResolveToolCallOutcome, Store,
     TurnLeaseFence,
 };
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
@@ -771,6 +771,7 @@ pub struct Agent {
     provider: Arc<dyn ModelProvider>,
     tools: Arc<ToolRegistry>,
     store: Arc<dyn Store>,
+    blobs: Option<Arc<dyn BlobStore>>,
     config: AgentConfig,
     approvals: Arc<dyn ApprovalGate>,
     standing_grants: Arc<StandingGrants>,
@@ -824,6 +825,7 @@ impl Agent {
             provider,
             tools,
             store,
+            blobs: None,
             config,
             approvals: Arc::new(RefuseGate),
             standing_grants: Arc::new(StandingGrants::new()),
@@ -833,6 +835,18 @@ impl Agent {
             agent_orchestration_enabled: false,
             continuation_instruction: None,
         }
+    }
+
+    /// Hydrate image attachments for outbound requests from `blobs`.
+    ///
+    /// Without a byte source an agent cannot honour a transcript that carries
+    /// image blocks, so it evicts them to text stand-ins rather than handing an
+    /// adapter a block it must refuse. Wire this wherever the store can return
+    /// messages with attachments.
+    #[must_use]
+    pub fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+        self.blobs = Some(blobs);
+        self
     }
 
     /// Use `gate` for Sensitive-tool decisions (park-and-resume on the server).
@@ -1060,7 +1074,10 @@ impl Agent {
             // Fit the transcript to the context window, retrying with tighter
             // budgets on prompt-too-long errors from the provider.
             let mut stream = loop {
-                let (fitted, reduced) = self.fit_transcript(&transcript, reduction_level);
+                let (mut fitted, reduced) = self.fit_transcript(&transcript, reduction_level);
+                // Hydration can evict an image that no longer fits the outbound
+                // bound, so the token estimate is taken after it, not before.
+                let images = self.hydrate_images(&mut fitted).await?;
                 let fitted_tokens = context::estimate_transcript_tokens(&fitted);
                 let request = ChatRequest {
                     provider: self.config.provider.clone(),
@@ -1074,10 +1091,7 @@ impl Agent {
                     max_tokens: self.config.max_tokens,
                     temperature: self.config.temperature,
                     reasoning_effort: self.config.reasoning_effort,
-                    // Empty until message attachments are persisted and the
-                    // transcript can carry image blocks; hydration from the
-                    // blob store hangs here.
-                    images: crate::image::ImageAttachments::new(),
+                    images,
                 };
 
                 progress.model_steps = step + 1;
@@ -2569,6 +2583,69 @@ impl Agent {
         );
         let floor = context::content_floor_for_level(reduction_level);
         context::fit_to_budget(transcript, budget, floor)
+    }
+
+    /// Load the pixels for the image blocks left in `messages`.
+    ///
+    /// Blocks and bytes are deliberately separate: the transcript carries
+    /// identity, and this is the one place bytes join a request. Two bounds
+    /// apply, both newest-first, because a long conversation would otherwise
+    /// re-upload every image it has ever accumulated on every turn: at most
+    /// [`context::MAX_HYDRATED_IMAGES`] attachments and at most
+    /// [`context::MAX_HYDRATED_IMAGE_BYTES`] of pixels.
+    ///
+    /// Anything not hydrated — over a bound, or whose bytes are simply gone —
+    /// is rewritten as a text stand-in in `messages` before the request is
+    /// built. That keeps the invariant adapters rely on: a surviving
+    /// [`ContentBlock::Image`] always has bytes, so an adapter that finds none
+    /// is looking at a real fault rather than an intended drop.
+    async fn hydrate_images(&self, messages: &mut [ChatMessage]) -> Result<ImageAttachments> {
+        let carries_image = messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+        });
+        if !carries_image {
+            return Ok(ImageAttachments::new());
+        }
+        let Some(blobs) = self.blobs.as_ref() else {
+            context::evict_all_images(messages);
+            return Ok(ImageAttachments::new());
+        };
+        context::evict_images_beyond(messages, context::MAX_HYDRATED_IMAGES);
+
+        let mut attachments = ImageAttachments::new();
+        let mut hydrated_bytes = 0usize;
+        for message in messages.iter_mut().rev() {
+            for block in message.content.iter_mut().rev() {
+                // `ImageRef` is `Copy`, so take it by value and release the
+                // borrow before the block may be rewritten below.
+                let ContentBlock::Image { image } = *block else {
+                    continue;
+                };
+                // The same attachment can appear in several messages; its bytes
+                // are uploaded once and counted once.
+                if attachments.contains(image.blob_id) {
+                    continue;
+                }
+                let fits = match blobs.get(image.blob_id).await? {
+                    Some(bytes)
+                        if hydrated_bytes.saturating_add(bytes.len())
+                            <= context::MAX_HYDRATED_IMAGE_BYTES =>
+                    {
+                        hydrated_bytes += bytes.len();
+                        attachments.insert(image.blob_id, ImageData::new(image.media_type, bytes));
+                        true
+                    }
+                    _ => false,
+                };
+                if !fits {
+                    *block = context::evict_image_block(block);
+                }
+            }
+        }
+        Ok(attachments)
     }
 }
 
@@ -7313,5 +7390,260 @@ mod tests {
             }),
             "expected rebuilt ToolResult in cross-turn transcript: {messages:?}"
         );
+    }
+}
+
+// Image hydration needs the SQLite store to persist attachments end to end.
+#[cfg(all(test, feature = "sqlite"))]
+mod image_hydration_tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use futures::channel::mpsc::unbounded;
+    use futures::stream::{self, BoxStream};
+    use futures::StreamExt;
+
+    use super::*;
+    use crate::db::DbStore;
+    use crate::image::{ImageMediaType, ImageRef};
+    use crate::provider::ProviderId;
+
+    /// An in-memory blob store: enough to prove hydration reads the bytes the
+    /// attachment names, without a filesystem in the way.
+    #[derive(Default)]
+    struct MemBlobs {
+        bytes: Mutex<HashMap<uuid::Uuid, Vec<u8>>>,
+    }
+
+    #[async_trait]
+    impl BlobStore for MemBlobs {
+        async fn put(&self, id: uuid::Uuid, bytes: Vec<u8>) -> Result<()> {
+            self.bytes.lock().unwrap().insert(id, bytes);
+            Ok(())
+        }
+
+        async fn get(&self, id: uuid::Uuid) -> Result<Option<Vec<u8>>> {
+            Ok(self.bytes.lock().unwrap().get(&id).cloned())
+        }
+
+        fn delete(&self, id: uuid::Uuid) -> Result<()> {
+            self.bytes.lock().unwrap().remove(&id);
+            Ok(())
+        }
+    }
+
+    /// Captures the exact request an adapter would have serialized.
+    struct CaptureProvider {
+        seen: Arc<Mutex<Option<ChatRequest>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for CaptureProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("capture")
+        }
+
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            *self.seen.lock().unwrap() = Some(req);
+            Ok(stream::iter(vec![
+                ProviderEvent::TextDelta { text: "ok".into() },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    fn image_ref(blob_id: uuid::Uuid, bytes: &[u8]) -> ImageRef {
+        ImageRef {
+            blob_id,
+            media_type: ImageMediaType::Png,
+            width: 64,
+            height: 48,
+            byte_len: bytes.len() as u64,
+        }
+    }
+
+    async fn store_with_chat(name: &str) -> (Arc<DbStore>, Chat, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join(name).display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        (store, chat, dir)
+    }
+
+    /// Run one turn against a capturing provider and return the request it saw.
+    async fn captured_request(
+        store: Arc<DbStore>,
+        blobs: Option<Arc<dyn BlobStore>>,
+        chat: &Chat,
+        input: &str,
+    ) -> ChatRequest {
+        let seen: Arc<Mutex<Option<ChatRequest>>> = Arc::new(Mutex::new(None));
+        let mut agent = Agent::new(
+            Arc::new(CaptureProvider { seen: seen.clone() }),
+            Arc::new(ToolRegistry::new()),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        );
+        if let Some(blobs) = blobs {
+            agent = agent.with_blobs(blobs);
+        }
+        let (tx, rx) = unbounded();
+        agent.run_turn(chat, input, &tx).await.unwrap();
+        drop(tx);
+        let _: Vec<AgentEvent> = rx.collect().await;
+        let request = seen.lock().unwrap().take();
+        request.expect("provider was called")
+    }
+
+    #[tokio::test]
+    async fn hydration_gives_the_adapter_bytes_for_every_surviving_image_block() {
+        let (store, chat, _dir) = store_with_chat("hydrate.db").await;
+        let blobs = Arc::new(MemBlobs::default());
+        let pixels = b"\x89PNG\r\n\x1a\n pretend pixels".to_vec();
+        let blob_id = uuid::Uuid::from_u128(7);
+        blobs.put(blob_id, pixels.clone()).await.unwrap();
+        let image = image_ref(blob_id, &pixels);
+        store
+            .accept_turn_with_attachments(
+                TurnId::new(),
+                chat.id,
+                "fake",
+                "what is in this screenshot?",
+                &[image],
+            )
+            .await
+            .unwrap();
+
+        let request = captured_request(
+            store,
+            Some(blobs as Arc<dyn BlobStore>),
+            &chat,
+            "and what about the corner?",
+        )
+        .await;
+
+        let block_ids: Vec<uuid::Uuid> = request
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::Image { image } => Some(image.blob_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(block_ids, vec![blob_id], "the image block must survive");
+        let data = request
+            .images
+            .get(blob_id)
+            .expect("an adapter must find bytes for a surviving image block");
+        assert_eq!(data.bytes(), pixels.as_slice());
+        assert_eq!(data.media_type(), ImageMediaType::Png);
+    }
+
+    #[tokio::test]
+    async fn an_agent_without_a_byte_source_tells_the_model_instead_of_sending_a_bare_block() {
+        let (store, chat, _dir) = store_with_chat("no-blobs.db").await;
+        let pixels = b"pixels".to_vec();
+        let image = image_ref(uuid::Uuid::from_u128(9), &pixels);
+        store
+            .accept_turn_with_attachments(TurnId::new(), chat.id, "fake", "look", &[image])
+            .await
+            .unwrap();
+
+        let request = captured_request(store, None, &chat, "again").await;
+        assert!(request.images.is_empty());
+        assert!(
+            !request.messages.iter().any(|message| message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))),
+            "an unhydratable block must become a stand-in, never reach an adapter"
+        );
+        assert!(request.messages.iter().any(|message| message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("image omitted")))));
+    }
+
+    #[tokio::test]
+    async fn hydration_is_bounded_so_a_long_chat_cannot_grow_the_outbound_body() {
+        let (store, chat, _dir) = store_with_chat("bounded.db").await;
+        let blobs = Arc::new(MemBlobs::default());
+        let total = context::MAX_HYDRATED_IMAGES + 3;
+        let mut newest = Vec::new();
+        for index in 0..total {
+            let pixels = format!("pixels-{index}").into_bytes();
+            let blob_id = uuid::Uuid::from_u128(100 + index as u128);
+            blobs.put(blob_id, pixels.clone()).await.unwrap();
+            let turn_id = TurnId::new();
+            store
+                .accept_turn_with_attachments(
+                    turn_id,
+                    chat.id,
+                    "fake",
+                    &format!("image {index}"),
+                    &[image_ref(blob_id, &pixels)],
+                )
+                .await
+                .unwrap();
+            // A chat holds one live turn at a time, so each history entry has to
+            // reach a terminal state before the next is accepted.
+            store
+                .request_turn_cancellation_and_append_event(turn_id, Utc::now())
+                .await
+                .unwrap();
+            newest.push(blob_id);
+        }
+
+        let request =
+            captured_request(store, Some(blobs as Arc<dyn BlobStore>), &chat, "summarize").await;
+        assert_eq!(request.images.len(), context::MAX_HYDRATED_IMAGES);
+        // The newest attachments keep their pixels; the oldest become stand-ins.
+        for blob_id in &newest[total - context::MAX_HYDRATED_IMAGES..] {
+            assert!(
+                request.images.contains(*blob_id),
+                "{blob_id} lost its bytes"
+            );
+        }
+        for blob_id in &newest[..total - context::MAX_HYDRATED_IMAGES] {
+            assert!(
+                !request.images.contains(*blob_id),
+                "{blob_id} was hydrated past the bound"
+            );
+        }
+        // Every block that kept its identity has bytes, so the adapter contract
+        // ("a surviving image block is hydrated") still holds after the bound.
+        for block in request
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+        {
+            if let ContentBlock::Image { image } = block {
+                assert!(request.images.contains(image.blob_id));
+            }
+        }
     }
 }

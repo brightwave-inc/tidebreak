@@ -99,6 +99,24 @@ pub fn evict_all_images(messages: &mut [ChatMessage]) {
     }
 }
 
+/// Most image attachments hydrated into a single outbound request.
+///
+/// A long conversation accumulates image blocks without bound, and every one
+/// that keeps its pixels is re-uploaded on every subsequent turn. Capping the
+/// count is what stops the outbound body from growing with chat length. Eight
+/// spans a normal back-and-forth about a handful of screenshots while leaving
+/// the older ones as text stand-ins.
+pub const MAX_HYDRATED_IMAGES: usize = 8;
+
+/// Most image bytes hydrated into a single outbound request.
+///
+/// The count cap alone is not a byte bound — eight attachments at the per-image
+/// ceiling would be 128 MB. Providers cap the whole request (Anthropic at 32 MB)
+/// and image bytes are base64-encoded on the wire, inflating by 4/3, so 20 MiB
+/// of pixels is roughly 27 MB encoded and stays under that with room for the
+/// text of the transcript.
+pub const MAX_HYDRATED_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
 /// Keep pixels on only the newest `keep_last_n` image blocks, evicting older
 /// ones to text stand-ins.
 ///

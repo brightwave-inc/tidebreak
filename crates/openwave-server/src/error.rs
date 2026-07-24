@@ -12,6 +12,7 @@ use axum::Json;
 use openwave_core::{AgentError, AgentErrorInfo};
 
 /// An HTTP-facing error: a status code and a serializable description.
+#[derive(Debug)]
 pub struct ServerError {
     status: StatusCode,
     info: AgentErrorInfo,
@@ -64,6 +65,12 @@ impl ServerError {
                 message: message.into(),
             },
         }
+    }
+
+    /// The stable machine-readable `kind` clients branch on.
+    #[cfg(test)]
+    pub(crate) fn kind(&self) -> &str {
+        &self.info.kind
     }
 
     /// A `409 Conflict` for a request that clashes with current state (e.g. a

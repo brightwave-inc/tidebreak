@@ -140,7 +140,15 @@ pub fn app(state: AppState) -> Router {
             get(routes::get_document).delete(routes::delete_document),
         )
         .route("/documents/{id}/retry", post(routes::retry_document))
-        .route("/search", post(routes::search_documents));
+        .route("/search", post(routes::search_documents))
+        // Image attachments sit on the same trust boundary as raw document
+        // ingest — both take bytes off the user's disk for one conversation —
+        // so they follow it into whichever router that boundary lands on.
+        .route(
+            "/chats/{chat_id}/attachments/images",
+            post(routes::publish_chat_image_attachment)
+                .layer(DefaultBodyLimit::max(routes::MAX_IMAGE_ATTACHMENT_BYTES)),
+        );
 
     let client_executor_api = Router::new()
         .route(
@@ -580,6 +588,7 @@ async fn bind_inner(
         Some(state.config.data_dir.join("scratch")),
         turn_worker::TurnWorkerConfig::default(),
     )
+    .with_blobs(state.blobs.clone())
     .with_mcp_runtime(state.mcp.clone());
     let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()
         .with_delegated_file_executor(client_executor_id.is_some());
