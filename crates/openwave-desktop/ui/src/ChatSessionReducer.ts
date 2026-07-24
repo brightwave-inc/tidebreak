@@ -1,6 +1,5 @@
 import type { SequencedEvent } from "./api";
 import { parseToolActionPreview, parseToolResultPreview } from "./api";
-import { shouldRefreshAgentRunsAfterToolEvent } from "./AgentRunRefresh";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import type { ChatMessage } from "./MessageList";
 import type { ToolCallStatus } from "./ToolCallCard";
@@ -41,7 +40,6 @@ export type ChatSessionState = {
 };
 
 export type ChatSessionEffect =
-  | { type: "refresh_agent_runs" }
   | { type: "refresh_folder_access" }
   | { type: "refresh_user_questions" }
   /** A turn began; the host resets cancel state (and steer state when asked). */
@@ -89,14 +87,9 @@ export function reduceChatSessionEvent(
   const event = framed.event;
   const effects: ChatSessionEffect[] = [];
 
-  if (shouldRefreshAgentRunsAfterToolEvent(event)) {
-    effects.push({ type: "refresh_agent_runs" });
-  }
-
   switch (event.type) {
     case "turn_started": {
       effects.push(
-        { type: "refresh_agent_runs" },
         { type: "invalidate_terminal_hydration" },
         {
           type: "turn_began",
@@ -335,7 +328,6 @@ export function reduceChatSessionEvent(
       state = flushMarkerTail(state, deps);
       effects.push(
         { type: "turn_resolved" },
-        { type: "refresh_agent_runs" },
         { type: "refresh_user_questions" },
         { type: "hydrate_terminal_transcript" },
       );
@@ -356,7 +348,6 @@ export function reduceChatSessionEvent(
       effects.push(
         { type: "invalidate_terminal_hydration" },
         { type: "turn_resolved" },
-        { type: "refresh_agent_runs" },
         { type: "refresh_user_questions" },
       );
       return {
@@ -380,7 +371,6 @@ export function reduceChatSessionEvent(
       effects.push(
         { type: "invalidate_terminal_hydration" },
         { type: "turn_resolved" },
-        { type: "refresh_agent_runs" },
         { type: "refresh_user_questions" },
       );
       return {

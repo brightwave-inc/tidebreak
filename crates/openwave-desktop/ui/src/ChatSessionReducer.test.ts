@@ -77,7 +77,6 @@ describe("turn_started", () => {
       { id: "t1", role: "assistant", text: "", sources: [], createdAt: NOW },
     ]);
     expect(effects).toEqual([
-      { type: "refresh_agent_runs" },
       { type: "invalidate_terminal_hydration" },
       { type: "turn_began", turnId: "turn-1", startsDifferentTurn: true },
     ]);
@@ -223,8 +222,6 @@ describe("tool call lifecycle", () => {
       { status: "completed" },
     );
     expect(completed.state.provisionalToolCallIds.size).toBe(0);
-    expect(completed.effects).toContainEqual({ type: "refresh_agent_runs" });
-
     const rejectedThenCompleted = play([
       TURN,
       START_SEARCH,
@@ -368,7 +365,6 @@ describe("terminal events", () => {
     expect(state.activeTurnId).toBeNull();
     expect(effects).toEqual([
       { type: "turn_resolved" },
-      { type: "refresh_agent_runs" },
       { type: "refresh_user_questions" },
       { type: "hydrate_terminal_transcript" },
     ]);
@@ -401,7 +397,6 @@ describe("terminal events", () => {
     expect(effects).toEqual([
       { type: "invalidate_terminal_hydration" },
       { type: "turn_resolved" },
-      { type: "refresh_agent_runs" },
       { type: "refresh_user_questions" },
     ]);
   });

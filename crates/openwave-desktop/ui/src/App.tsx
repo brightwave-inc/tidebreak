@@ -245,9 +245,6 @@ export default function App() {
 
   function applySessionEffect(effect: ChatSessionEffect) {
     switch (effect.type) {
-      case "refresh_agent_runs":
-        signalRefresh("agentRuns");
-        return;
       case "refresh_folder_access":
         signalRefresh("folderAccess");
         return;
@@ -351,7 +348,6 @@ export default function App() {
       setRecentSource((current) =>
         current?.chatId === chatId ? null : current,
       );
-      signalRefresh("agentRuns");
     } catch (err) {
       if (chatSelectionRef.current !== selection) return;
       resolveActiveTurn();
