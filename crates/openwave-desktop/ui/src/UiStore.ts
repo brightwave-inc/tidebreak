@@ -1,5 +1,10 @@
 import { create } from "zustand";
-import { CHAT_SURFACE, normalizeSurface, type Surface } from "./Surface";
+import {
+  CHAT_SURFACE,
+  normalizeSurface,
+  sameSurface,
+  type Surface,
+} from "./Surface";
 import {
   EMPTY_LAYOUTS,
   WORKSPACE_LAYOUT_KEY,
@@ -56,12 +61,8 @@ export type UiStore = {
   surface: Surface;
   expanded: boolean;
   fraction: number;
-  openSurface: (surface: Surface) => void;
   showChat: () => void;
-  showDocuments: (target?: {
-    documentId?: string;
-    citationId?: string;
-  }) => void;
+  showDocuments: () => void;
   showDeliverables: (target?: { filename?: string }) => void;
   showFolders: () => void;
   showSettings: () => void;
@@ -91,6 +92,12 @@ export function createUiStore() {
       const next = normalizeSurface(surface);
       const nextExpanded = next.kind === "chat" ? false : expanded;
       remember(next, nextExpanded);
+      // Re-selecting the surface already open would otherwise publish a fresh
+      // descriptor object and re-render every subscriber for no change.
+      const current = get();
+      if (sameSurface(current.surface, next) && current.expanded === nextExpanded) {
+        return;
+      }
       set({ surface: next, expanded: nextExpanded });
     }
 
@@ -98,14 +105,8 @@ export function createUiStore() {
       surface: CHAT_SURFACE,
       expanded: false,
       fraction: layouts.fraction,
-      openSurface: (surface) => go(surface),
       showChat: () => go(CHAT_SURFACE),
-      showDocuments: (target) =>
-        go({
-          kind: "documents",
-          itemId: target?.documentId,
-          anchor: target?.citationId,
-        }),
+      showDocuments: () => go({ kind: "documents" }),
       showDeliverables: (target) =>
         go({ kind: "deliverables", itemId: target?.filename }),
       showFolders: () => go({ kind: "folders" }),
