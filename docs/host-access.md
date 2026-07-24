@@ -315,6 +315,42 @@ trusted conversation execution state, not by model-generated tool arguments.
 This stops a model from selecting a different conversation's context—or a
 dormant project subject—even if it guesses an identifier.
 
+### Importing an approved file as a conversation source
+
+Reading and importing are different acts, and the tool surface separates them.
+`read_connected_file` returns bounded UTF-8 to the model. `import_connected_file`
+returns nothing readable at all: it moves the file into the conversation's own
+source pipeline and hands back a document id, after which the agent reads it
+through the ordinary source tools. That is what makes a PDF or Office document
+under an approved root reachable without asking the user to find the same file
+again in a picker.
+
+The model's arguments stay the same shape as a read — an opaque root ID and a
+bounded root-relative path — and everything consequential is decided natively:
+
+- The broker performs the bounded binary read under the server-derived
+  conversation context, checking its own attachment and grant and reauthorizing
+  before releasing bytes.
+- The attachment is checked a second time immediately before the source is
+  published, because publishing is a separate later effect. A detach or
+  revocation that wins that race discards the bytes rather than persisting
+  them.
+- The media type is determined from the bytes, not from the path the model
+  named, so a model cannot choose which parser runs by choosing a filename.
+- The source identity is derived from the exact conversation, opaque root, and
+  root-relative path. Importing the same file again converges on the same
+  single source, so a retry after an ambiguous response recovers one source
+  rather than adding a second. That is also why an interrupted import may be
+  replayed while an interrupted read may not: a read has no durable outcome to
+  reconcile a second attempt against.
+- Nothing persisted or returned contains an absolute host path. The stored
+  source URI uses the same opaque-root plus bounded-relative-path vocabulary as
+  the audit trail, and the renderer's catalog projection excludes it entirely.
+
+Because import produces a source rather than text, a file whose parser produces
+nothing is reported as stored but not searchable rather than as ready, so the
+agent does not describe a scanned document as one it has read.
+
 ## Agent-requested access
 
 Agents need a safe way to ask for a folder they cannot currently see. This is a

@@ -20,6 +20,7 @@ pub const REQUEST_FOLDER_ACCESS_TOOL: &str = "request_folder_access";
 pub const LIST_CONNECTED_FOLDERS_TOOL: &str = "list_connected_folders";
 pub const LIST_FOLDER_TOOL: &str = "list_folder";
 pub const READ_CONNECTED_FILE_TOOL: &str = "read_connected_file";
+pub const IMPORT_CONNECTED_FILE_TOOL: &str = "import_connected_file";
 
 /// Maximum UTF-8 bytes in a root-relative path supplied by the model.
 pub const MAX_CONNECTED_FOLDER_PATH_BYTES: usize = 1_024;
@@ -195,10 +196,56 @@ pub struct ReadConnectedFileArgs {
     pub path: String,
 }
 
+/// Canonical arguments for [`IMPORT_CONNECTED_FILE_TOOL`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportConnectedFileArgs {
+    /// Opaque id returned by `list_connected_folders` or folder consent.
+    pub root_id: uuid::Uuid,
+    /// Nonempty root-relative file path.
+    pub path: String,
+}
+
+/// Model-facing outcome of one import proposal.
+///
+/// Deliberately says nothing about how the file was read. The model proposed a
+/// root-relative path; the trusted client decided whether that proposal was
+/// still authorized, what the bytes actually were, and what the source became.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImportConnectedFileResult {
+    /// The file became a source in this conversation.
+    Imported {
+        /// Id usable with `list_sources` and `read_source`.
+        document_id: uuid::Uuid,
+        /// Bounded leaf name safe for display.
+        title: String,
+        /// Media type the trusted client determined from the bytes.
+        media_type: String,
+        /// Decoded size of the imported source.
+        bytes: u64,
+        /// What can be done with the source now. Import always begins
+        /// asynchronously, so this normally starts as `processing`.
+        readiness: crate::SourceReadiness,
+    },
+    /// Nothing was imported, and no host detail explains why.
+    Unavailable {
+        /// Short reason safe to show a user.
+        message: String,
+    },
+}
+
 impl ListFolderArgs {
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
         !self.root_id.is_nil() && valid_connected_folder_path(&self.path, true)
+    }
+}
+
+impl ImportConnectedFileArgs {
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.root_id.is_nil() && valid_connected_folder_path(&self.path, false)
     }
 }
 
@@ -226,6 +273,13 @@ pub fn validate_list_folder_arguments(arguments: &Value) -> bool {
 #[must_use]
 pub fn validate_read_connected_file_arguments(arguments: &Value) -> bool {
     serde_json::from_value::<ReadConnectedFileArgs>(arguments.clone())
+        .is_ok_and(|arguments| arguments.is_well_formed())
+}
+
+/// Validate a canonical model payload before it is durably checkpointed.
+#[must_use]
+pub fn validate_import_connected_file_arguments(arguments: &Value) -> bool {
+    serde_json::from_value::<ImportConnectedFileArgs>(arguments.clone())
         .is_ok_and(|arguments| arguments.is_well_formed())
 }
 
@@ -269,6 +323,23 @@ pub fn read_connected_file_tool_spec() -> ToolSpec {
             "properties": {
                 "root_id": { "type": "string", "format": "uuid" },
                 "path": { "type": "string", "minLength": 1, "maxLength": MAX_CONNECTED_FOLDER_PATH_BYTES, "description": "Root-relative text file path." }
+            },
+            "required": ["root_id", "path"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+#[must_use]
+pub fn import_connected_file_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: IMPORT_CONNECTED_FILE_TOOL.into(),
+        description: "Add one file below an already connected folder to this conversation as a source, so it can be searched and cited. Use this for a PDF, Office document, or any other file that read_connected_file cannot return as text. Use only an opaque root_id and a nonempty root-relative path; never use an absolute path or parent traversal. Importing the same file again recovers the same single source rather than adding a duplicate. The result is normally still processing: check list_sources for whether it became searchable.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "root_id": { "type": "string", "format": "uuid" },
+                "path": { "type": "string", "minLength": 1, "maxLength": MAX_CONNECTED_FOLDER_PATH_BYTES, "description": "Root-relative file path." }
             },
             "required": ["root_id", "path"],
             "additionalProperties": false
@@ -427,6 +498,71 @@ mod tests {
                 "path": ""
             })
         ));
+    }
+
+    #[test]
+    fn import_takes_the_same_bounded_pathless_proposal_as_a_read() {
+        let root_id = uuid::Uuid::new_v4();
+        assert!(validate_import_connected_file_arguments(
+            &serde_json::json!({ "root_id": root_id, "path": "reports/q3.pdf" })
+        ));
+        // The folder root is a directory, not an importable file.
+        assert!(!validate_import_connected_file_arguments(
+            &serde_json::json!({ "root_id": root_id, "path": "" })
+        ));
+        for path in ["/tmp/secret.pdf", "../secret.pdf", "a/../secret", "a\\b"] {
+            assert!(
+                !validate_import_connected_file_arguments(
+                    &serde_json::json!({ "root_id": root_id, "path": path })
+                ),
+                "{path}"
+            );
+        }
+        // No way to name a media type, title, or conversation: the trusted
+        // client derives all three.
+        assert!(!validate_import_connected_file_arguments(
+            &serde_json::json!({
+                "root_id": root_id,
+                "path": "a.pdf",
+                "media_type": "application/pdf"
+            })
+        ));
+        assert!(!validate_import_connected_file_arguments(
+            &serde_json::json!({
+                "root_id": uuid::Uuid::nil(),
+                "path": "a.pdf"
+            })
+        ));
+    }
+
+    #[test]
+    fn import_results_carry_a_source_id_but_never_a_host_path() {
+        let result = ImportConnectedFileResult::Imported {
+            document_id: uuid::Uuid::new_v4(),
+            title: "q3.pdf".into(),
+            media_type: "application/pdf".into(),
+            bytes: 2_048,
+            readiness: crate::SourceReadiness::Processing,
+        };
+        let encoded = serde_json::to_value(&result).unwrap();
+        assert_eq!(encoded["status"], "imported");
+        assert_eq!(encoded["readiness"], "processing");
+        assert!(encoded.get("path").is_none());
+        assert!(encoded.get("root_id").is_none());
+        assert_eq!(
+            serde_json::from_value::<ImportConnectedFileResult>(encoded).unwrap(),
+            result
+        );
+        assert_eq!(
+            serde_json::to_value(ImportConnectedFileResult::Unavailable {
+                message: "That file is no longer available to this conversation.".into()
+            })
+            .unwrap(),
+            serde_json::json!({
+                "status": "unavailable",
+                "message": "That file is no longer available to this conversation."
+            })
+        );
     }
 
     #[test]

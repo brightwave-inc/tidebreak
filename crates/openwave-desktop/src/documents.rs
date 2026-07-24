@@ -107,9 +107,9 @@ pub(crate) struct ImportedDocument {
 }
 
 #[derive(Debug, Deserialize)]
-struct IngestResponse {
-    document_id: Uuid,
-    processing_status: DocumentProcessingStatus,
+pub(crate) struct IngestResponse {
+    pub(crate) document_id: Uuid,
+    pub(crate) processing_status: DocumentProcessingStatus,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,7 +290,7 @@ fn documents_path(chat_id: ChatId) -> String {
     format!("/chats/{chat_id}/documents")
 }
 
-fn raw_documents_path(chat_id: ChatId) -> String {
+pub(crate) fn raw_documents_path(chat_id: ChatId) -> String {
     format!("{}/raw", documents_path(chat_id))
 }
 
@@ -298,7 +298,7 @@ fn search_path(chat_id: ChatId) -> String {
     format!("/chats/{chat_id}/search")
 }
 
-fn native_auth(
+pub(crate) fn native_auth(
     request: reqwest::RequestBuilder,
     info: &crate::NativeServerInfo,
 ) -> reqwest::RequestBuilder {
@@ -307,7 +307,7 @@ fn native_auth(
         .header(CLIENT_EXECUTOR_HEADER, &info.executor_token)
 }
 
-fn local_client() -> reqwest::Client {
+pub(crate) fn local_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -379,7 +379,7 @@ fn read_selected_document(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn is_safe_title_char(character: char) -> bool {
+pub(crate) fn is_safe_title_char(character: char) -> bool {
     !matches!(
         get_general_category(character),
         GeneralCategory::Control

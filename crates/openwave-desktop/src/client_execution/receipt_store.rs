@@ -51,11 +51,12 @@ pub(super) struct FolderAccessReceipt {
     pub(super) resolution: Option<StoredResolution>,
 }
 
-/// Durable receipt for one read-only foreground folder operation.
+/// Durable receipt for one foreground operation on a connected folder.
 ///
 /// It intentionally stores no host path or authority. The canonical request is
 /// recovered from the server-owned tool call; this receipt preserves only the
-/// exact native lease and terminal model result across desktop restarts.
+/// exact native lease, whether an interrupted dispatch may be retried, and the
+/// terminal model result across desktop restarts.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) struct FolderOperationReceipt {
@@ -66,8 +67,36 @@ pub(super) struct FolderOperationReceipt {
     pub(super) lease_token: Uuid,
     #[serde(default)]
     pub(super) phase: FolderOperationPhase,
+    #[serde(default)]
+    pub(super) recovery: DispatchRecovery,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) resolution: Option<StoredResolution>,
+}
+
+/// What recovery may do with a dispatch that might already have happened.
+///
+/// This only decides recovery while this executor still holds the lease. A
+/// claim that can no longer be recovered terminalizes regardless, because
+/// another executor may own the call by then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DispatchRecovery {
+    /// The operation has no recoverable outcome, so recovery must terminalize.
+    ///
+    /// A read is the motivating case: the broker keeps no read receipt, so a
+    /// second attempt is a second disclosure with nothing to reconcile it
+    /// against.
+    #[default]
+    Terminalize,
+    /// The operation converges on the same result when repeated, so recovery
+    /// may run it again rather than reporting a failure it cannot confirm.
+    ///
+    /// An import qualifies because its source identity is derived from the
+    /// exact conversation, root, and path it was asked for. Repeating it
+    /// recovers the one source rather than adding another — which is equally
+    /// true of a later call from the model, so a terminalized import is only
+    /// ever one retry away from the same single source.
+    Retry,
 }
 
 /// Native-only recovery state for one exact sandbox delegated-file read.
@@ -230,6 +259,7 @@ impl std::fmt::Debug for FolderOperationReceipt {
             .field("executor_id", &self.executor_id)
             .field("lease_token", &"[redacted]")
             .field("phase", &self.phase)
+            .field("recovery", &self.recovery)
             .field("resolution", &self.resolution)
             .finish()
     }
@@ -402,7 +432,12 @@ impl ManualFolderConnectReceipt {
 }
 
 impl FolderOperationReceipt {
-    pub(super) fn new(chat_id: ChatId, call_id: CallId, executor_id: Uuid) -> Self {
+    pub(super) fn new(
+        chat_id: ChatId,
+        call_id: CallId,
+        executor_id: Uuid,
+        recovery: DispatchRecovery,
+    ) -> Self {
         Self {
             version: RECEIPT_VERSION,
             chat_id,
@@ -410,6 +445,7 @@ impl FolderOperationReceipt {
             executor_id,
             lease_token: Uuid::new_v4(),
             phase: FolderOperationPhase::NotStarted,
+            recovery,
             resolution: None,
         }
     }
@@ -1076,8 +1112,12 @@ mod tests {
     fn folder_operation_receipts_are_separate_and_keep_lease_tokens_private() {
         let temp = tempfile::tempdir().unwrap();
         let store = ReceiptStore::open(temp.path()).unwrap();
-        let receipt =
-            FolderOperationReceipt::new(ChatId::new(), CallId::new(), store.executor_id());
+        let receipt = FolderOperationReceipt::new(
+            ChatId::new(),
+            CallId::new(),
+            store.executor_id(),
+            DispatchRecovery::Terminalize,
+        );
         store.save_operation(&receipt).unwrap();
         assert_eq!(store.load_operations().unwrap(), vec![receipt.clone()]);
         assert!(store.load_all().unwrap().is_empty());

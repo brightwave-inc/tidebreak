@@ -141,6 +141,7 @@ pub(crate) fn compose(specs: &[ToolSpec]) -> String {
         "list_connected_folders",
         "list_folder",
         "read_connected_file",
+        "import_connected_file",
     ]
     .iter()
     .any(|name| has(name))
@@ -162,6 +163,14 @@ pub(crate) fn compose(specs: &[ToolSpec]) -> String {
         if has("read_connected_file") {
             lines.push(
                 "- Use `read_connected_file` only for bounded UTF-8 text below an already connected root.",
+            );
+        }
+        if has("import_connected_file") {
+            lines.push(
+                "- Use `import_connected_file` for a PDF, Office document, or other file `read_connected_file` cannot return as text. It adds the file to this conversation as a source; it does not return the contents.",
+            );
+            lines.push(
+                "- An import starts asynchronously. Do not claim to have read an imported file until `list_sources` reports it as searchable, and treat `stored_not_searchable` as a file you can name but have not read.",
             );
         }
         if has("request_folder_access") {
