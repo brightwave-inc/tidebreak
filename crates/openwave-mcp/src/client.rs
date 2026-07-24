@@ -678,6 +678,11 @@ impl Tool for McpTool {
             content,
             data: result.structured_content,
             is_error: result.is_error,
+            // The external server reports that it failed, not why in terms this
+            // side can classify, so it is the tool's own failure.
+            error_category: result
+                .is_error
+                .then_some(openwave_core::ToolErrorCategory::ToolFailed),
             private_evidence: Vec::new(),
         })
     }

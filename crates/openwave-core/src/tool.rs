@@ -97,6 +97,50 @@ pub struct ToolSpec {
 /// `content` is the model-readable result folded back into the conversation;
 /// `data` is an optional structured payload for clients that can render it
 /// (e.g. a tool-call card). A failing tool returns `is_error = true` rather than
+/// Why a tool call failed.
+///
+/// A boolean says something went wrong; a category says whether anything *is*
+/// wrong. A call the reader cancelled and a call the reader declined are not
+/// failures of the tool, of the model, or of the product, and recording them
+/// the same way as a crash makes every later question about reliability
+/// unanswerable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolErrorCategory {
+    /// The reader stopped the turn before or during the call.
+    UserCancelled,
+    /// The reader declined the call at the approval gate.
+    UserDeclined,
+    /// The model named a tool this turn does not advertise.
+    NotFound,
+    /// The tool ran and reported a failure of its own.
+    ToolFailed,
+}
+
+impl ToolErrorCategory {
+    /// Stable durable and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UserCancelled => "user_cancelled",
+            Self::UserDeclined => "user_declined",
+            Self::NotFound => "not_found",
+            Self::ToolFailed => "tool_failed",
+        }
+    }
+
+    /// Whether this counts against the product rather than describing a choice
+    /// the reader made or a request the model got wrong.
+    #[must_use]
+    pub const fn is_product_failure(self) -> bool {
+        match self {
+            Self::UserCancelled | Self::UserDeclined | Self::NotFound => false,
+            Self::ToolFailed => true,
+        }
+    }
+}
+
 /// an `Err` so the model sees the failure and can adapt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutput {
@@ -108,6 +152,9 @@ pub struct ToolOutput {
     /// Whether the tool reported a failure.
     #[serde(default)]
     pub is_error: bool,
+    /// Why it failed, when it did. `None` on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_category: Option<ToolErrorCategory>,
     /// Server-private durable sidecar committed with the canonical tool result.
     #[serde(skip)]
     pub private_evidence: Vec<crate::RetrievalEvidenceInput>,
@@ -120,16 +167,27 @@ impl ToolOutput {
             content: content.into(),
             data: None,
             is_error: false,
+            error_category: None,
             private_evidence: Vec::new(),
         }
     }
 
     /// A failure the model should see and react to.
+    ///
+    /// Categorized as the tool's own failure. Callers that know better — the
+    /// loop, which is the only thing that can tell a cancellation from a
+    /// crash — use [`Self::failed`].
     pub fn error(content: impl Into<String>) -> Self {
+        Self::failed(ToolErrorCategory::ToolFailed, content)
+    }
+
+    /// A failure whose cause the caller can name.
+    pub fn failed(category: ToolErrorCategory, content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
             data: None,
             is_error: true,
+            error_category: Some(category),
             private_evidence: Vec::new(),
         }
     }
@@ -299,6 +357,56 @@ pub trait Tool: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reader_choice_is_not_recorded_as_a_product_failure() {
+        // The distinction this exists for: a cancelled or declined call is a
+        // choice, not a defect, and counting it as one makes any later question
+        // about reliability unanswerable.
+        for category in [
+            ToolErrorCategory::UserCancelled,
+            ToolErrorCategory::UserDeclined,
+            ToolErrorCategory::NotFound,
+        ] {
+            assert!(!category.is_product_failure(), "{}", category.as_str());
+        }
+        assert!(ToolErrorCategory::ToolFailed.is_product_failure());
+
+        // Every category has a distinct durable spelling.
+        let spellings = [
+            ToolErrorCategory::UserCancelled,
+            ToolErrorCategory::UserDeclined,
+            ToolErrorCategory::NotFound,
+            ToolErrorCategory::ToolFailed,
+        ]
+        .map(ToolErrorCategory::as_str);
+        assert_eq!(
+            spellings.len(),
+            spellings
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
+    }
+
+    #[test]
+    fn an_uncategorized_failure_reads_as_the_tool_failing() {
+        // `error` is what an ordinary tool calls, and a tool reporting a failure
+        // is exactly the tool failing. Only the loop can distinguish more.
+        let plain = ToolOutput::error("boom");
+        assert!(plain.is_error);
+        assert_eq!(plain.error_category, Some(ToolErrorCategory::ToolFailed));
+
+        let cancelled = ToolOutput::failed(ToolErrorCategory::UserCancelled, "stopped");
+        assert_eq!(
+            cancelled.error_category,
+            Some(ToolErrorCategory::UserCancelled)
+        );
+
+        // Success carries no category at all rather than a benign-looking one.
+        assert_eq!(ToolOutput::text("fine").error_category, None);
+        assert!(!ToolOutput::text("fine").is_error);
+    }
+
     use super::*;
 
     #[test]
