@@ -3,7 +3,20 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "./api";
 import { useChatSessionStore } from "./ChatSessionStore";
+import { useChatListStore } from "./ChatListStore";
 import { useToolApprovals } from "./useToolApprovals";
+
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  promise.catch(() => {});
+  return { promise, resolve, reject };
+}
 
 function stubClient(overrides: Record<string, unknown> = {}) {
   return {
@@ -32,7 +45,10 @@ beforeEach(() => {
   useChatSessionStore.getState().reset();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  useChatListStore.getState().setDeletingChatId(null);
+});
 
 describe("useToolApprovals", () => {
   it("sends a decision and marks its card resolved", async () => {
@@ -115,5 +131,26 @@ describe("useToolApprovals", () => {
     );
     const [message] = useChatSessionStore.getState().messages;
     expect(message.role === "approval" && message.resolved).toBeFalsy();
+  });
+
+  it("drops a failed decision once its chat is being deleted", async () => {
+    // The pane stays mounted on the doomed chat for the whole delete round
+    // trip, so its id still matches — the deletion is the only signal that the
+    // conversation this error would land on is on its way out.
+    const decision = deferred<void>();
+    const client = stubClient({
+      decideApproval: vi.fn(() => decision.promise),
+    });
+    seedApprovalCard("call-1");
+    const { result } = renderHook(() => useToolApprovals(client, "chat-1"));
+
+    act(() => result.current.decide("call-1", "approve"));
+    act(() => useChatListStore.getState().setDeletingChatId("chat-1"));
+    await act(async () => {
+      decision.reject(new Error("gone"));
+      await decision.promise.catch(() => {});
+    });
+
+    expect(result.current.errors).toEqual({});
   });
 });

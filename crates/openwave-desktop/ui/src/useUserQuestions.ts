@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ApiClient, PendingUserQuestions, UserQuestionAnswer } from "./api";
 import { requestUserAttention } from "./host";
+import { useOpenConversation } from "./OpenConversation";
 import { useRefreshSignals } from "./RefreshSignals";
 
 const POLL_INTERVAL_MS = 10_000;
@@ -32,8 +33,7 @@ export function useUserQuestions(
   const answeringRef = useRef<Set<string>>(new Set());
   const seenCallIdsRef = useRef<Set<string>>(new Set());
   const refreshRef = useRef<(() => void) | null>(null);
-  const currentChatIdRef = useRef(chatId);
-  currentChatIdRef.current = chatId;
+  const stillOpen = useOpenConversation(chatId);
   const signal = useRefreshSignals((state) => state.userQuestions);
 
   useEffect(() => {
@@ -103,7 +103,7 @@ export function useUserQuestions(
     try {
       await request();
     } catch (err) {
-      if (currentChatIdRef.current === startedChatId) {
+      if (stillOpen(startedChatId)) {
         setErrors((current) => ({ ...current, [callId]: failure(err) }));
       }
     } finally {
@@ -113,7 +113,7 @@ export function useUserQuestions(
         next.delete(callId);
         return next;
       });
-      if (currentChatIdRef.current === startedChatId) refreshRef.current?.();
+      if (stillOpen(startedChatId)) refreshRef.current?.();
     }
   }
 

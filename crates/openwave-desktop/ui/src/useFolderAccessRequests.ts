@@ -6,6 +6,7 @@ import {
   type FolderAccessDecision,
 } from "./host";
 import { useFolderDecisionLatch } from "./FolderDecisionLatch";
+import { useOpenConversation } from "./OpenConversation";
 import { useRefreshSignals } from "./RefreshSignals";
 
 const POLL_INTERVAL_MS = 10_000;
@@ -36,6 +37,7 @@ export function useFolderAccessRequests(
   const [errors, setErrors] = useState<Record<string, string>>({});
   const resolving = useFolderDecisionLatch((state) => state.resolving);
   const refreshRef = useRef<(() => void) | null>(null);
+  const stillOpen = useOpenConversation(chatId);
   const signal = useRefreshSignals((state) => state.folderAccess);
 
   useEffect(() => {
@@ -88,32 +90,39 @@ export function useFolderAccessRequests(
     return true;
   }
 
-  function finishResolving(callId: string) {
+  /** The latch is released unconditionally — it is the host's, not the chat's. */
+  function finishResolving(callId: string, startedChatId: string) {
     useFolderDecisionLatch.getState().release(callId);
-    refreshRef.current?.();
+    if (stillOpen(startedChatId)) refreshRef.current?.();
   }
 
   async function decide(callId: string, decision: FolderAccessDecision) {
     if (!chatId || !hasNativeHost()) return;
+    const startedChatId = chatId;
     if (!beginResolving(callId)) return;
     try {
-      await resolveFolderAccessRequest(chatId, callId, decision);
+      await resolveFolderAccessRequest(startedChatId, callId, decision);
     } catch (err) {
-      setErrors((current) => ({ ...current, [callId]: String(err) }));
+      if (stillOpen(startedChatId)) {
+        setErrors((current) => ({ ...current, [callId]: String(err) }));
+      }
     } finally {
-      finishResolving(callId);
+      finishResolving(callId, startedChatId);
     }
   }
 
   async function cancel(callId: string, turnId: string) {
     if (!client || !chatId) return;
+    const startedChatId = chatId;
     if (!beginResolving(callId)) return;
     try {
-      await client.cancel(chatId, turnId);
+      await client.cancel(startedChatId, turnId);
     } catch (err) {
-      setErrors((current) => ({ ...current, [callId]: String(err) }));
+      if (stillOpen(startedChatId)) {
+        setErrors((current) => ({ ...current, [callId]: String(err) }));
+      }
     } finally {
-      finishResolving(callId);
+      finishResolving(callId, startedChatId);
     }
   }
 
