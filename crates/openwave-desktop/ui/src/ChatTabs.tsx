@@ -1,8 +1,9 @@
 import { FileOutput, FolderOpen, LibraryBig, MessageSquare } from "lucide-react";
-import { useUiStore, type PrimaryView } from "./UiStore";
+import { useUiStore } from "./UiStore";
+import type { SurfaceKind } from "./Surface";
 
 /** Surfaces whose catalogs are served by the native host rather than the API. */
-const NATIVE_HOST_SURFACES: ReadonlySet<PrimaryView> = new Set([
+const NATIVE_HOST_SURFACES: ReadonlySet<SurfaceKind> = new Set([
   "documents",
   "deliverables",
   "folders",
@@ -10,8 +11,8 @@ const NATIVE_HOST_SURFACES: ReadonlySet<PrimaryView> = new Set([
 
 const UNAVAILABLE_HINT = "Available in the OpenWave desktop app";
 
-export function requiresNativeHost(view: PrimaryView): boolean {
-  return NATIVE_HOST_SURFACES.has(view);
+export function requiresNativeHost(kind: SurfaceKind): boolean {
+  return NATIVE_HOST_SURFACES.has(kind);
 }
 
 export type ChatTabsProps = {
@@ -27,7 +28,7 @@ export type ChatTabsProps = {
  * chat-scoped destinations.
  */
 export function ChatTabs({ nativeHost }: ChatTabsProps) {
-  const primaryView = useUiStore((state) => state.primaryView);
+  const surface = useUiStore((state) => state.surface);
   const showChat = useUiStore((state) => state.showChat);
   const showDocuments = useUiStore((state) => state.showDocuments);
   const showDeliverables = useUiStore((state) => state.showDeliverables);
@@ -44,13 +45,13 @@ export function ChatTabs({ nativeHost }: ChatTabsProps) {
       key: "documents" as const,
       label: "Sources",
       icon: LibraryBig,
-      onSelect: showDocuments,
+      onSelect: () => showDocuments(),
     },
     {
       key: "deliverables" as const,
       label: "Outputs",
       icon: FileOutput,
-      onSelect: showDeliverables,
+      onSelect: () => showDeliverables(),
     },
     {
       key: "folders" as const,
@@ -64,7 +65,7 @@ export function ChatTabs({ nativeHost }: ChatTabsProps) {
     <div className="chat-tabs" role="tablist" aria-label="Chat views">
       {tabs.map((tab) => {
         const unavailable = !nativeHost && requiresNativeHost(tab.key);
-        const active = primaryView === tab.key;
+        const active = surface.kind === tab.key;
         const Icon = tab.icon;
         return (
           <button

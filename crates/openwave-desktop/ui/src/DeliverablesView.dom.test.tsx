@@ -42,6 +42,64 @@ describe("DeliverablesView", () => {
     expect(await screen.findByText("Research brief.md was saved.")).toBeVisible();
   });
 
+  it("previews the output it was pointed at, not the first one", async () => {
+    const apis = twoOutputApis();
+
+    render(
+      <DeliverablesView
+        chatId="chat-1"
+        initialFilename="Second.md"
+        apis={apis}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(apis.read).toHaveBeenCalledWith("chat-1", "Second.md"),
+    );
+    expect(apis.read).not.toHaveBeenCalledWith("chat-1", "First.md");
+  });
+
+  it("falls back to the list when it is pointed at an output this chat lacks", async () => {
+    const apis = twoOutputApis();
+
+    render(
+      <DeliverablesView
+        chatId="chat-1"
+        initialFilename="Missing.md"
+        apis={apis}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(apis.read).toHaveBeenCalledWith("chat-1", "First.md"),
+    );
+    expect(apis.read).not.toHaveBeenCalledWith("chat-1", "Missing.md");
+  });
+
+  it("stops steering once the reader chooses another output", async () => {
+    const apis = twoOutputApis();
+
+    render(
+      <DeliverablesView
+        chatId="chat-1"
+        initialFilename="Second.md"
+        apis={apis}
+      />,
+    );
+    await waitFor(() =>
+      expect(apis.read).toHaveBeenCalledWith("chat-1", "Second.md"),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /First\.md/ }));
+    await waitFor(() =>
+      expect(apis.read).toHaveBeenCalledWith("chat-1", "First.md"),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(apis.list).toHaveBeenCalledTimes(2));
+    expect(apis.read).toHaveBeenLastCalledWith("chat-1", "First.md");
+  });
+
   it("explains how to create the first output", async () => {
     render(
       <DeliverablesView
@@ -154,3 +212,27 @@ describe("DeliverablesView", () => {
     expect(screen.queryByText("stale")).not.toBeInTheDocument();
   });
 });
+
+function twoOutputApis() {
+  const outputs = ["First.md", "Second.md"];
+  return {
+    list: vi.fn().mockResolvedValue({
+      deliverables: outputs.map((filename) => ({
+        filename,
+        mediaType: "text/markdown" as const,
+        sizeBytes: 12,
+        updatedAt: "2026-07-24T00:00:00Z",
+      })),
+      truncated: false,
+    }),
+    read: vi.fn().mockImplementation((_chatId: string, filename: string) =>
+      Promise.resolve({
+        filename,
+        mediaType: "text/markdown" as const,
+        content: `# ${filename}`,
+        truncated: false,
+      }),
+    ),
+    export: vi.fn().mockResolvedValue(true),
+  };
+}

@@ -93,7 +93,7 @@ export default function App() {
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
-  const primaryView = useUiStore((state) => state.primaryView);
+  const surface = useUiStore((state) => state.surface);
   const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -1256,7 +1256,7 @@ export default function App() {
       />}
 
       <div className="main">
-        {primaryView === "settings" ? (
+        {surface.kind === "settings" ? (
           <SettingsView
             client={client}
             models={models}
