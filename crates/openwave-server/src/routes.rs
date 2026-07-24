@@ -1550,9 +1550,26 @@ pub struct ApprovalBody {
     /// Optional reject reason (invalid on approve).
     #[serde(default)]
     pub reason: Option<String>,
-    /// Remember an approval for matching calls in this chat.
+    /// How much of an approval to remember for this chat. Absent means this
+    /// call only.
     #[serde(default)]
-    pub remember: bool,
+    pub grant: Option<ApprovalGrantRung>,
+}
+
+/// How wide a standing grant the human chose, narrowest first.
+///
+/// The renderer names a rung; the server builds the concrete grant from the
+/// arguments the call is parked on. A grant can therefore only ever describe
+/// the action that was actually under review.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalGrantRung {
+    /// Exactly this argument vector.
+    ExactCommand,
+    /// This executable, with any arguments.
+    AnyArgsForCommand,
+    /// Every call to this tool.
+    WholeTool,
 }
 
 /// Wire form of an approval decision.
@@ -1590,6 +1607,22 @@ pub(crate) struct PendingApprovalSnapshot {
     pub can_remember: bool,
 }
 
+impl PendingApprovalSnapshot {
+    fn from_approval(approval: openwave_core::ToolApproval) -> Self {
+        let kind = approval.kind;
+        Self {
+            call_id: approval.call_id,
+            turn_id: approval.turn_id,
+            action: crate::event_projection::RendererToolName::from(approval.tool_name.as_str()),
+            approval: kind,
+            class: approval.class,
+            preview: approval.preview,
+            can_approve: kind.is_approvable(),
+            can_remember: kind.is_standing_grantable(),
+        }
+    }
+}
+
 /// `GET /chats/{id}/approvals` — recover a bounded page of pending cards.
 pub(crate) async fn list_pending_approvals(
     State(state): State<AppState>,
@@ -1611,21 +1644,7 @@ pub(crate) async fn list_pending_approvals(
     Ok(Json(
         approvals
             .into_iter()
-            .map(|approval| {
-                let action =
-                    crate::event_projection::RendererToolName::from(approval.tool_name.as_str());
-                let kind = approval.kind;
-                PendingApprovalSnapshot {
-                    call_id: approval.call_id,
-                    turn_id: approval.turn_id,
-                    action,
-                    approval: kind,
-                    class: approval.class,
-                    preview: approval.preview,
-                    can_approve: kind.is_approvable(),
-                    can_remember: kind.is_standing_grantable(),
-                }
-            })
+            .map(PendingApprovalSnapshot::from_approval)
             .collect(),
     ))
 }
@@ -1660,7 +1679,7 @@ pub async fn post_approval(
                 .unwrap_or_else(|| "user denied approval".into()),
         },
     };
-    if body.remember && !matches!(&decision, ApprovalDecision::Approve) {
+    if body.grant.is_some() && !matches!(&decision, ApprovalDecision::Approve) {
         return Err(ServerError::bad_request(
             "only an approval can be remembered",
         ));
@@ -1675,7 +1694,7 @@ pub async fn post_approval(
     }
     match state
         .approvals
-        .resolve_with_remember(chat_id, call_id, decision, body.remember)
+        .resolve_with_grant(chat_id, call_id, decision, body.grant)
         .await?
     {
         crate::approvals::ResolveApprovalOutcome::Resolved => Ok(StatusCode::NO_CONTENT),
@@ -1689,6 +1708,12 @@ pub async fn post_approval(
             "approval_action_not_presentable",
             "this action cannot be approved from the renderer",
         )),
+        // Refusing beats widening: a rung the parked call cannot describe
+        // would otherwise have to fall back to a broader grant than the human
+        // was shown.
+        crate::approvals::ResolveApprovalOutcome::GrantNotAvailable => Err(
+            ServerError::bad_request("this action cannot be granted at that scope"),
+        ),
         crate::approvals::ResolveApprovalOutcome::DecisionConflict => {
             Err(ServerError::conflict_kind(
                 "approval_already_decided",

@@ -14,8 +14,8 @@ use tokio::sync::Notify;
 use openwave_core::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
     ApprovalRegistrationFuture, ApprovalRequest, ApprovalRequiredPublication, CallId, ChatId,
-    DecideToolApprovalOutcome, RequestToolApprovalOutcome, Result, StandingGrant, StandingGrants,
-    Store,
+    DecideToolApprovalOutcome, GrantScope, RequestToolApprovalOutcome, Result, StandingGrant,
+    StandingGrants, Store,
 };
 
 /// Coordinates durable approval state with local low-latency waiters.
@@ -48,18 +48,18 @@ impl ApprovalBroker {
         call_id: CallId,
         decision: ApprovalDecision,
     ) -> Result<ResolveApprovalOutcome> {
-        self.resolve_with_remember(chat_id, call_id, decision, false)
+        self.resolve_with_grant(chat_id, call_id, decision, None)
             .await
     }
 
     /// Decide one exact request and optionally remember an approval for later
     /// matching calls in the same chat.
-    pub async fn resolve_with_remember(
+    pub async fn resolve_with_grant(
         &self,
         chat_id: ChatId,
         call_id: CallId,
         decision: ApprovalDecision,
-        remember: bool,
+        rung: Option<crate::routes::ApprovalGrantRung>,
     ) -> Result<ResolveApprovalOutcome> {
         let Some(current) = self.store.get_tool_call_approval(call_id).await? else {
             return Ok(ResolveApprovalOutcome::NotPending);
@@ -70,17 +70,28 @@ impl ApprovalBroker {
         if matches!(decision, ApprovalDecision::Approve) && !current.kind.is_approvable() {
             return Ok(ResolveApprovalOutcome::NotApprovable);
         }
+        // Resolve the scope from durable state before deciding, so a rung the
+        // call cannot support fails the request instead of silently landing a
+        // broader grant after the call has already run.
+        let scope = match rung {
+            None => None,
+            Some(rung) => match grant_scope(rung, current.preview.as_ref()) {
+                Some(scope) => Some(scope),
+                None => return Ok(ResolveApprovalOutcome::GrantNotAvailable),
+            },
+        };
         let outcome = self
             .store
             .decide_tool_call_approval(chat_id, call_id, &decision, Utc::now())
             .await?;
         match outcome {
             DecideToolApprovalOutcome::Decided(_) | DecideToolApprovalOutcome::Existing(_) => {
-                if remember && matches!(&decision, ApprovalDecision::Approve) {
-                    if let Some(grant) = StandingGrant::new(
+                if let Some(scope) = scope {
+                    if let Some(grant) = StandingGrant::scoped(
                         current.chat_id,
                         current.tool_name,
                         current.kind,
+                        scope,
                         Utc::now(),
                     ) {
                         self.standing_grants.record(grant);
@@ -104,7 +115,35 @@ pub enum ResolveApprovalOutcome {
     NotPending,
     WrongChat,
     NotApprovable,
+    /// The chosen rung does not exist for this call.
+    GrantNotAvailable,
     DecisionConflict,
+}
+
+/// Build the concrete grant a rung names, from the action the call is parked
+/// on. A narrow rung over an action the renderer could not describe has nothing
+/// to name, so it is refused rather than widened.
+fn grant_scope(
+    rung: crate::routes::ApprovalGrantRung,
+    action: Option<&openwave_core::ToolActionPreview>,
+) -> Option<GrantScope> {
+    use crate::routes::ApprovalGrantRung;
+    use openwave_core::ToolActionPreview;
+    match (rung, action) {
+        (ApprovalGrantRung::WholeTool, _) => Some(GrantScope::WholeTool),
+        (ApprovalGrantRung::ExactCommand, Some(ToolActionPreview::Exec { command, args, .. })) => {
+            Some(GrantScope::ExactCommand {
+                command: command.clone(),
+                args: args.clone(),
+            })
+        }
+        (ApprovalGrantRung::AnyArgsForCommand, Some(ToolActionPreview::Exec { command, .. })) => {
+            Some(GrantScope::AnyArgsFor {
+                command: command.clone(),
+            })
+        }
+        _ => None,
+    }
 }
 
 impl ApprovalGate for ApprovalBroker {
@@ -248,6 +287,13 @@ mod tests {
     use serde_json::json;
 
     async fn setup(tool_name: &str) -> (Arc<dyn Store>, ApprovalRequest) {
+        setup_with_arguments(tool_name, json!({"query": "private"})).await
+    }
+
+    async fn setup_with_arguments(
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> (Arc<dyn Store>, ApprovalRequest) {
         let db = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -281,7 +327,7 @@ mod tests {
                     turn_id,
                     provider_id: "provider-call".into(),
                     name: tool_name.into(),
-                    arguments: json!({"query": "private"}),
+                    arguments,
                     execution: ToolCallExecution::Server,
                     status: ToolCallStatus::Pending,
                     result: None,
@@ -411,19 +457,96 @@ mod tests {
 
         assert_eq!(
             broker
-                .resolve_with_remember(
+                .resolve_with_grant(
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    true,
+                    Some(crate::routes::ApprovalGrantRung::WholeTool),
                 )
                 .await
                 .unwrap(),
             ResolveApprovalOutcome::Resolved
         );
-        assert!(broker
+        assert!(broker.standing_grants().covers(
+            request.chat_id,
+            &request.tool_name,
+            request.kind,
+            None
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_narrow_grant_covers_the_command_it_named_and_nothing_else() {
+        // The grant is derived from the arguments the call is durably parked
+        // on, never from what the request carried in memory.
+        let (store, request) = setup_with_arguments(
+            "exec",
+            json!({ "command": "cargo", "args": ["test"], "cwd": "." }),
+        )
+        .await;
+        let broker = ApprovalBroker::new(store);
+        let _pending = broker.register(request.clone(), None).await;
+
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::ExactCommand),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+
+        let grants = broker.standing_grants();
+        let exec = |command: &str, args: &[&str]| openwave_core::ToolActionPreview::Exec {
+            command: command.into(),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            cwd: ".".into(),
+        };
+        assert!(grants.covers(
+            request.chat_id,
+            "exec",
+            request.kind,
+            Some(&exec("cargo", &["test"])),
+        ));
+        // The grant was built from the arguments the call was parked on, so it
+        // cannot stretch to a command the human never saw.
+        assert!(!grants.covers(
+            request.chat_id,
+            "exec",
+            request.kind,
+            Some(&exec("cargo", &["publish"])),
+        ));
+        assert!(!grants.covers(request.chat_id, "exec", request.kind, None));
+    }
+
+    #[tokio::test]
+    async fn a_rung_the_call_cannot_describe_is_refused_rather_than_widened() {
+        // The approval carries no action, so "always allow exactly this" has
+        // nothing to name. Falling back to a broader grant would hand out more
+        // authority than the human chose.
+        let (store, request) = setup("exec").await;
+        let broker = ApprovalBroker::new(store);
+        let _pending = broker.register(request.clone(), None).await;
+
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::ExactCommand),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::GrantNotAvailable
+        );
+        assert!(!broker
             .standing_grants()
-            .covers(request.chat_id, &request.tool_name, request.kind,));
+            .covers(request.chat_id, "exec", request.kind, None));
     }
 
     #[tokio::test]
@@ -437,19 +560,22 @@ mod tests {
 
         assert_eq!(
             broker
-                .resolve_with_remember(
+                .resolve_with_grant(
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    true,
+                    Some(crate::routes::ApprovalGrantRung::WholeTool),
                 )
                 .await
                 .unwrap(),
             ResolveApprovalOutcome::Resolved
         );
-        assert!(broker
-            .standing_grants()
-            .covers(request.chat_id, &request.tool_name, request.kind));
+        assert!(broker.standing_grants().covers(
+            request.chat_id,
+            &request.tool_name,
+            request.kind,
+            None
+        ));
     }
 
     #[tokio::test]

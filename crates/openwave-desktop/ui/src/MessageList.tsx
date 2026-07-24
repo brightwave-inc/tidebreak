@@ -1,6 +1,7 @@
 import { memo, useMemo } from "react";
 import type { ReactNode, RefObject, UIEvent } from "react";
 import type {
+  ApprovalGrantRung,
   PendingFolderAccessRequest,
   PendingUserQuestions,
   ToolActionPreview,
@@ -74,7 +75,7 @@ type MessageListProps = {
   onApproval: (
     callId: string,
     decision: "approve" | "reject",
-    remember?: boolean,
+    grant: ApprovalGrantRung | null,
   ) => void;
   onFolderAccessDecision: (
     callId: string,
@@ -198,7 +199,7 @@ export function groupMessageItems(
   onApproval: (
     callId: string,
     decision: "approve" | "reject",
-    remember?: boolean,
+    grant: ApprovalGrantRung | null,
   ) => void,
   approvalState?: {
     decidingApprovalCalls: Set<string>;
@@ -290,7 +291,7 @@ function surfacedCards(
   onApproval: (
     callId: string,
     decision: "approve" | "reject",
-    remember?: boolean,
+    grant: ApprovalGrantRung | null,
   ) => void,
   approvalState?: {
     decidingApprovalCalls: Set<string>;

@@ -1,3 +1,4 @@
+import type { ApprovalGrantRung } from "./api";
 import { useRef, useState } from "react";
 import type { ApiClient } from "./api";
 import { useChatSessionStore } from "./ChatSessionStore";
@@ -9,7 +10,7 @@ export type ToolApprovals = {
   decide: (
     callId: string,
     decision: "approve" | "reject",
-    remember?: boolean,
+    grant?: ApprovalGrantRung | null,
   ) => void;
 };
 
@@ -33,7 +34,7 @@ export function useToolApprovals(
   async function send(
     callId: string,
     decision: "approve" | "reject",
-    remember: boolean,
+    grant: ApprovalGrantRung | null,
   ) {
     if (!client || !chatId || decidingRef.current.has(callId)) return;
     const startedChatId = chatId;
@@ -45,7 +46,7 @@ export function useToolApprovals(
       return next;
     });
     try {
-      await client.decideApproval(startedChatId, callId, decision, remember);
+      await client.decideApproval(startedChatId, callId, decision, grant);
       useChatSessionStore.getState().update((session) => ({
         ...session,
         messages: session.messages.map((message) =>
@@ -76,7 +77,7 @@ export function useToolApprovals(
   return {
     deciding,
     errors,
-    decide: (callId, decision, remember = false) =>
-      void send(callId, decision, remember),
+    decide: (callId, decision, grant = null) =>
+      void send(callId, decision, grant),
   };
 }

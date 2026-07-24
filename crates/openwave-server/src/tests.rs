@@ -11727,7 +11727,7 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
     // decision, leaving the exact approval actionable.
     for body in [
         serde_json::json!({"decision": "reject", "reason": "bad\0reason"}),
-        serde_json::json!({"decision": "reject", "remember": true}),
+        serde_json::json!({"decision": "reject", "grant": "whole_tool"}),
         serde_json::json!({"decision": "approve", "unexpected": true}),
     ] {
         let invalid = router
@@ -11764,7 +11764,7 @@ async fn approval_endpoint_unparks_a_sensitive_tool() {
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"decision": "approve", "remember": true}).to_string(),
+                    serde_json::json!({"decision": "approve", "grant": "whole_tool"}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -12245,7 +12245,7 @@ async fn ingest_index_search_then_chat_through_the_approval_gate() {
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"decision": "approve", "remember": true}).to_string(),
+                    serde_json::json!({"decision": "approve", "grant": "whole_tool"}).to_string(),
                 ))
                 .unwrap(),
         )

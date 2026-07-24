@@ -217,7 +217,79 @@ pub struct StandingGrant {
     chat_id: ChatId,
     tool_name: String,
     kind: ToolApprovalKind,
+    scope: GrantScope,
     granted_at: DateTime<Utc>,
+}
+
+/// How much a standing grant covers.
+///
+/// A grant is easy to widen by accident and hard to notice afterwards, so the
+/// scope is stated in the grant itself rather than inferred from the tool. The
+/// narrower variants exist because "don't ask me about commands again" is a
+/// much larger thing to agree to than "don't ask me about `cargo` again".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantScope {
+    /// Exactly this argument vector, and nothing else.
+    ExactCommand { command: String, args: Vec<String> },
+    /// This executable, with any arguments.
+    AnyArgsFor { command: String },
+    /// Every call to the tool.
+    WholeTool,
+}
+
+impl GrantScope {
+    /// Whether this scope covers the action a call is about to take.
+    ///
+    /// An action the renderer could not describe is never covered by a narrow
+    /// scope: matching it would mean guessing at what the call will do.
+    #[must_use]
+    pub fn covers_action(&self, action: Option<&crate::preview::ToolActionPreview>) -> bool {
+        use crate::preview::ToolActionPreview;
+        match self {
+            Self::WholeTool => true,
+            Self::ExactCommand { command, args } => matches!(
+                action,
+                Some(ToolActionPreview::Exec {
+                    command: call_command,
+                    args: call_args,
+                    ..
+                }) if call_command == command && call_args == args
+            ),
+            Self::AnyArgsFor { command } => matches!(
+                action,
+                Some(ToolActionPreview::Exec {
+                    command: call_command,
+                    ..
+                }) if call_command == command
+            ),
+        }
+    }
+
+    /// The scopes offered for an action, narrowest first.
+    ///
+    /// A tool with nothing to describe can only be granted wholesale, because
+    /// there is no narrower thing to name.
+    #[must_use]
+    pub fn ladder_for(action: Option<&crate::preview::ToolActionPreview>) -> Vec<Self> {
+        match action {
+            Some(crate::preview::ToolActionPreview::Exec { command, args, .. }) => {
+                let mut ladder = vec![Self::ExactCommand {
+                    command: command.clone(),
+                    args: args.clone(),
+                }];
+                // With no arguments, "exactly this" and "this executable with
+                // any arguments" would read as two names for one grant.
+                if !args.is_empty() {
+                    ladder.push(Self::AnyArgsFor {
+                        command: command.clone(),
+                    });
+                }
+                ladder.push(Self::WholeTool);
+                ladder
+            }
+            _ => vec![Self::WholeTool],
+        }
+    }
 }
 
 impl StandingGrant {
@@ -234,6 +306,20 @@ impl StandingGrant {
         kind: ToolApprovalKind,
         granted_at: DateTime<Utc>,
     ) -> Option<Self> {
+        Self::scoped(chat_id, tool_name, kind, GrantScope::WholeTool, granted_at)
+    }
+
+    /// Record consent limited to `scope`.
+    ///
+    /// Returns `None` on the same terms as [`StandingGrant::new`].
+    #[must_use]
+    pub fn scoped(
+        chat_id: ChatId,
+        tool_name: impl Into<String>,
+        kind: ToolApprovalKind,
+        scope: GrantScope,
+        granted_at: DateTime<Utc>,
+    ) -> Option<Self> {
         if !kind.is_standing_grantable() {
             return None;
         }
@@ -241,8 +327,15 @@ impl StandingGrant {
             chat_id,
             tool_name: tool_name.into(),
             kind,
+            scope,
             granted_at,
         })
+    }
+
+    /// How much this grant covers.
+    #[must_use]
+    pub const fn scope(&self) -> &GrantScope {
+        &self.scope
     }
 
     /// Chat the standing consent belongs to.
@@ -271,11 +364,18 @@ impl StandingGrant {
 
     /// Whether this grant covers an exact Sensitive action.
     #[must_use]
-    fn covers(&self, chat_id: ChatId, tool_name: &str, kind: ToolApprovalKind) -> bool {
+    fn covers(
+        &self,
+        chat_id: ChatId,
+        tool_name: &str,
+        kind: ToolApprovalKind,
+        action: Option<&crate::preview::ToolActionPreview>,
+    ) -> bool {
         self.chat_id == chat_id
             && self.tool_name == tool_name
             && self.kind == kind
             && kind.is_approvable()
+            && self.scope.covers_action(action)
     }
 }
 
@@ -314,6 +414,7 @@ impl StandingGrants {
             existing.chat_id == grant.chat_id
                 && existing.tool_name == grant.tool_name
                 && existing.kind == grant.kind
+                && existing.scope == grant.scope
         }) {
             grants.push(grant);
         }
@@ -321,10 +422,16 @@ impl StandingGrants {
 
     /// Whether a live grant covers this exact Sensitive action.
     #[must_use]
-    pub fn covers(&self, chat_id: ChatId, tool_name: &str, kind: ToolApprovalKind) -> bool {
+    pub fn covers(
+        &self,
+        chat_id: ChatId,
+        tool_name: &str,
+        kind: ToolApprovalKind,
+        action: Option<&crate::preview::ToolActionPreview>,
+    ) -> bool {
         self.read()
             .iter()
-            .any(|grant| grant.covers(chat_id, tool_name, kind))
+            .any(|grant| grant.covers(chat_id, tool_name, kind, action))
     }
 
     /// Drop every grant, e.g. on explicit revocation.
@@ -521,9 +628,9 @@ mod standing_grant_tests {
         let chat = ChatId::new();
         let grants = StandingGrants::from_grants(vec![grant(chat, "exec")]);
         let kind = ToolApprovalKind::for_tool_name("exec");
-        assert!(grants.covers(chat, "exec", kind));
+        assert!(grants.covers(chat, "exec", kind, None));
         // Deny-by-default still holds for a different chat.
-        assert!(!grants.covers(ChatId::new(), "exec", kind));
+        assert!(!grants.covers(ChatId::new(), "exec", kind, None));
     }
 
     #[test]
@@ -553,7 +660,12 @@ mod standing_grant_tests {
     fn empty_set_covers_nothing() {
         let chat = ChatId::new();
         let grants = StandingGrants::new();
-        assert!(!grants.covers(chat, "search", ToolApprovalKind::for_tool_name("search")));
+        assert!(!grants.covers(
+            chat,
+            "search",
+            ToolApprovalKind::for_tool_name("search"),
+            None
+        ));
     }
 
     #[test]
@@ -563,13 +675,147 @@ mod standing_grant_tests {
         let grants = StandingGrants::from_grants(vec![grant(chat, "search")]);
         let kind = ToolApprovalKind::for_tool_name("search");
 
-        assert!(grants.covers(chat, "search", kind));
-        assert!(!grants.covers(other_chat, "search", kind));
+        assert!(grants.covers(chat, "search", kind, None));
+        assert!(!grants.covers(other_chat, "search", kind, None));
         assert!(!grants.covers(
             chat,
             "third_party_sensitive",
             ToolApprovalKind::for_tool_name("third_party_sensitive"),
+            None,
         ));
+    }
+
+    fn exec_action(command: &str, args: &[&str]) -> crate::preview::ToolActionPreview {
+        crate::preview::ToolActionPreview::Exec {
+            command: command.into(),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            cwd: ".".into(),
+        }
+    }
+
+    #[test]
+    fn an_exact_grant_covers_only_the_vector_it_named() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        let grants = StandingGrants::new();
+        grants.record(
+            StandingGrant::scoped(
+                chat,
+                "exec",
+                kind,
+                GrantScope::ExactCommand {
+                    command: "cargo".into(),
+                    args: vec!["test".into()],
+                },
+                Utc::now(),
+            )
+            .unwrap(),
+        );
+
+        assert!(grants.covers(chat, "exec", kind, Some(&exec_action("cargo", &["test"]))));
+        assert!(!grants.covers(
+            chat,
+            "exec",
+            kind,
+            Some(&exec_action("cargo", &["publish"]))
+        ));
+        assert!(!grants.covers(chat, "exec", kind, Some(&exec_action("rm", &["test"]))));
+        // An action the renderer could not describe was never the one granted.
+        assert!(!grants.covers(chat, "exec", kind, None));
+    }
+
+    #[test]
+    fn an_executable_grant_covers_any_arguments_to_it() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        let grants = StandingGrants::new();
+        grants.record(
+            StandingGrant::scoped(
+                chat,
+                "exec",
+                kind,
+                GrantScope::AnyArgsFor {
+                    command: "cargo".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap(),
+        );
+
+        assert!(grants.covers(chat, "exec", kind, Some(&exec_action("cargo", &["test"]))));
+        assert!(grants.covers(
+            chat,
+            "exec",
+            kind,
+            Some(&exec_action("cargo", &["publish"]))
+        ));
+        assert!(!grants.covers(chat, "exec", kind, Some(&exec_action("rm", &["-rf"]))));
+    }
+
+    #[test]
+    fn a_whole_tool_grant_covers_an_action_it_cannot_read() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        let grants = StandingGrants::new();
+        grants.record(grant(chat, "exec"));
+
+        assert!(grants.covers(chat, "exec", kind, Some(&exec_action("rm", &["-rf"]))));
+        assert!(grants.covers(chat, "exec", kind, None));
+    }
+
+    #[test]
+    fn the_ladder_runs_narrowest_first_and_never_names_one_grant_twice() {
+        assert_eq!(
+            GrantScope::ladder_for(Some(&exec_action("cargo", &["test"]))),
+            vec![
+                GrantScope::ExactCommand {
+                    command: "cargo".into(),
+                    args: vec!["test".into()],
+                },
+                GrantScope::AnyArgsFor {
+                    command: "cargo".into(),
+                },
+                GrantScope::WholeTool,
+            ]
+        );
+        // With no arguments, "exactly this" and "any arguments to this" would
+        // be two names for the same grant.
+        assert_eq!(
+            GrantScope::ladder_for(Some(&exec_action("true", &[]))),
+            vec![
+                GrantScope::ExactCommand {
+                    command: "true".into(),
+                    args: vec![],
+                },
+                GrantScope::WholeTool,
+            ]
+        );
+        // Nothing to describe means nothing narrower to offer.
+        assert_eq!(GrantScope::ladder_for(None), vec![GrantScope::WholeTool]);
+    }
+
+    #[test]
+    fn narrow_grants_for_the_same_tool_accumulate_rather_than_collapse() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        let grants = StandingGrants::new();
+        for command in ["cargo", "git"] {
+            grants.record(
+                StandingGrant::scoped(
+                    chat,
+                    "exec",
+                    kind,
+                    GrantScope::AnyArgsFor {
+                        command: command.into(),
+                    },
+                    Utc::now(),
+                )
+                .unwrap(),
+            );
+        }
+        assert_eq!(grants.read().len(), 2);
+        assert!(grants.covers(chat, "exec", kind, Some(&exec_action("git", &["log"]))));
+        assert!(!grants.covers(chat, "exec", kind, Some(&exec_action("npm", &["i"]))));
     }
 
     #[test]
@@ -580,9 +826,9 @@ mod standing_grant_tests {
         grants.record(grant(chat, "search"));
         grants.record(grant(chat, "search"));
         assert_eq!(grants.read().len(), 1);
-        assert!(grants.covers(chat, "search", kind));
+        assert!(grants.covers(chat, "search", kind, None));
 
         grants.clear();
-        assert!(!grants.covers(chat, "search", kind));
+        assert!(!grants.covers(chat, "search", kind, None));
     }
 }

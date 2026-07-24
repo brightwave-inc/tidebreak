@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
-import type { ToolActionPreview } from "./api";
+import type { ApprovalGrantRung, ToolActionPreview } from "./api";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ScrollableContainer } from "./ScrollableContainer";
@@ -8,12 +8,15 @@ import { toolPreviewPresentation } from "./ToolPreview";
 
 export type ApprovalDecision = "approve" | "reject";
 
-export type ApprovalOption = {
-  key: string;
-  label: string;
-  decision: ApprovalDecision;
-  remember: boolean;
-};
+export type ApprovalOption =
+  | {
+      kind: "decide";
+      key: string;
+      label: string;
+      decision: ApprovalDecision;
+      grant: ApprovalGrantRung | null;
+    }
+  | { kind: "more"; key: string; label: string };
 
 type ApprovalCardProps = {
   callId: string;
@@ -28,7 +31,7 @@ type ApprovalCardProps = {
   onDecide: (
     callId: string,
     decision: ApprovalDecision,
-    remember: boolean,
+    grant: ApprovalGrantRung | null,
   ) => void;
 };
 
@@ -54,7 +57,8 @@ export function ApprovalCard({
   error,
   onDecide,
 }: ApprovalCardProps) {
-  const options = approvalOptions(preview, canApprove, canRemember);
+  const [expanded, setExpanded] = useState(false);
+  const options = approvalOptions(preview, canApprove, canRemember, expanded);
   const [highlight, setHighlight] = useState(0);
   const rowRefs = useRef<Array<HTMLDivElement | null>>([]);
   const hasAutoFocused = useRef(false);
@@ -84,7 +88,16 @@ export function ApprovalCard({
   const commit = (index: number) => {
     const option = options[index];
     if (!option || deciding) return;
-    onDecide(callId, option.decision, option.remember);
+    if (option.kind === "more") {
+      setExpanded(true);
+      // The revealed grants take the indices "More options" occupied, so
+      // leaving the highlight here would park it on a broader grant and let
+      // the next Enter commit it — the one thing this list exists to prevent.
+      setHighlight(0);
+      rowRefs.current[0]?.focus();
+      return;
+    }
+    onDecide(callId, option.decision, option.grant);
   };
 
   const focusRow = (to: number) => {
@@ -159,7 +172,10 @@ export function ApprovalCard({
             <span
               className={cn(
                 "flex-1",
-                option.decision === "reject" && "text-muted-foreground",
+                option.kind === "decide" &&
+                  option.decision === "reject" &&
+                  "text-muted-foreground",
+                option.kind === "more" && "text-muted-foreground",
               )}
             >
               {option.label}
@@ -205,8 +221,16 @@ export function approvalAsk(
   return { title: summary, summaryLine: null };
 }
 
+/** How many grants show before the rest move behind "More options". */
+const INLINE_GRANTS = 1;
+
 /**
  * Narrowest grant first, decline last.
+ *
+ * The broader rungs start hidden. Every option on screen is one keystroke
+ * away, so a list that shows "don't ask again" beside "just this once" makes
+ * the widest grant as cheap as the narrowest — and scope is easy to widen by
+ * accident and hard to notice afterwards.
  *
  * A kind the server will not let the renderer approve offers only the decline,
  * so an unpresentable action can never be waved through from here.
@@ -215,32 +239,84 @@ export function approvalOptions(
   preview: ToolActionPreview | null,
   canApprove: boolean,
   canRemember: boolean,
+  expanded = false,
 ): ApprovalOption[] {
-  const options: ApprovalOption[] = [];
-  if (canApprove) {
-    options.push({
+  if (!canApprove) return [declineOption()];
+
+  const options: ApprovalOption[] = [
+    {
+      kind: "decide",
       key: "once",
       // Named for the act, not the abstraction: "run it once" is what the
       // person is about to do.
       label:
         preview?.tool === "exec" ? "Yes, run it once" : "Yes, allow it once",
       decision: "approve",
-      remember: false,
-    });
-    if (canRemember) {
-      options.push({
-        key: "chat",
-        label: "Yes, and don't ask again in this chat",
-        decision: "approve",
-        remember: true,
-      });
-    }
+      grant: null,
+    },
+  ];
+
+  const grants = canRemember ? grantLadder(preview) : [];
+  const visible = expanded ? grants : grants.slice(0, INLINE_GRANTS);
+  options.push(...visible);
+  if (grants.length > visible.length) {
+    options.push({ kind: "more", key: "more", label: "More options" });
   }
-  options.push({
+  options.push(declineOption());
+  return options;
+}
+
+function declineOption(): ApprovalOption {
+  return {
+    kind: "decide",
     key: "decline",
     label: "No, don't allow this",
     decision: "reject",
-    remember: false,
-  });
-  return options;
+    grant: null,
+  };
+}
+
+/**
+ * The standing grants on offer, narrowest first.
+ *
+ * A command names itself, so consent can be about that command rather than
+ * about commands in general. A tool with nothing to describe can only be
+ * granted wholesale — there is no narrower thing to name.
+ */
+export function grantLadder(preview: ToolActionPreview | null): ApprovalOption[] {
+  const wholeTool: ApprovalOption = {
+    kind: "decide",
+    key: "whole-tool",
+    label:
+      preview?.tool === "exec"
+        ? "Yes, and don't ask again about commands in this chat"
+        : "Yes, and don't ask again in this chat",
+    decision: "approve",
+    grant: "whole_tool",
+  };
+  if (preview?.tool !== "exec") return [wholeTool];
+
+  const spoken = [preview.command, ...preview.args].join(" ");
+  return [
+    {
+      kind: "decide",
+      key: "exact",
+      label: `Yes, and always allow exactly \u201c${spoken}\u201d`,
+      decision: "approve",
+      grant: "exact_command",
+    },
+    // With no arguments this would be the same grant as the exact one.
+    ...(preview.args.length > 0
+      ? [
+          {
+            kind: "decide" as const,
+            key: "any-args",
+            label: `Yes, and always allow any \u201c${preview.command}\u201d command`,
+            decision: "approve" as const,
+            grant: "any_args_for_command" as const,
+          },
+        ]
+      : []),
+    wholeTool,
+  ];
 }

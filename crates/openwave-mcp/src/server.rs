@@ -69,7 +69,11 @@ impl ApprovalBridge {
         arguments: &Value,
     ) -> Option<String> {
         let kind = ToolApprovalKind::for_tool_name(tool_name);
-        if self.grants.covers(chat_id, tool_name, kind) {
+        let action = ToolActionPreview::build(tool_name, arguments);
+        if self
+            .grants
+            .covers(chat_id, tool_name, kind, action.as_ref())
+        {
             return None;
         }
         let request = ApprovalRequest {
@@ -79,7 +83,7 @@ impl ApprovalBridge {
             tool_name: tool_name.to_string(),
             class,
             kind,
-            preview: ToolActionPreview::build(tool_name, arguments),
+            preview: action,
             summary: format!("{tool_name} requires approval"),
         };
         // MCP has no durable steer journal, so register without a journal identity.
