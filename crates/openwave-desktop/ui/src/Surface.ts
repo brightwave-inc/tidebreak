@@ -1,9 +1,8 @@
 /**
  * Where the chat workspace is pointed.
  *
- * A surface name alone cannot express "open this source at this citation" or
- * "open this output", so the selection is a descriptor: a surface, optionally
- * an item owned by that surface, and optionally a position within that item.
+ * A surface name alone cannot express "open this output", so the selection is a
+ * descriptor: a surface plus, optionally, an item owned by that surface.
  * Identifiers are opaque and come from the API or the native catalog — never a
  * host path.
  */
@@ -17,54 +16,47 @@ export type SurfaceKind =
 export type Surface = {
   kind: SurfaceKind;
   itemId?: string;
-  anchor?: string;
 };
 
-type TargetSupport = { item: boolean; anchor: boolean };
-
 /**
- * What each surface can be pointed at. Surfaces gain targets as the views that
- * resolve them land, so this table is the single place that has to change.
+ * Which surfaces can be pointed at an item, and so which ones have a view that
+ * resolves one. A surface gains an entry when the view can act on it, not when
+ * the descriptor could carry it: a target nothing consumes reads as a feature
+ * and behaves as dead weight.
  */
-const SURFACE_TARGETS: Record<SurfaceKind, TargetSupport> = {
-  chat: { item: false, anchor: false },
-  documents: { item: true, anchor: true },
-  deliverables: { item: true, anchor: false },
-  folders: { item: false, anchor: false },
-  settings: { item: false, anchor: false },
+const SURFACE_TARGETS: Record<SurfaceKind, { item: boolean }> = {
+  chat: { item: false },
+  documents: { item: false },
+  deliverables: { item: true },
+  folders: { item: false },
+  settings: { item: false },
 };
 
 export const CHAT_SURFACE: Surface = { kind: "chat" };
 
-export function isSurfaceKind(value: unknown): value is SurfaceKind {
+function isSurfaceKind(value: unknown): value is SurfaceKind {
   return typeof value === "string" && Object.hasOwn(SURFACE_TARGETS, value);
 }
 
 /**
  * Reduce an arbitrary value — a caller's argument, or a descriptor restored
  * from storage — to one the workspace can render. An unrecognised surface
- * falls back to the transcript. A target the surface does not accept, or an
- * anchor with no item to anchor to, is dropped so the surface opens on its own
- * list instead of an empty pane.
+ * falls back to the transcript. A target the surface does not accept is
+ * dropped so it opens on its own list instead of an empty pane.
  */
 export function normalizeSurface(value: unknown): Surface {
   if (!isRecord(value) || !isSurfaceKind(value.kind)) return CHAT_SURFACE;
 
   const kind = value.kind;
-  const supports = SURFACE_TARGETS[kind];
-  const itemId = supports.item ? nonEmptyString(value.itemId) : null;
-  if (!itemId) return { kind };
-
-  const anchor = supports.anchor ? nonEmptyString(value.anchor) : null;
-  return anchor ? { kind, itemId, anchor } : { kind, itemId };
+  const itemId = SURFACE_TARGETS[kind].item
+    ? nonEmptyString(value.itemId)
+    : null;
+  return itemId ? { kind, itemId } : { kind };
 }
 
+/** Whether two descriptors point at the same thing. */
 export function sameSurface(left: Surface, right: Surface): boolean {
-  return (
-    left.kind === right.kind &&
-    left.itemId === right.itemId &&
-    left.anchor === right.anchor
-  );
+  return left.kind === right.kind && left.itemId === right.itemId;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -22,40 +22,30 @@ describe("UiStore", () => {
     expect(store.getState().surface).toEqual({ kind: "chat" });
   });
 
-  it("carries a target into the surface that accepts it", () => {
+  it("carries a target into the one surface whose view resolves it", () => {
     const store = createUiStore();
-
-    store.getState().showDocuments({ documentId: "doc-1", citationId: "c-4" });
-    expect(store.getState().surface).toEqual({
-      kind: "documents",
-      itemId: "doc-1",
-      anchor: "c-4",
-    });
 
     store.getState().showDeliverables({ filename: "summary.md" });
     expect(store.getState().surface).toEqual({
       kind: "deliverables",
       itemId: "summary.md",
     });
-  });
 
-  it("drops a citation that has no source to anchor to", () => {
-    const store = createUiStore();
-    store.getState().showDocuments({ citationId: "c-4" });
+    // Sources has no target: the view takes only a conversation, so carrying
+    // one would read as a feature and behave as dead weight.
+    store.getState().showDocuments();
     expect(store.getState().surface).toEqual({ kind: "documents" });
   });
 
-  it("validates a descriptor opened directly", () => {
+  it("does not republish the surface already open", () => {
     const store = createUiStore();
+    store.getState().showDeliverables({ filename: "summary.md" });
+    const opened = store.getState().surface;
 
-    store.getState().openSurface({ kind: "deliverables", itemId: "notes.md" });
-    expect(store.getState().surface).toEqual({
-      kind: "deliverables",
-      itemId: "notes.md",
-    });
-
-    store.getState().openSurface({ kind: "nope" } as never);
-    expect(store.getState().surface).toEqual({ kind: "chat" });
+    store.getState().showDeliverables({ filename: "summary.md" });
+    // Same identity, not merely equal: a fresh descriptor would re-render every
+    // subscriber for a navigation that did not happen.
+    expect(store.getState().surface).toBe(opened);
   });
 });
 

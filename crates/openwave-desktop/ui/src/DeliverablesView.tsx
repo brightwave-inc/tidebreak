@@ -95,6 +95,11 @@ export function DeliverablesView({
     setError(null);
     setPreviewError(null);
     setExportStatus(null);
+    // The requested filename belongs to the conversation that asked for it. Its
+    // only other clear sits after the stale-generation bail, which a chat switch
+    // always takes — so without resetting here the next conversation opens on
+    // the file the previous one wanted.
+    pendingFilenameRef.current = initialFilename ?? null;
     void refresh(true);
     return () => {
       catalogGenerationRef.current += 1;
@@ -112,7 +117,10 @@ export function DeliverablesView({
     } else {
       pendingFilenameRef.current = initialFilename;
     }
-  }, [initialFilename]);
+    // `catalog` is read here, so it belongs in the dependencies: a target set
+    // before the list arrived has to re-resolve when it does, by any path and
+    // not only through an explicit refresh.
+  }, [initialFilename, catalog]);
 
   useEffect(() => {
     if (!selected) {
