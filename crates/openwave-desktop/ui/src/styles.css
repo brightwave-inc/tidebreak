@@ -2336,6 +2336,17 @@ body {
   margin: 0;
 }
 
+.boot .boot-error-detail {
+  max-width: 34rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.boot .btn {
+  margin-top: 0.75rem;
+}
+
 .approval {
   display: flex;
   flex-wrap: wrap;
