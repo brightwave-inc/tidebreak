@@ -163,11 +163,204 @@ fn operate(
     }))
 }
 
+fn list_approved(controller: &Controller) -> Vec<RootSummary> {
+    let result = unwrap_response(controller.handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::ListApprovedRoots,
+    }))
+    .unwrap();
+    let ControlResult::ListApprovedRoots { roots } = result else {
+        panic!("unexpected control result")
+    };
+    roots
+}
+
 fn unwrap_response<T>(envelope: ResponseEnvelope<T>) -> Result<T, ErrorResponse> {
     match envelope.response {
         Response::Ok(result) => Ok(result),
         Response::Error(error) => Err(error),
     }
+}
+
+#[test]
+fn an_empty_conversation_lists_no_roots_without_needing_a_grant() {
+    let (_temp, broker, _path) = setup();
+    let context = ExecutionContext::standalone(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        operate(&broker.operator(), context, OperationRequest::ListRoots).unwrap(),
+        OperationResult::ListRoots { roots: Vec::new() }
+    );
+    assert!(list_approved(&broker.controller()).is_empty());
+}
+
+#[test]
+fn approved_roots_can_be_explicitly_attached_to_another_standalone_conversation() {
+    let (_temp, broker, path) = setup();
+    let first_conversation = Uuid::new_v4();
+    let first_subject = GrantSubject::conversation(first_conversation).unwrap();
+    let registered = register(
+        &broker.controller(),
+        first_subject,
+        first_conversation,
+        path,
+        OperationId::new(),
+    );
+    let root_id = registered.root.root_id;
+    mutate_attachment(
+        &broker.controller(),
+        OperationId::new(),
+        first_subject,
+        first_conversation,
+        root_id,
+        RootAttachmentMutationKind::Detach,
+    )
+    .unwrap();
+
+    assert_eq!(
+        list_approved(&broker.controller()),
+        vec![registered.root.clone()]
+    );
+    assert_eq!(
+        operate(
+            &broker.operator(),
+            ExecutionContext::standalone(first_conversation).unwrap(),
+            OperationRequest::ListRoots,
+        )
+        .unwrap(),
+        OperationResult::ListRoots { roots: Vec::new() }
+    );
+
+    let second_conversation = Uuid::new_v4();
+    let second_subject = GrantSubject::conversation(second_conversation).unwrap();
+    mutate_attachment(
+        &broker.controller(),
+        OperationId::new(),
+        second_subject,
+        second_conversation,
+        root_id,
+        RootAttachmentMutationKind::Attach,
+    )
+    .unwrap();
+    let second_context = ExecutionContext::standalone(second_conversation).unwrap();
+    assert_eq!(
+        operate(
+            &broker.operator(),
+            second_context,
+            OperationRequest::ListRoots,
+        )
+        .unwrap(),
+        OperationResult::ListRoots {
+            roots: vec![registered.root]
+        }
+    );
+    assert!(matches!(
+        operate(
+            &broker.operator(),
+            second_context,
+            OperationRequest::ReadFile(PathRequest {
+                root_id,
+                path: RelativePath::parse("note.txt").unwrap(),
+            }),
+        )
+        .unwrap(),
+        OperationResult::ReadFile(_)
+    ));
+
+    let unrelated = ExecutionContext::standalone(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        operate(&broker.operator(), unrelated, OperationRequest::ListRoots).unwrap(),
+        OperationResult::ListRoots { roots: Vec::new() }
+    );
+}
+
+#[test]
+fn reused_standalone_approval_and_chat_attachment_survive_restart() {
+    let (temp, broker, path, state_dir) = durable_setup();
+    let first_conversation = Uuid::new_v4();
+    let first_subject = GrantSubject::conversation(first_conversation).unwrap();
+    let registered = register(
+        &broker.controller(),
+        first_subject,
+        first_conversation,
+        path,
+        OperationId::new(),
+    );
+    mutate_attachment(
+        &broker.controller(),
+        OperationId::new(),
+        first_subject,
+        first_conversation,
+        registered.root.root_id,
+        RootAttachmentMutationKind::Detach,
+    )
+    .unwrap();
+    let second_conversation = Uuid::new_v4();
+    mutate_attachment(
+        &broker.controller(),
+        OperationId::new(),
+        GrantSubject::conversation(second_conversation).unwrap(),
+        second_conversation,
+        registered.root.root_id,
+        RootAttachmentMutationKind::Attach,
+    )
+    .unwrap();
+    drop(broker);
+
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    assert_eq!(
+        list_approved(&broker.controller()),
+        vec![registered.root.clone()]
+    );
+    assert_eq!(
+        operate(
+            &broker.operator(),
+            ExecutionContext::standalone(second_conversation).unwrap(),
+            OperationRequest::ListRoots,
+        )
+        .unwrap(),
+        OperationResult::ListRoots {
+            roots: vec![registered.root]
+        }
+    );
+}
+
+#[test]
+fn choosing_the_same_approved_folder_again_reuses_its_host_identity() {
+    let (_temp, broker, path) = setup();
+    let first_conversation = Uuid::new_v4();
+    let first = register(
+        &broker.controller(),
+        GrantSubject::conversation(first_conversation).unwrap(),
+        first_conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+    let second_conversation = Uuid::new_v4();
+    let second = register(
+        &broker.controller(),
+        GrantSubject::conversation(second_conversation).unwrap(),
+        second_conversation,
+        path,
+        OperationId::new(),
+    );
+
+    assert_eq!(second.root, first.root);
+    assert_eq!(
+        list_approved(&broker.controller()),
+        vec![first.root.clone()]
+    );
+    assert_eq!(
+        operate(
+            &broker.operator(),
+            ExecutionContext::standalone(second_conversation).unwrap(),
+            OperationRequest::ListRoots,
+        )
+        .unwrap(),
+        OperationResult::ListRoots {
+            roots: vec![first.root]
+        }
+    );
 }
 
 #[test]
@@ -1716,7 +1909,7 @@ fn persisted_receipts_must_match_authoritative_state() {
 }
 
 #[test]
-fn persisted_attachments_must_be_unique_and_respect_conversation_ownership() {
+fn persisted_attachments_must_be_unique_and_match_subject_grants() {
     let (_temp, broker, path, _state_dir) = durable_setup();
     let conversation = Uuid::new_v4();
     register(

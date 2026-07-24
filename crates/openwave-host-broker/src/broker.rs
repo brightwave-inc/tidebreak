@@ -141,6 +141,8 @@ struct State {
 
 #[derive(Clone)]
 struct RegisteredRoot {
+    /// Subject that originally established the host approval. Other subjects
+    /// may receive grants only through trusted attachment control actions.
     owner: GrantSubject,
     display_name: String,
     root: Arc<ValidatedRoot>,
@@ -213,7 +215,7 @@ struct ControlAudit {
 impl ControlAudit {
     fn from_request(request: &ControlRequest) -> Option<Self> {
         match request {
-            ControlRequest::Hello => None,
+            ControlRequest::Hello | ControlRequest::ListApprovedRoots => None,
             ControlRequest::RegisterRoot(request) => Some(Self {
                 actor: AuditActor::Control {
                     subject: request.subject,
@@ -433,6 +435,10 @@ impl Controller {
         require_version(envelope.protocol_version).map_err(error_response)?;
         match envelope.request {
             ControlRequest::Hello => Ok(ControlResult::Hello(hello())),
+            ControlRequest::ListApprovedRoots => {
+                let state = self.lock_state().map_err(error_response)?;
+                list_approved_roots(&state).map(|roots| ControlResult::ListApprovedRoots { roots })
+            }
             ControlRequest::RegisterRoot(request) => {
                 self.register_root(request).map(ControlResult::RegisterRoot)
             }
@@ -489,11 +495,17 @@ impl Controller {
         let outcome = match prepared {
             Ok(prepared) => {
                 let existing = next.roots.iter().find_map(|(root_id, root)| {
-                    (root.owner == prepared.root.owner
-                        && root.root.identity() == prepared.root.root.identity())
-                    .then(|| (*root_id, root.display_name.clone()))
+                    (root.root.identity() == prepared.root.root.identity())
+                        .then(|| (*root_id, root.display_name.clone()))
                 });
                 if let Some((root_id, display_name)) = existing {
+                    ensure_subject_grants(
+                        &mut next,
+                        prepared.root.owner,
+                        root_id,
+                        prepared.grants[0].consent().clone(),
+                    )
+                    .map_err(error_response)?;
                     if !next.attachments.iter().any(|attachment| {
                         attachment.conversation_id() == prepared.conversation_id
                             && attachment.root_id() == root_id
@@ -799,7 +811,7 @@ impl Operator {
                 OperationRequest::ListRoots => {
                     let state = self.lock_state()?;
                     let (result, authorized_by) = list_roots(&state, envelope.context)?;
-                    grant_id = Some(authorized_by);
+                    grant_id = authorized_by;
                     Ok(result)
                 }
                 OperationRequest::ListDirectory(PathRequest { root_id, path }) => {
@@ -1073,20 +1085,24 @@ fn registration_is_connected(
     request: &RegisterFingerprint,
     root: &RootSummary,
 ) -> bool {
-    state.roots.get(&root.root_id).is_some_and(|registered| {
-        registered.owner == request.subject && registered.display_name == root.display_name
-    }) && state.attachments.iter().any(|attachment| {
-        attachment.conversation_id() == request.conversation_id
-            && attachment.root_id() == root.root_id
-    }) && state.grants.iter().any(|grant| {
-        grant.subject() == request.subject
-            && grant.capability() == Capability::ListRoots
-            && matches!(grant.scope(), Scope::Subject)
-    }) && state.grants.iter().any(|grant| {
-        grant.subject() == request.subject
-            && grant.capability() == Capability::ReadFiles
-            && matches!(grant.scope(), Scope::Root { root_id } if *root_id == root.root_id)
-    })
+    state
+        .roots
+        .get(&root.root_id)
+        .is_some_and(|registered| registered.display_name == root.display_name)
+        && state.attachments.iter().any(|attachment| {
+            attachment.conversation_id() == request.conversation_id
+                && attachment.root_id() == root.root_id
+        })
+        && state.grants.iter().any(|grant| {
+            grant.subject() == request.subject
+                && grant.capability() == Capability::ListRoots
+                && matches!(grant.scope(), Scope::Subject)
+        })
+        && state.grants.iter().any(|grant| {
+            grant.subject() == request.subject
+                && grant.capability() == Capability::ReadFiles
+                && matches!(grant.scope(), Scope::Root { root_id } if *root_id == root.root_id)
+        })
 }
 
 fn claim_register(
@@ -1258,13 +1274,12 @@ fn apply_root_attachment(
     validate_subject_conversation(request.subject, request.conversation_id)?;
     let changed = match request.mutation {
         RootAttachmentMutationKind::Attach => {
-            let root = state
+            state
                 .roots
                 .get(&request.root_id)
                 .ok_or(BrokerError::UnknownRoot)?;
-            if root.owner != request.subject {
-                return Err(BrokerError::Denied);
-            }
+            let consent = root_consent(state, request.root_id).ok_or(BrokerError::Denied)?;
+            ensure_subject_grants(state, request.subject, request.root_id, consent)?;
             if has_root_attachment(state, request.conversation_id, request.root_id) {
                 false
             } else {
@@ -1276,10 +1291,10 @@ fn apply_root_attachment(
             }
         }
         RootAttachmentMutationKind::Detach => {
-            if let Some(root) = state.roots.get(&request.root_id) {
-                if root.owner != request.subject {
-                    return Err(BrokerError::Denied);
-                }
+            if state.roots.contains_key(&request.root_id)
+                && !subject_has_root_grant(state, request.subject, request.root_id)
+            {
+                return Err(BrokerError::Denied);
             }
             let before = state.attachments.len();
             state.attachments.retain(|attachment| {
@@ -1314,23 +1329,100 @@ fn has_root_attachment(state: &State, conversation_id: Uuid, root_id: RootId) ->
     })
 }
 
+fn root_consent(state: &State, root_id: RootId) -> Option<ConsentRecord> {
+    state
+        .grants
+        .iter()
+        .find(|grant| {
+            grant.capability() == Capability::ReadFiles
+                && matches!(grant.scope(), Scope::Root { root_id: granted } if *granted == root_id)
+        })
+        .map(|grant| grant.consent().clone())
+}
+
+fn subject_has_root_grant(state: &State, subject: GrantSubject, root_id: RootId) -> bool {
+    state.grants.iter().any(|grant| {
+        grant.subject() == subject
+            && grant.capability() == Capability::ReadFiles
+            && matches!(grant.scope(), Scope::Root { root_id: granted } if *granted == root_id)
+    })
+}
+
+fn ensure_subject_grants(
+    state: &mut State,
+    subject: GrantSubject,
+    root_id: RootId,
+    consent: ConsentRecord,
+) -> Result<(), BrokerError> {
+    if !state.grants.iter().any(|grant| {
+        grant.subject() == subject
+            && grant.capability() == Capability::ListRoots
+            && matches!(grant.scope(), Scope::Subject)
+    }) {
+        state.grants.push(Grant::from_consent(
+            GrantId::new(),
+            subject,
+            Capability::ListRoots,
+            Scope::Subject,
+            consent.clone(),
+        )?);
+    }
+    if !subject_has_root_grant(state, subject, root_id) {
+        state.grants.push(Grant::from_consent(
+            GrantId::new(),
+            subject,
+            Capability::ReadFiles,
+            Scope::Root { root_id },
+            consent,
+        )?);
+    }
+    Ok(())
+}
+
+fn list_approved_roots(state: &State) -> Result<Vec<RootSummary>, ErrorResponse> {
+    let mut roots = state
+        .roots
+        .iter()
+        .map(|(root_id, root)| RootSummary {
+            root_id: *root_id,
+            display_name: root.display_name.clone(),
+        })
+        .take(MAX_LIST_ROOTS + 1)
+        .collect::<Vec<_>>();
+    if roots.len() > MAX_LIST_ROOTS {
+        return Err(error_response(BrokerError::RootListTooLarge));
+    }
+    roots.sort_by(|left, right| {
+        left.display_name
+            .cmp(&right.display_name)
+            .then_with(|| left.root_id.to_string().cmp(&right.root_id.to_string()))
+    });
+    Ok(roots)
+}
+
 fn list_roots(
     state: &State,
     context: ExecutionContext,
-) -> Result<(OperationResult, GrantId), BrokerError> {
+) -> Result<(OperationResult, Option<GrantId>), BrokerError> {
+    if !state
+        .attachments
+        .iter()
+        .any(|attachment| attachment.conversation_id() == context.conversation_id())
+    {
+        return Ok((OperationResult::ListRoots { roots: Vec::new() }, None));
+    }
     let grant_id = authorize(state, context, Capability::ListRoots, Resource::Subject)?;
     let mut roots = state
         .roots
         .iter()
-        .filter(|(root_id, root)| {
-            context.grant_subject_matches(root.owner)
-                && authorize(
-                    state,
-                    context,
-                    Capability::ReadFiles,
-                    Resource::Root(root_id),
-                )
-                .is_ok()
+        .filter(|(root_id, _root)| {
+            authorize(
+                state,
+                context,
+                Capability::ReadFiles,
+                Resource::Root(root_id),
+            )
+            .is_ok()
         })
         .map(|(root_id, root)| RootSummary {
             root_id: *root_id,
@@ -1346,7 +1438,7 @@ fn list_roots(
             .cmp(&right.display_name)
             .then_with(|| left.root_id.to_string().cmp(&right.root_id.to_string()))
     });
-    Ok((OperationResult::ListRoots { roots }, grant_id))
+    Ok((OperationResult::ListRoots { roots }, Some(grant_id)))
 }
 
 fn root_display_name(path: &Path) -> String {

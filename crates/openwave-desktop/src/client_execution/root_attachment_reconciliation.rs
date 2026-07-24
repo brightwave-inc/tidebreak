@@ -66,6 +66,58 @@ pub(crate) async fn connect_selected_folder(
     drive_manual_connect(state, &mut receipt, ConnectMode::Interactive).await
 }
 
+/// Attach a host-approved root to one exact conversation after native consent.
+///
+/// The root summary carries no path or authority. The broker creates the
+/// conversation grant only when the durable product attachment is driven.
+pub(crate) async fn connect_existing_root(
+    state: &HostAccess,
+    context: AuthoritativeContext,
+    root: RootSummary,
+) -> Result<ConnectedFolder, String> {
+    let product_root_id = HostRootId::from_uuid(root.root_id.as_uuid())
+        .map_err(|_| "invalid approved folder identity".to_owned())?;
+    let store = state
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let chat = store
+        .get_chat(ChatId::from(context.chat_id))
+        .await
+        .map_err(|_| "could not load connected folders".to_owned())?
+        .ok_or_else(|| "conversation not found".to_owned())?;
+    let fingerprint = BeginFingerprint {
+        id: RootAttachmentChangeId::new(),
+        chat_id: chat.id,
+        root_id: product_root_id,
+        action: RootAttachmentChangeAction::Attach,
+        expected_revision: chat.attachment_revision,
+        created_at: canonical_now(),
+    };
+    let begun = control_plane(state)?
+        .begin_root_attachment_change(
+            fingerprint.chat_id,
+            fingerprint.id,
+            fingerprint.root_id,
+            fingerprint.action,
+            fingerprint.expected_revision,
+            fingerprint.created_at,
+        )
+        .await
+        .map_err(begin_error)?;
+    validate_begin_change(&begun.change, context, fingerprint)?;
+    let finished = drive_change(state, begun.change).await?;
+    verify_product_terminal(state, &finished).await?;
+    match finished.phase {
+        RootAttachmentChangePhase::Completed => Ok(connected_folder(root)),
+        RootAttachmentChangePhase::Failed => {
+            Err("The approved folder could not be connected to this chat.".to_owned())
+        }
+        RootAttachmentChangePhase::AwaitingBroker => {
+            Err("folder attachment is still pending".to_owned())
+        }
+    }
+}
+
 /// Begin and drive an exact conversation-only detach. Global root revocation
 /// is deliberately not part of the renderer's connected-folder action.
 pub(crate) async fn disconnect_root(

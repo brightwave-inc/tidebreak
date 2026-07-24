@@ -155,6 +155,8 @@ pub fn run() {
             deliverables::export_deliverable,
             client_execution::resolve_folder_access_request,
             host_access::connect_folder,
+            host_access::connect_approved_folder,
+            host_access::list_approved_folders,
             host_access::list_connected_folders,
             host_access::disconnect_folder,
             updater::desktop_update_state,

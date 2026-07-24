@@ -16,9 +16,22 @@ export function listConnectedFolders(chat: Chat): Promise<ConnectedFolder[]> {
   return invoke("list_connected_folders", { chatId: chat.id });
 }
 
+export function listApprovedFolders(): Promise<ConnectedFolder[]> {
+  return invoke("list_approved_folders");
+}
+
 export function connectFolder(chat: Chat): Promise<ConnectedFolder | null> {
   return invoke("connect_folder", {
     request: { chatId: chat.id },
+  });
+}
+
+export function connectApprovedFolder(
+  chat: Chat,
+  rootId: string,
+): Promise<ConnectedFolder | null> {
+  return invoke("connect_approved_folder", {
+    request: { chatId: chat.id, rootId },
   });
 }
 

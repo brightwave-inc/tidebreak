@@ -51,6 +51,11 @@ pub enum ControlRequest {
     /// Version negotiation. This request is accepted even when its envelope
     /// version differs so the host can discover the broker's version.
     Hello,
+    /// List safe summaries of folders previously approved on this host.
+    ///
+    /// This is a trusted-host management operation, not an agent operation.
+    /// It exposes neither absolute paths nor attachment authority.
+    ListApprovedRoots,
     /// Register the exact folder returned by a native picker and attach it to
     /// the conversation that initiated the trusted interaction.
     RegisterRoot(RegisterRootRequest),
@@ -97,7 +102,7 @@ pub struct LookupRegisterRootReceiptRequest {
 pub struct RootAttachmentMutationRequest {
     /// Stable idempotency identity for this mutation.
     pub operation_id: OperationId,
-    /// Trusted owner of the registered root.
+    /// Trusted product subject receiving or removing the conversation grant.
     pub subject: GrantSubject,
     /// Exact conversation whose live broker attachment changes.
     pub conversation_id: Uuid,
@@ -130,6 +135,7 @@ pub struct RevokeRootRequest {
     /// Stable idempotency identity for this mutation, independent of transport
     /// request/retry correlation.
     pub operation_id: OperationId,
+    /// Original registering subject allowed to forget this host approval.
     pub subject: GrantSubject,
     pub root_id: RootId,
 }
@@ -213,6 +219,7 @@ pub type OperationResponseEnvelope = ResponseEnvelope<OperationResult>;
 #[non_exhaustive]
 pub enum ControlResult {
     Hello(HelloResult),
+    ListApprovedRoots { roots: Vec<RootSummary> },
     RegisterRoot(RegisterRootResult),
     LookupRegisterRootReceipt(LookupRegisterRootReceiptResult),
     AttachRoot(RootAttachmentMutationResult),

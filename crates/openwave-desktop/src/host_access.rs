@@ -4,11 +4,12 @@ use std::path::PathBuf;
 
 use openwave_core::{ChatId, Store};
 use openwave_host_broker::{
-    ExecutionContext, GrantSubject, OperationEnvelope, OperationRequest, OperationResult, RootId,
+    ControlRequest, ControlResult, ExecutionContext, GrantSubject, OperationEnvelope,
+    OperationRequest, OperationResult, RootId, RootSummary,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tokio::sync::{oneshot, Mutex, OnceCell};
 use uuid::Uuid;
 
@@ -133,6 +134,13 @@ pub(crate) struct DisconnectFolderRequest {
     root_id: RootId,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConnectApprovedFolderRequest {
+    chat_id: Uuid,
+    root_id: RootId,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConnectedFolder {
@@ -181,6 +189,9 @@ pub(crate) async fn list_connected_folders(
         .await
         .map_err(|_| "could not load connected folders".to_owned())?
         .ok_or_else(|| "conversation not found".to_owned())?;
+    if chat.root_attachments.is_empty() {
+        return Ok(Vec::new());
+    }
     let request_id = openwave_host_broker::RequestId::new();
     let result = state
         .broker
@@ -211,6 +222,45 @@ pub(crate) async fn list_connected_folders(
 }
 
 #[tauri::command]
+pub(crate) async fn list_approved_folders(
+    state: State<'_, HostAccess>,
+) -> Result<Vec<ConnectedFolder>, String> {
+    approved_folders(&state).await
+}
+
+#[tauri::command]
+pub(crate) async fn connect_approved_folder(
+    app: AppHandle,
+    state: State<'_, HostAccess>,
+    request: ConnectApprovedFolderRequest,
+) -> Result<Option<ConnectedFolder>, String> {
+    state.context(request.chat_id).await?;
+    let chat_label = conversation_label(&state, request.chat_id).await?;
+    let root = approved_roots(&state)
+        .await?
+        .into_iter()
+        .find(|root| root.root_id == request.root_id)
+        .ok_or_else(|| "the approved folder is no longer available".to_owned())?;
+    let _consent = state
+        .picker
+        .try_lock()
+        .map_err(|_| "a folder permission prompt is already open".to_owned())?;
+    if !confirm_folder_attachment(&app, &chat_label, &root.display_name).await? {
+        return Ok(None);
+    }
+
+    // Resolve authority again after the user responds so a deleted or changed
+    // conversation cannot reuse the earlier context.
+    let _root_change = state.root_changes.lock().await;
+    let context = state.context(request.chat_id).await?;
+    crate::client_execution::root_attachment_reconciliation::connect_existing_root(
+        &state, context, root,
+    )
+    .await
+    .map(Some)
+}
+
+#[tauri::command]
 pub(crate) async fn disconnect_folder(
     state: State<'_, HostAccess>,
     request: DisconnectFolderRequest,
@@ -223,6 +273,84 @@ pub(crate) async fn disconnect_folder(
         request.root_id,
     )
     .await
+}
+
+async fn approved_folders(state: &HostAccess) -> Result<Vec<ConnectedFolder>, String> {
+    Ok(approved_roots(state)
+        .await?
+        .into_iter()
+        .map(|root| ConnectedFolder {
+            root_id: root.root_id,
+            display_name: root.display_name,
+        })
+        .collect())
+}
+
+async fn approved_roots(state: &HostAccess) -> Result<Vec<RootSummary>, String> {
+    let result = state
+        .broker
+        .control(ControlRequest::ListApprovedRoots)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ControlResult::ListApprovedRoots { roots } = result else {
+        return Err("host broker returned an unexpected response".to_owned());
+    };
+    Ok(roots)
+}
+
+async fn conversation_label(state: &HostAccess, chat_id: Uuid) -> Result<String, String> {
+    let store = state
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let chat = store
+        .get_chat(ChatId::from(chat_id))
+        .await
+        .map_err(|_| "could not load the conversation".to_owned())?
+        .ok_or_else(|| "conversation not found".to_owned())?;
+    Ok(safe_dialog_label(
+        chat.title.as_deref().unwrap_or("Untitled chat"),
+    ))
+}
+
+fn safe_dialog_label(value: &str) -> String {
+    value
+        .chars()
+        .take(80)
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+async fn confirm_folder_attachment(
+    app: &AppHandle,
+    chat_label: &str,
+    display_name: &str,
+) -> Result<bool, String> {
+    let folder_label = safe_dialog_label(display_name);
+    let (tx, rx) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(format!(
+            "Allow the chat “{chat_label}” to read the previously approved folder “{folder_label}”?"
+        ))
+        .title("Connect folder")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Connect".to_owned(),
+            "Cancel".to_owned(),
+        ));
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show(move |approved| {
+        let _ = tx.send(approved);
+    });
+    rx.await
+        .map_err(|_| "folder permission prompt closed unexpectedly".to_owned())
 }
 
 pub(super) async fn pick_folder(
@@ -282,5 +410,13 @@ mod tests {
         });
         assert!(serde_json::from_value::<ConnectFolderRequest>(injected).is_err());
         assert!(authoritative_context(Uuid::nil(), None).is_err());
+    }
+
+    #[test]
+    fn native_confirmation_labels_are_bounded_and_strip_controls() {
+        let label = safe_dialog_label(&format!("Research\n{}", "x".repeat(100)));
+        assert!(!label.contains('\n'));
+        assert_eq!(label.chars().count(), 80);
+        assert!(label.starts_with("Research\u{fffd}"));
     }
 }

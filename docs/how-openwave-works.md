@@ -225,15 +225,17 @@ headless server does not advertise it.
 The built-in `read_file`, `list_dir`, `write_file`, and `create_deliverable`
 tools operate only inside a server-derived, pinned per-chat scratch capability.
 Its path is neither persisted on the chat nor returned by the product API. The
-desktop can connect, list, and revoke multiple folders
-through a native picker and capability-gated host-broker sidecar; it exposes only
-opaque root IDs and display names to the renderer. Foreground tool calls can now
-list/read roots already attached to their stored chat context. An approved
-agent folder request now converges through the durable product root-attachment
-state machine before it can report `connected`. The same state machine backs
-the manual Connected folders UI: Disconnect is conversation-scoped instead of
-global revocation, and a bounded native startup loop resumes exact pending
-attach or detach identities after a crash.
+desktop can approve multiple folders through a native picker and a
+capability-gated host-broker sidecar; it exposes only opaque root IDs and
+display names to the renderer. A host-approved root can later be attached to
+another chat after a native confirmation, without locating it in the picker
+again. Foreground tool calls can list/read only roots attached to their stored
+chat context. An approved agent folder request now converges through the durable
+product root-attachment state machine before it can report `connected`. The
+same state machine backs the manual Connected folders UI: Connect and
+Disconnect are conversation-scoped instead of global authorization changes,
+and a bounded native startup loop resumes exact pending attach or detach
+identities after a crash.
 See [Host access and connected folders](host-access.md). The agent loop can now
 produce a durable client-wait checkpoint for the registered folder-request
 contract. The desktop discovers those pending requests from durable state and
