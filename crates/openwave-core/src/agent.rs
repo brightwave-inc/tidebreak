@@ -1073,6 +1073,10 @@ impl Agent {
                     max_tokens: self.config.max_tokens,
                     temperature: self.config.temperature,
                     reasoning_effort: self.config.reasoning_effort,
+                    // Empty until message attachments are persisted and the
+                    // transcript can carry image blocks; hydration from the
+                    // blob store hangs here.
+                    images: crate::image::ImageAttachments::new(),
                 };
 
                 progress.model_steps = step + 1;

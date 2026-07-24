@@ -975,6 +975,9 @@ async fn sandbox_request(
         max_tokens: config.max_tokens,
         temperature: config.temperature,
         reasoning_effort: config.reasoning_effort,
+        // Sandbox runs replay text and tool blocks from checkpoints; no path
+        // puts an image block in this transcript.
+        images: openwave_core::ImageAttachments::new(),
     })
 }
 
@@ -1663,6 +1666,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             reasoning_effort: None,
+            images: openwave_core::ImageAttachments::new(),
         };
         for events in [
             vec![
@@ -2660,6 +2664,7 @@ mod tests {
             max_tokens: Some(100),
             temperature: Some(0.0),
             reasoning_effort: None,
+            images: openwave_core::ImageAttachments::new(),
         };
         let provider = Arc::new(EventProvider(vec![
             ProviderEvent::ToolCallStarted {

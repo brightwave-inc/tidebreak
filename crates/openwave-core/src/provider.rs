@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::Result;
+use crate::image::{ImageAttachments, ImageRef};
 use crate::model::Role;
 
 /// Stable identifier for a provider adapter (e.g. `anthropic`, `openai-compat`).
@@ -52,6 +53,15 @@ pub enum ContentBlock {
         name: String,
         /// The arguments (JSON) the model produced.
         input: Value,
+    },
+    /// An image attached to the message.
+    ///
+    /// Carries identity only — the pixels travel out of band on
+    /// [`ChatRequest::images`], so no path that serializes, stores, or
+    /// debug-prints a content block can leak them.
+    Image {
+        /// Blob identity, media type, and bounded dimensions.
+        image: ImageRef,
     },
     /// The result of a tool call, fed back to the model.
     ToolResult {
@@ -118,6 +128,15 @@ pub struct ChatRequest {
     /// control and ignore it otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<crate::model::ReasoningEffort>,
+    /// Pixels for the [`ContentBlock::Image`] blocks in `messages`.
+    ///
+    /// Hydrated from the blob store for exactly this request. Skipped by serde
+    /// so no serialized request — a debug log, an error payload, a journal
+    /// entry — can carry image bytes, and dropped as soon as the request is
+    /// built. Adapters resolve each block's blob id here and fail when it is
+    /// missing rather than quietly sending a question about an absent image.
+    #[serde(skip)]
+    pub images: ImageAttachments,
 }
 
 /// Token accounting for a completion.
@@ -282,6 +301,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             reasoning_effort: None,
+            images: ImageAttachments::new(),
         }))
         .unwrap();
         drop(provider);
@@ -309,6 +329,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             reasoning_effort: None,
+            images: ImageAttachments::new(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("system"), "{json}");

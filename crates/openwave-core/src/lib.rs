@@ -39,6 +39,7 @@ pub mod deliverable;
 pub mod error;
 pub mod event;
 pub mod id;
+pub mod image;
 #[cfg(feature = "keychain")]
 pub mod keychain;
 pub mod model;
@@ -104,6 +105,9 @@ pub use id::{
     AgentRunId, AssistantCitationId, CallId, ChatId, ChunkId, DocumentId, DocumentJobId,
     HostRootId, HostRootIdError, MessageId, OutputId, OutputRevisionId, ProjectId,
     RootAttachmentChangeId, RootAttachmentChangeIdError, StepId, TurnId, TurnSteerId,
+};
+pub use image::{
+    ImageAttachments, ImageData, ImageMediaType, ImageRef, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,
 };
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;

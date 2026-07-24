@@ -15,6 +15,7 @@ use crate::provider::{ChatMessage, ContentBlock};
 const TEXT_OVERHEAD: usize = 7;
 const TOOL_USE_OVERHEAD: usize = 30;
 const TOOL_RESULT_OVERHEAD: usize = 20;
+const IMAGE_OVERHEAD: usize = 10;
 const ROLE_OVERHEAD: usize = 4;
 const MAX_SINGLE_BLOCK_TOKENS: usize = 25_000;
 const TRUNCATION_SUFFIX: &str = "\n… [truncated]";
@@ -36,12 +37,104 @@ pub fn estimate_block_tokens(block: &ContentBlock) -> usize {
                 + estimate_tokens(name)
                 + estimate_tokens(&input.to_string())
         }
+        ContentBlock::Image { image } => IMAGE_OVERHEAD + image.estimated_tokens(),
         ContentBlock::ToolResult {
             tool_use_id,
             content,
             ..
         } => TOOL_RESULT_OVERHEAD + estimate_tokens(tool_use_id) + estimate_tokens(content),
     }
+}
+
+/// Whether this message can anchor the start of a request.
+///
+/// The Messages API requires a conversation to open with a `user` message that
+/// carries real content, so a message holding only tool results cannot lead.
+/// Text and images both qualify: an image-only turn ("what is in this
+/// screenshot?" with the question in the image) is a legitimate opening, and
+/// treating it as unanchored would silently discard the user's actual request.
+fn is_user_anchor(msg: &ChatMessage) -> bool {
+    msg.role == Role::User
+        && msg
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { .. } | ContentBlock::Image { .. }))
+}
+
+/// Replace an image block with a short text stand-in.
+///
+/// Dropping an image silently would leave the model answering a question about
+/// something it cannot see, with no way to tell that from a question about
+/// nothing. The stand-in keeps the turn coherent and lets the model say it no
+/// longer has the image instead of guessing.
+///
+/// This is also what makes the adapter contract unambiguous: every
+/// [`ContentBlock::Image`] that survives reduction is expected to have
+/// hydrated bytes, so an adapter finding none is a real error rather than an
+/// intended eviction.
+#[must_use]
+pub fn evict_image_block(block: &ContentBlock) -> ContentBlock {
+    match block {
+        ContentBlock::Image { image } => ContentBlock::Text {
+            text: format!(
+                "[image omitted from context: {} {}×{}]",
+                image.media_type, image.width, image.height
+            ),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Replace every image block in `messages` with its text stand-in.
+///
+/// A coarse degradation lever for when a request must shed pixels wholesale —
+/// for example after a provider refuses an oversized body.
+pub fn evict_all_images(messages: &mut [ChatMessage]) {
+    for message in messages.iter_mut() {
+        for block in message.content.iter_mut() {
+            if matches!(block, ContentBlock::Image { .. }) {
+                *block = evict_image_block(block);
+            }
+        }
+    }
+}
+
+/// Keep pixels on only the newest `keep_last_n` image blocks, evicting older
+/// ones to text stand-ins.
+///
+/// Bounds outbound body growth over a long chat. Newest-first because recent
+/// images are the ones a turn is usually about.
+///
+/// Evicting rewrites the bytes of an already-sent message, which invalidates a
+/// provider prompt cache from that position onward. Callers should therefore
+/// keep `keep_last_n` generous enough to span a typical back-and-forth about
+/// one image and tighten it only when the context budget actually demands it.
+pub fn evict_images_beyond(messages: &mut [ChatMessage], keep_last_n: usize) {
+    let mut seen = 0usize;
+    for message in messages.iter_mut().rev() {
+        for block in message.content.iter_mut().rev() {
+            if !matches!(block, ContentBlock::Image { .. }) {
+                continue;
+            }
+            if seen < keep_last_n {
+                seen += 1;
+                continue;
+            }
+            *block = evict_image_block(block);
+        }
+    }
+}
+
+/// Whether a block can be shrunk to fit a budget.
+///
+/// Text and tool payloads compress by dropping characters. An image cannot:
+/// the provider needs whole bytes, so the only choices are send it or drop the
+/// message carrying it. Treating an image as compressible would let a message
+/// claim a small floor and then serialize at full cost, which is how an
+/// image-heavy transcript slips past the budget gate and overflows the context
+/// window.
+const fn is_compressible(block: &ContentBlock) -> bool {
+    !matches!(block, ContentBlock::Image { .. })
 }
 
 /// Estimate tokens for a full message (role overhead + blocks).
@@ -166,6 +259,12 @@ fn message_floor(msg: &ChatMessage, content_floor: usize) -> usize {
             .content
             .iter()
             .map(|block| {
+                if !is_compressible(block) {
+                    // Charged in full: shrinking is not an option for this
+                    // block, so a smaller floor would be a promise the
+                    // serializer cannot keep.
+                    return estimate_block_tokens(block);
+                }
                 let overhead = block_overhead(block);
                 let content = estimate_block_tokens(block).saturating_sub(overhead);
                 overhead + content.min(content_floor)
@@ -176,6 +275,7 @@ fn message_floor(msg: &ChatMessage, content_floor: usize) -> usize {
 fn block_overhead(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { .. } => TEXT_OVERHEAD,
+        ContentBlock::Image { .. } => IMAGE_OVERHEAD,
         ContentBlock::ToolUse { .. } => TOOL_USE_OVERHEAD,
         ContentBlock::ToolResult { .. } => TOOL_RESULT_OVERHEAD,
     }
@@ -221,22 +321,13 @@ fn select_newest_to_fit(entries: &mut [Entry], budget: usize, messages: &[ChatMe
     // conversations to start with `user`). If none was selected, force-keep
     // the most recent one — slightly exceeding the budget is better than an
     // empty or invalid transcript.
-    let has_user_text = entries.iter().enumerate().any(|(i, e)| {
-        e.kept
-            && messages[i].role == Role::User
-            && messages[i]
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Text { .. }))
-    });
-    if !has_user_text {
+    let has_user_anchor = entries
+        .iter()
+        .enumerate()
+        .any(|(i, e)| e.kept && is_user_anchor(&messages[i]));
+    if !has_user_anchor {
         for i in (0..entries.len()).rev() {
-            if messages[i].role == Role::User
-                && messages[i]
-                    .content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::Text { .. }))
-            {
+            if is_user_anchor(&messages[i]) {
                 mark_pair_kept(i, entries, messages, &use_to_msg, &result_to_msg);
                 break;
             }
@@ -358,6 +449,9 @@ fn truncate_message(msg: &ChatMessage, target_tokens: usize) -> ChatMessage {
 
 fn truncate_block(block: &ContentBlock, target_tokens: usize) -> ContentBlock {
     match block {
+        // Incompressible: the floor already charges the full cost, so this is
+        // only ever reached with a budget the image already fits.
+        ContentBlock::Image { .. } => block.clone(),
         ContentBlock::Text { text } => {
             let budget = target_tokens.saturating_sub(TEXT_OVERHEAD);
             ContentBlock::Text {
@@ -479,12 +573,7 @@ fn merge_adjacent_roles(messages: &mut Vec<ChatMessage>) {
 /// content. The Messages API requires the conversation to start with `user`.
 fn ensure_starts_with_user(messages: &mut Vec<ChatMessage>) {
     while let Some(first) = messages.first() {
-        if first.role == Role::User
-            && first
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Text { .. }))
-        {
+        if is_user_anchor(first) {
             break;
         }
         messages.remove(0);
@@ -917,5 +1006,112 @@ mod tests {
         ensure_starts_with_user(&mut msgs);
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, Role::User);
+    }
+
+    // ── Image blocks ───────────────────────────────────────────────
+
+    fn image_block(width: u32, height: u32) -> ContentBlock {
+        ContentBlock::Image {
+            image: crate::image::ImageRef {
+                blob_id: uuid::Uuid::from_u128(u128::from(width) << 32 | u128::from(height)),
+                media_type: crate::image::ImageMediaType::Png,
+                width,
+                height,
+                byte_len: 4_096,
+            },
+        }
+    }
+
+    fn image_only_user_msg(width: u32, height: u32) -> ChatMessage {
+        ChatMessage {
+            role: Role::User,
+            content: vec![image_block(width, height)],
+        }
+    }
+
+    #[test]
+    fn an_image_is_charged_tokens_rather_than_riding_along_free() {
+        // A 1024×1024 image is four 512-px tiles.
+        let tokens = estimate_block_tokens(&image_block(1_024, 1_024));
+        assert_eq!(tokens, IMAGE_OVERHEAD + 4 * 1_600);
+        // Comfortably more than a short text block, which is the whole point:
+        // budgeting must not treat pixels as nearly free.
+        assert!(tokens > estimate_block_tokens(&ContentBlock::Text { text: "hi".into() }));
+    }
+
+    #[test]
+    fn an_image_message_floor_is_its_full_cost_not_a_stub() {
+        let msg = image_only_user_msg(1_024, 1_024);
+        let full = estimate_message_tokens(&msg);
+        // Even at an aggressively small content floor, an image cannot shrink,
+        // so its floor must still equal the full cost. Reporting a smaller
+        // floor is what lets an image-heavy transcript slip past the budget
+        // gate and overflow the context window.
+        assert_eq!(message_floor(&msg, 10), full);
+    }
+
+    #[test]
+    fn truncating_an_image_block_leaves_it_byte_identical() {
+        let block = image_block(800, 600);
+        assert_eq!(truncate_block(&block, 1), block);
+    }
+
+    #[test]
+    fn an_image_only_user_turn_can_anchor_the_transcript() {
+        // "What is in this screenshot?" where the question is the image.
+        let mut msgs = vec![image_only_user_msg(800, 600), assistant_msg("a chart")];
+        ensure_starts_with_user(&mut msgs);
+        assert_eq!(msgs.len(), 2, "the image-only turn must not be discarded");
+        assert!(matches!(msgs[0].content[0], ContentBlock::Image { .. }));
+    }
+
+    #[test]
+    fn reduction_keeps_an_image_only_turn_instead_of_emptying_the_transcript() {
+        let msgs = vec![image_only_user_msg(2_048, 2_048)];
+        // A budget far below the image's cost: the transcript cannot be made
+        // to fit, but returning nothing would be worse than overshooting.
+        let (fitted, _) = fit_to_budget(&msgs, 10, 0);
+        assert!(
+            !fitted.is_empty(),
+            "reduction must not discard the only user turn"
+        );
+    }
+
+    #[test]
+    fn evicting_an_image_leaves_a_stand_in_the_model_can_read() {
+        let evicted = evict_image_block(&image_block(800, 600));
+        let ContentBlock::Text { text } = &evicted else {
+            panic!("expected a text stand-in, got {evicted:?}");
+        };
+        assert!(text.contains("image/png"), "{text}");
+        assert!(text.contains("800"), "{text}");
+        assert!(text.contains("600"), "{text}");
+        // Cheap enough that eviction actually reclaims budget.
+        assert!(estimate_block_tokens(&evicted) < estimate_block_tokens(&image_block(800, 600)));
+    }
+
+    #[test]
+    fn eviction_keeps_the_newest_images_and_stands_in_for_the_rest() {
+        let mut msgs = vec![
+            image_only_user_msg(100, 100),
+            assistant_msg("first"),
+            image_only_user_msg(200, 200),
+            assistant_msg("second"),
+            image_only_user_msg(300, 300),
+        ];
+        evict_images_beyond(&mut msgs, 2);
+
+        // Oldest loses its pixels; the two newest keep theirs.
+        assert!(matches!(msgs[0].content[0], ContentBlock::Text { .. }));
+        assert!(matches!(msgs[2].content[0], ContentBlock::Image { .. }));
+        assert!(matches!(msgs[4].content[0], ContentBlock::Image { .. }));
+
+        evict_all_images(&mut msgs);
+        assert!(
+            msgs.iter()
+                .flat_map(|m| &m.content)
+                .all(|b| !matches!(b, ContentBlock::Image { .. })),
+            "evict_all_images must leave no image blocks"
+        );
     }
 }
