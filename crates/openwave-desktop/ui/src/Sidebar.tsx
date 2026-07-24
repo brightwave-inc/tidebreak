@@ -3,6 +3,7 @@ import { Logomark } from "./Logomark";
 import {
   Ellipsis,
   Monitor,
+  PanelLeftClose,
   Moon,
   Pencil,
   RotateCw,
@@ -24,6 +25,8 @@ import { useChatListStore } from "./ChatListStore";
 import { useUiStore } from "./UiStore";
 
 export type SidebarProps = {
+  /** Render the in-sidebar hide control (off when the titlebar owns it). */
+  collapseControl?: boolean;
   themeMode: ThemeMode;
   updateReady: boolean;
   updateVersion: string | null;
@@ -44,6 +47,7 @@ export type SidebarProps = {
  * session lifecycle) lives with the owner.
  */
 export function Sidebar({
+  collapseControl = true,
   themeMode,
   updateReady,
   updateVersion,
@@ -67,11 +71,24 @@ export function Sidebar({
   const setRenameDraft = useChatListStore((state) => state.setRenameDraft);
   const primaryView = useUiStore((state) => state.primaryView);
   const showSettings = useUiStore((state) => state.showSettings);
+  const toggleSidebar = useUiStore((state) => state.toggleSidebar);
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
         <Logomark />
         <span>OpenWave</span>
+        {collapseControl && (
+          <WithTooltip label="Hide sidebar" side="bottom">
+            <button
+              type="button"
+              className="theme-toggle"
+              aria-label="Hide sidebar"
+              onClick={toggleSidebar}
+            >
+              <PanelLeftClose size={15} />
+            </button>
+          </WithTooltip>
+        )}
         <WithTooltip
           label={`Theme: ${themeMode} — click to change`}
           side="bottom"
