@@ -6299,7 +6299,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
         .await
         .unwrap(),
     );
-    let (_retrieval, tools, _config) = agent_deps(
+    let (_retrieval, mut tools, mut config) = agent_deps(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
         Arc::new(UnavailableCodeExecution),
@@ -6309,6 +6309,32 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
         )),
         store,
     );
+    assert!(
+        config.system_prompt.is_none(),
+        "prompt must not be frozen before boot-time tools are mounted"
+    );
+    tools.register_client(ToolSpec {
+        name: "mcp__test__lookup".into(),
+        description: "untrusted remote metadata must not enter the operating prompt".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "private_runtime_value": {"default": "must-not-be-copied"}
+            }
+        }),
+    });
+    finalize_foreground_agent_config(&tools, &mut config);
+    let system_prompt = config
+        .system_prompt
+        .as_deref()
+        .expect("production foreground turns receive an operating prompt");
+    assert!(system_prompt.contains("You are OpenWave"));
+    assert!(system_prompt.contains("## Conversation sources and citations"));
+    assert!(system_prompt.contains("## Connected folders"));
+    assert!(system_prompt.contains("## Background delegation"));
+    assert!(system_prompt.contains("## External MCP tools"));
+    assert!(!system_prompt.contains("mcp__test__lookup"));
+    assert!(!system_prompt.contains("must-not-be-copied"));
     let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
     assert!(
         names.iter().any(|n| n == "search"),
