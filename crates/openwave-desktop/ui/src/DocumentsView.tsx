@@ -8,6 +8,11 @@ import {
   type LibraryDocument,
   type LibrarySearchResult,
 } from "./documents";
+import {
+  PICKER_BUSY_MESSAGE,
+  PICKER_HOLDERS,
+  useNativePickerLatch,
+} from "./NativePickerLatch";
 
 export function DocumentsView({
   chatId,
@@ -77,6 +82,10 @@ export function DocumentsView({
 
   async function onImport() {
     if (importing) return;
+    if (!useNativePickerLatch.getState().claim(PICKER_HOLDERS.importSource)) {
+      setError(PICKER_BUSY_MESSAGE);
+      return;
+    }
     setImporting(true);
     setError(null);
     setImported(null);
@@ -90,6 +99,7 @@ export function DocumentsView({
         setError(friendlyError(err, "Could not add that source."));
       }
     } finally {
+      useNativePickerLatch.getState().release(PICKER_HOLDERS.importSource);
       if (mountedRef.current) setImporting(false);
     }
   }

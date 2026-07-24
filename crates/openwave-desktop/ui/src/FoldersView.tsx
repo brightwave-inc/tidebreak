@@ -8,6 +8,11 @@ import {
   listConnectedFolders,
   type ConnectedFolder,
 } from "./host";
+import {
+  PICKER_BUSY_MESSAGE,
+  PICKER_HOLDERS,
+  useNativePickerLatch,
+} from "./NativePickerLatch";
 
 /**
  * A chat's connected folders: the directories the native host may read on this
@@ -55,30 +60,39 @@ export function FoldersView({ chat }: { chat: Chat }) {
     };
   }, [chat.id, chat.project_id]);
 
-  async function addFolder() {
+  /**
+   * Run one native picker interaction under the app-wide latch.
+   *
+   * Both of these open a host window, and the host allows one at a time. Taking
+   * the latch is what turns a second attempt into a sentence a reader can act
+   * on instead of the host's own rejection string.
+   */
+  async function withPicker(holder: string, open: () => Promise<unknown>) {
+    if (!useNativePickerLatch.getState().claim(holder)) {
+      setError(PICKER_BUSY_MESSAGE);
+      return;
+    }
     setWorking(true);
     setError(null);
     try {
-      const connected = await connectFolder(chat);
+      const connected = await open();
       if (connected) await refresh();
     } catch (err) {
       setError(String(err));
     } finally {
+      useNativePickerLatch.getState().release(holder);
       setWorking(false);
     }
   }
 
+  async function addFolder() {
+    await withPicker(PICKER_HOLDERS.connectFolder, () => connectFolder(chat));
+  }
+
   async function addApprovedFolder(rootId: string) {
-    setWorking(true);
-    setError(null);
-    try {
-      const connected = await connectApprovedFolder(chat, rootId);
-      if (connected) await refresh();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setWorking(false);
-    }
+    await withPicker(PICKER_HOLDERS.confirmApprovedFolder, () =>
+      connectApprovedFolder(chat, rootId),
+    );
   }
 
   async function removeFolder(rootId: string) {

@@ -26,6 +26,11 @@ import {
   importLibraryDocument,
   type ImportedDocument,
 } from "./documents";
+import {
+  PICKER_BUSY_MESSAGE,
+  PICKER_HOLDERS,
+  useNativePickerLatch,
+} from "./NativePickerLatch";
 import { reconcilePendingApprovalCards } from "./ApprovalHistory";
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
@@ -364,6 +369,10 @@ export default function App() {
   async function onAddSource() {
     if (!chat || addingSourceChatId !== null || deletionInFlightRef.current) return;
     const chatId = chat.id;
+    if (!useNativePickerLatch.getState().claim(PICKER_HOLDERS.importSource)) {
+      setSourceAttachmentError({ chatId, message: PICKER_BUSY_MESSAGE });
+      return;
+    }
     setAddingSourceChatId(chatId);
     setSourceAttachmentError(null);
     try {
@@ -378,6 +387,7 @@ export default function App() {
         });
       }
     } finally {
+      useNativePickerLatch.getState().release(PICKER_HOLDERS.importSource);
       setAddingSourceChatId(null);
     }
   }

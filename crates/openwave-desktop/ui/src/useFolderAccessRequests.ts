@@ -5,7 +5,10 @@ import {
   resolveFolderAccessRequest,
   type FolderAccessDecision,
 } from "./host";
-import { useFolderDecisionLatch } from "./FolderDecisionLatch";
+import {
+  PICKER_BUSY_MESSAGE,
+  useNativePickerLatch,
+} from "./NativePickerLatch";
 import { useOpenConversation } from "./OpenConversation";
 import { useRefreshSignals } from "./RefreshSignals";
 
@@ -35,7 +38,8 @@ export function useFolderAccessRequests(
 ): FolderAccessRequests {
   const [requests, setRequests] = useState<PendingFolderAccessRequest[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const resolving = useFolderDecisionLatch((state) => state.resolving);
+  const pickerHolder = useNativePickerLatch((state) => state.holder);
+  const resolving = new Set(pickerHolder === null ? [] : [pickerHolder]);
   const refreshRef = useRef<(() => void) | null>(null);
   const stillOpen = useOpenConversation(chatId);
   const signal = useRefreshSignals((state) => state.folderAccess);
@@ -87,9 +91,12 @@ export function useFolderAccessRequests(
     refreshRef.current?.();
   }, [signal]);
 
-  /** Takes the app-wide latch, or reports that another decision holds it. */
+  /** Takes the app-wide picker latch, or reports that another surface has it. */
   function beginResolving(callId: string): boolean {
-    if (!useFolderDecisionLatch.getState().claim(callId)) return false;
+    if (!useNativePickerLatch.getState().claim(callId)) {
+      setErrors((current) => ({ ...current, [callId]: PICKER_BUSY_MESSAGE }));
+      return false;
+    }
     setErrors((current) => {
       const next = { ...current };
       delete next[callId];
@@ -100,7 +107,7 @@ export function useFolderAccessRequests(
 
   /** The latch is released unconditionally — it is the host's, not the chat's. */
   function finishResolving(callId: string, startedChatId: string) {
-    useFolderDecisionLatch.getState().release(callId);
+    useNativePickerLatch.getState().release(callId);
     if (stillOpen(startedChatId)) refreshRef.current?.();
   }
 
