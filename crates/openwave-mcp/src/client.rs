@@ -19,6 +19,18 @@ use tokio::time::timeout;
 use crate::protocol::{Response, RpcError, PROTOCOL_VERSION};
 
 const CLIENT_NAME: &str = "openwave";
+/// Provider-safe mounted function-name limit shared by OpenAI and Anthropic.
+pub const MAX_MOUNTED_TOOL_NAME_BYTES: usize = 64;
+/// Leaves useful room for the remote name inside `mcp__{server}__{tool}`.
+pub const MAX_SERVER_NAME_BYTES: usize = 32;
+const MAX_SERVER_INFO_BYTES: usize = 256;
+const MAX_TOOLS_PER_SERVER: usize = 128;
+const MAX_TOOL_DESCRIPTION_BYTES: usize = 8 * 1024;
+const MAX_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
+const MAX_TOOL_METADATA_BYTES: usize = 512 * 1024;
+const MAX_TOOL_LIST_PAGES: usize = 64;
+const MAX_CURSOR_BYTES: usize = 4 * 1024;
+const MAX_JSON_RPC_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
 /// Default maximum time to wait for one external MCP request.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -40,6 +52,7 @@ pub struct McpServerInfo {
 /// The configured `server_name` is a stable local namespace, independent of the
 /// server's self-reported identity. A remote tool named `search` on a configured
 /// server named `docs` is advertised as `mcp__docs__search`.
+#[derive(Clone)]
 pub struct McpClient {
     server_name: String,
     server_info: McpServerInfo,
@@ -87,7 +100,8 @@ impl McpClient {
     /// Spawn and connect to an external MCP stdio server.
     ///
     /// Callers configure the executable, arguments, environment, and working
-    /// directory on `command`; this method owns stdin/stdout and inherits stderr.
+    /// directory on `command`; this method owns stdin/stdout and discards stderr
+    /// so an untrusted child cannot copy a selected credential into host logs.
     /// The child is terminated if the client session is dropped.
     pub async fn spawn(server_name: impl Into<String>, command: Command) -> Result<Self> {
         Self::spawn_with_timeout(server_name, command, DEFAULT_REQUEST_TIMEOUT).await
@@ -96,7 +110,19 @@ impl McpClient {
     /// Spawn a server with an explicit per-request timeout.
     pub async fn spawn_with_timeout(
         server_name: impl Into<String>,
+        command: Command,
+        request_timeout: Duration,
+    ) -> Result<Self> {
+        Self::spawn_with_timeouts(server_name, command, request_timeout, request_timeout).await
+    }
+
+    /// Spawn with a separately bounded initialization timeout. The established
+    /// session switches to `request_timeout` only after initialize and initial
+    /// tool discovery succeed.
+    pub async fn spawn_with_timeouts(
+        server_name: impl Into<String>,
         mut command: Command,
+        initialization_timeout: Duration,
         request_timeout: Duration,
     ) -> Result<Self> {
         let server_name = server_name.into();
@@ -104,7 +130,7 @@ impl McpClient {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::null())
             .kill_on_drop(true);
         let mut child = command
             .spawn()
@@ -118,16 +144,18 @@ impl McpClient {
             .take()
             .ok_or_else(|| mcp_message("external server did not provide stdout"))?;
 
-        Self::connect_session(
+        let client = Self::connect_session(
             server_name,
             Session::new(
                 Box::new(BufReader::new(stdout)),
                 Box::new(stdin),
                 Some(child),
-                request_timeout,
+                initialization_timeout,
             ),
         )
-        .await
+        .await?;
+        client.session.lock().await.request_timeout = request_timeout;
+        Ok(client)
     }
 
     async fn connect_session(server_name: String, mut session: Session) -> Result<Self> {
@@ -158,11 +186,18 @@ impl McpClient {
                 "external server did not advertise the tools capability",
             ));
         }
+        if initialized.server_info.name.len() > MAX_SERVER_INFO_BYTES
+            || initialized.server_info.version.len() > MAX_SERVER_INFO_BYTES
+        {
+            return Err(mcp_message(
+                "external server identity exceeds the metadata limit",
+            ));
+        }
         session
             .notify("notifications/initialized", json!({}))
             .await?;
 
-        let descriptors = discover_tools(&mut session).await?;
+        let descriptors = discover_tools(&server_name, &mut session).await?;
         let tools = build_mounted_tools(&server_name, descriptors)?;
         Ok(Self {
             server_name,
@@ -189,6 +224,24 @@ impl McpClient {
         self.tools.iter().map(|tool| &tool.spec)
     }
 
+    /// Check that an idle session still responds and report whether the server
+    /// asked the client to refresh its tool list. A session owned by a live tool
+    /// call returns [`McpProbe::Busy`] immediately.
+    ///
+    /// MCP stdio is serialized per server, so the ping also drains notifications
+    /// that arrived while no tool call was active. Callers should establish a
+    /// fresh connection before publishing a changed tool surface; existing
+    /// registry snapshots may continue using this session until their turn ends.
+    pub async fn probe(&self) -> Result<McpProbe> {
+        let Ok(mut session) = self.session.try_lock() else {
+            return Ok(McpProbe::Busy);
+        };
+        session.request("ping", json!({})).await?;
+        Ok(McpProbe::Ready {
+            tools_list_changed: session.take_tools_list_changed(),
+        })
+    }
+
     /// Register namespaced proxies for all discovered tools.
     ///
     /// Registry registration follows [`ToolRegistry::register`] semantics, so a
@@ -210,6 +263,7 @@ struct Session {
     writer: BoxWriter,
     next_id: u64,
     request_timeout: Duration,
+    tools_list_changed: bool,
     // Keeping the child owns its lifecycle; `kill_on_drop(true)` handles both a
     // normal registry teardown and a failed initialization.
     _child: Option<Child>,
@@ -227,8 +281,13 @@ impl Session {
             writer,
             next_id: 1,
             request_timeout,
+            tools_list_changed: false,
             _child: child,
         }
+    }
+
+    fn take_tools_list_changed(&mut self) -> bool {
+        std::mem::take(&mut self.tools_list_changed)
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -288,19 +347,13 @@ impl Session {
 
     async fn read_response(&mut self, expected_id: u64) -> Result<Value> {
         loop {
-            let mut line = String::new();
-            let read = self
-                .reader
-                .read_line(&mut line)
-                .await
-                .map_err(|error| mcp_error("could not read from external server", error))?;
-            if read == 0 {
+            let Some(line) = read_bounded_line(&mut self.reader).await? else {
                 return Err(mcp_message("external server closed stdout before replying"));
-            }
-            if line.trim().is_empty() {
+            };
+            if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            let value: Value = serde_json::from_str(&line)
+            let value: Value = serde_json::from_slice(&line)
                 .map_err(|error| mcp_error("external server returned malformed JSON-RPC", error))?;
 
             // Server notifications are asynchronous and need no response. Ping
@@ -308,6 +361,9 @@ impl Session {
             // advertises no other request-producing capabilities, so fail closed
             // for any other server request.
             if let Some(method) = value.get("method").and_then(Value::as_str) {
+                if method == "notifications/tools/list_changed" && value.get("id").is_none() {
+                    self.tools_list_changed = true;
+                }
                 if let Some(id) = value.get("id") {
                     self.write_server_request_response(id.clone(), method)
                         .await?;
@@ -362,6 +418,44 @@ impl Session {
     }
 }
 
+async fn read_bounded_line(reader: &mut BoxReader) -> Result<Option<Vec<u8>>> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader
+            .fill_buf()
+            .await
+            .map_err(|error| mcp_error("could not read from external server", error))?;
+        if available.is_empty() {
+            return Ok((!line.is_empty()).then_some(line));
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        if line.len().saturating_add(consumed) > MAX_JSON_RPC_FRAME_BYTES {
+            return Err(mcp_message(
+                "external server JSON-RPC frame exceeds the limit",
+            ));
+        }
+        line.extend_from_slice(&available[..consumed]);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(Some(line));
+        }
+    }
+}
+
+/// Result of one non-mutating MCP health probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpProbe {
+    /// A tool call already owns the serialized stdio session. Health supervision
+    /// must skip this cycle rather than time out legitimate work.
+    Busy,
+    /// The ping completed on an otherwise idle session.
+    Ready {
+        /// The server emitted `notifications/tools/list_changed`.
+        tools_list_changed: bool,
+    },
+}
+
 #[derive(Deserialize)]
 struct IncomingResponse {
     jsonrpc: String,
@@ -408,8 +502,10 @@ struct ListToolsResponse {
     next_cursor: Option<String>,
 }
 
-async fn discover_tools(session: &mut Session) -> Result<Vec<RemoteTool>> {
+async fn discover_tools(server_name: &str, session: &mut Session) -> Result<Vec<RemoteTool>> {
     let mut tools = Vec::new();
+    let mut metadata_bytes = 0_usize;
+    let mut pages = 0_usize;
     let mut cursor: Option<String> = None;
     let mut seen_cursors = HashSet::new();
     loop {
@@ -418,9 +514,33 @@ async fn discover_tools(session: &mut Session) -> Result<Vec<RemoteTool>> {
             .map_or_else(|| json!({}), |cursor| json!({"cursor": cursor}));
         let result = session.request("tools/list", params).await?;
         let page: ListToolsResponse = decode_result("tools/list", result)?;
-        tools.extend(page.tools);
+        pages += 1;
+        if pages > MAX_TOOL_LIST_PAGES {
+            return Err(mcp_message("external server tool list has too many pages"));
+        }
+        if tools.len().saturating_add(page.tools.len()) > MAX_TOOLS_PER_SERVER {
+            return Err(mcp_message("external server advertises too many tools"));
+        }
+        for tool in page.tools {
+            metadata_bytes = metadata_bytes
+                .checked_add(validate_remote_tool(server_name, &tool)?)
+                .ok_or_else(|| mcp_message("external server tool metadata exceeds the limit"))?;
+            if metadata_bytes > MAX_TOOL_METADATA_BYTES {
+                return Err(mcp_message(
+                    "external server tool metadata exceeds the limit",
+                ));
+            }
+            tools.push(tool);
+        }
         match page.next_cursor.filter(|cursor| !cursor.is_empty()) {
-            Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
+            Some(next) if next.len() <= MAX_CURSOR_BYTES && seen_cursors.insert(next.clone()) => {
+                cursor = Some(next)
+            }
+            Some(next) if next.len() > MAX_CURSOR_BYTES => {
+                return Err(mcp_message(
+                    "external server tool-list cursor exceeds the limit",
+                ))
+            }
             Some(_) => {
                 return Err(mcp_message(
                     "external server repeated a tools/list pagination cursor",
@@ -431,24 +551,33 @@ async fn discover_tools(session: &mut Session) -> Result<Vec<RemoteTool>> {
     }
 }
 
+#[derive(Clone)]
 struct MountedTool {
     spec: ToolSpec,
     remote_name: String,
 }
 
 fn build_mounted_tools(server_name: &str, tools: Vec<RemoteTool>) -> Result<Vec<MountedTool>> {
+    if tools.len() > MAX_TOOLS_PER_SERVER {
+        return Err(mcp_message("external server advertises too many tools"));
+    }
     let mut remote_names = HashSet::new();
+    let mut metadata_bytes = 0_usize;
     tools
         .into_iter()
         .map(|tool| {
-            if tool.name.is_empty() {
-                return Err(mcp_message("external server advertised an empty tool name"));
+            metadata_bytes = metadata_bytes
+                .checked_add(validate_remote_tool(server_name, &tool)?)
+                .ok_or_else(|| mcp_message("external server tool metadata exceeds the limit"))?;
+            if metadata_bytes > MAX_TOOL_METADATA_BYTES {
+                return Err(mcp_message(
+                    "external server tool metadata exceeds the limit",
+                ));
             }
             if !remote_names.insert(tool.name.clone()) {
-                return Err(mcp_message(format!(
-                    "external server advertised duplicate tool name {}",
-                    tool.name
-                )));
+                return Err(mcp_message(
+                    "external server advertised duplicate tool names",
+                ));
             }
             Ok(MountedTool {
                 spec: ToolSpec {
@@ -462,8 +591,37 @@ fn build_mounted_tools(server_name: &str, tools: Vec<RemoteTool>) -> Result<Vec<
         .collect()
 }
 
+fn validate_remote_tool(server_name: &str, tool: &RemoteTool) -> Result<usize> {
+    let mounted_name = format!("mcp__{server_name}__{}", tool.name);
+    if tool.name.is_empty()
+        || mounted_name.len() > MAX_MOUNTED_TOOL_NAME_BYTES
+        || !mounted_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(mcp_message(
+            "external server advertised a provider-incompatible tool name",
+        ));
+    }
+    if tool.description.len() > MAX_TOOL_DESCRIPTION_BYTES {
+        return Err(mcp_message(
+            "external server tool description exceeds the limit",
+        ));
+    }
+    let schema_bytes = serde_json::to_vec(&tool.input_schema)?.len();
+    if schema_bytes > MAX_TOOL_SCHEMA_BYTES {
+        return Err(mcp_message("external server tool schema exceeds the limit"));
+    }
+    mounted_name
+        .len()
+        .checked_add(tool.description.len())
+        .and_then(|size| size.checked_add(schema_bytes))
+        .ok_or_else(|| mcp_message("external server tool metadata exceeds the limit"))
+}
+
 fn validate_server_name(server_name: &str) -> Result<()> {
     if server_name.is_empty()
+        || server_name.len() > MAX_SERVER_NAME_BYTES
         || !server_name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
@@ -612,6 +770,13 @@ mod tests {
         assert_eq!(output.content, "found waves");
         assert_eq!(output.data, Some(json!({"matches": 1})));
         assert!(!output.is_error);
+        let probe = client.probe().await.unwrap();
+        assert_eq!(
+            probe,
+            McpProbe::Ready {
+                tools_list_changed: true
+            }
+        );
 
         drop(registry);
         drop(client);
@@ -650,6 +815,207 @@ mod tests {
             .expect("invalid name must fail before spawn");
         assert!(error.to_string().contains("ASCII letters"));
         assert!(!error.to_string().contains("could not spawn"));
+    }
+
+    fn remote_tool(name: impl Into<String>) -> RemoteTool {
+        RemoteTool {
+            name: name.into(),
+            description: "fixture".to_string(),
+            input_schema: json!({"type": "object"}).as_object().unwrap().clone(),
+        }
+    }
+
+    #[test]
+    fn mounted_tool_names_use_the_shared_provider_safe_contract() {
+        for name in ["", "bad tool", "bad/tool", "bad.tool"] {
+            let error = build_mounted_tools("docs", vec![remote_tool(name)])
+                .err()
+                .expect("unsafe remote tool name must fail");
+            assert!(error.to_string().contains("provider-incompatible"));
+            if !name.is_empty() {
+                assert!(!error.to_string().contains(name));
+            }
+        }
+
+        let error = build_mounted_tools("docs", vec![remote_tool("x".repeat(64))])
+            .err()
+            .expect("overlong mounted tool name must fail");
+        assert!(error.to_string().contains("provider-incompatible"));
+    }
+
+    #[test]
+    fn tool_discovery_metadata_is_bounded_per_tool_and_in_aggregate() {
+        let too_many = (0..=MAX_TOOLS_PER_SERVER)
+            .map(|index| remote_tool(format!("tool_{index}")))
+            .collect();
+        assert!(build_mounted_tools("docs", too_many)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("too many tools"));
+
+        let mut description = remote_tool("description");
+        description.description = "x".repeat(MAX_TOOL_DESCRIPTION_BYTES + 1);
+        assert!(build_mounted_tools("docs", vec![description])
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("description exceeds"));
+
+        let mut schema = remote_tool("schema");
+        schema.input_schema = json!({
+            "type": "object",
+            "description": "x".repeat(MAX_TOOL_SCHEMA_BYTES)
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(build_mounted_tools("docs", vec![schema])
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("schema exceeds"));
+
+        let aggregate = (0..MAX_TOOLS_PER_SERVER)
+            .map(|index| {
+                let mut tool = remote_tool(format!("tool_{index}"));
+                tool.description = "x".repeat(MAX_TOOL_METADATA_BYTES / MAX_TOOLS_PER_SERVER);
+                tool
+            })
+            .collect();
+        assert!(build_mounted_tools("docs", aggregate)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("metadata exceeds"));
+    }
+
+    #[tokio::test]
+    async fn rejects_an_oversized_json_rpc_frame_before_decoding_it() {
+        let (client_stream, server_stream) = duplex(MAX_JSON_RPC_FRAME_BYTES + 1024);
+        let (client_reader, client_writer) = split(client_stream);
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = split(server_stream);
+            let mut lines = BufReader::new(reader).lines();
+            let _request = lines.next_line().await.unwrap().unwrap();
+            writer
+                .write_all(&vec![b'x'; MAX_JSON_RPC_FRAME_BYTES + 1])
+                .await
+                .unwrap();
+            writer.write_all(b"\n").await.unwrap();
+        });
+        let error = McpClient::connect_with_timeout(
+            "docs",
+            client_reader,
+            client_writer,
+            Duration::from_secs(5),
+        )
+        .await
+        .err()
+        .expect("oversized frame must fail");
+        assert!(error.to_string().contains("frame exceeds"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn health_probe_skips_a_session_owned_by_a_long_running_tool_call() {
+        let (client_stream, server_stream) = duplex(16 * 1024);
+        let (client_reader, client_writer) = split(client_stream);
+        let call_started = Arc::new(tokio::sync::Notify::new());
+        let release_call = Arc::new(tokio::sync::Notify::new());
+        let server = tokio::spawn(blocking_tool_server(
+            server_stream,
+            call_started.clone(),
+            release_call.clone(),
+        ));
+        let client = McpClient::connect("busy", client_reader, client_writer)
+            .await
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        client.mount(&mut registry);
+        let call = tokio::spawn(async move {
+            registry
+                .get("mcp__busy__wait")
+                .unwrap()
+                .execute(
+                    &ToolCtx::new_legacy_workspace(
+                        ChatId::new(),
+                        None,
+                        PathBuf::from("unused-by-mcp"),
+                    ),
+                    json!({}),
+                )
+                .await
+        });
+        call_started.notified().await;
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(50), client.probe())
+                .await
+                .expect("busy detection must not wait for the tool request")
+                .unwrap(),
+            McpProbe::Busy
+        );
+
+        release_call.notify_one();
+        assert_eq!(call.await.unwrap().unwrap().content, "finished");
+        assert_eq!(
+            client.probe().await.unwrap(),
+            McpProbe::Ready {
+                tools_list_changed: false
+            }
+        );
+        drop(client);
+        server.await.unwrap();
+    }
+
+    async fn blocking_tool_server(
+        stream: tokio::io::DuplexStream,
+        call_started: Arc<tokio::sync::Notify>,
+        release_call: Arc<tokio::sync::Notify>,
+    ) {
+        let (reader, mut writer) = split(stream);
+        let mut lines = BufReader::new(reader).lines();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let Some(id) = request.get("id").cloned() else {
+                assert_eq!(request["method"], "notifications/initialized");
+                continue;
+            };
+            let result = match request["method"].as_str().unwrap() {
+                "initialize" => json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "blocking-fixture", "version": "1"}
+                }),
+                "tools/list" => json!({
+                    "tools": [{
+                        "name": "wait",
+                        "description": "Wait for the deterministic test",
+                        "inputSchema": {"type": "object"}
+                    }]
+                }),
+                "tools/call" => {
+                    call_started.notify_one();
+                    release_call.notified().await;
+                    json!({
+                        "content": [{"type": "text", "text": "finished"}],
+                        "isError": false
+                    })
+                }
+                "ping" => json!({}),
+                method => panic!("unexpected method: {method}"),
+            };
+            let mut response = serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": result
+            }))
+            .unwrap();
+            response.push(b'\n');
+            writer.write_all(&response).await.unwrap();
+            writer.flush().await.unwrap();
+        }
     }
 
     async fn fake_server(stream: tokio::io::DuplexStream) {
@@ -718,6 +1084,17 @@ mod tests {
                         "structuredContent": {"matches": 1},
                         "isError": false
                     })
+                }
+                "ping" => {
+                    let mut notification = serde_json::to_vec(&json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/tools/list_changed"
+                    }))
+                    .unwrap();
+                    notification.push(b'\n');
+                    writer.write_all(&notification).await.unwrap();
+                    writer.flush().await.unwrap();
+                    json!({})
                 }
                 method => panic!("unexpected method: {method}"),
             };

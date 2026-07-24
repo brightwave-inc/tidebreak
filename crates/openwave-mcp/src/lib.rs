@@ -47,7 +47,9 @@ pub mod protocol;
 mod server;
 mod stdio;
 
-pub use client::{McpClient, McpServerInfo, DEFAULT_REQUEST_TIMEOUT};
+pub use client::{
+    McpClient, McpProbe, McpServerInfo, DEFAULT_REQUEST_TIMEOUT, MAX_SERVER_NAME_BYTES,
+};
 pub use protocol::PROTOCOL_VERSION;
 pub use server::McpServer;
 pub use stdio::{serve, serve_stdio};

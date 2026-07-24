@@ -5,6 +5,7 @@ import {
   Globe,
   KeyRound,
   Palette,
+  PlugZap,
   RefreshCw,
   SquareTerminal,
 } from "lucide-react";
@@ -17,12 +18,14 @@ import { ModelsPanel } from "./settings/ModelsPanel";
 import { AppearancePanel } from "./settings/AppearancePanel";
 import { CodeExecutionPanel } from "./settings/CodeExecutionPanel";
 import { UpdatesPanel } from "./settings/UpdatesPanel";
+import { McpPanel } from "./settings/McpPanel";
 
 type SettingsSectionKey =
   | "providers"
   | "models"
   | "web-search"
   | "code-execution"
+  | "mcp"
   | "appearance"
   | "updates";
 
@@ -35,6 +38,7 @@ const SECTIONS: {
   { key: "models", label: "Models", icon: Cpu },
   { key: "web-search", label: "Web search", icon: Globe },
   { key: "code-execution", label: "Code execution", icon: SquareTerminal },
+  { key: "mcp", label: "MCP servers", icon: PlugZap },
   { key: "appearance", label: "Appearance", icon: Palette },
   { key: "updates", label: "Updates", icon: RefreshCw },
 ];
@@ -109,6 +113,7 @@ export function SettingsView({
         {section === "code-execution" && (
           <CodeExecutionPanel client={client} />
         )}
+        {section === "mcp" && <McpPanel client={client} />}
         {section === "appearance" && (
           <AppearancePanel mode={themeMode} onChange={onThemeChange} />
         )}

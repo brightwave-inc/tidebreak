@@ -364,6 +364,26 @@ mod tests {
     }
 
     #[test]
+    fn mcp_approval_projects_one_generic_action_without_remote_metadata() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 9,
+            event: AgentEvent::ApprovalRequired {
+                call_id: CallId::new(),
+                tool_name: "mcp__private_server__private_tool".into(),
+                class: ApprovalClass::Sensitive,
+                kind: ToolApprovalKind::ExternalMcpMayCallServer,
+                summary: "private model-authored arguments".into(),
+            },
+        });
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(json.contains(r#""action":"other""#));
+        assert!(json.contains(r#""approval":"external_mcp_may_call_server""#));
+        assert!(!json.contains("private_server"));
+        assert!(!json.contains("private_tool"));
+        assert!(!json.contains("model-authored"));
+    }
+
+    #[test]
     fn background_agent_tools_use_fixed_renderer_names() {
         for (name, expected) in [
             ("spawn_sandbox_agent", r#""name":"spawn_sandbox_agent""#),

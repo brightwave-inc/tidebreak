@@ -132,11 +132,13 @@ describe("ToolCallCard", () => {
       summary:
         "Allow search to send your query and potentially matching document excerpts to configured AI services outside OpenWave?",
       canApprove: true,
+      canRemember: true,
     });
     expect(toolApprovalPresentation("web_search_may_share_query")).toEqual({
       summary:
         "Allow web search to send this query and its explicit filters to the configured search provider outside OpenWave?",
       canApprove: true,
+      canRemember: true,
     });
     expect(
       toolApprovalPresentation("exec_may_run_networked_command"),
@@ -144,10 +146,18 @@ describe("ToolCallCard", () => {
       summary:
         "Allow OpenWave to run a command that leaves the chat workspace and may reach the network?",
       canApprove: true,
+      canRemember: true,
+    });
+    expect(toolApprovalPresentation("external_mcp_may_call_server")).toEqual({
+      summary:
+        "Allow this external MCP server to receive the call and act with its own local or remote permissions?",
+      canApprove: true,
+      canRemember: false,
     });
     expect(toolApprovalPresentation("unsupported")).toEqual({
       summary: "The exact action cannot be safely described.",
       canApprove: false,
+      canRemember: false,
     });
   });
 });

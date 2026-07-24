@@ -87,6 +87,7 @@ describe("AssistantWorkingIndicator", () => {
       callId: "call",
       summary: "Safe approval copy",
       canApprove: true,
+      canRemember: true,
     };
 
     expect(shouldShowAssistantWorking([runningTool], true, 0)).toBe(false);
@@ -127,6 +128,7 @@ describe("AssistantWorkingIndicator", () => {
         callId: "call",
         summary: "private-provider-diagnostic",
         canApprove: false,
+        canRemember: false,
         resolved: true,
       },
     ];

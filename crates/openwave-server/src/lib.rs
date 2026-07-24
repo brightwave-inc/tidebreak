@@ -234,6 +234,16 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_CODE_EXECUTION_CONFIG_BODY_BYTES)),
         )
         .route(
+            "/mcp/servers",
+            get(routes::get_mcp_servers)
+                .put(routes::put_mcp_servers)
+                .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
+        )
+        .route(
+            "/mcp/servers/{name}/reconnect",
+            post(routes::post_mcp_server_reconnect),
+        )
+        .route(
             "/web-search/credentials",
             get(routes::get_web_search_credentials),
         )
@@ -332,6 +342,7 @@ pub struct Server {
     _sandbox_web_search_worker: AbortTask,
     _blob_retirement_worker: AbortTask,
     _blob_orphan_auditor: AbortTask,
+    _mcp_supervisor: AbortTask,
     _instance_lock: InstanceLock,
 }
 
@@ -483,15 +494,13 @@ async fn bind_inner(
     ));
     let foreground_web_search =
         Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
-    let (retrieval, mut tools, mut agent_config) = agent_deps(
+    let (retrieval, tools, agent_config) = agent_deps(
         embedder,
         vector_store,
         code_execution,
         foreground_web_search,
         store.clone(),
     );
-    mcp_servers.mount(&mut tools).await?;
-    finalize_foreground_agent_config(&tools, &mut agent_config);
     let tools = Arc::new(tools);
     let state = match client_executor_id {
         Some(client_executor_id) => AppState::new_with_client_executor_id(
@@ -514,6 +523,7 @@ async fn bind_inner(
             agent_config,
         ),
     };
+    state.mcp.initialize(mcp_servers).await?;
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();
     let document_worker = document_worker::DocumentWorker::new(
@@ -557,7 +567,8 @@ async fn bind_inner(
         state.agent_config.clone(),
         Some(state.config.data_dir.join("scratch")),
         turn_worker::TurnWorkerConfig::default(),
-    );
+    )
+    .with_mcp_runtime(state.mcp.clone());
     let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()
         .with_delegated_file_executor(client_executor_id.is_some());
     let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
@@ -580,6 +591,7 @@ async fn bind_inner(
             sandbox_web_search_worker::SandboxWebSearchWorkerConfig::default(),
         );
     let server_store = state.store.clone();
+    let mcp_runtime = state.mcp.clone();
     let router = app(state);
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -596,6 +608,7 @@ async fn bind_inner(
     let sandbox_web_search_worker = tokio::spawn(sandbox_web_search_worker.run());
     let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
     let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
+    let mcp_supervisor = tokio::spawn(mcp_runtime.supervise());
 
     Ok(Server {
         local_addr,
@@ -611,6 +624,7 @@ async fn bind_inner(
         _sandbox_web_search_worker: AbortTask(sandbox_web_search_worker),
         _blob_retirement_worker: AbortTask(blob_retirement_worker),
         _blob_orphan_auditor: AbortTask(blob_orphan_auditor),
+        _mcp_supervisor: AbortTask(mcp_supervisor),
         _instance_lock: instance_lock,
     })
 }
@@ -664,17 +678,6 @@ fn agent_deps(
         ..AgentConfig::default()
     };
     (retrieval, tools, agent_config)
-}
-
-/// Finalize the foreground prompt only after every boot-time tool is mounted.
-///
-/// The registry is immutable after this point today. A future dynamically
-/// swappable registry must run the same composition against the immutable tool
-/// snapshot selected for each turn, rather than retaining this startup value.
-fn finalize_foreground_agent_config(tools: &ToolRegistry, agent_config: &mut AgentConfig) {
-    agent_config.system_prompt = Some(foreground_prompt::compose(
-        &tools.specs_for_foreground(true),
-    ));
 }
 
 /// The embeddings model used when an OpenAI credential is configured. Its native

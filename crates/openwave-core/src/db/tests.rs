@@ -10757,6 +10757,14 @@ async fn claimed_sensitive_call(
     store: &DbStore,
     chat: &Chat,
 ) -> (TurnId, uuid::Uuid, ToolCallRecord, ApprovalRequest) {
+    claimed_sensitive_call_named(store, chat, "search").await
+}
+
+async fn claimed_sensitive_call_named(
+    store: &DbStore,
+    chat: &Chat,
+    tool_name: &str,
+) -> (TurnId, uuid::Uuid, ToolCallRecord, ApprovalRequest) {
     let turn_id = TurnId::new();
     let accepted = match store
         .accept_turn(turn_id, chat.id, "gpt-5", "search")
@@ -10793,7 +10801,7 @@ async fn claimed_sensitive_call(
         chat_id: chat.id,
         turn_id,
         provider_id: "approval-call".into(),
-        name: "search".into(),
+        name: tool_name.into(),
         arguments: serde_json::json!({"query": "private"}),
         execution: ToolCallExecution::Server,
         status: ToolCallStatus::Pending,
@@ -10819,6 +10827,42 @@ async fn claimed_sensitive_call(
         summary: "search requires approval".into(),
     };
     (turn_id, lease_token, call, request)
+}
+
+#[tokio::test]
+async fn external_mcp_approval_roundtrips_as_one_shot_consent() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (_turn_id, lease_token, _call, request) =
+        claimed_sensitive_call_named(&store, &chat, "mcp__documents__search").await;
+
+    let registered = store
+        .request_tool_call_approval_and_append_event(
+            &request,
+            lease_token,
+            1,
+            DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
+        )
+        .await
+        .unwrap();
+    let approval = match registered.outcome {
+        RequestToolApprovalOutcome::Requested(approval) => approval,
+        outcome => panic!("unexpected approval request outcome: {outcome:?}"),
+    };
+    assert_eq!(
+        approval.kind,
+        crate::ToolApprovalKind::ExternalMcpMayCallServer
+    );
+    assert!(approval.kind.is_approvable());
+    assert!(!approval.kind.is_standing_grantable());
+
+    let recovered = store
+        .get_tool_call_approval(request.call_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.kind, approval.kind);
 }
 
 #[tokio::test]

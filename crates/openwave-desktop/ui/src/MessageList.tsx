@@ -37,6 +37,7 @@ export type ChatMessage =
       callId: string;
       summary: string;
       canApprove: boolean;
+      canRemember: boolean;
       resolved?: boolean;
     }
   | { id: string; role: "error"; text: string };
@@ -300,14 +301,16 @@ function MessageBubbleImpl({
                 >
                   Approve once
                 </button>
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={deciding}
-                  onClick={() => onApproval(message.callId, "approve", true)}
-                >
-                  Allow for this chat
-                </button>
+                {message.canRemember && (
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={deciding}
+                    onClick={() => onApproval(message.callId, "approve", true)}
+                  >
+                    Allow for this chat
+                  </button>
+                )}
               </>
             )}
             <button

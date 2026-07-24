@@ -78,6 +78,11 @@ pub enum ToolApprovalKind {
     WebSearchMayShareQuery,
     /// A command execution escapes the chat workspace and may reach the network.
     ExecMayRunNetworkedCommand,
+    /// An external MCP process may receive the call and act with its own local
+    /// or remote authority. Calls are approvable once but never standing-
+    /// grantable because a Settings edit can replace the process behind a
+    /// stable tool namespace.
+    ExternalMcpMayCallServer,
     /// A Sensitive action with no presentable consent semantics: rejectable but
     /// not approvable from the renderer.
     Unsupported,
@@ -90,6 +95,7 @@ impl ToolApprovalKind {
             "search" => Self::SearchMayShareQueryAndExcerpts,
             "web_search" => Self::WebSearchMayShareQuery,
             "exec" => Self::ExecMayRunNetworkedCommand,
+            name if name.starts_with("mcp__") => Self::ExternalMcpMayCallServer,
             _ => Self::Unsupported,
         }
     }
@@ -104,6 +110,10 @@ impl ToolApprovalKind {
             // serde still exposes the narrower renderer kind.
             Self::WebSearchMayShareQuery => "search_may_share_query_and_excerpts",
             Self::ExecMayRunNetworkedCommand => "exec_may_run_networked_command",
+            // Existing databases have a closed approval-kind constraint. The
+            // exact namespaced tool name disambiguates this renderer kind when
+            // durable state is read, as it already does for web search.
+            Self::ExternalMcpMayCallServer => "search_may_share_query_and_excerpts",
             Self::Unsupported => "unsupported",
         }
     }
@@ -115,7 +125,18 @@ impl ToolApprovalKind {
             Self::SearchMayShareQueryAndExcerpts
                 | Self::WebSearchMayShareQuery
                 | Self::ExecMayRunNetworkedCommand
+                | Self::ExternalMcpMayCallServer
         )
+    }
+
+    /// Whether approval may be remembered for later calls in the same chat.
+    ///
+    /// MCP is intentionally one-shot: its configured executable can change
+    /// while retaining a model-visible namespace, so reusing consent by name
+    /// would silently widen authority.
+    #[must_use]
+    pub const fn is_standing_grantable(self) -> bool {
+        self.is_approvable() && !matches!(self, Self::ExternalMcpMayCallServer)
     }
 }
 
@@ -198,9 +219,10 @@ pub struct StandingGrant {
 impl StandingGrant {
     /// Record consent to stop re-prompting `tool_name` in `chat_id`.
     ///
-    /// Returns `None` for a tool whose consent semantics are not standing-
-    /// grantable (mirrors [`ToolApprovalKind::is_approvable`]); an unknown or
-    /// non-approvable action must keep parking on the gate every call.
+    /// Returns `None` for a tool whose consent semantics are not
+    /// [`ToolApprovalKind::is_standing_grantable`]. An unknown action, an
+    /// unapprovable action, or a replaceable MCP namespace must keep parking on
+    /// the gate every call.
     #[must_use]
     pub fn new(
         chat_id: ChatId,
@@ -208,7 +230,7 @@ impl StandingGrant {
         kind: ToolApprovalKind,
         granted_at: DateTime<Utc>,
     ) -> Option<Self> {
-        if !kind.is_approvable() {
+        if !kind.is_standing_grantable() {
             return None;
         }
         Some(Self {
@@ -495,6 +517,18 @@ mod standing_grant_tests {
         assert!(grants.covers(chat, "exec", kind));
         // Deny-by-default still holds for a different chat.
         assert!(!grants.covers(ChatId::new(), "exec", kind));
+    }
+
+    #[test]
+    fn external_mcp_is_approvable_once_but_never_standing_grantable() {
+        let kind = ToolApprovalKind::for_tool_name("mcp__documents__search");
+        assert_eq!(kind, ToolApprovalKind::ExternalMcpMayCallServer);
+        assert!(kind.is_approvable());
+        assert!(!kind.is_standing_grantable());
+        assert!(
+            StandingGrant::new(ChatId::new(), "mcp__documents__search", kind, Utc::now(),)
+                .is_none()
+        );
     }
 
     #[test]

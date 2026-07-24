@@ -102,18 +102,32 @@ before its proxies are registered. Each remote name is locally namespaced as
 serialized per external server and their text, structured content, and error
 flag are translated back into `ToolOutput`. Because MCP tools can cross both the
 workspace and process boundary, every mounted proxy is classified `Sensitive`.
+Each call needs one explicit approval; MCP approval is never remembered by tool
+name because Settings can replace the process behind a stable namespace.
 
-The desktop and `openwave serve` boot paths read external stdio servers from the
-JSON file named by `OPENWAVE_MCP_CONFIG`. Each entry declares a unique namespace,
-an executable plus argument array, an optional working directory and explicit
-environment, and an optional bounded request timeout. No shell interprets these
-values. Child environments are cleared by default to avoid leaking provider or
-host credentials; `env_from` selectively forwards named parent variables without
-putting their values in JSON, while `inherit_env` remains an explicit broad
-opt-in. A missing selected variable fails startup. Initialization is fail-closed
-so the advertised tool surface never silently differs from the boot
-configuration. Configuration UI, reconnect supervision, and MCP
-`tools/list_changed` refresh remain future work.
+The desktop Settings page manages external stdio servers at runtime. Each entry
+declares a unique namespace, executable, argument array, optional working
+directory, explicit non-secret environment, selected `env_from` names, and a
+bounded request timeout. No shell interprets any field. Child environments are
+always cleared before the selected names and literal values are added, so an MCP
+process cannot inherit provider credentials or other desktop secrets by
+accident. Resolved `env_from` values never enter the database or renderer, and
+child stderr is discarded instead of being copied into host logs.
+
+Saving first validates and connects the complete candidate set, then atomically
+publishes it for later turns. A failure leaves the prior connection set active.
+Active turns retain their immutable registry snapshot, so reconnect or tool
+refresh cannot change a replaying turn's schema or executor. A supervisor probes
+idle sessions, skips sessions busy with a live call, reconnects with capped
+backoff, and establishes a fresh connection after
+`notifications/tools/list_changed` before publishing the new tool list.
+Provider-safe names plus per-frame, per-tool, count, pagination, and aggregate
+metadata limits keep a malformed server from breaking or bloating later model
+requests.
+The legacy `OPENWAVE_MCP_CONFIG` JSON file remains available for headless boot;
+when no saved configuration exists it uses the same closed schema and fails
+startup if an enabled server cannot initialize.
+See [Local MCP servers](mcp-servers.md) for the field contract and setup flow.
 
 ## Foreground and sandbox surfaces
 

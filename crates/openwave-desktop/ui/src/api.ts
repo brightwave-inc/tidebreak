@@ -90,6 +90,37 @@ export type CodeExecutionConfigInfo = {
   available: boolean;
 };
 
+export type McpHealth =
+  | "initializing"
+  | "healthy"
+  | "degraded"
+  | "reconnecting"
+  | "disabled";
+
+/** Typed stdio process data. Values are argv entries, never shell source. */
+export type McpServerDefinition = {
+  name: string;
+  command: string;
+  args: string[];
+  /** Literal values must be non-secret; credentials use `env_from` names. */
+  env: Record<string, string>;
+  env_from: string[];
+  cwd: string | null;
+  request_timeout_ms: number;
+  enabled: boolean;
+};
+
+/** Renderer-safe health projection. Resolved `env_from` values are never sent. */
+export type McpServerInfo = McpServerDefinition & {
+  health: McpHealth;
+  tool_count: number;
+  diagnostic: string | null;
+};
+
+export type McpServersInfo = {
+  servers: McpServerInfo[];
+};
+
 export type Chat = {
   id: string;
   title: string | null;
@@ -255,6 +286,7 @@ export type RendererApprovalKind =
   | "search_may_share_query_and_excerpts"
   | "web_search_may_share_query"
   | "exec_may_run_networked_command"
+  | "external_mcp_may_call_server"
   | "unsupported";
 
 /** Approval kinds a human may approve from the renderer. */
@@ -262,8 +294,14 @@ export function isApprovableKind(kind: RendererApprovalKind): boolean {
   return (
     kind === "search_may_share_query_and_excerpts" ||
     kind === "web_search_may_share_query" ||
-    kind === "exec_may_run_networked_command"
+    kind === "exec_may_run_networked_command" ||
+    kind === "external_mcp_may_call_server"
   );
+}
+
+/** Approval kinds whose authority is stable enough to remember by tool name. */
+export function isRememberableKind(kind: RendererApprovalKind): boolean {
+  return isApprovableKind(kind) && kind !== "external_mcp_may_call_server";
 }
 
 /** A strict renderer-safe snapshot used to recover a parked approval. */
@@ -274,6 +312,7 @@ export type PendingToolApproval = {
   approval: RendererApprovalKind;
   class: "read_only" | "workspace" | "sensitive";
   canApprove: boolean;
+  canRemember: boolean;
 };
 
 export type FolderAccessHint = "documents" | "downloads";
@@ -435,6 +474,25 @@ export class ApiClient {
       method: "PUT",
       headers: this.headers(true),
       body: JSON.stringify(body),
+    });
+  }
+
+  listMcpServers(): Promise<McpServersInfo> {
+    return this.json("/mcp/servers", { headers: this.headers() });
+  }
+
+  putMcpServers(servers: McpServerDefinition[]): Promise<McpServersInfo> {
+    return this.json("/mcp/servers", {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify({ servers }),
+    });
+  }
+
+  reconnectMcpServer(name: string): Promise<McpServersInfo> {
+    return this.json(`/mcp/servers/${encodeURIComponent(name)}/reconnect`, {
+      method: "POST",
+      headers: this.headers(),
     });
   }
 
@@ -724,7 +782,8 @@ export function parsePendingToolApproval(
         key !== "action" &&
         key !== "approval" &&
         key !== "class" &&
-        key !== "can_approve",
+        key !== "can_approve" &&
+        key !== "can_remember",
     ) ||
     typeof value.call_id !== "string" ||
     value.call_id.length === 0 ||
@@ -736,7 +795,9 @@ export function parsePendingToolApproval(
       value.class !== "workspace" &&
       value.class !== "sensitive") ||
     typeof value.can_approve !== "boolean" ||
-    value.can_approve !== isApprovableKind(value.approval)
+    value.can_approve !== isApprovableKind(value.approval) ||
+    typeof value.can_remember !== "boolean" ||
+    value.can_remember !== isRememberableKind(value.approval)
   ) {
     return null;
   }
@@ -747,6 +808,7 @@ export function parsePendingToolApproval(
     approval: value.approval,
     class: value.class,
     canApprove: value.can_approve,
+    canRemember: value.can_remember,
   };
 }
 
@@ -778,6 +840,7 @@ function isRendererApprovalKind(value: unknown): value is RendererApprovalKind {
     value === "search_may_share_query_and_excerpts" ||
     value === "web_search_may_share_query" ||
     value === "exec_may_run_networked_command" ||
+    value === "external_mcp_may_call_server" ||
     value === "unsupported"
   );
 }
