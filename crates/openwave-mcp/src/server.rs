@@ -70,10 +70,9 @@ impl ApprovalBridge {
     ) -> Option<String> {
         let kind = ToolApprovalKind::for_tool_name(tool_name);
         let action = ToolActionPreview::build(tool_name, arguments);
-        if self
-            .grants
-            .covers(chat_id, tool_name, kind, action.as_ref())
-        {
+        // The canonical arguments decide authority; `action` beside it only
+        // describes them for the card.
+        if self.grants.covers(chat_id, tool_name, kind, arguments) {
             return None;
         }
         let request = ApprovalRequest {

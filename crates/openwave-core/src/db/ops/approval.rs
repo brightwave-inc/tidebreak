@@ -489,6 +489,7 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
         // stored separately, so a recovered card can never describe a different
         // action from the one that will run.
         preview: ToolActionPreview::build(&model.name, &model.arguments),
+        action_is_exact: ToolActionPreview::describes_exactly(&model.name, &model.arguments),
         status,
         reason: model.approval_reason.clone(),
         requested_at: model

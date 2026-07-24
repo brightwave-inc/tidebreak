@@ -166,6 +166,13 @@ pub struct ToolApproval {
     pub kind: ToolApprovalKind,
     /// What the call will do, when the tool projects it.
     pub preview: Option<ToolActionPreview>,
+    /// Whether [`Self::preview`] reproduces the call's arguments exactly.
+    ///
+    /// Derived alongside the preview from the arguments the call is parked on,
+    /// not stored: the preview is clamped for display, and a scope narrower
+    /// than the whole tool may only be built from one that lost nothing. See
+    /// [`ToolActionPreview::describes_exactly`].
+    pub action_is_exact: bool,
     pub status: ToolApprovalStatus,
     pub reason: Option<String>,
     pub requested_at: DateTime<Utc>,
@@ -229,8 +236,12 @@ pub struct StandingGrant {
 /// much larger thing to agree to than "don't ask me about `cargo` again".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantScope {
-    /// Exactly this argument vector, and nothing else.
-    ExactCommand { command: String, args: Vec<String> },
+    /// Exactly this argument vector, in this directory, and nothing else.
+    ExactCommand {
+        command: String,
+        args: Vec<String>,
+        cwd: String,
+    },
     /// This executable, with any arguments.
     AnyArgsFor { command: String },
     /// Every call to the tool.
@@ -238,44 +249,61 @@ pub enum GrantScope {
 }
 
 impl GrantScope {
-    /// Whether this scope covers the action a call is about to take.
+    /// Whether this scope covers the exact call about to run.
     ///
-    /// An action the renderer could not describe is never covered by a narrow
-    /// scope: matching it would mean guessing at what the call will do.
+    /// Takes the canonical arguments rather than only the action preview,
+    /// because the preview is clamped for display and the clamp is many-to-one:
+    /// a 600-character command and that command with `; rm -rf ~` appended
+    /// project to the same 512 characters. Keying authorization on the
+    /// projection would let the second run under a grant given for the first.
+    ///
+    /// So a narrow scope requires the call to be exactly describable
+    /// ([`ToolActionPreview::describes_exactly`]) *and* to match. An action the
+    /// renderer could not describe, or could only describe approximately, keeps
+    /// asking.
     #[must_use]
-    pub fn covers_action(&self, action: Option<&crate::preview::ToolActionPreview>) -> bool {
+    pub fn covers_call(&self, tool_name: &str, arguments: &serde_json::Value) -> bool {
         use crate::preview::ToolActionPreview;
+        if matches!(self, Self::WholeTool) {
+            return true;
+        }
+        if !ToolActionPreview::describes_exactly(tool_name, arguments) {
+            return false;
+        }
+        let Some(ToolActionPreview::Exec {
+            command: call_command,
+            args: call_args,
+            cwd: call_cwd,
+        }) = ToolActionPreview::build(tool_name, arguments)
+        else {
+            return false;
+        };
         match self {
             Self::WholeTool => true,
-            Self::ExactCommand { command, args } => matches!(
-                action,
-                Some(ToolActionPreview::Exec {
-                    command: call_command,
-                    args: call_args,
-                    ..
-                }) if call_command == command && call_args == args
-            ),
-            Self::AnyArgsFor { command } => matches!(
-                action,
-                Some(ToolActionPreview::Exec {
-                    command: call_command,
-                    ..
-                }) if call_command == command
-            ),
+            Self::ExactCommand { command, args, cwd } => {
+                call_command == *command && call_args == *args && call_cwd == *cwd
+            }
+            Self::AnyArgsFor { command } => call_command == *command,
         }
     }
 
-    /// The scopes offered for an action, narrowest first.
+    /// The scopes offered for a call, narrowest first.
     ///
-    /// A tool with nothing to describe can only be granted wholesale, because
-    /// there is no narrower thing to name.
+    /// A call with nothing to describe — or nothing describable *exactly* —
+    /// can only be granted wholesale, because there is no narrower thing that
+    /// could be named without naming it approximately.
     #[must_use]
-    pub fn ladder_for(action: Option<&crate::preview::ToolActionPreview>) -> Vec<Self> {
-        match action {
-            Some(crate::preview::ToolActionPreview::Exec { command, args, .. }) => {
+    pub fn ladder_for(tool_name: &str, arguments: &serde_json::Value) -> Vec<Self> {
+        use crate::preview::ToolActionPreview;
+        if !ToolActionPreview::describes_exactly(tool_name, arguments) {
+            return vec![Self::WholeTool];
+        }
+        match ToolActionPreview::build(tool_name, arguments) {
+            Some(ToolActionPreview::Exec { command, args, cwd }) => {
                 let mut ladder = vec![Self::ExactCommand {
                     command: command.clone(),
                     args: args.clone(),
+                    cwd: cwd.clone(),
                 }];
                 // With no arguments, "exactly this" and "this executable with
                 // any arguments" would read as two names for one grant.
@@ -362,20 +390,20 @@ impl StandingGrant {
         self.granted_at
     }
 
-    /// Whether this grant covers an exact Sensitive action.
+    /// Whether this grant covers an exact Sensitive call.
     #[must_use]
     fn covers(
         &self,
         chat_id: ChatId,
         tool_name: &str,
         kind: ToolApprovalKind,
-        action: Option<&crate::preview::ToolActionPreview>,
+        arguments: &serde_json::Value,
     ) -> bool {
         self.chat_id == chat_id
             && self.tool_name == tool_name
             && self.kind == kind
             && kind.is_approvable()
-            && self.scope.covers_action(action)
+            && self.scope.covers_call(tool_name, arguments)
     }
 }
 
@@ -420,18 +448,22 @@ impl StandingGrants {
         }
     }
 
-    /// Whether a live grant covers this exact Sensitive action.
+    /// Whether a live grant covers this exact Sensitive call.
+    ///
+    /// Takes the canonical arguments, not the display projection of them: see
+    /// [`GrantScope::covers_call`] for why a clamped preview cannot decide
+    /// authority.
     #[must_use]
     pub fn covers(
         &self,
         chat_id: ChatId,
         tool_name: &str,
         kind: ToolApprovalKind,
-        action: Option<&crate::preview::ToolActionPreview>,
+        arguments: &serde_json::Value,
     ) -> bool {
         self.read()
             .iter()
-            .any(|grant| grant.covers(chat_id, tool_name, kind, action))
+            .any(|grant| grant.covers(chat_id, tool_name, kind, arguments))
     }
 
     /// Drop every grant, e.g. on explicit revocation.
@@ -628,9 +660,9 @@ mod standing_grant_tests {
         let chat = ChatId::new();
         let grants = StandingGrants::from_grants(vec![grant(chat, "exec")]);
         let kind = ToolApprovalKind::for_tool_name("exec");
-        assert!(grants.covers(chat, "exec", kind, None));
+        assert!(grants.covers(chat, "exec", kind, &no_args()));
         // Deny-by-default still holds for a different chat.
-        assert!(!grants.covers(ChatId::new(), "exec", kind, None));
+        assert!(!grants.covers(ChatId::new(), "exec", kind, &no_args()));
     }
 
     #[test]
@@ -664,7 +696,7 @@ mod standing_grant_tests {
             chat,
             "search",
             ToolApprovalKind::for_tool_name("search"),
-            None
+            &no_args()
         ));
     }
 
@@ -675,22 +707,25 @@ mod standing_grant_tests {
         let grants = StandingGrants::from_grants(vec![grant(chat, "search")]);
         let kind = ToolApprovalKind::for_tool_name("search");
 
-        assert!(grants.covers(chat, "search", kind, None));
-        assert!(!grants.covers(other_chat, "search", kind, None));
+        assert!(grants.covers(chat, "search", kind, &no_args()));
+        assert!(!grants.covers(other_chat, "search", kind, &no_args()));
         assert!(!grants.covers(
             chat,
             "third_party_sensitive",
             ToolApprovalKind::for_tool_name("third_party_sensitive"),
-            None,
+            &no_args(),
         ));
     }
 
-    fn exec_action(command: &str, args: &[&str]) -> crate::preview::ToolActionPreview {
-        crate::preview::ToolActionPreview::Exec {
-            command: command.into(),
-            args: args.iter().map(|arg| (*arg).to_string()).collect(),
-            cwd: ".".into(),
-        }
+    /// A tool with no action projection; every scope decision for it turns on
+    /// the grant itself rather than on matching an action.
+    fn no_args() -> serde_json::Value {
+        serde_json::json!({})
+    }
+
+    /// Canonical `exec` arguments, which is what a grant is now matched on.
+    fn exec_args(command: &str, args: &[&str]) -> serde_json::Value {
+        serde_json::json!({ "command": command, "args": args })
     }
 
     #[test]
@@ -706,22 +741,126 @@ mod standing_grant_tests {
                 GrantScope::ExactCommand {
                     command: "cargo".into(),
                     args: vec!["test".into()],
+                    cwd: ".".into(),
                 },
                 Utc::now(),
             )
             .unwrap(),
         );
 
-        assert!(grants.covers(chat, "exec", kind, Some(&exec_action("cargo", &["test"]))));
+        assert!(grants.covers(chat, "exec", kind, &exec_args("cargo", &["test"])));
+        assert!(!grants.covers(chat, "exec", kind, &exec_args("cargo", &["publish"])));
+        assert!(!grants.covers(chat, "exec", kind, &exec_args("rm", &["test"])));
+        // An action the renderer could not describe was never the one granted.
+        assert!(!grants.covers(chat, "exec", kind, &no_args()));
+    }
+
+    #[test]
+    fn a_clamped_call_never_matches_or_creates_a_narrow_grant() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        let long = "x".repeat(crate::preview::MAX_ACTION_FIELD_CHARS);
+        let grants = StandingGrants::new();
+        grants.record(
+            StandingGrant::scoped(
+                chat,
+                "exec",
+                kind,
+                GrantScope::ExactCommand {
+                    command: "bash".into(),
+                    args: vec!["-c".into(), long.clone()],
+                    cwd: ".".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap(),
+        );
+
+        // Truncation: a longer script sharing the granted prefix projects to
+        // the same preview. Keying on the projection would run it unprompted.
+        let appended = format!("{long}; rm -rf ~");
+        assert!(!grants.covers(chat, "exec", kind, &exec_args("bash", &["-c", &appended])));
+        // A value exactly at the bound is not truncated, so it stays faithful
+        // and the grant still covers the command it was actually given for.
+        assert!(grants.covers(chat, "exec", kind, &exec_args("bash", &["-c", &long])));
+        // Nothing at or past the bound can be turned into a narrow grant.
+        assert_eq!(
+            GrantScope::ladder_for("exec", &exec_args("bash", &["-c", &appended])),
+            vec![GrantScope::WholeTool]
+        );
+    }
+
+    #[test]
+    fn an_exact_grant_is_not_widened_by_a_dropped_or_extra_argument() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        let grants = StandingGrants::new();
+        grants.record(
+            StandingGrant::scoped(
+                chat,
+                "exec",
+                kind,
+                GrantScope::ExactCommand {
+                    command: "foo".into(),
+                    args: vec!["bar".into()],
+                    cwd: ".".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap(),
+        );
+
+        assert!(grants.covers(chat, "exec", kind, &exec_args("foo", &["bar"])));
+        // An empty argument used to clamp away entirely, making these two
+        // different calls indistinguishable.
+        assert!(!grants.covers(chat, "exec", kind, &exec_args("foo", &["", "bar"])));
+        // A control character used to be stripped, so these collapsed too.
+        assert!(!grants.covers(chat, "exec", kind, &exec_args("foo", &["b\u{0}ar"])));
+        // A non-string argument used to be dropped, changing the call's arity.
         assert!(!grants.covers(
             chat,
             "exec",
             kind,
-            Some(&exec_action("cargo", &["publish"]))
+            &serde_json::json!({ "command": "foo", "args": ["bar", 7] })
         ));
-        assert!(!grants.covers(chat, "exec", kind, Some(&exec_action("rm", &["test"]))));
-        // An action the renderer could not describe was never the one granted.
-        assert!(!grants.covers(chat, "exec", kind, None));
+        // Past the argument cap the tail was elided, so a longer vector matched
+        // a shorter grant.
+        let many: Vec<String> = (0..=crate::preview::MAX_ACTION_ARGS)
+            .map(|index| index.to_string())
+            .collect();
+        assert!(!grants.covers(
+            chat,
+            "exec",
+            kind,
+            &serde_json::json!({ "command": "foo", "args": many })
+        ));
+    }
+
+    #[test]
+    fn an_exact_grant_is_scoped_to_the_directory_it_was_given_in() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::for_tool_name("exec");
+        let grants = StandingGrants::new();
+        grants.record(
+            StandingGrant::scoped(
+                chat,
+                "exec",
+                kind,
+                GrantScope::ExactCommand {
+                    command: "npm".into(),
+                    args: vec!["install".into()],
+                    cwd: "./sandbox".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap(),
+        );
+
+        let in_dir =
+            |cwd: &str| serde_json::json!({ "command": "npm", "args": ["install"], "cwd": cwd });
+        assert!(grants.covers(chat, "exec", kind, &in_dir("./sandbox")));
+        // The card showed the directory, so the grant is about that directory.
+        assert!(!grants.covers(chat, "exec", kind, &in_dir("/")));
     }
 
     #[test]
@@ -742,14 +881,9 @@ mod standing_grant_tests {
             .unwrap(),
         );
 
-        assert!(grants.covers(chat, "exec", kind, Some(&exec_action("cargo", &["test"]))));
-        assert!(grants.covers(
-            chat,
-            "exec",
-            kind,
-            Some(&exec_action("cargo", &["publish"]))
-        ));
-        assert!(!grants.covers(chat, "exec", kind, Some(&exec_action("rm", &["-rf"]))));
+        assert!(grants.covers(chat, "exec", kind, &exec_args("cargo", &["test"])));
+        assert!(grants.covers(chat, "exec", kind, &exec_args("cargo", &["publish"])));
+        assert!(!grants.covers(chat, "exec", kind, &exec_args("rm", &["-rf"])));
     }
 
     #[test]
@@ -759,18 +893,19 @@ mod standing_grant_tests {
         let grants = StandingGrants::new();
         grants.record(grant(chat, "exec"));
 
-        assert!(grants.covers(chat, "exec", kind, Some(&exec_action("rm", &["-rf"]))));
-        assert!(grants.covers(chat, "exec", kind, None));
+        assert!(grants.covers(chat, "exec", kind, &exec_args("rm", &["-rf"])));
+        assert!(grants.covers(chat, "exec", kind, &no_args()));
     }
 
     #[test]
     fn the_ladder_runs_narrowest_first_and_never_names_one_grant_twice() {
         assert_eq!(
-            GrantScope::ladder_for(Some(&exec_action("cargo", &["test"]))),
+            GrantScope::ladder_for("exec", &exec_args("cargo", &["test"])),
             vec![
                 GrantScope::ExactCommand {
                     command: "cargo".into(),
                     args: vec!["test".into()],
+                    cwd: ".".into(),
                 },
                 GrantScope::AnyArgsFor {
                     command: "cargo".into(),
@@ -781,17 +916,21 @@ mod standing_grant_tests {
         // With no arguments, "exactly this" and "any arguments to this" would
         // be two names for the same grant.
         assert_eq!(
-            GrantScope::ladder_for(Some(&exec_action("true", &[]))),
+            GrantScope::ladder_for("exec", &exec_args("true", &[])),
             vec![
                 GrantScope::ExactCommand {
                     command: "true".into(),
                     args: vec![],
+                    cwd: ".".into(),
                 },
                 GrantScope::WholeTool,
             ]
         );
         // Nothing to describe means nothing narrower to offer.
-        assert_eq!(GrantScope::ladder_for(None), vec![GrantScope::WholeTool]);
+        assert_eq!(
+            GrantScope::ladder_for("search", &no_args()),
+            vec![GrantScope::WholeTool]
+        );
     }
 
     #[test]
@@ -814,8 +953,8 @@ mod standing_grant_tests {
             );
         }
         assert_eq!(grants.read().len(), 2);
-        assert!(grants.covers(chat, "exec", kind, Some(&exec_action("git", &["log"]))));
-        assert!(!grants.covers(chat, "exec", kind, Some(&exec_action("npm", &["i"]))));
+        assert!(grants.covers(chat, "exec", kind, &exec_args("git", &["log"])));
+        assert!(!grants.covers(chat, "exec", kind, &exec_args("npm", &["i"])));
     }
 
     #[test]
@@ -826,9 +965,9 @@ mod standing_grant_tests {
         grants.record(grant(chat, "search"));
         grants.record(grant(chat, "search"));
         assert_eq!(grants.read().len(), 1);
-        assert!(grants.covers(chat, "search", kind, None));
+        assert!(grants.covers(chat, "search", kind, &no_args()));
 
         grants.clear();
-        assert!(!grants.covers(chat, "search", kind, None));
+        assert!(!grants.covers(chat, "search", kind, &no_args()));
     }
 }

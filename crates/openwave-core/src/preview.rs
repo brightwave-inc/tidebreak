@@ -78,6 +78,58 @@ impl ToolActionPreview {
             _ => None,
         }
     }
+
+    /// Whether [`Self::build`] would reproduce `arguments` without losing
+    /// anything.
+    ///
+    /// The preview is clamped so a card stays bounded: long fields are cut,
+    /// control characters removed, and surplus or unreadable arguments dropped.
+    /// That is right for showing a human what a call does and wrong for
+    /// deciding whether a *later* call is the same one, because the clamp is
+    /// many-to-one — a 600-character command and that command with anything
+    /// appended project to the same 512 characters.
+    ///
+    /// A scope narrower than the whole tool may only be created from, or
+    /// matched against, a call this returns `true` for. Anything else has to
+    /// keep asking.
+    #[must_use]
+    pub fn describes_exactly(tool_name: &str, arguments: &Value) -> bool {
+        match tool_name {
+            "exec" => {
+                let Some(command) = arguments.get("command").and_then(Value::as_str) else {
+                    return false;
+                };
+                if !survives_clamp(command) {
+                    return false;
+                }
+                // An absent `args` is faithfully the empty vector; a present one
+                // must be an array whose every element survives intact, since a
+                // dropped element silently changes the call's arity.
+                match arguments.get("args") {
+                    None => {}
+                    Some(Value::Array(args)) => {
+                        if args.len() > MAX_ACTION_ARGS {
+                            return false;
+                        }
+                        if !args
+                            .iter()
+                            .all(|arg| arg.as_str().is_some_and(survives_clamp))
+                        {
+                            return false;
+                        }
+                    }
+                    Some(_) => return false,
+                }
+                // An absent `cwd` is faithfully the default the preview shows.
+                match arguments.get("cwd") {
+                    None => true,
+                    Some(Value::String(cwd)) => survives_clamp(cwd),
+                    Some(_) => false,
+                }
+            }
+            _ => false,
+        }
+    }
 }
 
 /// What a call produced, in a form a human can read.
@@ -158,6 +210,18 @@ fn stream(value: Option<&Value>) -> String {
 
 /// Bound one single-line preview field, dropping control characters that could
 /// forge card structure. An empty or all-control field is not presentable.
+/// Whether [`clamp`] would return this string unchanged.
+///
+/// Deliberately mirrors `clamp`'s three lossy steps rather than calling it and
+/// comparing, so the two cannot drift into disagreeing about what "unchanged"
+/// means: nothing removed, nothing truncated, and nothing that clamps away to
+/// nothing.
+fn survives_clamp(value: &str) -> bool {
+    !value.is_empty()
+        && !value.chars().any(char::is_control)
+        && value.chars().count() <= MAX_ACTION_FIELD_CHARS
+}
+
 fn clamp(value: &str, max_chars: usize) -> Option<String> {
     let cleaned: String = value
         .chars()
