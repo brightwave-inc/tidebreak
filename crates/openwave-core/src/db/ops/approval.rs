@@ -456,6 +456,9 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
         }
     };
     let kind = match model.approval_kind.as_deref() {
+        Some("search_may_share_query_and_excerpts") if model.name.starts_with("mcp__") => {
+            ToolApprovalKind::ExternalMcpMayCallServer
+        }
         Some("search_may_share_query_and_excerpts") if model.name == "web_search" => {
             ToolApprovalKind::WebSearchMayShareQuery
         }

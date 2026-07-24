@@ -10,6 +10,7 @@ const approval: ChatMessage = {
   callId: "call-1",
   summary: "Search a site",
   canApprove: true,
+  canRemember: true,
 };
 
 afterEach(cleanup);
@@ -97,6 +98,23 @@ describe("approval card interactions", () => {
       screen.queryByRole("button", { name: "Allow for this chat" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
+  });
+
+  it("offers one-shot approval but no remembered grant for MCP", () => {
+    render(
+      <MessageBubble
+        message={{ ...approval, canRemember: false }}
+        busy={false}
+        onApproval={() => undefined}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Approve once" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Allow for this chat" }),
+    ).not.toBeInTheDocument();
   });
 });
 

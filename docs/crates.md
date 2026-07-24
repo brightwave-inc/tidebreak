@@ -169,9 +169,13 @@ consults. Its client
 half initializes external stdio servers, follows paginated tool discovery, and
 mounts each proxy as `mcp__{server}__{tool}` in the same registry. Mounted tools
 are classified sensitive so they cross OpenWave's approval boundary before the
-client forwards a call. The CLI and desktop boot paths load external stdio
-servers from `OPENWAVE_MCP_CONFIG`. Configuration UI, reconnect supervision,
-and dynamic tool-list refresh are still follow-up work.
+client forwards a call. Their generic approval is one-shot rather than a
+standing name-based grant, since Settings can replace the executable behind a
+stable namespace. The desktop Settings page owns typed runtime configuration
+and renderer-safe health, while `OPENWAVE_MCP_CONFIG` remains a headless
+bootstrap path. The server supervises idle-session health with bounded
+reconnect backoff and refreshes changed tool lists by publishing a fresh
+immutable registry for subsequent turns.
 
 **Depends on:** `openwave-core`.
 

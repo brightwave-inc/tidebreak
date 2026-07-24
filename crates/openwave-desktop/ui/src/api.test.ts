@@ -106,6 +106,7 @@ describe("pending approval recovery", () => {
     approval: "search_may_share_query_and_excerpts",
     class: "sensitive",
     can_approve: true,
+    can_remember: true,
   };
 
   it("parses only the closed renderer projection", () => {
@@ -116,6 +117,7 @@ describe("pending approval recovery", () => {
       approval: "search_may_share_query_and_excerpts",
       class: "sensitive",
       canApprove: true,
+      canRemember: true,
     });
     expect(parsePendingToolApproval({ ...safe, arguments: { query: "private" } })).toBeNull();
     expect(parsePendingToolApproval({ ...safe, can_approve: false })).toBeNull();
@@ -169,6 +171,29 @@ describe("pending approval recovery", () => {
     ).toBeNull();
   });
 
+  it("recovers one-shot MCP approval without a standing grant", () => {
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "other",
+        approval: "external_mcp_may_call_server",
+        can_remember: false,
+      }),
+    ).toMatchObject({
+      action: "other",
+      approval: "external_mcp_may_call_server",
+      canApprove: true,
+      canRemember: false,
+    });
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "other",
+        approval: "external_mcp_may_call_server",
+      }),
+    ).toBeNull();
+  });
+
   it("recognizes the fixed background wait name without accepting extensions", () => {
     expect(
       parsePendingToolApproval({
@@ -176,6 +201,7 @@ describe("pending approval recovery", () => {
         action: "wait_for_agents",
         approval: "unsupported",
         can_approve: false,
+        can_remember: false,
       }),
     ).toMatchObject({ action: "wait_for_agents", canApprove: false });
     expect(
@@ -184,6 +210,7 @@ describe("pending approval recovery", () => {
         action: "wait_for_agents_with_private_results",
         approval: "unsupported",
         can_approve: false,
+        can_remember: false,
       }),
     ).toBeNull();
   });
@@ -195,6 +222,7 @@ describe("pending approval recovery", () => {
         action: "read_delegated_file",
         approval: "unsupported",
         can_approve: false,
+        can_remember: false,
       }),
     ).toMatchObject({ action: "read_delegated_file", canApprove: false });
     expect(
@@ -203,6 +231,7 @@ describe("pending approval recovery", () => {
         action: "read_delegated_file:/Users/private/document.txt",
         approval: "unsupported",
         can_approve: false,
+        can_remember: false,
       }),
     ).toBeNull();
   });

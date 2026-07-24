@@ -236,6 +236,7 @@ export function reduceChatSessionEvent(
             action: event.action,
             approval: event.approval,
             canApprove: approval.canApprove,
+            canRemember: approval.canRemember,
           }),
         },
         effects,
@@ -563,4 +564,3 @@ export function discardToolCalls(
     (message) => message.role !== "tool" || !callIds.has(message.callId),
   );
 }
-

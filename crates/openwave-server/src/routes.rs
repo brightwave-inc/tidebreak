@@ -16,9 +16,9 @@ use std::path::Path as FsPath;
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunExecution, AgentRunStatus,
-    ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome, DeleteProjectOutcome,
-    Message as StoredMessage, MessageId, Project, ProjectId, ReasoningEffort,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentRun, AgentRunExecution,
+    AgentRunStatus, ApprovalDecision, CallId, Chat, ChatId, DeleteChatOutcome,
+    DeleteProjectOutcome, Message as StoredMessage, MessageId, Project, ProjectId, ReasoningEffort,
     RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Role, SandboxToolCall,
     SandboxToolCallStatus, SecretProvider, SequencedEvent, Store, ToolCallExecution,
     ToolCallRecord, ToolCallStatus, TurnId, TurnSteer, TurnSteerId,
@@ -29,6 +29,7 @@ use crate::code_execution::{self, CodeExecutionConfigInfo, CodeExecutionConfigUp
 use crate::error::ServerError;
 use crate::event_projection::RendererSequencedEvent;
 use crate::extract::{Json, Path, Query};
+use crate::mcp_config::{McpServersConfig, McpServersInfo};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
 use crate::state::AppState;
 use crate::web_search::{
@@ -44,6 +45,56 @@ pub use client_execution::*;
 pub use delegated_file_execution::*;
 pub use document::*;
 pub use root_attachment::*;
+
+/// `GET /mcp/servers` — renderer-safe definitions and current connection health.
+pub async fn get_mcp_servers(
+    State(state): State<AppState>,
+) -> Result<Json<McpServersInfo>, ServerError> {
+    Ok(Json(state.mcp.info().await))
+}
+
+/// `PUT /mcp/servers` — atomically validate, connect, persist, and publish a
+/// complete replacement set. A failed candidate never changes active tools.
+pub async fn put_mcp_servers(
+    State(state): State<AppState>,
+    Json(body): Json<McpServersConfig>,
+) -> Result<Json<McpServersInfo>, ServerError> {
+    // Once validation/startup begins, finish the durable/live commit even if
+    // the HTTP client disconnects and drops this handler future.
+    let runtime = state.mcp.clone();
+    let mutation = tokio::spawn(async move { runtime.replace(body).await });
+    Ok(Json(
+        mutation
+            .await
+            .map_err(|_| ServerError::internal("MCP settings update task failed"))?
+            .map_err(mcp_request_error)?,
+    ))
+}
+
+/// `POST /mcp/servers/{name}/reconnect` — explicitly establish a fresh session,
+/// rediscover tools, and publish them for subsequent turns.
+pub async fn post_mcp_server_reconnect(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<McpServersInfo>, ServerError> {
+    // A dropped response must not strand the published state at
+    // `reconnecting`; Tokio tasks continue after their JoinHandle is dropped.
+    let runtime = state.mcp.clone();
+    let mutation = tokio::spawn(async move { runtime.reconnect(&name).await });
+    Ok(Json(
+        mutation
+            .await
+            .map_err(|_| ServerError::internal("MCP reconnect task failed"))?
+            .map_err(mcp_request_error)?,
+    ))
+}
+
+fn mcp_request_error(error: AgentError) -> ServerError {
+    match error {
+        AgentError::Config(message) => ServerError::bad_request(message),
+        other => other.into(),
+    }
+}
 
 /// The store-settings key for the selected model.
 const MODEL_SETTING: &str = "model";
@@ -1529,6 +1580,7 @@ pub(crate) struct PendingApprovalSnapshot {
     pub approval: openwave_core::ToolApprovalKind,
     pub class: openwave_core::ApprovalClass,
     pub can_approve: bool,
+    pub can_remember: bool,
 }
 
 /// `GET /chats/{id}/approvals` — recover a bounded page of pending cards.
@@ -1563,6 +1615,7 @@ pub(crate) async fn list_pending_approvals(
                     approval: kind,
                     class: approval.class,
                     can_approve: kind.is_approvable(),
+                    can_remember: kind.is_standing_grantable(),
                 }
             })
             .collect(),

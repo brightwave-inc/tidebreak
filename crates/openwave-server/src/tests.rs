@@ -6299,7 +6299,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
         .await
         .unwrap(),
     );
-    let (_retrieval, mut tools, mut config) = agent_deps(
+    let (_retrieval, mut tools, config) = agent_deps(
         Arc::new(HashEmbedder::default()),
         Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
         Arc::new(UnavailableCodeExecution),
@@ -6323,8 +6323,9 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
             }
         }),
     });
-    finalize_foreground_agent_config(&tools, &mut config);
-    let system_prompt = config
+    let surface = crate::turn_worker::freeze_foreground_turn_surface(Arc::new(tools), &config);
+    let system_prompt = surface
+        .agent_config
         .system_prompt
         .as_deref()
         .expect("production foreground turns receive an operating prompt");
@@ -6335,7 +6336,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
     assert!(system_prompt.contains("## External MCP tools"));
     assert!(!system_prompt.contains("mcp__test__lookup"));
     assert!(!system_prompt.contains("must-not-be-copied"));
-    let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
+    let names: Vec<String> = surface.tools.specs().into_iter().map(|s| s.name).collect();
     assert!(
         names.iter().any(|n| n == "search"),
         "search tool registered"
@@ -6367,7 +6368,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
         "foreground web search registered"
     );
     assert_eq!(
-        tools.get("web_search").unwrap().approval_class(),
+        surface.tools.get("web_search").unwrap().approval_class(),
         ApprovalClass::Sensitive
     );
     assert!([
@@ -6376,7 +6377,8 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
     ]
     .iter()
     .all(|orchestration| !names.iter().any(|name| name == orchestration)));
-    let foreground = tools
+    let foreground = surface
+        .tools
         .specs_for_foreground(true)
         .into_iter()
         .map(|spec| spec.name)
@@ -6388,19 +6390,23 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
     .iter()
     .all(|name| foreground.contains(*name)));
     assert_eq!(
-        tools.execution(openwave_core::REQUEST_FOLDER_ACCESS_TOOL),
+        surface
+            .tools
+            .execution(openwave_core::REQUEST_FOLDER_ACCESS_TOOL),
         Some(ToolCallExecution::Client)
     );
-    assert!(tools
+    assert!(surface
+        .tools
         .get(openwave_core::REQUEST_FOLDER_ACCESS_TOOL)
         .is_none());
-    let spec = tools
+    let spec = surface
+        .tools
         .specs()
         .into_iter()
         .find(|spec| spec.name == openwave_core::REQUEST_FOLDER_ACCESS_TOOL)
         .expect("folder consent tool is advertised");
     assert_eq!(spec, openwave_core::request_folder_access_tool_spec());
-    assert!(tools.client_arguments_are_valid(
+    assert!(surface.tools.client_arguments_are_valid(
         openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
         &serde_json::json!({
             "reason": "Read the reports needed for this project",
@@ -6408,7 +6414,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
             "folder_hint": "documents"
         })
     ));
-    assert!(!tools.client_arguments_are_valid(
+    assert!(!surface.tools.client_arguments_are_valid(
         openwave_core::REQUEST_FOLDER_ACCESS_TOOL,
         &serde_json::json!({
             "reason": "Read reports",
@@ -8894,6 +8900,158 @@ async fn settings_default_then_update_roundtrips() {
         .unwrap();
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
+}
+
+async fn put_mcp_servers(
+    router: &Router,
+    bearer: &str,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/mcp/servers")
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn get_mcp_servers(router: &Router, bearer: &str) -> serde_json::Value {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/mcp/servers")
+                .header(header::AUTHORIZATION, bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    json_body(response).await
+}
+
+#[tokio::test]
+async fn mcp_settings_roundtrip_disabled_typed_definitions_without_credentials() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let unauthenticated = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/mcp/servers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let response = put_mcp_servers(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "servers": [{
+                "name": "private_docs",
+                "command": "/not/started/while/disabled",
+                "args": ["--stdio"],
+                "env": {"LOG_LEVEL": "info"},
+                "env_from": ["PATH"],
+                "cwd": "/tmp",
+                "request_timeout_ms": 2500,
+                "enabled": false
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let info: serde_json::Value = json_body(response).await;
+    assert_eq!(info["servers"][0]["health"], "disabled");
+    assert_eq!(info["servers"][0]["tool_count"], 0);
+    assert_eq!(info["servers"][0]["env_from"], serde_json::json!(["PATH"]));
+    let encoded = info.to_string();
+    assert!(!encoded.contains("resolved_value"));
+    assert!(!encoded.contains("inherit_env"));
+    if let Ok(path) = std::env::var("PATH") {
+        assert!(
+            !encoded.contains(&path),
+            "resolved PATH leaked into renderer JSON"
+        );
+    }
+
+    let fetched = get_mcp_servers(&router, &bearer).await;
+    assert_eq!(fetched, info);
+}
+
+#[tokio::test]
+async fn failed_mcp_candidate_does_not_replace_the_active_configuration() {
+    const MISSING: &str = "OPENWAVE_TEST_MCP_ROUTE_MISSING_ENV_65B7A2";
+    assert!(std::env::var_os(MISSING).is_none());
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let initial = put_mcp_servers(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "servers": [{
+                "name": "kept",
+                "command": "/not/started",
+                "enabled": false
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(initial.status(), StatusCode::OK);
+
+    let failed = put_mcp_servers(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "servers": [{
+                "name": "broken",
+                "command": "/not/reached",
+                "env_from": [MISSING]
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(failed.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(failed).await;
+    assert_eq!(error.kind, "bad_request");
+    assert!(error.message.contains("broken"));
+    assert!(error.message.contains(MISSING));
+
+    let active = get_mcp_servers(&router, &bearer).await;
+    assert_eq!(active["servers"][0]["name"], "kept");
+}
+
+#[tokio::test]
+async fn mcp_settings_reject_environment_inheritance_and_unknown_fields() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let response = put_mcp_servers(
+        &router,
+        &bearer,
+        serde_json::json!({
+            "servers": [{
+                "name": "unsafe",
+                "command": "/bin/false",
+                "inherit_env": true
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(response).await;
+    assert_eq!(error.kind, "bad_request");
+    assert!(error.message.contains("unknown field"));
 }
 
 /// PUT /settings with a raw JSON body, returning the response.
@@ -11706,6 +11864,7 @@ async fn foreground_web_search_runs_end_to_end_through_durable_approval() {
     assert_eq!(pending[0]["approval"], "web_search_may_share_query");
     assert_eq!(pending[0]["class"], "sensitive");
     assert_eq!(pending[0]["can_approve"], true);
+    assert_eq!(pending[0]["can_remember"], true);
     let pending_json = pending.to_string();
     assert!(!pending_json.contains("OpenWave release"));
     assert!(!pending_json.contains("Example.com"));

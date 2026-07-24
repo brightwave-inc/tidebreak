@@ -30,7 +30,7 @@ export function upsertPendingApprovalCard(
   messages: ChatMessage[],
   approval: Pick<
     PendingToolApproval,
-    "callId" | "action" | "approval" | "canApprove"
+    "callId" | "action" | "approval" | "canApprove" | "canRemember"
   >,
 ): ChatMessage[] {
     let next = messages;
@@ -72,6 +72,7 @@ export function upsertPendingApprovalCard(
       callId: approval.callId,
       summary: presentation.summary,
       canApprove: approval.canApprove && presentation.canApprove,
+      canRemember: approval.canRemember && presentation.canRemember,
     };
     if (cardIndex >= 0) {
       next = next.map((message, index) => (index === cardIndex ? card : message));

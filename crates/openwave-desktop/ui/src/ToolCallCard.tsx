@@ -35,6 +35,7 @@ export type ToolCallPresentation = {
 export type ToolApprovalPresentation = {
   summary: string;
   canApprove: boolean;
+  canRemember: boolean;
 };
 
 // This is deliberately an allowlist rather than a display transformation of a
@@ -199,6 +200,7 @@ export function toolApprovalPresentation(
       summary:
         "Allow search to send your query and potentially matching document excerpts to configured AI services outside OpenWave?",
       canApprove: true,
+      canRemember: true,
     };
   }
   if (kind === "web_search_may_share_query") {
@@ -206,6 +208,7 @@ export function toolApprovalPresentation(
       summary:
         "Allow web search to send this query and its explicit filters to the configured search provider outside OpenWave?",
       canApprove: true,
+      canRemember: true,
     };
   }
   if (kind === "exec_may_run_networked_command") {
@@ -213,11 +216,22 @@ export function toolApprovalPresentation(
       summary:
         "Allow OpenWave to run a command that leaves the chat workspace and may reach the network?",
       canApprove: true,
+      canRemember: true,
+    };
+  }
+  if (kind === "external_mcp_may_call_server") {
+    return {
+      summary:
+        "Allow this external MCP server to receive the call and act with its own local or remote permissions?",
+      canApprove: true,
+      // The executable behind a stable MCP namespace can change in Settings.
+      canRemember: false,
     };
   }
   return {
     summary: "The exact action cannot be safely described.",
     canApprove: false,
+    canRemember: false,
   };
 }
 

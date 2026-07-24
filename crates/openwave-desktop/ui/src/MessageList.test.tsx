@@ -42,6 +42,7 @@ describe("MessageBubble", () => {
         callId: "call-1",
         summary: "Search a site",
         canApprove: true,
+        canRemember: true,
       },
       { id: "assistant-2", role: "assistant", text: "", sources: [] },
     ];
@@ -143,6 +144,7 @@ describe("MessageBubble", () => {
           callId: "call-unknown",
           summary: "The exact action cannot be safely described.",
           canApprove: false,
+          canRemember: false,
         }}
         busy
         onApproval={noop}
@@ -451,6 +453,7 @@ describe("approval decision feedback", () => {
     callId: "call-1",
     summary: "Search a site",
     canApprove: true,
+    canRemember: true,
   };
 
   it("disables the decision buttons while a decision is in flight", () => {

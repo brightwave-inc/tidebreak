@@ -27,6 +27,7 @@ use tokio::sync::Notify;
 
 use crate::approvals::ApprovalBroker;
 use crate::bus::EventBus;
+use crate::mcp_config::McpRuntime;
 use crate::resolver::ProviderResolver;
 use crate::state::TurnGuard;
 
@@ -71,6 +72,7 @@ pub(crate) struct TurnWorker {
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
     tools: Arc<ToolRegistry>,
+    mcp: Option<Arc<McpRuntime>>,
     approvals: Arc<ApprovalBroker>,
     events: Arc<EventBus>,
     signals: Arc<TurnGuard>,
@@ -96,6 +98,30 @@ enum ClaimAction {
 enum HeartbeatOutcome {
     Cancelling,
     LeaseLost,
+}
+
+/// Exact foreground capability surface retained for one live turn execution.
+///
+/// Both the provider-visible tool definitions and host-owned operating prompt
+/// derive from `tools`; runtime MCP refreshes can only produce a different
+/// surface for a later execution.
+pub(crate) struct ForegroundTurnSurface {
+    pub(crate) tools: Arc<ToolRegistry>,
+    pub(crate) agent_config: AgentConfig,
+}
+
+pub(crate) fn freeze_foreground_turn_surface(
+    tools: Arc<ToolRegistry>,
+    base_agent_config: &AgentConfig,
+) -> ForegroundTurnSurface {
+    let mut agent_config = base_agent_config.clone();
+    agent_config.system_prompt = Some(crate::foreground_prompt::compose(
+        &tools.specs_for_foreground(true),
+    ));
+    ForegroundTurnSurface {
+        tools,
+        agent_config,
+    }
 }
 
 /// Finish live publication for state transitions that committed before this
@@ -262,6 +288,7 @@ impl TurnWorker {
             store,
             resolver,
             tools,
+            mcp: None,
             approvals,
             events,
             signals,
@@ -271,6 +298,13 @@ impl TurnWorker {
             private_scratch_root,
             config,
         }
+    }
+
+    /// Resolve one immutable registry when a turn begins. Runtime MCP changes
+    /// affect later turns without changing this worker's active replay surface.
+    pub(crate) fn with_mcp_runtime(mut self, mcp: Arc<McpRuntime>) -> Self {
+        self.mcp = Some(mcp);
+        self
     }
 
     pub(crate) async fn run(self) {
@@ -362,7 +396,12 @@ impl TurnWorker {
                 turn.id
             )));
         }
-        if let Some(prompt) = self.agent_config.system_prompt.as_deref() {
+        let tools = self
+            .mcp
+            .as_ref()
+            .map_or_else(|| self.tools.clone(), |mcp| mcp.snapshot());
+        let surface = freeze_foreground_turn_surface(tools, &self.agent_config);
+        if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
             eprintln!(
                 "openwave: turn {} operating_prompt={}",
                 turn.id,
@@ -487,7 +526,7 @@ impl TurnWorker {
                 cancel.clone(),
             )));
             let mut heartbeat_open = true;
-            let mut config = self.agent_config.clone();
+            let mut config = surface.agent_config.clone();
             if let Some(policy) = model_policy.as_ref() {
                 crate::providers::apply_model_policy(&mut config, policy, chat.reasoning_effort)?;
             } else {
@@ -509,7 +548,7 @@ impl TurnWorker {
             });
             let provider = self.resolver.resolve().await;
             let steer = active.steer_inbox();
-            let agent = Agent::new(provider, self.tools.clone(), self.store.clone(), config)
+            let agent = Agent::new(provider, surface.tools.clone(), self.store.clone(), config)
                 .with_approvals(self.approvals.clone())
                 .with_standing_grants(self.approvals.standing_grants())
                 .with_cancel(cancel.clone())
@@ -937,7 +976,7 @@ impl TurnWorker {
                             .await;
                     }
                     if !client_checkpoint_is_valid(
-                        self.tools.as_ref(),
+                        surface.tools.as_ref(),
                         turn.chat_id,
                         turn.id,
                         &request,
@@ -1148,7 +1187,7 @@ impl TurnWorker {
                             )
                             .await;
                     }
-                    if !sandbox_spawn_checkpoint_is_valid(self.tools.as_ref(), &request) {
+                    if !sandbox_spawn_checkpoint_is_valid(surface.tools.as_ref(), &request) {
                         drop(active);
                         return self
                             .record_failure(
@@ -1414,7 +1453,7 @@ impl TurnWorker {
                             )
                             .await;
                     }
-                    if !agent_wait_checkpoint_is_valid(self.tools.as_ref(), &request) {
+                    if !agent_wait_checkpoint_is_valid(surface.tools.as_ref(), &request) {
                         drop(active);
                         return self
                             .record_failure(
@@ -2166,6 +2205,54 @@ fn log_turn_result(result: std::result::Result<Result<TurnWorkerOutcome>, tokio:
 #[cfg(test)]
 mod committed_event_drain_tests {
     use super::*;
+
+    #[test]
+    fn mcp_refresh_keeps_prompt_and_tools_on_one_immutable_snapshot() {
+        let original_tools = Arc::new(ToolRegistry::new());
+        let original =
+            freeze_foreground_turn_surface(original_tools.clone(), &AgentConfig::default());
+
+        let mut refreshed_registry = (*original_tools).clone();
+        refreshed_registry.register_client(openwave_core::ToolSpec {
+            name: "mcp__documents__lookup".into(),
+            description: "untrusted remote description marker".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "credential_marker": {"default": "untrusted remote schema marker"}
+                }
+            }),
+        });
+        let refreshed =
+            freeze_foreground_turn_surface(Arc::new(refreshed_registry), &AgentConfig::default());
+
+        let original_names = original
+            .tools
+            .specs_for_foreground(true)
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>();
+        let refreshed_names = refreshed
+            .tools
+            .specs_for_foreground(true)
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>();
+        let original_prompt = original.agent_config.system_prompt.as_deref().unwrap();
+        let refreshed_prompt = refreshed.agent_config.system_prompt.as_deref().unwrap();
+
+        assert!(!original_names.iter().any(|name| name.starts_with("mcp__")));
+        assert!(!original_prompt.contains("## External MCP tools"));
+        assert!(refreshed_names
+            .iter()
+            .any(|name| name == "mcp__documents__lookup"));
+        assert!(refreshed_prompt.contains("## External MCP tools"));
+        for prompt in [original_prompt, refreshed_prompt] {
+            assert!(!prompt.contains("mcp__documents__lookup"));
+            assert!(!prompt.contains("untrusted remote description marker"));
+            assert!(!prompt.contains("untrusted remote schema marker"));
+        }
+    }
 
     #[test]
     fn private_scratch_is_isolated_per_chat() {

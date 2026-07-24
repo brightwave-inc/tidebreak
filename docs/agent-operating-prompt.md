@@ -12,9 +12,10 @@ belongs to a project, organization, or shared workspace.
 ## Capability composition
 
 `openwave-server/src/foreground_prompt.rs` composes the prompt from the exact
-tool definitions advertised to a production foreground turn. Boot-time MCP
-servers are mounted before this composition, so their tools participate in the
-same capability snapshot. The baseline covers:
+tool definitions advertised to a production foreground turn. Each claimed turn
+selects one immutable registry snapshot, derives both its advertised definitions
+and operating prompt from that snapshot, and retains the pair for the execution.
+Runtime MCP refreshes therefore affect only later turns. The baseline covers:
 
 - calibrating effort to the request;
 - making small reversible assumptions while asking about consequential choices;
@@ -46,12 +47,11 @@ when composing the prompt because every normal chat turn is durably claimed and
 opts into those same contracts. Sandboxed background agents keep their separate,
 restricted prompt and never inherit the foreground prompt.
 
-Today the production registry becomes immutable after startup. When dynamic MCP
-configuration lands, prompt composition must move with it: select one immutable
-tool-registry snapshot for the turn, derive both the advertised definitions and
-the prompt from that same snapshot, and retain the pair for the request. A
-long-lived prompt derived from an older registry would violate the
-capability-truthfulness contract.
+The built-in registry becomes immutable after startup. Runtime MCP configuration
+publishes a replacement snapshot only after every enabled candidate validates
+and initializes successfully. A turn already holding an older snapshot keeps
+using its matching prompt and tools; it never observes a partially refreshed
+registry or a long-lived prompt derived from different capabilities.
 
 ## Versioning and diagnostics
 

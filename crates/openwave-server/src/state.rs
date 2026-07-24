@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::approvals::ApprovalBroker;
 use crate::bus::EventBus;
+use crate::mcp_config::McpRuntime;
 use crate::resolver::ProviderResolver;
 
 /// The state cloned into each handler: the boot config, the durable store, the
@@ -38,6 +39,8 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretProvider>,
     /// The tools available to the agent.
     pub tools: Arc<ToolRegistry>,
+    /// Runtime-managed MCP connections and immutable per-turn tool snapshots.
+    pub(crate) mcp: Arc<McpRuntime>,
     /// The retrieval pipeline used by the durable document worker and the
     /// agent's shared `search` tool.
     pub retrieval: Arc<Retriever>,
@@ -125,6 +128,7 @@ impl AppState {
         }
         let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
         let blob_writes = Arc::new(BlobWriteGuard::new(config.data_dir.join("blob-locks")));
+        let mcp = Arc::new(McpRuntime::new(tools.clone(), store.clone()));
         Ok(Self {
             config: Arc::new(config),
             store: store.clone(),
@@ -132,6 +136,7 @@ impl AppState {
             resolver,
             secrets,
             tools,
+            mcp,
             retrieval,
             document_job_wake: Arc::new(Notify::new()),
             turn_job_wake: Arc::new(Notify::new()),

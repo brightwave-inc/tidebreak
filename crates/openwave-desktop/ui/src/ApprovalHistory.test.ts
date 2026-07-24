@@ -11,6 +11,7 @@ const pending = {
   approval: "search_may_share_query_and_excerpts" as const,
   class: "sensitive" as const,
   canApprove: true,
+  canRemember: true,
 };
 
 describe("reconcilePendingApprovalCards", () => {
@@ -30,6 +31,7 @@ describe("reconcilePendingApprovalCards", () => {
         summary:
           "Allow search to send your query and potentially matching document excerpts to configured AI services outside OpenWave?",
         canApprove: true,
+        canRemember: true,
       },
     ]);
   });
@@ -50,6 +52,7 @@ describe("reconcilePendingApprovalCards", () => {
           callId: "call-old",
           summary: "old",
           canApprove: true,
+          canRemember: true,
         },
         { id: "message-new", role: "user", text: "new chat" },
       ],

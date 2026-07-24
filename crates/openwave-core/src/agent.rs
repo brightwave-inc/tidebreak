@@ -60,13 +60,14 @@ use crate::storage::{
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
 
 /// A name-keyed registry of the tools available to the agent.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
 }
 
+#[derive(Clone)]
 enum RegisteredTool {
-    Server(Box<dyn Tool>),
+    Server(Arc<dyn Tool>),
     Client {
         spec: ToolSpec,
         validate_arguments: Option<fn(&Value) -> bool>,
@@ -93,7 +94,7 @@ impl ToolRegistry {
     /// Register a tool under its advertised name (replacing any existing one).
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools
-            .insert(tool.spec().name, RegisteredTool::Server(tool));
+            .insert(tool.spec().name, RegisteredTool::Server(Arc::from(tool)));
     }
 
     /// Register a client-owned tool contract with no server-side executor.
