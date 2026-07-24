@@ -1585,7 +1585,7 @@ pub(crate) struct PendingApprovalSnapshot {
     pub approval: openwave_core::ToolApprovalKind,
     pub class: openwave_core::ApprovalClass,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub preview: Option<openwave_core::ToolApprovalPreview>,
+    pub preview: Option<openwave_core::ToolActionPreview>,
     pub can_approve: bool,
     pub can_remember: bool,
 }

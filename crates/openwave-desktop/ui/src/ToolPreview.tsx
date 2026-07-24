@@ -1,4 +1,4 @@
-import type { ToolApprovalPreview } from "./api";
+import type { ToolActionPreview, ToolResultPreview } from "./api";
 
 /**
  * Presentation of a tool's own preview of the action it is about to take.
@@ -15,18 +15,26 @@ export type ToolPreviewPresentation = {
 };
 
 export function toolPreviewPresentation(
-  preview: ToolApprovalPreview,
+  preview: ToolActionPreview,
+  result: ToolResultPreview | null = null,
 ): ToolPreviewPresentation {
   const headline = [preview.command, ...preview.args]
     .map(quoteArgument)
     .join(" ");
-  // The working directory is a fact about the command, not part of it, so it
-  // reads as a comment rather than as something the shell would run. There is
-  // no shell here at all — this is an argument vector.
-  const detail =
-    preview.cwd === "."
-      ? headline
-      : `${headline}\n# working directory: ${preview.cwd}`;
+  // Everything below the command is a fact *about* it, so it reads as a
+  // comment rather than as something a shell would run. There is no shell here
+  // at all — this is an argument vector.
+  const detail = [
+    headline,
+    preview.cwd !== "." && `# working directory: ${preview.cwd}`,
+    result?.timedOut && "# stopped at the time limit",
+    result && !result.timedOut && result.exitCode === null && "# killed by a signal",
+    result?.exitCode !== null &&
+      result?.exitCode !== undefined &&
+      `# exit code: ${result.exitCode}`,
+  ]
+    .filter((line): line is string => typeof line === "string")
+    .join("\n");
   return { headline, detail };
 }
 

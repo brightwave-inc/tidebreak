@@ -1,4 +1,5 @@
-import type { ChatMessage, ChatToolActivity } from "./api";
+import { parseToolActionPreview } from "./api";
+import type { ChatMessage, ChatToolActivity, ToolActionPreview } from "./api";
 import type { AssistantSource } from "./AssistantSources";
 import type { ToolCallStatus } from "./ToolCallCard";
 
@@ -15,6 +16,7 @@ export type HydratedTranscriptEntry =
       id: string;
       kind: "tool";
       name: string;
+      preview: ToolActionPreview | null;
       status: ToolCallStatus;
       createdAt: string;
     };
@@ -76,6 +78,9 @@ export function hydrateTranscriptHistory(
       kind: "tool" as const,
       name: HISTORY_TOOL_NAMES[activity.title],
       status: activity.status,
+      // History carries what the call did but not what it produced: results
+      // are not persisted, so a reloaded command card shows its command alone.
+      preview: parseToolActionPreview(activity.action),
       createdAt: activity.started_at,
     })),
   ];

@@ -37,6 +37,7 @@ export function presentChatTranscript(
           callId: entry.id,
           name: entry.name,
           status: entry.status,
+          preview: entry.preview,
         }
       : entry.role === "assistant"
         ? {

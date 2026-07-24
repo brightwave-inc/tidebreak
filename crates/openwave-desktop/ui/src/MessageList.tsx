@@ -3,7 +3,8 @@ import type { ReactNode, RefObject, UIEvent } from "react";
 import type {
   PendingFolderAccessRequest,
   PendingUserQuestions,
-  ToolApprovalPreview,
+  ToolActionPreview,
+  ToolResultPreview,
   UserQuestionAnswer,
 } from "./api";
 import { ApprovalCard } from "./ApprovalCard";
@@ -38,14 +39,16 @@ export type ChatMessage =
       name: string;
       status: ToolCallStatus;
       /** The tool's own closed view of what it is doing, when it has one. */
-      preview?: ToolApprovalPreview | null;
+      preview?: ToolActionPreview | null;
+      /** What the call produced, once it has produced anything. */
+      result?: ToolResultPreview | null;
     }
   | {
       id: string;
       role: "approval";
       callId: string;
       summary: string;
-      preview?: ToolApprovalPreview | null;
+      preview?: ToolActionPreview | null;
       canApprove: boolean;
       canRemember: boolean;
       resolved?: boolean;
@@ -326,6 +329,7 @@ function surfacedCards(
         name={entry.name}
         status={entry.status}
         preview={entry.preview}
+        result={entry.result ?? null}
       />,
     );
   }

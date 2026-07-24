@@ -140,12 +140,17 @@ impl Tool for ExecTool {
             content.push_str(&response.stderr);
         }
         let failed = response.timed_out || response.exit_code != Some(0);
+        // `stdout`/`stderr` ride here as well as in the model-facing content
+        // so the renderer's closed result projection can read them field by
+        // field rather than parsing them back out of prose.
         let mut output = ToolOutput::text(content).with_data(json!({
             "provider": response.provider,
             "exit_code": response.exit_code,
             "timed_out": response.timed_out,
             "output_truncated": response.output_truncated,
             "duration_ms": response.duration_ms,
+            "stdout": response.stdout,
+            "stderr": response.stderr,
         }));
         output.is_error = failed;
         Ok(output)

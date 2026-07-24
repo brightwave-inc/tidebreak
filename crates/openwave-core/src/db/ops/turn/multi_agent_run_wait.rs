@@ -622,6 +622,8 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
         let expected_event = AgentEvent::ToolCallCompleted {
             call_id: wait_id,
             output: crate::ToolOutput::text(result),
+            action: None,
+            result: None,
         };
         let stored_event: AgentEvent = serde_json::from_value(event_model.payload)?;
         if event_model.turn_id != Some(stored.turn_id)
@@ -774,6 +776,8 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
     let payload = AgentEvent::ToolCallCompleted {
         call_id: wait_id,
         output: crate::ToolOutput::text(canonical_result),
+        action: None,
+        result: None,
     };
     let event_seq = append_event_on(
         &transaction,
@@ -1017,6 +1021,8 @@ where
     let payload = AgentEvent::ToolCallCompleted {
         call_id: CallId(wait.id),
         output: crate::ToolOutput::error(result),
+        action: None,
+        result: None,
     };
     let event_seq = append_event_on(
         conn,

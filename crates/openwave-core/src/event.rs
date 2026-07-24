@@ -81,7 +81,7 @@ pub enum AgentEvent {
         /// Closed projection of what the call will do, when its tool has one.
         /// Absent on journal rows written before previews existed.
         #[serde(default)]
-        preview: Option<crate::approval::ToolApprovalPreview>,
+        preview: Option<crate::preview::ToolActionPreview>,
         /// A short, human-readable summary of what will happen.
         summary: String,
     },
@@ -98,6 +98,13 @@ pub enum AgentEvent {
         call_id: CallId,
         /// The tool's output.
         output: ToolOutput,
+        /// Closed projection of what the call did, when its tool has one.
+        /// Absent on journal rows written before previews existed.
+        #[serde(default)]
+        action: Option<crate::preview::ToolActionPreview>,
+        /// Closed projection of what the call produced, when its tool has one.
+        #[serde(default)]
+        result: Option<crate::preview::ToolResultPreview>,
     },
     /// The turn finished successfully.
     TurnCompleted {
@@ -181,6 +188,8 @@ mod tests {
         let ev = AgentEvent::ToolCallCompleted {
             call_id: CallId::new(),
             output: ToolOutput::text("done"),
+            action: None,
+            result: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);

@@ -102,12 +102,18 @@ pub enum ChatToolActivityStatus {
     Cancelled,
 }
 
-/// A completed tool invocation with no arguments, results, tool identity,
-/// provider metadata, executor identity, lease, or diagnostic detail.
+/// A completed tool invocation with no results, tool identity, provider
+/// metadata, executor identity, lease, or diagnostic detail. The only arguments
+/// it can carry are the ones a tool explicitly projects for display.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChatToolActivitySnapshot {
     /// Fixed allowlisted presentation title, never a provider-supplied name.
     pub title: &'static str,
+    /// Closed projection of what the call did, when its tool has one. Rebuilt
+    /// from the arguments it ran with, so history describes the same action
+    /// the live stream did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<crate::preview::ToolActionPreview>,
     pub status: ChatToolActivityStatus,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,

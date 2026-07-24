@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
-import type { ToolApprovalPreview } from "./api";
+import type { ToolActionPreview } from "./api";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ScrollableContainer } from "./ScrollableContainer";
@@ -20,7 +20,7 @@ type ApprovalCardProps = {
   /** Fixed copy naming the class of action under review. */
   summary: string;
   /** The tool's own view of the concrete action, when it projects one. */
-  preview: ToolApprovalPreview | null;
+  preview: ToolActionPreview | null;
   canApprove: boolean;
   canRemember: boolean;
   deciding: boolean;
@@ -196,7 +196,7 @@ export function ApprovalCard({
  * tool with nothing to show has only that sentence, so it stays the question.
  */
 export function approvalAsk(
-  preview: ToolApprovalPreview | null,
+  preview: ToolActionPreview | null,
   summary: string,
 ): { title: string; summaryLine: string | null } {
   if (preview?.tool === "exec") {
@@ -212,7 +212,7 @@ export function approvalAsk(
  * so an unpresentable action can never be waved through from here.
  */
 export function approvalOptions(
-  preview: ToolApprovalPreview | null,
+  preview: ToolActionPreview | null,
   canApprove: boolean,
   canRemember: boolean,
 ): ApprovalOption[] {

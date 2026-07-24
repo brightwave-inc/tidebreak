@@ -692,6 +692,7 @@ fn tool_activity_from_call(call: ToolCallRecord) -> ChatToolActivitySnapshot {
     };
     ChatToolActivitySnapshot {
         title: historical_tool_title(&call.name),
+        action: crate::preview::ToolActionPreview::build(&call.name, &call.arguments),
         status,
         started_at: call.created_at,
         finished_at: call.resolved_at,
