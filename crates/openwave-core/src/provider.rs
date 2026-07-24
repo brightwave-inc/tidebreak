@@ -215,6 +215,17 @@ pub enum ProviderEvent {
         /// Why it stopped.
         reason: StopReason,
     },
+    /// The stream ended abnormally — a transport error cut it off mid-flight.
+    ///
+    /// Distinct from [`ProviderEvent::Stop`]: whatever text and tool calls have
+    /// accumulated so far are incomplete, and a tool call's JSON arguments in
+    /// particular may be truncated mid-value. Consumers must discard the
+    /// partial step and treat the completion as failed rather than acting on
+    /// it.
+    Failed {
+        /// Why the stream broke, for the turn's failure detail.
+        message: String,
+    },
 }
 
 /// An LLM backend the agent streams completions from. Held as a trait object,
