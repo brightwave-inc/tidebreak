@@ -21,31 +21,6 @@ export type HydratedTranscriptEntry =
       createdAt: string;
     };
 
-// The history endpoint exposes titles rather than canonical tool names. Keep
-// the renderer on an explicit inverse allowlist so a server-side title change
-// cannot become a display path for provider names, arguments, or output.
-const HISTORY_TOOL_NAMES: Record<ChatToolActivity["title"], string> = {
-  "Search sources": "search",
-  "Check sources": "list_sources",
-  "Read a source": "read_source",
-  "Search the web": "web_search",
-  "Read a delegated file": "read_delegated_file",
-  "Read a file": "read_file",
-  "Browse files": "list_dir",
-  "Update a file": "write_file",
-  "Create an output": "create_deliverable",
-  "Request folder access": "request_folder_access",
-  "Connect a folder": "connect_folder",
-  "Check connected folders": "list_connected_folders",
-  "Browse a connected folder": "list_folder",
-  "Add a file as a source": "import_connected_file",
-  "Ask a question": "ask_user_questions",
-  "Delegate a task": "spawn_sandbox_agent",
-  "Wait for background agents": "wait_for_agents",
-  "Run a command": "exec",
-  "Use a tool": "historical_unknown_tool",
-};
-
 /** Build a stable, presentation-only transcript from one durable snapshot. */
 export function hydrateTranscriptHistory(
   messages: ChatMessage[],
@@ -81,7 +56,9 @@ export function hydrateTranscriptHistory(
       // it is never used to resolve or replay a tool operation.
       id: `tool-history:${activity.started_at}:${index}`,
       kind: "tool" as const,
-      name: HISTORY_TOOL_NAMES[activity.title],
+      // Already an allowlisted renderer tool name, folded server-side, so the
+      // same presentation the live stream uses applies directly.
+      name: activity.tool,
       status: activity.status,
       // History carries what the call did but not what it produced: results
       // are not persisted, so a reloaded command card shows its command alone.

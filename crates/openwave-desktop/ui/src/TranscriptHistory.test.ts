@@ -22,7 +22,7 @@ describe("hydrateTranscriptHistory", () => {
       ],
       [
         {
-          title: "Search the web",
+          tool: "web_search",
           status: "completed",
           started_at: "2026-07-16T10:00:01Z",
           finished_at: "2026-07-16T10:00:01Z",
@@ -45,13 +45,13 @@ describe("hydrateTranscriptHistory", () => {
   it("hydrates background delegation and wait activity with fixed tool kinds", () => {
     const entries = hydrateTranscriptHistory([], [
       {
-        title: "Delegate a task",
+        tool: "spawn_sandbox_agent",
         status: "completed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: "2026-07-16T10:00:00Z",
       },
       {
-        title: "Wait for background agents",
+        tool: "wait_for_agents",
         status: "completed",
         started_at: "2026-07-16T10:00:01Z",
         finished_at: "2026-07-16T10:00:02Z",
@@ -68,7 +68,7 @@ describe("hydrateTranscriptHistory", () => {
   it("hydrates answered questions with a fixed presentation kind", () => {
     const entries = hydrateTranscriptHistory([], [
       {
-        title: "Ask a question",
+        tool: "ask_user_questions",
         status: "completed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: "2026-07-16T10:00:01Z",
@@ -83,7 +83,7 @@ describe("hydrateTranscriptHistory", () => {
   it("hydrates delegated file reads as their fixed presentation kind", () => {
     const entries = hydrateTranscriptHistory([], [
       {
-        title: "Read a delegated file",
+        tool: "read_delegated_file",
         status: "completed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: "2026-07-16T10:00:01Z",
@@ -99,19 +99,19 @@ describe("hydrateTranscriptHistory", () => {
   it("hydrates source discovery, direct reads, and semantic search distinctly", () => {
     const entries = hydrateTranscriptHistory([], [
       {
-        title: "Check sources",
+        tool: "list_sources",
         status: "completed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: "2026-07-16T10:00:00Z",
       },
       {
-        title: "Read a source",
+        tool: "read_source",
         status: "completed",
         started_at: "2026-07-16T10:00:01Z",
         finished_at: "2026-07-16T10:00:01Z",
       },
       {
-        title: "Search sources",
+        tool: "search",
         status: "completed",
         started_at: "2026-07-16T10:00:02Z",
         finished_at: "2026-07-16T10:00:02Z",
@@ -128,7 +128,7 @@ describe("hydrateTranscriptHistory", () => {
   it("hydrates generated outputs with fixed renderer copy", () => {
     const entries = hydrateTranscriptHistory([], [
       {
-        title: "Create an output",
+        tool: "create_deliverable",
         status: "completed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: "2026-07-16T10:00:01Z",
@@ -200,19 +200,22 @@ describe("hydrateTranscriptHistory", () => {
     });
   });
 
-  it("keeps the server's generic historical title on the generic card path", () => {
+  it("folds an unrecognized historical tool to the generic card", () => {
     const [entry] = hydrateTranscriptHistory([], [
       {
-        title: "Use a tool",
+        tool: "other",
         status: "failed",
         started_at: "2026-07-16T10:00:00Z",
         finished_at: null,
       },
     ]);
 
+    // `other` is the server's own fold and a real member of the renderer's
+    // tool vocabulary, so it resolves to the generic presentation. The previous
+    // sentinel name existed in neither the copy nor the icon table.
     expect(entry).toMatchObject({
       kind: "tool",
-      name: "historical_unknown_tool",
+      name: "other",
       status: "failed",
     });
   });
