@@ -17,7 +17,6 @@ describe("ChatSessionStore", () => {
     expect(store.getState().activeTurnId).toBe("turn-1");
     expect(store.getState().lastSeq).toBe(1);
     expect(effects.map((effect) => effect.type)).toEqual([
-      "refresh_agent_runs",
       "invalidate_terminal_hydration",
       "turn_began",
     ]);

@@ -6,13 +6,11 @@ import {
   type RefObject,
 } from "react";
 import type { ApiClient, Chat } from "./api";
-import { AgentActivityPanel } from "./AgentActivityPanel";
 import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { Composer } from "./Composer";
 import { MessageList } from "./MessageList";
 import { useTranscriptVisible } from "./TranscriptVisibility";
-import { useAgentRuns } from "./useAgentRuns";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useToolApprovals } from "./useToolApprovals";
 import { useTurnControls } from "./useTurnControls";
@@ -68,7 +66,6 @@ export function ChatView({
   const folderAccess = useFolderAccessRequests(client, chat.id);
   const userQuestions = useUserQuestions(client, chat.id);
   const approvals = useToolApprovals(client, chat.id);
-  const agentRuns = useAgentRuns(client, chat.id);
   const turnControls = useTurnControls(client, chat.id, draftRef, () =>
     onDraftChange(""),
   );
@@ -117,16 +114,6 @@ export function ChatView({
 
   return (
     <section className="chat-pane">
-      <AgentActivityPanel
-        runs={agentRuns.runs}
-        loading={agentRuns.loading}
-        error={agentRuns.error}
-        onRetry={agentRuns.refresh}
-        stoppingRunIds={agentRuns.stoppingRunIds}
-        stopErrorRunIds={agentRuns.stopErrorRunIds}
-        onStop={agentRuns.stop}
-      />
-
       <div className="message-view">
         <MessageList
           messages={messages}
