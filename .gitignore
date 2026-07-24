@@ -34,3 +34,7 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Default `openwave serve` data dir when OPENWAVE_DATA_DIR is unset (SQLite +
+# vector index); created wherever the server is launched from.
+.openwave/
