@@ -72,10 +72,10 @@ describe("ProvidersPanel", () => {
       <ProvidersPanel
         providers={[
           {
+            // `base_url` is omitted, not null, exactly as the server sends it.
             kind: "anthropic",
             enabled: false,
             has_credential: false,
-            base_url: null,
             models: [],
           },
         ]}

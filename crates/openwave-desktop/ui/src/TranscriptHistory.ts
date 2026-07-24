@@ -52,17 +52,21 @@ export function hydrateTranscriptHistory(
       kind: "message" as const,
       role: message.role,
       text: message.content,
+      // Ownership is already established by the server, which groups citations
+      // by message before nesting them in each snapshot — which is why the
+      // wire shape carries no `message_id`. Re-filtering on one here compared
+      // against `undefined` and silently dropped every historical citation.
       sources:
         message.role === "assistant"
-          ? (message.citations ?? [])
-              .filter((citation) => citation.message_id === message.id)
-              .map(({ id, ordinal, excerpt, heading, pages }) => ({
+          ? (message.citations ?? []).map(
+              ({ id, ordinal, excerpt, heading, pages }) => ({
                 id,
                 ordinal,
                 excerpt,
                 heading,
                 pages,
-              }))
+              }),
+            )
           : [],
       createdAt: message.created_at,
     })),
