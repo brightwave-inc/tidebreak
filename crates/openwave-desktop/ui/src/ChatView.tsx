@@ -12,6 +12,7 @@ import { useChatSessionStore } from "./ChatSessionStore";
 import { Composer } from "./Composer";
 import type { FolderAccessDecision } from "./host";
 import { MessageList } from "./MessageList";
+import { useTranscriptVisible } from "./TranscriptVisibility";
 import { ArrowDown } from "lucide-react";
 
 export type ChatViewProps = {
@@ -117,6 +118,7 @@ export function ChatView({
   onSteer,
   onStop,
 }: ChatViewProps) {
+  const transcriptVisible = useTranscriptVisible();
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
@@ -131,13 +133,15 @@ export function ChatView({
 
   useEffect(() => {
     const scroll = scrollRef.current;
-    if (!scroll) return;
+    // Scrolling a transcript that has been expanded away does nothing, so this
+    // also runs on the way back to put a following reader at the latest message.
+    if (!scroll || !transcriptVisible) return;
     if (followsLatestRef.current) {
       scrollToLatest(scroll, followScrollBehavior(busy));
     } else {
       setHasUnreadActivity(true);
     }
-  }, [messages, busy]);
+  }, [messages, busy, transcriptVisible]);
 
   useEffect(() => {
     const next = new Set([
