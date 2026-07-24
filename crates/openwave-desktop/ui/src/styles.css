@@ -2407,6 +2407,15 @@ body {
   font-size: 0.74rem;
 }
 
+/* A transcript phase whose row threw while rendering. Deliberately quiet: the
+   conversation around it is intact, and the step itself is recoverable from the
+   durable record. */
+.tool-activity-unavailable {
+  padding: 0.5rem 0.75rem;
+  color: var(--muted-foreground);
+  font-size: 0.82rem;
+}
+
 .document-status {
   padding: 0.2rem 0.5rem;
   border-radius: 999px;

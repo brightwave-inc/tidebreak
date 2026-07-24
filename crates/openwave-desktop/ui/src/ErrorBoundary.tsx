@@ -5,6 +5,15 @@ type ErrorBoundaryProps = {
   children: ReactNode;
   /** Injectable for tests; defaults to a real page reload. */
   onReload?: () => void;
+  /**
+   * Rendered instead of the full-page recovery screen.
+   *
+   * Supplied when the boundary wraps one part of the page rather than the
+   * whole tree: a transcript row that cannot render should degrade to a note
+   * in its own place, not replace the conversation around it with a reload
+   * prompt.
+   */
+  fallback?: ReactNode;
 };
 
 type ErrorBoundaryState = {
@@ -32,6 +41,7 @@ export class ErrorBoundary extends Component<
 
   render() {
     if (!this.state.error) return this.props.children;
+    if (this.props.fallback !== undefined) return this.props.fallback;
     return (
       <div className="boot" role="alert">
         <div className="boot-brand">

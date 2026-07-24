@@ -16,6 +16,7 @@ import { MessageMarkdown } from "./MessageMarkdown";
 import { MessageFooter } from "./MessageFooter";
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
 import { ToolCommandCard, type ToolCallStatus } from "./ToolCallCard";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { ToolActivityGroup } from "./ToolActivityGroup";
 import { WelcomeState } from "./WelcomeState";
 import { UserQuestionsCard } from "./UserQuestionsCard";
@@ -263,14 +264,22 @@ export function groupMessageItems(
     );
     const cards = surfacedCards(phase, parked, onApproval, approvalState);
 
+    // A tool row renders model-influenced data through several defensive
+    // parsers. If one of them is ever wrong, the throw should cost this phase
+    // and not the conversation around it.
     items.push(
-      <ToolActivityGroup
+      <ErrorBoundary
         key={`tool-activity-group-${groupIndex}`}
-        activities={activities}
-        groupIndex={groupIndex}
+        fallback={
+          <p className="tool-activity-unavailable" role="status">
+            This step could not be displayed.
+          </p>
+        }
       >
-        {cards.length > 0 ? cards : undefined}
-      </ToolActivityGroup>,
+        <ToolActivityGroup activities={activities} groupIndex={groupIndex}>
+          {cards.length > 0 ? cards : undefined}
+        </ToolActivityGroup>
+      </ErrorBoundary>,
     );
     groupIndex += 1;
   }

@@ -50,3 +50,27 @@ describe("ErrorBoundary", () => {
     expect(onReload).toHaveBeenCalledOnce();
   });
 });
+
+describe("ErrorBoundary with an inline fallback", () => {
+  it("contains a throw to its own region instead of replacing the page", () => {
+    const Boom = () => {
+      throw new Error("tool row exploded");
+    };
+    render(
+      <div>
+        <p>the conversation around it</p>
+        <ErrorBoundary
+          fallback={<p>This step could not be displayed.</p>}
+        >
+          <Boom />
+        </ErrorBoundary>
+      </div>,
+    );
+
+    expect(screen.getByText("This step could not be displayed.")).toBeTruthy();
+    // The point of the inline fallback: the rest of the transcript survives,
+    // and the reader is not offered a reload for one bad row.
+    expect(screen.getByText("the conversation around it")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Reload" })).toBeNull();
+  });
+});
