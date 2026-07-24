@@ -58,7 +58,7 @@ import { prependReplacementChat } from "./ChatDeletion";
 import { useConfirm } from "./components/ConfirmDialog";
 import { useDesktopUpdates } from "./updates";
 import { ChatView } from "./ChatView";
-import { FoldersPanel } from "./FoldersPanel";
+import { FoldersView } from "./FoldersView";
 import { Sidebar } from "./Sidebar";
 
 let msgSeq = 0;
@@ -89,7 +89,6 @@ export default function App() {
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
   const primaryView = useUiStore((state) => state.primaryView);
-  const settingsPanel = useUiStore((state) => state.settingsPanel);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const busy = useChatSessionStore((session) => session.busy);
@@ -715,7 +714,7 @@ export default function App() {
     if (!client || creationInFlightRef.current || deletionInFlightRef.current) return;
     creationInFlightRef.current = true;
     chatListActions.setCreatingChat(true);
-    uiActions.showChat({ keepPanels: true });
+    uiActions.showChat();
     try {
       const created = await client.createChat(
         chat?.model ?? models[0]?.id,
@@ -741,7 +740,7 @@ export default function App() {
   }
 
   function openCreatedChat(created: Chat) {
-    uiActions.showChat({ keepPanels: true });
+    uiActions.showChat();
     controllerRef.current?.dispose();
     controllerRef.current = null;
     useChatSessionStore.getState().reset();
@@ -1059,7 +1058,6 @@ export default function App() {
     <div className="app-shell">
       {confirmDialog}
       <Sidebar
-        nativeHost={hasNativeHost()}
         themeMode={themeMode}
         updateReady={desktopUpdates.state.status === "ready"}
         updateVersion={desktopUpdates.state.version ?? null}
@@ -1073,20 +1071,20 @@ export default function App() {
         onRestartForUpdate={() => void onRestartForUpdate()}
       />
 
-      <div
-        className={`main${primaryView === "chat" && settingsPanel ? " with-settings" : ""}`}
-      >
+      <div className="main">
         {primaryView === "documents" ? (
           <DocumentsView chatId={chat.id} />
         ) : primaryView === "deliverables" ? (
           <DeliverablesView chatId={chat.id} />
+        ) : primaryView === "folders" ? (
+          <FoldersView chat={chat} />
         ) : primaryView === "settings" ? (
           <SettingsView
             client={client}
             models={models}
             providers={providers}
             onProvidersChanged={() => void refreshCatalog()}
-            onBack={() => uiActions.showChat({ keepPanels: true })}
+            onBack={() => uiActions.showChat()}
             themeMode={themeMode}
             onThemeChange={setThemeMode}
             updateState={desktopUpdates.state}
@@ -1094,8 +1092,7 @@ export default function App() {
             onRestartForUpdate={onRestartForUpdate}
           />
         ) : (
-          <>
-        <ChatView
+          <ChatView
           key={chat.id}
           chat={chat}
           status={status}
@@ -1168,13 +1165,6 @@ export default function App() {
           onSteer={onSteerActiveTurn}
           onStop={onCancelActiveTurn}
         />
-
-        {settingsPanel === "folders" && (
-          <aside className="settings">
-            <FoldersPanel chat={chat} />
-          </aside>
-        )}
-          </>
         )}
       </div>
     </div>
