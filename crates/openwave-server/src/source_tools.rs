@@ -68,7 +68,11 @@ impl Tool for ListSourcesTool {
             description: "List files added as sources to this exact conversation, newest first. \
                           Use this when the user refers to an added or attached file without an \
                           exact document id; then use read_source for direct text or search for \
-                          relevant passages."
+                          relevant passages. Each source reports one status: `searchable` means \
+                          search and read_source can find its text; `processing` means checking \
+                          again shortly may change that; `stored_not_searchable` means the file \
+                          is kept and can be named but holds no text to find, so do not claim to \
+                          have read it; `failed` means it could not be prepared."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -119,7 +123,11 @@ impl Tool for ListSourcesTool {
                     "document_id": record.id,
                     "title": record.title,
                     "media_type": record.media_type,
-                    "status": record.processing_status,
+                    // Deliberately the combined readiness rather than the raw
+                    // lifecycle: a source that parsed to nothing is `ready`,
+                    // and reporting that would send the agent to search a
+                    // document it can never match.
+                    "status": record.readiness().as_str(),
                 })
             })
             .collect::<Vec<_>>();
@@ -392,6 +400,50 @@ mod tests {
         assert_eq!(window.end_byte, 7);
         assert_eq!(window.total_characters, 4);
         assert!(source_window("short", 5, 1, 8).is_none());
+    }
+
+    #[test]
+    fn readiness_never_reports_an_unsearchable_source_as_usable() {
+        use openwave_core::{DocumentProcessingStatus, SourceReadiness};
+
+        // The case this exists for: the pipeline finished and found nothing.
+        assert_eq!(
+            SourceReadiness::of(DocumentProcessingStatus::Ready, false).as_str(),
+            "stored_not_searchable"
+        );
+        assert_eq!(
+            SourceReadiness::of(DocumentProcessingStatus::Ready, true).as_str(),
+            "searchable"
+        );
+        // Not-yet-searchable while queued must stay distinguishable from
+        // finished-and-empty, because only one of them is worth waiting on.
+        for pending in [
+            DocumentProcessingStatus::Queued,
+            DocumentProcessingStatus::Processing,
+        ] {
+            assert_eq!(SourceReadiness::of(pending, false).as_str(), "processing");
+        }
+        assert_eq!(
+            SourceReadiness::of(DocumentProcessingStatus::Failed, false).as_str(),
+            "failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn listed_sources_report_readiness_rather_than_the_raw_lifecycle() {
+        let (_directory, store, chat, _document_id) = source_fixture().await;
+        let context = ToolCtx::without_private_scratch(chat.id, None);
+
+        let listed = ListSourcesTool::new(store.clone())
+            .execute(&context, json!({}))
+            .await
+            .unwrap();
+        assert!(!listed.is_error);
+        // Freshly upserted sources are still queued, and the agent-facing
+        // vocabulary says so without exposing the durable job lifecycle.
+        assert!(listed.content.contains("\"status\": \"processing\""));
+        assert!(!listed.content.contains("queued"));
+        assert!(!listed.content.contains("\"ready\""));
     }
 
     #[tokio::test]

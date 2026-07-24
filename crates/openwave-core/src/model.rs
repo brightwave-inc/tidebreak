@@ -518,6 +518,56 @@ impl DocumentProcessingStatus {
     }
 }
 
+/// What a caller can actually do with a source right now.
+///
+/// The durable lifecycle and the searchability of the parsed result are two
+/// separate facts, and neither alone answers the question a caller has. `Ready`
+/// on its own says a pipeline finished, not that it found anything; a source
+/// that parsed to nothing is `Ready` and unsearchable forever. Collapsing both
+/// facts into one value keeps callers from reading "finished" as "usable".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SourceReadiness {
+    /// Still being parsed or indexed. Checking again later may change this.
+    Processing,
+    /// Parsed, indexed, and matchable by a search of this conversation.
+    Searchable,
+    /// Durably stored and citable by name, but nothing in it can be searched.
+    ///
+    /// A scan without OCR, or a format whose parser is not installed on this
+    /// host. Waiting will not change this; reprocessing might.
+    StoredNotSearchable,
+    /// Processing exhausted retries or hit a permanent failure.
+    Failed,
+}
+
+impl SourceReadiness {
+    /// Combine the durable lifecycle with whether anything became searchable.
+    #[must_use]
+    pub const fn of(status: DocumentProcessingStatus, searchable: bool) -> Self {
+        match status {
+            DocumentProcessingStatus::Queued | DocumentProcessingStatus::Processing => {
+                Self::Processing
+            }
+            DocumentProcessingStatus::Failed => Self::Failed,
+            DocumentProcessingStatus::Ready if searchable => Self::Searchable,
+            DocumentProcessingStatus::Ready => Self::StoredNotSearchable,
+        }
+    }
+
+    /// Stable wire representation shared by agent tools.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Processing => "processing",
+            Self::Searchable => "searchable",
+            Self::StoredNotSearchable => "stored_not_searchable",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 /// Semantic stage performed by a durable document job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -974,6 +1024,14 @@ pub struct DocumentSummaryRecord {
     pub updated_at: DateTime<Utc>,
     /// When the current index watermark was recorded.
     pub indexed_at: Option<DateTime<Utc>>,
+}
+
+impl DocumentSummaryRecord {
+    /// What a caller can do with this source right now.
+    #[must_use]
+    pub const fn readiness(&self) -> SourceReadiness {
+        SourceReadiness::of(self.processing_status, self.searchable)
+    }
 }
 
 /// Stable position in a newest-first document listing.
