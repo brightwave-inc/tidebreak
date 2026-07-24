@@ -1111,6 +1111,7 @@ impl Agent {
                 Done,
                 Cancelled,
                 Steered,
+                Failed(String),
             }
             let mut streamed_events = AssistantStreamEventFilter::new(events);
             let stream_end = loop {
@@ -1163,15 +1164,25 @@ impl Agent {
                         progress.usage = total_usage;
                     }
                     ProviderEvent::Stop { reason } => stop_reason = reason,
+                    ProviderEvent::Failed { message } => break StreamEnd::Failed(message),
                 }
             };
-            if matches!(stream_end, StreamEnd::Steered) {
+            if matches!(stream_end, StreamEnd::Steered | StreamEnd::Failed(_)) {
                 streamed_events.discard();
             } else {
                 // Normal completion and cancellation retain malformed or
-                // incomplete marker-like prose exactly. Only a steer discards
-                // the entire candidate under StreamInterrupted semantics.
+                // incomplete marker-like prose exactly. Only a steer or a
+                // broken stream discards the entire candidate under
+                // StreamInterrupted semantics.
                 streamed_events.finish();
+            }
+            // A stream that broke mid-flight left this step's tool-call
+            // arguments possibly truncated mid-JSON. Nothing here is safe to
+            // act on, and nothing was persisted, so fail the turn under a
+            // retryable provider code rather than executing the fragment.
+            if let StreamEnd::Failed(message) = stream_end {
+                events.send(AgentEvent::StreamInterrupted);
+                return Err(AgentError::Provider(message));
             }
             // Prefer cancel when both cancel and interrupt are ready (cancel is
             // the left arm of the nested select). Also catch a cancel that raced
@@ -1212,12 +1223,17 @@ impl Agent {
                 .filter(|call| self.tools.execution(&call.name) == Some(ToolCallExecution::Client))
                 .collect::<Vec<_>>();
             if !client_calls.is_empty() {
-                if calls.len() != 1 || client_calls.len() != 1 || !text.is_empty() {
+                // Prose is kept, exactly as for a sensitive call (#372): the
+                // model narrates before it acts, and rejecting the step for
+                // that alone burned the step budget on a correction it was
+                // never going to satisfy. Only sibling calls stay forbidden —
+                // the checkpoint can carry one call across the resume.
+                if calls.len() != 1 || client_calls.len() != 1 {
                     events.send(AgentEvent::StreamInterrupted);
                     transcript.push(ChatMessage {
                         role: Role::User,
                         content: vec![ContentBlock::Text {
-                            text: "A client-executed tool must be requested alone, without assistant text or sibling tool calls. Retry the request in that form.".into(),
+                            text: "A client-executed tool must be requested alone, without sibling tool calls. Retry the request in that form.".into(),
                         }],
                     });
                     continue;
@@ -1258,6 +1274,14 @@ impl Agent {
                 let steer_revision = generation_steer_revision.ok_or_else(|| {
                     AgentError::Store("client-executed tools require a durably claimed turn".into())
                 })?;
+                // The checkpoint returns from the loop and the resumed attempt
+                // rebuilds its transcript from the store, so an unpersisted
+                // preamble would be lost. Fence on the lease first: the stream
+                // just consumed may have outlasted it.
+                if !text.is_empty() {
+                    self.ensure_durable_lease_current(turn_id).await?;
+                    self.persist_assistant(chat.id, turn_id, &candidate).await?;
+                }
                 return Ok(AgentTurnOutcome::ClientToolCall {
                     request,
                     usage: total_usage,
@@ -1274,12 +1298,12 @@ impl Agent {
                 })
                 .collect::<Vec<_>>();
             if !sandbox_spawns.is_empty() {
-                if calls.len() != 1 || sandbox_spawns.len() != 1 || !text.is_empty() {
+                if calls.len() != 1 || sandbox_spawns.len() != 1 {
                     events.send(AgentEvent::StreamInterrupted);
                     transcript.push(ChatMessage {
                         role: Role::User,
                         content: vec![ContentBlock::Text {
-                            text: "A sandbox delegation must be requested alone, without assistant text or sibling tool calls. Retry the request in that form.".into(),
+                            text: "A sandbox delegation must be requested alone, without sibling tool calls. Retry the request in that form.".into(),
                         }],
                     });
                     continue;
@@ -1315,6 +1339,10 @@ impl Agent {
                     });
                     continue;
                 };
+                if !text.is_empty() {
+                    self.ensure_durable_lease_current(turn_id).await?;
+                    self.persist_assistant(chat.id, turn_id, &candidate).await?;
+                }
                 return Ok(AgentTurnOutcome::SandboxAgentSpawn {
                     request: SandboxAgentSpawnRequest {
                         call_id: call.call_id,
@@ -1337,11 +1365,11 @@ impl Agent {
                 })
                 .collect::<Vec<_>>();
             if !agent_waits.is_empty() {
-                if calls.len() != 1 || agent_waits.len() != 1 || !text.is_empty() {
+                if calls.len() != 1 || agent_waits.len() != 1 {
                     events.send(AgentEvent::StreamInterrupted);
                     transcript.push(ChatMessage::text(
                         Role::User,
-                        "wait_for_agents must be requested alone, without assistant text or sibling tool calls. Retry the request in that form.",
+                        "wait_for_agents must be requested alone, without sibling tool calls. Retry the request in that form.",
                     ));
                     continue;
                 }
@@ -1371,6 +1399,10 @@ impl Agent {
                     ));
                     continue;
                 };
+                if !text.is_empty() {
+                    self.ensure_durable_lease_current(turn_id).await?;
+                    self.persist_assistant(chat.id, turn_id, &candidate).await?;
+                }
                 return Ok(AgentTurnOutcome::WaitForAgents {
                     request: ForegroundAgentWaitRequest {
                         call_id: call.call_id,
@@ -2846,6 +2878,9 @@ mod tests {
 
     struct ClientToolProvider {
         assistant_text: bool,
+        /// Emit a second, server-executed call beside the client one — the
+        /// shape the loop still refuses, since a checkpoint carries one call.
+        sibling_call: bool,
         name: &'static str,
         arguments: &'static str,
     }
@@ -3119,6 +3154,22 @@ mod tests {
                     reason: StopReason::ToolUse,
                 },
             ];
+            if self.sibling_call {
+                events.splice(
+                    1..1,
+                    [
+                        ProviderEvent::ToolCallStarted {
+                            index: 1,
+                            id: "native_2".into(),
+                            name: "read_file".into(),
+                        },
+                        ProviderEvent::ToolCallArgsDelta {
+                            index: 1,
+                            fragment: r#"{"path":"a.txt"}"#.into(),
+                        },
+                    ],
+                );
+            }
             if self.assistant_text {
                 events.insert(
                     0,
@@ -3224,6 +3275,7 @@ mod tests {
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
                 assistant_text: false,
+                sibling_call: false,
                 name: "connect_folder",
                 arguments: r#"{"hint":"Documents"}"#,
             }),
@@ -3274,6 +3326,7 @@ mod tests {
         let invalid_agent = Agent::new(
             Arc::new(ClientToolProvider {
                 assistant_text: false,
+                sibling_call: false,
                 name: crate::REQUEST_FOLDER_ACCESS_TOOL,
                 arguments: r#"{"reason":"Read reports","requested_capabilities":["write_files"],"path":"/Users/example/Documents"}"#,
             }),
@@ -3367,6 +3420,7 @@ mod tests {
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
                 assistant_text: false,
+                sibling_call: false,
                 name: crate::ASK_USER_QUESTIONS_TOOL,
                 arguments: r#"{"questions":[{"id":"target","header":"Target","question":"Where should I deploy?","options":[{"id":"staging","label":"Staging","description":"Deploy for verification."}]}]}"#,
             }),
@@ -3447,6 +3501,7 @@ mod tests {
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
                 assistant_text: false,
+                sibling_call: false,
                 name: crate::SPAWN_SANDBOX_AGENT_TOOL,
                 arguments: r#"{"task":"Research the error handling options."}"#,
             }),
@@ -3579,6 +3634,7 @@ mod tests {
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
                 assistant_text: false,
+                sibling_call: false,
                 name: crate::WAIT_FOR_AGENTS_TOOL,
                 arguments,
             }),
@@ -3624,7 +3680,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claimed_agent_retries_a_mixed_client_call_then_preserves_exhausted_usage() {
+    async fn claimed_agent_retries_a_client_call_with_siblings_then_preserves_exhausted_usage() {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "connect documents")
+            .await
+            .unwrap();
+        let lease_token = uuid::Uuid::new_v4();
+        let claimed_at = Utc::now();
+        store
+            .claim_turn_run(
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register_client(ToolSpec {
+            name: "connect_folder".into(),
+            description: "Ask the desktop to connect a folder".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        });
+        let agent = Agent::new(
+            Arc::new(ClientToolProvider {
+                assistant_text: false,
+                sibling_call: true,
+                name: "connect_folder",
+                arguments: r#"{"hint":"Documents"}"#,
+            }),
+            Arc::new(registry),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                max_steps: 2,
+                ..AgentConfig::default()
+            },
+        )
+        .with_durable_steer(lease_token);
+        let (tx, _rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            AgentTurnOutcome::Failed {
+                error,
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 4,
+                    ..
+                },
+                model_steps: 2,
+            } if error.kind == "max_steps_exceeded"
+        ));
+        assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+    }
+
+    /// The model narrates before it acts. Rejecting a client call for carrying
+    /// a preamble spent the whole step budget on a correction the model never
+    /// satisfied — the same failure #372 fixed for sensitive calls. The step
+    /// must check point instead, keeping the preamble durable across the
+    /// resume.
+    #[tokio::test]
+    async fn client_call_with_prose_checkpoints_and_keeps_the_preamble() {
         let db = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -3669,6 +3809,7 @@ mod tests {
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
                 assistant_text: true,
+                sibling_call: false,
                 name: "connect_folder",
                 arguments: r#"{"hint":"Documents"}"#,
             }),
@@ -3686,19 +3827,28 @@ mod tests {
             .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
             .await
             .unwrap();
-        assert!(matches!(
-            outcome,
-            AgentTurnOutcome::Failed {
-                error,
-                usage: Usage {
-                    input_tokens: 10,
-                    output_tokens: 4,
-                    ..
-                },
-                model_steps: 2,
-            } if error.kind == "max_steps_exceeded"
-        ));
-        assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+
+        // One step, not an exhausted budget: the call reached its checkpoint.
+        let AgentTurnOutcome::ClientToolCall {
+            request,
+            model_steps,
+            ..
+        } = outcome
+        else {
+            panic!("expected a client tool checkpoint, got {outcome:?}");
+        };
+        assert_eq!(request.name, "connect_folder");
+        assert_eq!(model_steps, 1);
+
+        // The preamble is durable, so the resumed attempt rebuilds it.
+        let messages = store.list_messages(chat.id).await.unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.role == Role::Assistant
+                    && message.content.contains("I will connect it")),
+            "the assistant preamble should survive the checkpoint: {messages:?}"
+        );
     }
 
     #[tokio::test]

@@ -1121,6 +1121,10 @@ async fn complete_sandbox_task(
                 return Ok(SandboxCompletion::Final(text));
             }
             ProviderEvent::ReasoningDelta { .. } | ProviderEvent::Usage(_) => {}
+            // The stream broke mid-flight, so `text` and `arguments` are both
+            // possibly truncated. Fail under the retryable provider code
+            // instead of treating the fragment as a result.
+            ProviderEvent::Failed { message } => return Err(AgentError::Provider(message)),
             _ => {
                 return Err(AgentError::msg(
                     "sandbox agent provider emitted an unsupported event",

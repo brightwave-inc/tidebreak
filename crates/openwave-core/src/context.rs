@@ -78,7 +78,20 @@ pub fn fit_to_budget(
     content_floor: usize,
 ) -> (Vec<ChatMessage>, bool) {
     if messages.is_empty() || estimate_transcript_tokens(messages) <= budget {
-        return (messages.to_vec(), false);
+        // Fitting is not the only thing a transcript needs. A turn that died
+        // with tool calls still pending leaves a ToolUse with no ToolResult,
+        // which providers reject outright — and because that transcript is
+        // usually well under budget, the reduction path below never runs and
+        // never repairs it. Repair here too, so one interrupted turn cannot
+        // wedge every later turn in the chat. This is a structural fix rather
+        // than a reduction, so it does not report `was_reduced`.
+        let mut fitted = messages.to_vec();
+        if has_orphaned_tool_blocks(&fitted) {
+            strip_orphaned_tool_blocks(&mut fitted);
+            merge_adjacent_roles(&mut fitted);
+            ensure_starts_with_user(&mut fitted);
+        }
+        return (fitted, false);
     }
 
     let mut entries: Vec<Entry> = messages
@@ -395,6 +408,29 @@ fn truncate_str(s: &str, target_tokens: usize) -> String {
 }
 
 // ── Cleanup ────────────────────────────────────────────────────────
+
+/// Report whether any ToolUse lacks a matching ToolResult, or vice versa.
+#[must_use]
+pub fn has_orphaned_tool_blocks(messages: &[ChatMessage]) -> bool {
+    let mut use_ids: HashSet<&str> = HashSet::new();
+    let mut result_ids: HashSet<&str> = HashSet::new();
+
+    for msg in messages {
+        for block in &msg.content {
+            match block {
+                ContentBlock::ToolUse { id, .. } => {
+                    use_ids.insert(id.as_str());
+                }
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    result_ids.insert(tool_use_id.as_str());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    use_ids.symmetric_difference(&result_ids).next().is_some()
+}
 
 /// Remove ToolUse blocks with no matching ToolResult and vice versa.
 pub fn strip_orphaned_tool_blocks(messages: &mut Vec<ChatMessage>) {
@@ -743,6 +779,44 @@ mod tests {
             .content
             .iter()
             .any(|b| matches!(b, ContentBlock::ToolUse { .. }))));
+    }
+
+    /// A turn that died with a tool call unresolved leaves a ToolUse with no
+    /// ToolResult. That transcript is usually well under budget, so the
+    /// reduction path never runs — yet providers reject it outright, which
+    /// wedged every later turn in the chat. Repair it even when it fits.
+    #[test]
+    fn repairs_orphaned_tool_use_even_when_the_transcript_already_fits() {
+        let msgs = vec![
+            user_msg("go"),
+            tool_use_msg("tu_1", "read_file", "a"),
+            // The turn died here: no matching ToolResult was ever committed.
+            user_msg("next"),
+        ];
+        let (fitted, was_reduced) = fit_to_budget(&msgs, 100_000, 500);
+        assert!(
+            !fitted.iter().any(|m| m
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. }))),
+            "the orphaned tool use should be stripped: {fitted:?}"
+        );
+        // Structural repair is not a context reduction — reporting one here
+        // would tell the client its context had been truncated.
+        assert!(!was_reduced);
+    }
+
+    #[test]
+    fn under_budget_transcripts_are_otherwise_untouched() {
+        let msgs = vec![
+            user_msg("go"),
+            tool_use_msg("tu_1", "read_file", "a"),
+            tool_result_msg("tu_1", "data"),
+            assistant_msg("done"),
+        ];
+        let (fitted, was_reduced) = fit_to_budget(&msgs, 100_000, 500);
+        assert_eq!(fitted, msgs);
+        assert!(!was_reduced);
     }
 
     #[test]

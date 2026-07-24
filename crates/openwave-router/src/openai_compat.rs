@@ -117,7 +117,18 @@ impl ModelProvider for OpenAiCompatProvider {
             let mut buffer: Vec<u8> = Vec::new();
             let mut state = StreamState::default();
             while let Some(chunk) = bytes.next().await {
-                let Ok(chunk) = chunk else { break };
+                // A mid-stream transport error must not read as a clean end:
+                // the accumulated tool-call arguments may be truncated
+                // mid-JSON, and acting on them silently corrupts the step.
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        yield ProviderEvent::Failed {
+                            message: format!("stream ended early: {error}"),
+                        };
+                        return;
+                    }
+                };
                 buffer.extend_from_slice(&chunk);
                 for frame in drain_frames(&mut buffer) {
                     if let Some(data) = frame_data(&frame) {
