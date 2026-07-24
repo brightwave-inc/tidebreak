@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tokio::sync::{oneshot, Mutex, OnceCell};
+use unicode_general_category::{get_general_category, GeneralCategory};
 use uuid::Uuid;
 
 use crate::broker::BrokerClient;
@@ -317,7 +318,13 @@ fn safe_dialog_label(value: &str) -> String {
         .chars()
         .take(80)
         .map(|character| {
-            if character.is_control() {
+            if matches!(
+                get_general_category(character),
+                GeneralCategory::Control
+                    | GeneralCategory::Format
+                    | GeneralCategory::LineSeparator
+                    | GeneralCategory::ParagraphSeparator
+            ) {
                 '\u{fffd}'
             } else {
                 character
@@ -414,9 +421,10 @@ mod tests {
 
     #[test]
     fn native_confirmation_labels_are_bounded_and_strip_controls() {
-        let label = safe_dialog_label(&format!("Research\n{}", "x".repeat(100)));
+        let label = safe_dialog_label(&format!("Research\n\u{202e}{}", "x".repeat(100)));
         assert!(!label.contains('\n'));
+        assert!(!label.contains('\u{202e}'));
         assert_eq!(label.chars().count(), 80);
-        assert!(label.starts_with("Research\u{fffd}"));
+        assert!(label.starts_with("Research\u{fffd}\u{fffd}"));
     }
 }

@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Host-originated request envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +107,8 @@ pub struct RootAttachmentMutationRequest {
     /// Exact conversation whose live broker attachment changes.
     pub conversation_id: Uuid,
     pub root_id: RootId,
+    /// Fresh trusted consent for an attach; detach requests carry no consent.
+    pub consent_method: Option<ConsentMethod>,
 }
 
 /// Desired state used to fence recovery-only attachment receipt lookup.
@@ -409,6 +411,7 @@ mod tests {
                 subject: GrantSubject::conversation(conversation_id).unwrap(),
                 conversation_id,
                 root_id: RootId::new(),
+                consent_method: Some(ConsentMethod::PermissionDialog),
             }),
         };
         let mut encoded = serde_json::to_value(attachment).unwrap();

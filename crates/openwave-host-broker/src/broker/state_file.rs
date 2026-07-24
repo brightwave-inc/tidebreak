@@ -13,7 +13,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use serde::{Deserialize, Serialize};
 
-use super::{root_display_name, BrokerError, MutationRecord, RegisteredRoot, State};
+use super::{
+    has_physical_root_alias, root_display_name, BrokerError, MutationRecord, RegisteredRoot, State,
+};
 use crate::{
     path_policy::RootIdentity, Grant, GrantSubject, OperationId, RootAttachment, RootId,
     RootPolicy, Scope,
@@ -376,6 +378,8 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                     .get(&request.root_id)
                     .is_some_and(|root| root.owner == request.subject);
                 let root_still_exists = state.roots.contains_key(&request.root_id);
+                let blocked_by_legacy_alias =
+                    still_owned && has_physical_root_alias(state, request.root_id);
                 let was_registered = state.mutations.values().any(|record| {
                     matches!(
                         record,
@@ -387,7 +391,7 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                     )
                 });
                 if (result.revoked && (root_still_exists || !was_registered))
-                    || (!result.revoked && still_owned)
+                    || (!result.revoked && still_owned && !blocked_by_legacy_alias)
                 {
                     return Err(invalid_data(
                         "successful revoke receipt does not match authoritative state",

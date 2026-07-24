@@ -195,6 +195,8 @@ struct AttachmentFingerprint {
     conversation_id: Uuid,
     root_id: RootId,
     mutation: RootAttachmentMutationKind,
+    #[serde(default)]
+    consent_method: Option<ConsentMethod>,
 }
 
 struct PreparedRegistration {
@@ -494,10 +496,7 @@ impl Controller {
         let mut next = state.clone();
         let outcome = match prepared {
             Ok(prepared) => {
-                let existing = next.roots.iter().find_map(|(root_id, root)| {
-                    (root.root.identity() == prepared.root.root.identity())
-                        .then(|| (*root_id, root.display_name.clone()))
-                });
+                let existing = preferred_root_alias(&next, &prepared.root);
                 if let Some((root_id, display_name)) = existing {
                     ensure_subject_grants(
                         &mut next,
@@ -660,6 +659,7 @@ impl Controller {
             conversation_id: request.conversation_id,
             root_id: request.root_id,
             mutation,
+            consent_method: request.consent_method,
         };
         let mut state = self.lock_state().map_err(error_response)?;
         let mut next = state.clone();
@@ -689,6 +689,9 @@ impl Controller {
             conversation_id: request.conversation_id,
             root_id: request.root_id,
             mutation: request.mutation,
+            // Receipt lookup does not recreate consent. None is a wildcard for
+            // both legacy v2 records and current method-bound mutations.
+            consent_method: None,
         };
         let state = self.lock_state().map_err(error_response)?;
         let receipt = match state.mutations.get(&request.operation_id) {
@@ -696,26 +699,30 @@ impl Controller {
             Some(MutationRecord::Attachment {
                 request: existing,
                 outcome: MutationOutcome::Pending,
-            }) if *existing == expected => {
+            }) if attachment_lookup_matches(existing, &expected) => {
                 return Err(error_response(BrokerError::OperationInProgress));
             }
             Some(MutationRecord::Attachment {
                 request: existing,
                 outcome: MutationOutcome::Complete(Ok(result)),
-            }) if *existing == expected => RootAttachmentMutationReceipt::Completed {
-                result: *result,
-                currently_attached: has_root_attachment(
-                    &state,
-                    request.conversation_id,
-                    request.root_id,
-                ),
-            },
+            }) if attachment_lookup_matches(existing, &expected) => {
+                RootAttachmentMutationReceipt::Completed {
+                    result: *result,
+                    currently_attached: has_root_attachment(
+                        &state,
+                        request.conversation_id,
+                        request.root_id,
+                    ),
+                }
+            }
             Some(MutationRecord::Attachment {
                 request: existing,
                 outcome: MutationOutcome::Complete(Err(error)),
-            }) if *existing == expected => RootAttachmentMutationReceipt::Failed {
-                error: error.clone(),
-            },
+            }) if attachment_lookup_matches(existing, &expected) => {
+                RootAttachmentMutationReceipt::Failed {
+                    error: error.clone(),
+                }
+            }
             Some(_) => return Err(error_response(BrokerError::OperationIdConflict)),
         };
         Ok(LookupRootAttachmentReceiptResult {
@@ -740,14 +747,21 @@ impl Controller {
             .roots
             .get(&request.root_id)
             .is_some_and(|root| root.owner == request.subject);
-        if owned {
+        // State version 2 could persist one physical directory under multiple
+        // product root IDs when separate subjects selected it. Removing only
+        // the requested ID would falsely claim global approval was gone, while
+        // deleting every alias would invalidate durable receipts and product
+        // projections that still name those IDs. Preserve that legacy state
+        // and report that no global revocation occurred.
+        let revoked = owned && !has_physical_root_alias(&next, request.root_id);
+        if revoked {
             next.roots.remove(&request.root_id);
             next.grants
                 .retain(|grant| !scope_targets_root(grant.scope(), request.root_id));
             next.attachments
                 .retain(|attachment| attachment.root_id() != request.root_id);
         }
-        let result = Ok(RevokeRootResult { revoked: owned });
+        let result = Ok(RevokeRootResult { revoked });
         complete_revoke(&mut next, operation_id, fingerprint, result.clone())
             .map_err(error_response)?;
         self.commit_state(&mut state, next)
@@ -1233,11 +1247,13 @@ fn claim_attachment(
         Some(MutationRecord::Attachment {
             request: existing,
             outcome: MutationOutcome::Complete(result),
-        }) if *existing == request => Ok(Claim::Complete(result.clone())),
+        }) if attachment_mutation_matches(existing, &request) => {
+            Ok(Claim::Complete(result.clone()))
+        }
         Some(MutationRecord::Attachment {
             request: existing,
             outcome: MutationOutcome::Pending,
-        }) if *existing == request => {
+        }) if attachment_mutation_matches(existing, &request) => {
             if state.active_mutations.insert(operation_id) {
                 Ok(Claim::Start)
             } else {
@@ -1258,7 +1274,9 @@ fn complete_attachment(
         Some(MutationRecord::Attachment {
             request: existing,
             outcome,
-        }) if *existing == request && matches!(outcome, MutationOutcome::Pending) => {
+        }) if attachment_mutation_matches(existing, &request)
+            && matches!(outcome, MutationOutcome::Pending) =>
+        {
             *outcome = MutationOutcome::Complete(result);
             state.active_mutations.remove(&operation_id);
             Ok(())
@@ -1278,7 +1296,12 @@ fn apply_root_attachment(
                 .roots
                 .get(&request.root_id)
                 .ok_or(BrokerError::UnknownRoot)?;
-            let consent = root_consent(state, request.root_id).ok_or(BrokerError::Denied)?;
+            let consent = ConsentRecord::new(
+                request
+                    .consent_method
+                    .ok_or(BrokerError::InvalidConsentMethod)?,
+                Utc::now(),
+            );
             ensure_subject_grants(state, request.subject, request.root_id, consent)?;
             if has_root_attachment(state, request.conversation_id, request.root_id) {
                 false
@@ -1291,6 +1314,9 @@ fn apply_root_attachment(
             }
         }
         RootAttachmentMutationKind::Detach => {
+            if request.consent_method.is_some() {
+                return Err(BrokerError::InvalidConsentMethod);
+            }
             if state.roots.contains_key(&request.root_id)
                 && !subject_has_root_grant(state, request.subject, request.root_id)
             {
@@ -1311,6 +1337,34 @@ fn apply_root_attachment(
     })
 }
 
+fn attachment_mutation_matches(
+    stored: &AttachmentFingerprint,
+    requested: &AttachmentFingerprint,
+) -> bool {
+    attachment_target_matches(stored, requested)
+        && (stored.consent_method == requested.consent_method
+            || (stored.mutation == RootAttachmentMutationKind::Attach
+                && stored.consent_method.is_none()
+                && requested.consent_method.is_some()))
+}
+
+fn attachment_lookup_matches(
+    stored: &AttachmentFingerprint,
+    requested: &AttachmentFingerprint,
+) -> bool {
+    attachment_target_matches(stored, requested)
+}
+
+fn attachment_target_matches(
+    stored: &AttachmentFingerprint,
+    requested: &AttachmentFingerprint,
+) -> bool {
+    stored.subject == requested.subject
+        && stored.conversation_id == requested.conversation_id
+        && stored.root_id == requested.root_id
+        && stored.mutation == requested.mutation
+}
+
 fn validate_subject_conversation(
     subject: GrantSubject,
     conversation_id: Uuid,
@@ -1327,17 +1381,6 @@ fn has_root_attachment(state: &State, conversation_id: Uuid, root_id: RootId) ->
     state.attachments.iter().any(|attachment| {
         attachment.conversation_id() == conversation_id && attachment.root_id() == root_id
     })
-}
-
-fn root_consent(state: &State, root_id: RootId) -> Option<ConsentRecord> {
-    state
-        .grants
-        .iter()
-        .find(|grant| {
-            grant.capability() == Capability::ReadFiles
-                && matches!(grant.scope(), Scope::Root { root_id: granted } if *granted == root_id)
-        })
-        .map(|grant| grant.consent().clone())
 }
 
 fn subject_has_root_grant(state: &State, subject: GrantSubject, root_id: RootId) -> bool {
@@ -1379,19 +1422,49 @@ fn ensure_subject_grants(
     Ok(())
 }
 
+fn preferred_root_alias(state: &State, candidate: &RegisteredRoot) -> Option<(RootId, String)> {
+    state
+        .roots
+        .iter()
+        .filter(|(_, root)| root.root.identity() == candidate.root.identity())
+        // Preserve an existing subject's legacy product root ID when possible,
+        // then use the opaque UUID as the host-wide deterministic tie-breaker.
+        .min_by_key(|(root_id, root)| (root.owner != candidate.owner, root_id.as_uuid()))
+        .map(|(root_id, root)| (*root_id, root.display_name.clone()))
+}
+
+fn has_physical_root_alias(state: &State, root_id: RootId) -> bool {
+    let Some(identity) = state.roots.get(&root_id).map(|root| root.root.identity()) else {
+        return false;
+    };
+    state
+        .roots
+        .iter()
+        .any(|(candidate_id, root)| *candidate_id != root_id && root.root.identity() == identity)
+}
+
 fn list_approved_roots(state: &State) -> Result<Vec<RootSummary>, ErrorResponse> {
+    if state.roots.len() > MAX_LIST_ROOTS {
+        return Err(error_response(BrokerError::RootListTooLarge));
+    }
+    let mut display_name_counts = HashMap::new();
+    for root in state.roots.values() {
+        *display_name_counts
+            .entry(root.display_name.as_str())
+            .or_insert(0usize) += 1;
+    }
     let mut roots = state
         .roots
         .iter()
+        // A basename is the only folder identity the native reuse prompt can
+        // safely expose. If it is not unique, offer none of the colliding roots
+        // and require the unambiguous native picker path instead.
+        .filter(|(_, root)| display_name_counts.get(root.display_name.as_str()) == Some(&1))
         .map(|(root_id, root)| RootSummary {
             root_id: *root_id,
             display_name: root.display_name.clone(),
         })
-        .take(MAX_LIST_ROOTS + 1)
         .collect::<Vec<_>>();
-    if roots.len() > MAX_LIST_ROOTS {
-        return Err(error_response(BrokerError::RootListTooLarge));
-    }
     roots.sort_by(|left, right| {
         left.display_name
             .cmp(&right.display_name)

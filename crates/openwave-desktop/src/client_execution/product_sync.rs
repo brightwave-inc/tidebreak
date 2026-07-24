@@ -6,7 +6,7 @@ use openwave_core::{
     RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentSubjectKind,
 };
 use openwave_host_broker::{
-    ControlRequest, ControlResult, LookupRegisterRootReceiptRequest,
+    ConsentMethod, ControlRequest, ControlResult, LookupRegisterRootReceiptRequest,
     LookupRootAttachmentReceiptRequest, OperationId, RegisterRootReceipt,
     RootAttachmentMutationKind, RootAttachmentMutationReceipt, RootAttachmentMutationRequest,
     RootId, RootSummary, SubjectKind,
@@ -253,6 +253,7 @@ async fn cleanup_rejected_registration(
                     subject: context.subject,
                     conversation_id: context.chat_id,
                     root_id: broker_root_id,
+                    consent_method: None,
                 }),
                 deadline,
             )
@@ -451,6 +452,7 @@ async fn reconcile_broker_attachment(
                 subject: context.subject,
                 conversation_id: context.chat_id,
                 root_id: broker_root_id,
+                consent_method: Some(ConsentMethod::PermissionDialog),
             }),
             dispatch_deadline,
         )

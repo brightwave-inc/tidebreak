@@ -242,8 +242,10 @@ desktop can approve multiple folders through a native picker and a
 capability-gated host-broker sidecar; it exposes only opaque root IDs and
 display names to the renderer. A host-approved root can later be attached to
 another chat after a native confirmation, without locating it in the picker
-again. Foreground tool calls can list/read only roots attached to their stored
-chat context. An approved agent folder request now converges through the durable
+again. Approved roots with colliding safe display names are omitted from reuse
+and must be identified through the native picker. Foreground tool calls can
+list/read only roots attached to their stored chat context. An approved agent
+folder request now converges through the durable
 product root-attachment state machine before it can report `connected`. The
 same state machine backs the manual Connected folders UI: Connect and
 Disconnect are conversation-scoped instead of global authorization changes,
