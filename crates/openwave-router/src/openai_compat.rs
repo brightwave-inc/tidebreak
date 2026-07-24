@@ -9,6 +9,8 @@
 //! targets the Chat Completions shape that local and third-party runtimes share.
 
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use futures::stream::{BoxStream, StreamExt};
 use serde_json::{json, Value};
 
@@ -16,7 +18,7 @@ use openwave_core::error::{AgentError, Result};
 use openwave_core::provider::{
     ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason, Usage,
 };
-use openwave_core::Role;
+use openwave_core::{ImageAttachments, Role};
 
 use crate::sse::{classify_provider_error, drain_frames, frame_data, read_bounded_error_body};
 
@@ -172,7 +174,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         }));
     }
     for message in &req.messages {
-        extend_openai_messages(&mut messages, message)?;
+        extend_openai_messages(&mut messages, message, &req.images)?;
     }
 
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
@@ -221,9 +223,14 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
 ///
 /// Tool results become individual `role: tool` messages (the wire format requires
 /// one per `tool_call_id`); everything else collapses into a single message.
+///
+/// A message carrying images cannot use the plain string `content` form —
+/// Chat Completions requires an array of typed parts, with each image as an
+/// `image_url` part holding a `data:` URL.
 fn extend_openai_messages(
     out: &mut Vec<Value>,
     message: &openwave_core::ChatMessage,
+    images: &ImageAttachments,
 ) -> Result<()> {
     let tool_results: Vec<_> = message
         .content
@@ -290,11 +297,51 @@ fn extend_openai_messages(
         Role::User | Role::System | Role::Tool => "user",
     };
 
+    let image_blocks: Vec<&openwave_core::ImageRef> = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image { image } => Some(image),
+            _ => None,
+        })
+        .collect();
+
     let mut msg = json!({ "role": role });
-    if !text.is_empty() {
-        msg["content"] = json!(text);
-    } else if tool_calls.is_empty() {
-        msg["content"] = json!("");
+    if image_blocks.is_empty() {
+        if !text.is_empty() {
+            msg["content"] = json!(text);
+        } else if tool_calls.is_empty() {
+            msg["content"] = json!("");
+        }
+    } else {
+        // Text first, then images, mirroring the block order a caller built.
+        let mut parts: Vec<Value> = Vec::with_capacity(image_blocks.len() + 1);
+        if !text.is_empty() {
+            parts.push(json!({ "type": "text", "text": text }));
+        }
+        for image in image_blocks {
+            let data = images.get(image.blob_id).ok_or_else(|| {
+                // Reduction turns a deliberately dropped image into a text
+                // stand-in, so a missing hydration here is lost bytes rather
+                // than an intended omission — fail instead of asking the model
+                // about an image it was never sent.
+                AgentError::Provider(format!(
+                    "image attachment {} has no hydrated bytes",
+                    image.blob_id
+                ))
+            })?;
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!(
+                        "data:{};base64,{}",
+                        data.media_type().as_str(),
+                        BASE64.encode(data.bytes())
+                    )
+                }
+            }));
+        }
+        msg["content"] = Value::Array(parts);
     }
     if !tool_calls.is_empty() {
         msg["tool_calls"] = Value::Array(tool_calls);
@@ -470,6 +517,7 @@ mod tests {
             max_tokens: None,
             temperature: Some(0.2),
             reasoning_effort: Some(ReasoningEffort::High),
+            images: ImageAttachments::new(),
         };
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["model"], "gpt-4o");
@@ -498,6 +546,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: None,
             reasoning_effort: None,
+            images: ImageAttachments::new(),
         };
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["max_completion_tokens"], 1024);
@@ -518,6 +567,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: None,
             reasoning_effort: Some(ReasoningEffort::Low),
+            images: ImageAttachments::new(),
         };
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["reasoning_effort"], "low");
@@ -539,7 +589,7 @@ mod tests {
             ],
         };
         let mut out = Vec::new();
-        extend_openai_messages(&mut out, &msg).unwrap();
+        extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["role"], "assistant");
         assert_eq!(out[0]["content"], "calling");
@@ -558,7 +608,7 @@ mod tests {
             }],
         };
         let mut out = Vec::new();
-        extend_openai_messages(&mut out, &msg).unwrap();
+        extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["role"], "tool");
         assert_eq!(out[0]["tool_call_id"], "call_1");
@@ -673,5 +723,71 @@ mod tests {
         assert_eq!(map_stop_reason("tool_calls"), StopReason::ToolUse);
         assert_eq!(map_stop_reason("length"), StopReason::MaxTokens);
         assert_eq!(map_stop_reason("stop"), StopReason::EndTurn);
+    }
+
+    // ── Image blocks ───────────────────────────────────────────────
+
+    fn png_ref(blob: u128) -> openwave_core::ImageRef {
+        openwave_core::ImageRef {
+            blob_id: uuid::Uuid::from_u128(blob),
+            media_type: openwave_core::ImageMediaType::Png,
+            width: 800,
+            height: 600,
+            byte_len: 3,
+        }
+    }
+
+    #[test]
+    fn an_image_turns_content_into_typed_parts_with_a_data_url() {
+        // Chat Completions cannot express an image with the plain string
+        // `content` form; it must become an array of typed parts.
+        let image = png_ref(1);
+        let mut images = ImageAttachments::new();
+        images.insert(
+            image.blob_id,
+            openwave_core::ImageData::new(openwave_core::ImageMediaType::Png, vec![1, 2, 3]),
+        );
+        let msg = ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is this?".into(),
+                },
+                ContentBlock::Image { image },
+            ],
+        };
+
+        let mut out = Vec::new();
+        extend_openai_messages(&mut out, &msg, &images).unwrap();
+        assert_eq!(out.len(), 1);
+        let parts = out[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "what is this?");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(
+            parts[1]["image_url"]["url"],
+            format!("data:image/png;base64,{}", BASE64.encode([1, 2, 3]))
+        );
+    }
+
+    #[test]
+    fn an_unhydrated_image_fails_the_request_instead_of_being_dropped() {
+        let msg = ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::Image { image: png_ref(9) }],
+        };
+        let mut out = Vec::new();
+        let err = extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap_err();
+        assert!(err.to_string().contains("no hydrated bytes"), "{err}");
+    }
+
+    #[test]
+    fn a_message_without_images_keeps_the_plain_string_content_form() {
+        // Guards against regressing every existing text-only request into the
+        // parts form, which some OpenAI-compatible servers do not accept.
+        let msg = ChatMessage::text(Role::User, "hi");
+        let mut out = Vec::new();
+        extend_openai_messages(&mut out, &msg, &ImageAttachments::new()).unwrap();
+        assert_eq!(out[0]["content"], "hi");
     }
 }

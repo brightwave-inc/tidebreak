@@ -10,11 +10,13 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use serde_json::{json, Value};
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use openwave_core::error::{AgentError, Result};
 use openwave_core::provider::{
-    ChatRequest, ModelProvider, ProviderEvent, ProviderId, StopReason, Usage,
+    ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason, Usage,
 };
-use openwave_core::Role;
+use openwave_core::{ImageAttachments, Role};
 
 use crate::sse::{classify_provider_error, drain_frames, frame_data, read_bounded_error_body};
 
@@ -130,10 +132,12 @@ impl ModelProvider for AnthropicProvider {
 
 /// Build the Anthropic request body from a normalized [`ChatRequest`].
 ///
-/// Our [`ContentBlock`](openwave_core::ContentBlock) serialization already
-/// matches Anthropic's content-block shape, so message content passes through
-/// as-is; the system prompt becomes a top-level field, and only `user`/
-/// `assistant` roles are valid on messages.
+/// Text, tool-use, and tool-result blocks serialize to exactly Anthropic's
+/// content-block shape, so they pass through untouched. Image blocks do not:
+/// they carry blob identity rather than pixels, so they are shaped explicitly
+/// against the bytes hydrated on [`ChatRequest::images`]. The system prompt
+/// becomes a top-level field, and only `user`/`assistant` roles are valid on
+/// messages.
 fn build_request_json(req: &ChatRequest) -> Result<Value> {
     let messages = req
         .messages
@@ -141,7 +145,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         .map(|message| {
             Ok(json!({
                 "role": anthropic_role(message.role),
-                "content": serde_json::to_value(&message.content)?,
+                "content": anthropic_content(&message.content, &req.images)?,
             }))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -174,6 +178,54 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         body["temperature"] = json!(temperature);
     }
     Ok(body)
+}
+
+/// Shape one message's blocks into Anthropic's `content` array.
+///
+/// When a message carries more than one image, each is preceded by an
+/// `Image N:` label. Anthropic's vision guidance calls for this in multi-image
+/// prompts so the model can refer to a specific image unambiguously; with a
+/// single image the label is noise and is omitted.
+fn anthropic_content(blocks: &[ContentBlock], images: &ImageAttachments) -> Result<Value> {
+    let image_count = blocks
+        .iter()
+        .filter(|block| matches!(block, ContentBlock::Image { .. }))
+        .count();
+    let label_images = image_count > 1;
+
+    let mut out: Vec<Value> = Vec::with_capacity(blocks.len());
+    let mut image_index = 0usize;
+    for block in blocks {
+        match block {
+            ContentBlock::Image { image } => {
+                let data = images.get(image.blob_id).ok_or_else(|| {
+                    // Reduction rewrites a deliberately dropped image into a
+                    // text stand-in, so an unhydrated image block here means
+                    // the bytes were lost, not omitted on purpose. Sending the
+                    // turn anyway would ask the model about an image it never
+                    // received.
+                    AgentError::Provider(format!(
+                        "image attachment {} has no hydrated bytes",
+                        image.blob_id
+                    ))
+                })?;
+                image_index += 1;
+                if label_images {
+                    out.push(json!({ "type": "text", "text": format!("Image {image_index}:") }));
+                }
+                out.push(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": data.media_type().as_str(),
+                        "data": BASE64.encode(data.bytes()),
+                    }
+                }));
+            }
+            other => out.push(serde_json::to_value(other)?),
+        }
+    }
+    Ok(Value::Array(out))
 }
 
 fn anthropic_role(role: Role) -> &'static str {
@@ -308,6 +360,7 @@ mod tests {
             max_tokens: None,
             temperature: Some(0.5),
             reasoning_effort: None,
+            images: ImageAttachments::new(),
         };
         let body = build_request_json(&req).unwrap();
         assert_eq!(body["model"], "claude-opus-4-8");
@@ -383,5 +436,120 @@ mod tests {
         assert_eq!(map_stop_reason("tool_use"), StopReason::ToolUse);
         assert_eq!(map_stop_reason("max_tokens"), StopReason::MaxTokens);
         assert_eq!(map_stop_reason("refusal"), StopReason::EndTurn);
+    }
+
+    // ── Image blocks ───────────────────────────────────────────────
+
+    fn png_ref(blob: u128) -> openwave_core::ImageRef {
+        openwave_core::ImageRef {
+            blob_id: uuid::Uuid::from_u128(blob),
+            media_type: openwave_core::ImageMediaType::Png,
+            width: 800,
+            height: 600,
+            byte_len: 3,
+        }
+    }
+
+    fn request_with(content: Vec<ContentBlock>, images: ImageAttachments) -> ChatRequest {
+        ChatRequest {
+            provider: Some(ProviderId::new("anthropic")),
+            model: "claude-opus-4-8".into(),
+            reasoning_model: false,
+            system: None,
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content,
+            }],
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            reasoning_effort: None,
+            images,
+        }
+    }
+
+    #[test]
+    fn an_image_block_becomes_a_base64_source_block() {
+        let image = png_ref(1);
+        let mut images = ImageAttachments::new();
+        images.insert(
+            image.blob_id,
+            openwave_core::ImageData::new(openwave_core::ImageMediaType::Png, vec![1, 2, 3]),
+        );
+        let req = request_with(
+            vec![
+                ContentBlock::Text {
+                    text: "what is this?".into(),
+                },
+                ContentBlock::Image { image },
+            ],
+            images,
+        );
+
+        let body = build_request_json(&req).unwrap();
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], BASE64.encode([1, 2, 3]));
+        // A single image needs no ordinal label.
+        assert_eq!(content.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn multiple_images_are_labelled_so_the_model_can_refer_to_each() {
+        let (first, second) = (png_ref(1), png_ref(2));
+        let mut images = ImageAttachments::new();
+        for image in [&first, &second] {
+            images.insert(
+                image.blob_id,
+                openwave_core::ImageData::new(openwave_core::ImageMediaType::Png, vec![7]),
+            );
+        }
+        let req = request_with(
+            vec![
+                ContentBlock::Image { image: first },
+                ContentBlock::Image { image: second },
+            ],
+            images,
+        );
+
+        let body = build_request_json(&req).unwrap();
+        let content = body["messages"][0]["content"].as_array().unwrap().clone();
+        assert_eq!(content.len(), 4);
+        assert_eq!(content[0]["text"], "Image 1:");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[2]["text"], "Image 2:");
+        assert_eq!(content[3]["type"], "image");
+    }
+
+    #[test]
+    fn an_unhydrated_image_fails_the_request_instead_of_being_dropped() {
+        // Reduction rewrites intentionally dropped images into text, so bytes
+        // missing here mean something went wrong. Silently sending the turn
+        // would ask the model about an image it never received.
+        let req = request_with(
+            vec![ContentBlock::Image { image: png_ref(9) }],
+            ImageAttachments::new(),
+        );
+        let err = build_request_json(&req).unwrap_err();
+        assert!(err.to_string().contains("no hydrated bytes"), "{err}");
+    }
+
+    #[test]
+    fn text_and_tool_blocks_keep_their_existing_wire_shape() {
+        // Guards the refactor away from blanket passthrough: non-image blocks
+        // must serialize exactly as before.
+        let blocks = vec![
+            ContentBlock::Text { text: "hi".into() },
+            ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "done".into(),
+                is_error: false,
+            },
+        ];
+        let shaped = anthropic_content(&blocks, &ImageAttachments::new()).unwrap();
+        assert_eq!(shaped, serde_json::to_value(&blocks).unwrap());
     }
 }

@@ -282,6 +282,7 @@ fn fnv1a64(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openwave_core::ImageAttachments;
 
     fn route(kind: RouteKind, key: &str, models: &[&str], base: Option<&str>) -> Route {
         Route {
@@ -394,6 +395,7 @@ mod tests {
                 max_tokens: None,
                 temperature: None,
                 reasoning_effort: None,
+                images: ImageAttachments::new(),
             })
             .await;
         match result {
