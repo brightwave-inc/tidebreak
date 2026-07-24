@@ -12,6 +12,7 @@ pub(in crate::db) mod citation;
 pub(in crate::db) mod client_execution;
 pub(in crate::db) mod conversation;
 pub(in crate::db) mod document;
+pub(in crate::db) mod message_attachment;
 pub(in crate::db) mod output;
 pub(in crate::db) mod root_attachment;
 pub(in crate::db) mod sandbox_tool;

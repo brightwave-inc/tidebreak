@@ -44,9 +44,10 @@ use crate::context;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
+use crate::image::ImageRef;
 use crate::model::{
-    Chat, Message, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
-    TurnRunStatus,
+    Chat, Message, MessageAttachment, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution,
+    ToolCallStatus, TurnRunStatus,
 };
 use crate::preview::{ToolActionPreview, ToolResultPreview};
 use crate::provider::{
@@ -2547,7 +2548,8 @@ impl Agent {
     async fn load_transcript(&self, chat_id: crate::id::ChatId) -> Result<Vec<ChatMessage>> {
         let messages = self.store.list_messages(chat_id).await?;
         let tool_calls = self.store.list_tool_calls(chat_id).await?;
-        Ok(rebuild_transcript(&messages, &tool_calls))
+        let attachments = self.store.list_message_attachments(chat_id).await?;
+        Ok(rebuild_transcript(&messages, &tool_calls, &attachments))
     }
 
     /// Fit the transcript to the context budget at the given reduction level.
@@ -2579,11 +2581,22 @@ impl Agent {
 /// and before the next message attach as `ToolUse` on that assistant; otherwise
 /// they become a tool-only assistant step. `ToolResult` blocks follow as a user
 /// message. Legacy `Role::Tool` rows are ignored.
-fn rebuild_transcript(messages: &[Message], tool_calls: &[ToolCallRecord]) -> Vec<ChatMessage> {
+///
+/// The block transcript is never stored, only reconstructed here, so this is
+/// also the single place history regains the images a message was submitted
+/// with: each non-assistant message's attachments become [`ContentBlock::Image`]
+/// blocks in their recorded order, ahead of the text they were sent with. A
+/// message with no attachments rebuilds exactly as before.
+fn rebuild_transcript(
+    messages: &[Message],
+    tool_calls: &[ToolCallRecord],
+    attachments: &[MessageAttachment],
+) -> Vec<ChatMessage> {
     let messages: Vec<&Message> = messages
         .iter()
         .filter(|message| message.role != Role::Tool)
         .collect();
+    let images = group_attachments(attachments);
     let batches = batch_tool_calls(tool_calls);
     let mut batch_i = 0;
     let mut out: Vec<ChatMessage> = Vec::new();
@@ -2618,7 +2631,10 @@ fn rebuild_transcript(messages: &[Message], tool_calls: &[ToolCallRecord]) -> Ve
                 out.push(ChatMessage::text(Role::Assistant, text.to_string()));
             }
         } else {
-            out.push(ChatMessage::text(message.role, message.content.clone()));
+            out.push(user_message_with_images(
+                message,
+                images.get(&message.id).map(Vec::as_slice).unwrap_or(&[]),
+            ));
             // Tool-only steps between this message and the next non-assistant
             // (e.g. user → tools → user steer). If the next message is
             // assistant, that branch claims the batch instead.
@@ -2645,12 +2661,63 @@ fn rebuild_transcript(messages: &[Message], tool_calls: &[ToolCallRecord]) -> Ve
     out
 }
 
+/// Index attachments by message, in submission order.
+///
+/// The ordinal is the authority on order, not the order rows arrived in, so a
+/// reload reproduces the submitted sequence regardless of how the store chose
+/// to return them.
+fn group_attachments(
+    attachments: &[MessageAttachment],
+) -> std::collections::HashMap<crate::id::MessageId, Vec<ImageRef>> {
+    let mut grouped: std::collections::HashMap<crate::id::MessageId, Vec<(i32, ImageRef)>> =
+        std::collections::HashMap::new();
+    for attachment in attachments {
+        grouped
+            .entry(attachment.message_id)
+            .or_default()
+            .push((attachment.ordinal, attachment.image));
+    }
+    grouped
+        .into_iter()
+        .map(|(message_id, mut images)| {
+            images.sort_by_key(|(ordinal, _)| *ordinal);
+            (
+                message_id,
+                images.into_iter().map(|(_, image)| image).collect(),
+            )
+        })
+        .collect()
+}
+
+/// Rebuild one user-authored message, carrying its images alongside its text.
+///
+/// Images lead the block list: both supported providers document better results
+/// when an image precedes the text that refers to it, and the user's prompt is
+/// almost always a question *about* the attachment.
+fn user_message_with_images(message: &Message, images: &[ImageRef]) -> ChatMessage {
+    if images.is_empty() {
+        return ChatMessage::text(message.role, message.content.clone());
+    }
+    let mut content: Vec<ContentBlock> = images
+        .iter()
+        .map(|image| ContentBlock::Image { image: *image })
+        .collect();
+    content.push(ContentBlock::Text {
+        text: message.content.clone(),
+    });
+    ChatMessage {
+        role: message.role,
+        content,
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn rebuild_transcript_for_test(
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
+    attachments: &[MessageAttachment],
 ) -> Vec<ChatMessage> {
-    rebuild_transcript(messages, tool_calls)
+    rebuild_transcript(messages, tool_calls, attachments)
 }
 
 /// Partition calls into per-model-step batches (see [`rebuild_transcript`]).
@@ -6785,6 +6852,85 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_replays_message_images_in_their_recorded_order() {
+        use crate::image::ImageMediaType;
+
+        let turn = TurnId::new();
+        let chat = ChatId::new();
+        let t0 = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
+        let t1 = DateTime::<Utc>::from_timestamp(1_001, 0).unwrap();
+        let with_images = MessageId::new();
+        let text_only = MessageId::new();
+        let messages = vec![
+            Message {
+                id: with_images,
+                chat_id: chat,
+                turn_id: turn,
+                role: Role::User,
+                content: "compare these".into(),
+                created_at: t0,
+            },
+            Message {
+                id: text_only,
+                chat_id: chat,
+                turn_id: turn,
+                role: Role::User,
+                content: "and this one?".into(),
+                created_at: t1,
+            },
+        ];
+        let image = |seed: u128, media_type| ImageRef {
+            blob_id: uuid::Uuid::from_u128(seed),
+            media_type,
+            width: 800,
+            height: 600,
+            byte_len: 4_096,
+        };
+        let first = image(1, ImageMediaType::Png);
+        let second = image(2, ImageMediaType::Jpeg);
+        // Deliberately out of row order: the ordinal decides, not arrival.
+        let attachments = vec![
+            MessageAttachment {
+                message_id: with_images,
+                chat_id: chat,
+                ordinal: 1,
+                image: second,
+                created_at: t0,
+            },
+            MessageAttachment {
+                message_id: with_images,
+                chat_id: chat,
+                ordinal: 0,
+                image: first,
+                created_at: t0,
+            },
+        ];
+
+        let rebuilt = rebuild_transcript(&messages, &[], &attachments);
+        assert_eq!(rebuilt.len(), 2);
+        assert_eq!(rebuilt[0].role, Role::User);
+        assert_eq!(
+            rebuilt[0].content,
+            vec![
+                ContentBlock::Image { image: first },
+                ContentBlock::Image { image: second },
+                ContentBlock::Text {
+                    text: "compare these".into()
+                },
+            ]
+        );
+        // A message with no attachments rebuilds exactly as it did before.
+        assert_eq!(
+            rebuilt[1].content,
+            vec![ContentBlock::Text {
+                text: "and this one?".into()
+            }]
+        );
+        // Reloading the same rows reproduces the identical block sequence.
+        assert_eq!(rebuild_transcript(&messages, &[], &attachments), rebuilt);
+    }
+
+    #[test]
     fn rebuild_attaches_tools_to_assistant_text() {
         let turn = TurnId::new();
         let chat = ChatId::new();
@@ -6826,7 +6972,7 @@ mod tests {
             created_at: t2,
             resolved_at: Some(DateTime::<Utc>::from_timestamp(1_003, 0).unwrap()),
         }];
-        let rebuilt = rebuild_transcript(&messages, &calls);
+        let rebuilt = rebuild_transcript(&messages, &calls, &[]);
         assert_eq!(rebuilt.len(), 3);
         assert_eq!(rebuilt[0].role, Role::User);
         assert!(matches!(
@@ -6941,7 +7087,7 @@ mod tests {
             resolved_at: Some(created_at),
         }];
 
-        let rebuilt = rebuild_transcript(&[], &calls);
+        let rebuilt = rebuild_transcript(&[], &calls, &[]);
         assert_eq!(rebuilt.len(), 2);
         assert!(matches!(
             &rebuilt[0],
@@ -7013,7 +7159,7 @@ mod tests {
             created_at: t1,
             resolved_at: Some(t1),
         }];
-        let rebuilt = rebuild_transcript(&messages, &calls);
+        let rebuilt = rebuild_transcript(&messages, &calls, &[]);
         assert_eq!(rebuilt.len(), 4);
         assert_eq!(rebuilt[0].role, Role::User);
         assert!(matches!(
@@ -7057,7 +7203,7 @@ mod tests {
                 created_at: DateTime::<Utc>::from_timestamp(3, 0).unwrap(),
             },
         ];
-        let rebuilt = rebuild_transcript(&messages, &[]);
+        let rebuilt = rebuild_transcript(&messages, &[], &[]);
         assert_eq!(rebuilt.len(), 2);
         assert_eq!(rebuilt[0].role, Role::User);
         assert_eq!(rebuilt[1].role, Role::Assistant);

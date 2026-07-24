@@ -818,7 +818,7 @@ async fn orchestration_calls_are_not_generic_work_and_rebuild_once_in_spawn_orde
         vec![first.call_id, second.call_id]
     );
     let messages = store.list_messages(chat.id).await.unwrap();
-    let transcript = crate::agent::rebuild_transcript_for_test(&messages, &calls);
+    let transcript = crate::agent::rebuild_transcript_for_test(&messages, &calls, &[]);
     assert_eq!(
         transcript
             .iter()

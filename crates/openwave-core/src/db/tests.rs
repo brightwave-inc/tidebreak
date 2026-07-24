@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 
 mod agent_run;
 mod delegated_file_read;
+mod message_attachment;
 mod multi_agent_wait;
 mod output;
 mod parent_terminal_guard;

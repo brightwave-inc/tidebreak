@@ -7,11 +7,13 @@ use sea_orm::{
 use crate::error::{AgentError, AgentErrorInfo, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, ChatId, MessageId, TurnId};
+use crate::image::ImageRef;
 use crate::model::{AgentRunStatus, TurnRun, TurnRunStatus};
 use crate::provider::Usage;
 use crate::storage::{AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome};
 
 use super::super::{entities, store_err, DbStore};
+use super::message_attachment as message_attachment_ops;
 use super::{
     acquire_chat_write_lock, acquire_turn_write_lock,
     agent_run::find_foreground_agent_run_on,
@@ -112,8 +114,10 @@ pub(in crate::db) async fn accept_turn(
     chat_id: ChatId,
     model: &str,
     content: &str,
+    images: &[ImageRef],
 ) -> Result<AcceptTurnOutcome> {
     validate_turn_input(id, model, content)?;
+    message_attachment_ops::validate(images)?;
 
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
@@ -135,6 +139,7 @@ pub(in crate::db) async fn accept_turn(
             foreground.id,
             model,
             content,
+            images,
         )
         .await?;
         transaction.commit().await.map_err(store_err)?;
@@ -183,6 +188,18 @@ pub(in crate::db) async fn accept_turn(
         transaction.rollback().await.map_err(store_err)?;
         return Err(store_err(error));
     }
+    // Attachments join this transaction rather than following it. The message
+    // and its images are one submitted artifact: a partial commit would leave a
+    // turn whose replayed history no longer matches what the user sent, and
+    // would leave the referenced blobs momentarily unreferenced and eligible for
+    // retirement.
+    if let Err(error) =
+        message_attachment_ops::insert_on(&transaction, chat_id, input_message_id, images, now)
+            .await
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(error);
+    }
 
     let run = entities::turn_run::ActiveModel {
         id: Set(id.0),
@@ -229,6 +246,7 @@ pub(in crate::db) async fn accept_turn(
                     foreground.id,
                     model,
                     content,
+                    images,
                 )
                 .await;
             }
@@ -960,6 +978,7 @@ where
         .map_err(store_err)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exact_accepted_turn_on<C>(
     conn: &C,
     existing: entities::turn_run::Model,
@@ -967,6 +986,7 @@ async fn exact_accepted_turn_on<C>(
     agent_run_id: AgentRunId,
     model: &str,
     content: &str,
+    images: &[ImageRef],
 ) -> Result<AcceptTurnOutcome>
 where
     C: ConnectionTrait,
@@ -990,11 +1010,18 @@ where
             TurnId(existing.id)
         )));
     }
+    // Attachments are part of the accepted input, so they are part of the
+    // idempotency proof. Without this a retried submit carrying different
+    // images would be reported as the same accepted turn while the durable
+    // history kept the first submission's images.
+    let accepted_images =
+        message_attachment_ops::list_for_message_on(conn, MessageId(message.id)).await?;
     let exact = existing.chat_id == chat_id.0
         && existing.agent_run_id == agent_run_id.0
         && existing.agent_run_depth == 0
         && existing.model == model
-        && message.content == content;
+        && message.content == content
+        && accepted_images == images;
     Ok(if exact {
         AcceptTurnOutcome::Existing(turn_run_from_model(existing)?)
     } else {

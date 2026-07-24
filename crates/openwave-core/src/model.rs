@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::num::NonZeroU32;
 use uuid::Uuid;
 
+use crate::image::ImageRef;
 use crate::provider::Usage;
 
 /// A half-open UTF-8 byte range `[start, end)` in canonical document text.
@@ -2262,6 +2263,53 @@ pub struct Message {
     pub content: String,
     /// When it was created.
     pub created_at: DateTime<Utc>,
+}
+
+/// Maximum number of images one message may carry.
+///
+/// Every attachment costs prompt tokens on every subsequent turn, so the bound
+/// keeps a single submit from permanently inflating a conversation. It also
+/// bounds the ordinal column, which the schema range-checks.
+pub const MAX_MESSAGE_ATTACHMENTS: usize = 16;
+
+/// One image attached to a persisted message.
+///
+/// This is the durable half of an attachment: identity only, never bytes and
+/// never a filesystem path. `ordinal` is the position the user submitted the
+/// image at, and it is what makes a reloaded transcript reproduce the original
+/// turn instead of an arbitrary permutation of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageAttachment {
+    /// The message this image is attached to.
+    pub message_id: MessageId,
+    /// The chat that owns the message, denormalized so conversation deletion
+    /// and retention can scan attachments without joining through messages.
+    pub chat_id: ChatId,
+    /// Zero-based position within the message, unique per message.
+    pub ordinal: i32,
+    /// Blob identity, media type, and bounded dimensions.
+    pub image: ImageRef,
+    /// When the attachment was recorded.
+    pub created_at: DateTime<Utc>,
+}
+
+impl MessageAttachment {
+    /// Validate the bounds the schema also enforces.
+    ///
+    /// # Errors
+    ///
+    /// Returns a static reason when the ordinal is negative or past
+    /// [`MAX_MESSAGE_ATTACHMENTS`], the blob id is nil, or the image itself
+    /// fails [`ImageRef::validate`].
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.ordinal < 0 || self.ordinal as usize >= MAX_MESSAGE_ATTACHMENTS {
+            return Err("message attachment ordinal is out of range");
+        }
+        if self.image.blob_id.is_nil() {
+            return Err("message attachment blob id must not be nil");
+        }
+        self.image.validate()
+    }
 }
 
 /// Where an accepted tool invocation must execute.
