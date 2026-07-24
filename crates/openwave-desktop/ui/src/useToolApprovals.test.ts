@@ -56,13 +56,13 @@ describe("useToolApprovals", () => {
     const client = stubClient();
     const { result } = renderHook(() => useToolApprovals(client, "chat-1"));
 
-    await act(async () => result.current.decide("call-1", "approve", true));
+    await act(async () => result.current.decide("call-1", "approve", "whole_tool"));
 
     expect(client.decideApproval).toHaveBeenCalledWith(
       "chat-1",
       "call-1",
       "approve",
-      true,
+      "whole_tool",
     );
     const [message] = useChatSessionStore.getState().messages;
     expect(message.role === "approval" && message.resolved).toBe(true);
@@ -78,7 +78,7 @@ describe("useToolApprovals", () => {
       "chat-1",
       "call-1",
       "reject",
-      false,
+      null,
     );
   });
 

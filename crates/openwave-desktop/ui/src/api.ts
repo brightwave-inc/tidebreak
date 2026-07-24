@@ -347,6 +347,18 @@ export function isApprovableKind(kind: RendererApprovalKind): boolean {
   );
 }
 
+/**
+ * How wide a standing grant to remember, narrowest first.
+ *
+ * The renderer only names the rung. The server builds the concrete grant from
+ * the arguments the call is parked on, so a grant can never describe a broader
+ * action than the one the human was shown.
+ */
+export type ApprovalGrantRung =
+  | "exact_command"
+  | "any_args_for_command"
+  | "whole_tool";
+
 /** Approval kinds whose authority is stable enough to remember by tool name. */
 export function isRememberableKind(kind: RendererApprovalKind): boolean {
   return isApprovableKind(kind) && kind !== "external_mcp_may_call_server";
@@ -718,12 +730,12 @@ export class ApiClient {
     chatId: string,
     callId: string,
     decision: "approve" | "reject",
-    remember = false,
+    grant: ApprovalGrantRung | null = null,
   ): Promise<void> {
     return this.json(`/chats/${chatId}/approvals/${callId}`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ decision, remember }),
+      body: JSON.stringify({ decision, grant }),
     });
   }
 

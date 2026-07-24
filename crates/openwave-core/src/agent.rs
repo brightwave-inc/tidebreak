@@ -2101,6 +2101,11 @@ impl Agent {
         let approval_class = durable_approval
             .map(|approval| approval.class)
             .unwrap_or_else(|| tool.approval_class());
+        // The action a standing grant is matched against, and the one the card
+        // shows if this call ends up parking. Built once so a grant can never
+        // be tested against a different reading of the arguments than the
+        // human was shown.
+        let action = call_action_preview(call);
         // Standing grant: a brand-new Sensitive call the user already approved
         // for this chat runs without re-parking on the gate. A recovered call
         // (`durable_approval` present) keeps its durable park-and-resume
@@ -2113,6 +2118,7 @@ impl Agent {
                 chat.id,
                 &call.name,
                 ToolApprovalKind::for_tool_name(&call.name),
+                action.as_ref(),
             );
         if matches!(approval_class, ApprovalClass::Sensitive) && !bypass_by_standing_grant {
             let summary = format!("{} requires approval", call.name);
@@ -2124,7 +2130,7 @@ impl Agent {
             // asked about before the restart.
             let preview = match durable_approval {
                 Some(approval) => approval.preview.clone(),
-                None => call_action_preview(call),
+                None => action.clone(),
             };
             if self.durable_steer_lease.is_some() && events.flush().await.is_err() {
                 return ToolOutput::error("approval event journal is unavailable");

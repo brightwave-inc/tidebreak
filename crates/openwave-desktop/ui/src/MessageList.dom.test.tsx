@@ -24,11 +24,12 @@ function card(overrides: Partial<Parameters<typeof ApprovalCard>[0]> = {}) {
 
 const ONCE = "1.Yes, allow it once";
 const REMEMBER = "2.Yes, and don't ask again in this chat";
+const MORE = "More options";
 
 afterEach(cleanup);
 
 describe("approval card interactions", () => {
-  it("propagates each decision with its remember flag", async () => {
+  it("propagates each decision with the grant it names", async () => {
     const user = userEvent.setup();
     const onDecide = vi.fn();
     render(card({ onDecide }));
@@ -41,13 +42,13 @@ describe("approval card interactions", () => {
     ]);
 
     await user.click(options[0]!);
-    expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", false);
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", null);
 
     await user.click(options[1]!);
-    expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", true);
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", "whole_tool");
 
     await user.click(options[2]!);
-    expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", false);
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", null);
   });
 
   it("starts on the narrowest grant so a stray Enter cannot widen scope", () => {
@@ -81,10 +82,10 @@ describe("approval card interactions", () => {
     render(card({ onDecide }));
 
     await user.keyboard("{ArrowDown}{Enter}");
-    expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", true);
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", "whole_tool");
 
     await user.keyboard("3{Enter}");
-    expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", false);
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", null);
   });
 
   it("wraps around the ends of the list", async () => {
@@ -93,7 +94,7 @@ describe("approval card interactions", () => {
     render(card({ onDecide }));
 
     await user.keyboard("{ArrowUp}{Enter}");
-    expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", false);
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", null);
   });
 
   it("blocks every decision while one is in flight", async () => {
@@ -119,7 +120,7 @@ describe("approval card interactions", () => {
       "Could not send your decision",
     );
     await user.click(screen.getAllByRole("option")[0]!);
-    expect(onDecide).toHaveBeenCalledWith("call-1", "approve", false);
+    expect(onDecide).toHaveBeenCalledWith("call-1", "approve", null);
   });
 
   it("offers only rejection when the action kind is not approvable", () => {
@@ -136,6 +137,77 @@ describe("approval card interactions", () => {
     expect(
       screen.getAllByRole("option").map((option) => option.textContent),
     ).toEqual([ONCE, "2.No, don't allow this"]);
+  });
+
+  it("hides the broader grants behind one more keystroke", async () => {
+    const user = userEvent.setup();
+    const onDecide = vi.fn();
+    render(
+      card({
+        onDecide,
+        preview: {
+          tool: "exec",
+          command: "cargo",
+          args: ["test"],
+          cwd: ".",
+        },
+      }),
+    );
+
+    // Every option on screen is one keystroke away, so the narrowest grant is
+    // inline and the wider ones are not.
+    expect(
+      screen.getAllByRole("option").map((option) => option.textContent),
+    ).toEqual([
+      "1.Yes, run it once",
+      "2.Yes, and always allow exactly \u201ccargo test\u201d",
+      `3.${MORE}`,
+      "4.No, don't allow this",
+    ]);
+
+    await user.click(screen.getByText(MORE));
+    expect(
+      screen.getAllByRole("option").map((option) => option.textContent),
+    ).toEqual([
+      "1.Yes, run it once",
+      "2.Yes, and always allow exactly \u201ccargo test\u201d",
+      "3.Yes, and always allow any \u201ccargo\u201d command",
+      "4.Yes, and don't ask again about commands in this chat",
+      "5.No, don't allow this",
+    ]);
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it("returns the highlight to the narrowest grant when it widens the list", async () => {
+    const user = userEvent.setup();
+    const onDecide = vi.fn();
+    render(
+      card({
+        onDecide,
+        preview: { tool: "exec", command: "cargo", args: ["test"], cwd: "." },
+      }),
+    );
+
+    // "More options" sat at row 3; expanding puts a broader grant there. A
+    // stray Enter must not commit whatever moved under the cursor.
+    await user.keyboard("3{Enter}");
+    expect(screen.getAllByRole("option")[0]).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await user.keyboard("{Enter}");
+    expect(onDecide).toHaveBeenCalledWith("call-1", "approve", null);
+  });
+
+  it("offers only the whole tool when the action names nothing narrower", async () => {
+    const user = userEvent.setup();
+    render(card());
+
+    expect(screen.queryByText(MORE)).not.toBeInTheDocument();
+    expect(
+      screen.getAllByRole("option").map((option) => option.textContent),
+    ).toEqual([ONCE, REMEMBER, "3.No, don't allow this"]);
+    await user.click(screen.getAllByRole("option")[1]!);
   });
 
   it("asks about the command rather than about commands in general", () => {
@@ -155,7 +227,9 @@ describe("approval card interactions", () => {
     expect(
       screen.getByRole("heading", { name: "Run this command?" }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/cargo test --workspace/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/cargo test --workspace/, { selector: "pre" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(/# working directory: checkout/),
     ).toBeInTheDocument();
@@ -257,7 +331,9 @@ describe("activity phases", () => {
 
     // One copy of the command, on the card that can act on it, and no rail
     // line announcing the same pending action a second time.
-    expect(screen.getAllByText(/cargo build/)).toHaveLength(1);
+    expect(screen.getAllByText(/cargo build/, { selector: "pre" })).toHaveLength(
+      1,
+    );
     expect(
       screen.queryByRole("button", { name: /Running a command/ }),
     ).toBeNull();

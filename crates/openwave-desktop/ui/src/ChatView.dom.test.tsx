@@ -153,7 +153,7 @@ describe("ChatView", () => {
         "chat-1",
         "call-a",
         "approve",
-        false,
+        null,
       ),
     );
   });
