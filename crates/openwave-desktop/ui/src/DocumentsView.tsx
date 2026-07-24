@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { FileText } from "lucide-react";
-import { ChatTabs } from "./ChatTabs";
 import {
   importLibraryDocument,
   listLibraryDocuments,
@@ -127,7 +126,6 @@ export function DocumentsView({
     <section className="documents-view" aria-labelledby="documents-title">
       <header className="documents-header">
         <div>
-          <p className="eyebrow">This conversation</p>
           <h1 id="documents-title">Sources</h1>
           <p>
             Add files for OpenWave to use in this conversation. Supported sources
@@ -135,7 +133,6 @@ export function DocumentsView({
           </p>
         </div>
         <div className="documents-header-actions">
-          <ChatTabs />
           <button
             type="button"
             className="btn btn-primary"

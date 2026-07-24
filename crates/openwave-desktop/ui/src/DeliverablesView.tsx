@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, FileOutput, RefreshCw } from "lucide-react";
-import { ChatTabs } from "./ChatTabs";
 import {
   exportDeliverable,
   listDeliverables,
@@ -133,7 +132,6 @@ export function DeliverablesView({
     <section className="deliverables-view" aria-labelledby="deliverables-title">
       <header className="deliverables-header">
         <div>
-          <p className="eyebrow">This conversation</p>
           <h1 id="deliverables-title">Outputs</h1>
           <p>
             Files OpenWave creates for you stay private until you choose where to
@@ -141,7 +139,6 @@ export function DeliverablesView({
           </p>
         </div>
         <div className="deliverables-header-actions">
-          <ChatTabs />
           <button
             type="button"
             className="btn"

@@ -8,7 +8,6 @@ describe("DocumentsView", () => {
       <DocumentsView chatId="chat-1" />,
     );
 
-    expect(markup).toContain("This conversation");
     expect(markup).toContain(">Sources<");
     expect(markup).toContain(
       "Add files for OpenWave to use in this conversation.",

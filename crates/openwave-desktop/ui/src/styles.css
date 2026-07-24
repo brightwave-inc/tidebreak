@@ -578,6 +578,23 @@ body {
   overflow: hidden;
 }
 
+.chat-workspace {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* Each surface scrolls inside the body; the header above it stays put. */
+.workspace-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .chat-pane {
   display: flex;
   flex-direction: column;
@@ -663,8 +680,13 @@ body {
   flex: 0 0 auto;
 }
 
-.chat-tab:hover {
+.chat-tab:hover:not(:disabled) {
   color: var(--ink);
+}
+
+.chat-tab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .chat-tab.is-active {

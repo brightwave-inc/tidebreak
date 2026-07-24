@@ -8,7 +8,6 @@ import {
   listConnectedFolders,
   type ConnectedFolder,
 } from "./host";
-import { ChatTabs } from "./ChatTabs";
 
 /**
  * A chat's connected folders: the directories the native host may read on this
@@ -99,7 +98,6 @@ export function FoldersView({ chat }: { chat: Chat }) {
     <section className="folders-view" aria-labelledby="folders-title">
       <header className="folders-header">
         <div>
-          <p className="eyebrow">This conversation</p>
           <h1 id="folders-title">Folders</h1>
           <p>
             OpenWave can read only the folders attached to this chat. Folders
@@ -107,7 +105,6 @@ export function FoldersView({ chat }: { chat: Chat }) {
           </p>
         </div>
         <div className="folders-header-actions">
-          <ChatTabs />
           <button
             type="button"
             className="btn btn-primary"
