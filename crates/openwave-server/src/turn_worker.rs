@@ -16,7 +16,7 @@ use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use openwave_core::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentRunWaitCondition,
-    AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, CheckpointSandboxSpawnOutcome,
+    AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, BlobStore, CheckpointSandboxSpawnOutcome,
     ClaimedAgentEvent, CompleteTurnRunOutcome, ForegroundAgentWaitRequest, MessageId,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
     Result, SandboxAgentSpawnRequest, SandboxSpawnCheckpointRequest, SequencedEvent, Store,
@@ -72,6 +72,7 @@ pub(crate) struct TurnWorker {
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
     tools: Arc<ToolRegistry>,
+    blobs: Option<Arc<dyn BlobStore>>,
     mcp: Option<Arc<McpRuntime>>,
     approvals: Arc<ApprovalBroker>,
     events: Arc<EventBus>,
@@ -290,6 +291,7 @@ impl TurnWorker {
             store,
             resolver,
             tools,
+            blobs: None,
             mcp: None,
             approvals,
             events,
@@ -300,6 +302,15 @@ impl TurnWorker {
             private_scratch_root,
             config,
         }
+    }
+
+    /// Hydrate image attachments for outbound requests from `blobs`.
+    ///
+    /// Without it an agent evicts every image block to a text stand-in, so a
+    /// turn still runs but the model is told the image is unavailable.
+    pub(crate) fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+        self.blobs = Some(blobs);
+        self
     }
 
     /// Resolve one immutable registry when a turn begins. Runtime MCP changes
@@ -550,7 +561,7 @@ impl TurnWorker {
             });
             let provider = self.resolver.resolve().await;
             let steer = active.steer_inbox();
-            let agent = Agent::new(provider, surface.tools.clone(), self.store.clone(), config)
+            let mut agent = Agent::new(provider, surface.tools.clone(), self.store.clone(), config)
                 .with_approvals(self.approvals.clone())
                 .with_standing_grants(self.approvals.standing_grants())
                 .with_cancel(cancel.clone())
@@ -558,6 +569,9 @@ impl TurnWorker {
                 .with_durable_steer(lease_token)
                 .with_foreground_agent_orchestration()
                 .with_continuation_instruction(continuation_instruction.clone());
+            if let Some(blobs) = self.blobs.clone() {
+                agent = agent.with_blobs(blobs);
+            }
             let chat = chat.clone();
             let (events_tx, mut events_rx) = unbounded();
             let mut drive = AbortOnDrop(tokio::spawn(async move {

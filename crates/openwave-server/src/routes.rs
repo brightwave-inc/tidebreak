@@ -40,11 +40,13 @@ use crate::web_search::{
 mod client_execution;
 mod delegated_file_execution;
 mod document;
+pub(crate) mod image_attachment;
 mod root_attachment;
 mod user_questions;
 pub use client_execution::*;
 pub use delegated_file_execution::*;
 pub use document::*;
+pub use image_attachment::*;
 pub use root_attachment::*;
 pub use user_questions::*;
 
@@ -1297,6 +1299,128 @@ pub struct PostMessage {
     pub turn_id: TurnId,
     /// The user's input for this turn.
     pub content: String,
+    /// Ids returned by the image attachment publish endpoint, in display order.
+    ///
+    /// Only identity crosses the wire. The server re-derives every attachment's
+    /// format and dimensions from the stored bytes, so a caller cannot describe
+    /// an image as something it is not.
+    #[serde(default)]
+    pub attachments: Vec<uuid::Uuid>,
+}
+
+/// Resolve published attachment ids into authoritative image identity.
+///
+/// The bytes are inspected again here rather than trusting what the publish
+/// response said, because nothing durable connects the two requests and the
+/// metadata persisted with the turn must describe the bytes that actually exist.
+async fn resolve_message_attachments(
+    state: &AppState,
+    ids: &[uuid::Uuid],
+) -> Result<Vec<openwave_core::ImageRef>, ServerError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    if ids.len() > openwave_core::MAX_MESSAGE_ATTACHMENTS {
+        return Err(ServerError::bad_request_kind(
+            "too_many_image_attachments",
+            format!(
+                "a message may carry at most {} image attachments",
+                openwave_core::MAX_MESSAGE_ATTACHMENTS
+            ),
+        ));
+    }
+    let mut images = Vec::with_capacity(ids.len());
+    for &id in ids {
+        let missing = || {
+            ServerError::bad_request_kind(
+                "image_attachment_not_found",
+                format!("image attachment {id} has not been published"),
+            )
+        };
+        let bytes = state.blobs.get(id).await?.ok_or_else(missing)?;
+        let image = image_attachment::inspect_image_bytes(&bytes)?;
+        // Attachment ids are content addresses. Bytes that do not hash back to
+        // the requested id are some other blob, so the reference is unresolved
+        // rather than merely mismatched.
+        if image.blob_id != id {
+            return Err(missing());
+        }
+        images.push(image);
+    }
+    Ok(images)
+}
+
+/// Refuse a turn whose model cannot see the images it carries.
+///
+/// Stripping the images would leave the model answering confidently about
+/// something it never received, and silently switching models would change the
+/// answer's author behind the user's back. Refusing is the only option that
+/// leaves the user in control, so the error is machine-readable and the client
+/// can offer to change the model or drop the attachments.
+async fn require_image_capable_model(state: &AppState, model: &str) -> Result<(), ServerError> {
+    if !state.resolver.enforces_model_registry() {
+        return Ok(());
+    }
+    let Some(policy) = providers::resolve_model_policy(&*state.store, model, true).await? else {
+        return Err(ServerError::bad_request_kind(
+            "unknown_model",
+            format!("model `{model}` is not registered for that provider"),
+        ));
+    };
+    require_image_input(&policy)
+}
+
+/// The capability decision itself, separated so it can be exercised against a
+/// constructed policy rather than only against whatever the registry happens to
+/// advertise today.
+fn require_image_input(policy: &providers::ResolvedModelPolicy) -> Result<(), ServerError> {
+    if policy
+        .input_modalities
+        .contains(&crate::model_registry::InputModality::Image)
+    {
+        return Ok(());
+    }
+    Err(ServerError::conflict_kind(
+        "model_image_input_unsupported",
+        format!(
+            "model `{}` does not accept image input; choose a model that does, or send the message without images",
+            policy.display_name
+        ),
+    ))
+}
+
+#[cfg(test)]
+mod image_capability_tests {
+    use super::*;
+    use crate::model_registry::{InputModality, ModelSpec};
+
+    const TEXT_ONLY: ModelSpec = ModelSpec {
+        id: "text-only-model",
+        display_name: "Text Only Model",
+        provider: ProviderKind::Anthropic,
+        context_window: 200_000,
+        max_output_tokens: 64_000,
+        input_modalities: &[InputModality::Text],
+        supports_reasoning: false,
+        supports_reasoning_effort: false,
+    };
+
+    const MULTIMODAL: ModelSpec = ModelSpec {
+        input_modalities: &[InputModality::Text, InputModality::Image],
+        ..TEXT_ONLY
+    };
+
+    #[test]
+    fn advertised_image_input_is_the_only_thing_that_admits_a_turn_with_images() {
+        // Every curated model is pinned text-only today, so the accepting case
+        // is constructed here rather than read from the registry: the rule has
+        // to hold from the moment a model does advertise image input.
+        assert!(require_image_input(&providers::ResolvedModelPolicy::curated(&MULTIMODAL)).is_ok());
+
+        let refused = require_image_input(&providers::ResolvedModelPolicy::curated(&TEXT_ONLY))
+            .expect_err("a text-only model must refuse a turn carrying images");
+        assert_eq!(refused.kind(), "model_image_input_unsupported");
+    }
 }
 
 /// `POST /chats/{id}/messages` — durably accept a message and queue its turn.
@@ -1306,6 +1430,12 @@ pub struct PostMessage {
 /// Repeating an exact `turn_id` and payload is idempotent. `404` if the chat
 /// doesn't exist, `409` if the identity names different input or another turn
 /// already owns the chat's single durable live slot.
+///
+/// Published image attachments may be referenced by id. They commit with the
+/// message, and a retry that names different images is an identity conflict
+/// rather than a silent acceptance of the first submission's images. A turn
+/// carrying images against a model that does not accept image input is refused
+/// with `model_image_input_unsupported`.
 pub async fn post_message(
     State(state): State<AppState>,
     Path(id): Path<ChatId>,
@@ -1346,9 +1476,13 @@ pub async fn post_message(
         };
         validate_model_selection(&state, &selected, true).await?
     };
+    let images = resolve_message_attachments(&state, &body.attachments).await?;
+    if !images.is_empty() {
+        require_image_capable_model(&state, &model).await?;
+    }
     match state
         .store
-        .accept_turn(body.turn_id, id, &model, &body.content)
+        .accept_turn_with_attachments(body.turn_id, id, &model, &body.content, &images)
         .await?
     {
         AcceptTurnOutcome::Accepted(_) | AcceptTurnOutcome::Existing(_) => {
@@ -1369,7 +1503,13 @@ pub async fn post_message(
                 && matches!(
                     state
                         .store
-                        .accept_turn(body.turn_id, id, &existing.model, &body.content)
+                        .accept_turn_with_attachments(
+                            body.turn_id,
+                            id,
+                            &existing.model,
+                            &body.content,
+                            &images,
+                        )
                         .await?,
                     AcceptTurnOutcome::Existing(_)
                 )

@@ -1,0 +1,464 @@
+//! Image attachment publication and turn acceptance over the HTTP surface.
+
+use super::*;
+
+use crate::routes::image_attachment::{gif_with_screen_size, png_header};
+
+fn image_attachments_uri(chat: ChatId) -> String {
+    format!("/chats/{chat}/attachments/images")
+}
+
+/// Publish `bytes` for `chat` under a declared `Content-Type`.
+async fn publish_image(
+    router: &Router,
+    bearer: &str,
+    chat: ChatId,
+    declared: &str,
+    bytes: Vec<u8>,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(image_attachments_uri(chat))
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, declared)
+                .body(Body::from(bytes))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn publish_png(router: &Router, bearer: &str, chat: ChatId, bytes: Vec<u8>) -> uuid::Uuid {
+    let response = publish_image(router, bearer, chat, "image/png", bytes).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let published: serde_json::Value = json_body(response).await;
+    published["attachment_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// POST a message carrying published attachment ids.
+async fn send_message_with_attachments(
+    router: &Router,
+    bearer: &str,
+    chat: ChatId,
+    turn_id: TurnId,
+    content: &str,
+    attachments: &[uuid::Uuid],
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{chat}/messages"))
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "turn_id": turn_id,
+                        "content": content,
+                        "attachments": attachments,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+fn stored_blob_count(data_dir: &std::path::Path) -> usize {
+    let blobs = data_dir.join("blobs");
+    let Ok(entries) = std::fs::read_dir(&blobs) else {
+        return 0;
+    };
+    entries
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry.path().extension().and_then(|ext| ext.to_str()) == Some("blob")
+                && entry.metadata().is_ok_and(|meta| meta.is_file())
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn publishing_returns_opaque_identity_and_bounded_metadata_only() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    let response =
+        publish_image(&router, &bearer, chat.id, "image/png", png_header(800, 600)).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let published: serde_json::Value = json_body(response).await;
+    let mut keys = published
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["attachment_id", "byte_len", "height", "media_type", "width"]
+    );
+    assert_eq!(published["media_type"], "image/png");
+    assert_eq!(published["width"], 800);
+    assert_eq!(published["height"], 600);
+    // Nothing in the response can be turned back into a location on disk.
+    let serialized = published.to_string();
+    for forbidden in [
+        "blob",
+        "path",
+        "dir",
+        "tmp",
+        ".png",
+        std::env::temp_dir().to_str().unwrap(),
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "publish response leaked {forbidden}: {serialized}"
+        );
+    }
+
+    // An unknown conversation is a 404 before any bytes are retained.
+    let missing = publish_image(
+        &router,
+        &bearer,
+        ChatId::new(),
+        "image/png",
+        png_header(8, 8),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_declared_type_that_disagrees_with_the_sniffed_bytes_is_refused() {
+    let (router, token, _store, dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    // PNG bytes announced as a JPEG: the bytes win, and the disagreement is
+    // reported rather than quietly corrected to the sniffed type.
+    let response = publish_image(&router, &bearer, chat.id, "image/jpeg", png_header(64, 64)).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(response).await;
+    assert_eq!(error.kind, "image_attachment_media_type_mismatch");
+    assert_eq!(
+        stored_blob_count(dir.path()),
+        0,
+        "a refused attachment must not retain bytes"
+    );
+
+    // A file renamed to `.png` and declared as one is caught the same way: the
+    // extension never enters the decision.
+    let response = publish_image(
+        &router,
+        &bearer,
+        chat.id,
+        "image/png",
+        gif_with_screen_size(8, 8),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(response).await;
+    assert_eq!(error.kind, "image_attachment_media_type_mismatch");
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(image_attachments_uri(chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::from(png_header(64, 64)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(response).await;
+    assert_eq!(error.kind, "image_attachment_media_type_required");
+}
+
+#[tokio::test]
+async fn a_non_image_an_unsupported_format_and_an_oversized_image_are_each_refused() {
+    let (router, token, _store, dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    for (declared, bytes, expected) in [
+        (
+            "image/png",
+            b"%PDF-1.7\n%\xe2\xe3\xcf\xd3 not an image".to_vec(),
+            "image_attachment_not_an_image",
+        ),
+        (
+            "image/png",
+            b"II*\x00\x08\x00\x00\x00".to_vec(),
+            "image_attachment_unsupported_format",
+        ),
+        (
+            "image/png",
+            png_header(openwave_core::MAX_IMAGE_DIMENSION + 1, 600),
+            "image_attachment_dimensions_too_large",
+        ),
+        (
+            "image/gif",
+            gif_with_screen_size(0, 8),
+            "image_attachment_zero_dimension",
+        ),
+        ("image/png", Vec::new(), "image_attachment_empty"),
+    ] {
+        let response = publish_image(&router, &bearer, chat.id, declared, bytes).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{expected}");
+        let error: AgentErrorInfo = json_body(response).await;
+        assert_eq!(error.kind, expected);
+    }
+
+    // Bytes past the per-image ceiling never reach a handler at all.
+    let oversized = vec![0u8; openwave_core::MAX_IMAGE_BYTES as usize + 1];
+    let response = publish_image(&router, &bearer, chat.id, "image/png", oversized).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    assert_eq!(
+        stored_blob_count(dir.path()),
+        0,
+        "no refusal may retain bytes"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_records_its_attachments_and_an_unpublished_id_is_refused() {
+    let (router, token, state, store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let _ = &state;
+
+    let attachment_id = publish_png(&router, &bearer, chat.id, png_header(320, 240)).await;
+    let accepted = send_message_with_attachments(
+        &router,
+        &bearer,
+        chat.id,
+        TurnId::new(),
+        "what is in this?",
+        &[attachment_id],
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+    let attachments = store.list_message_attachments(chat.id).await.unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].image.blob_id, attachment_id);
+    assert_eq!(attachments[0].image.width, 320);
+    assert_eq!(attachments[0].image.height, 240);
+    assert_eq!(
+        attachments[0].image.media_type,
+        openwave_core::ImageMediaType::Png
+    );
+
+    // An id that was never published names no bytes, so the turn cannot be
+    // accepted against it.
+    let response = send_message_with_attachments(
+        &router,
+        &bearer,
+        chat.id,
+        TurnId::new(),
+        "and this?",
+        &[uuid::Uuid::new_v4()],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(response).await;
+    assert_eq!(error.kind, "image_attachment_not_found");
+}
+
+#[tokio::test]
+async fn a_cancelled_and_a_retried_turn_leave_exactly_one_set_of_stored_bytes() {
+    let (router, token, _state, store, dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let bytes = png_header(640, 480);
+
+    // The same picture attached twice is one content-addressed blob.
+    let first = publish_png(&router, &bearer, chat.id, bytes.clone()).await;
+    let second = publish_png(&router, &bearer, chat.id, bytes.clone()).await;
+    assert_eq!(first, second);
+    assert_eq!(stored_blob_count(dir.path()), 1);
+
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_attachments(
+            &router,
+            &bearer,
+            chat.id,
+            turn_id,
+            "describe this",
+            &[first],
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    // An ambiguous HTTP retry of the same turn is idempotent, images included.
+    assert_eq!(
+        send_message_with_attachments(
+            &router,
+            &bearer,
+            chat.id,
+            turn_id,
+            "describe this",
+            &[first],
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        store.list_message_attachments(chat.id).await.unwrap().len(),
+        1
+    );
+    assert_eq!(stored_blob_count(dir.path()), 1);
+
+    // Cancel, then send the same image again as a fresh turn.
+    let cancelled = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/cancel", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"turn_id": turn_id}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status(), StatusCode::ACCEPTED);
+
+    let retried = publish_png(&router, &bearer, chat.id, bytes).await;
+    assert_eq!(retried, first);
+    assert_eq!(
+        send_message_with_attachments(
+            &router,
+            &bearer,
+            chat.id,
+            TurnId::new(),
+            "describe this",
+            &[retried],
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        store.list_message_attachments(chat.id).await.unwrap().len(),
+        2
+    );
+    assert_eq!(
+        stored_blob_count(dir.path()),
+        1,
+        "publishing, cancelling, and retrying the same image must store one copy"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("image-capability.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderCredential::api_key("sk-anthropic"),
+    )
+    .await
+    .unwrap();
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(resolver::ConfiguredResolver::new(
+            store.clone(),
+            secrets.clone(),
+        )),
+        secrets,
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "anthropic::claude-opus-4-8".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let bearer = format!("Bearer {}", state.token);
+    let router = app(state);
+    let chat = make_chat(&router, &bearer).await;
+
+    // The selected model is a real, available, curated one — it simply does not
+    // advertise image input.
+    let policy = providers::resolve_model_policy(&*store, "anthropic::claude-opus-4-8", false)
+        .await
+        .unwrap()
+        .expect("a curated model resolves");
+    assert!(!policy
+        .input_modalities
+        .contains(&crate::model_registry::InputModality::Image));
+
+    let attachment_id = publish_png(&router, &bearer, chat.id, png_header(200, 150)).await;
+    let response = send_message_with_attachments(
+        &router,
+        &bearer,
+        chat.id,
+        TurnId::new(),
+        "what is in this screenshot?",
+        &[attachment_id],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let error: AgentErrorInfo = json_body(response).await;
+    assert_eq!(error.kind, "model_image_input_unsupported");
+    // Refused, not silently stripped: no turn and no attachment were recorded.
+    assert!(store.list_messages(chat.id).await.unwrap().is_empty());
+    assert!(store
+        .list_message_attachments(chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // The same text without images still goes through, so the refusal is about
+    // the attachments rather than the model being unusable.
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "what is in this screenshot?").await,
+        StatusCode::ACCEPTED
+    );
+}

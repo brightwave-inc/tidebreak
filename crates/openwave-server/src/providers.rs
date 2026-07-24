@@ -201,7 +201,7 @@ pub struct ResolvedModelPolicy {
 }
 
 impl ResolvedModelPolicy {
-    fn curated(spec: &ModelSpec) -> Self {
+    pub(crate) fn curated(spec: &ModelSpec) -> Self {
         Self {
             key: model_registry::selection_key(spec.provider, spec.id),
             id: spec.id.to_owned(),

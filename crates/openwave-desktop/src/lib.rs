@@ -19,6 +19,7 @@ mod client_execution;
 mod deliverables;
 mod documents;
 mod host_access;
+mod image_attachments;
 mod media_type;
 mod updater;
 
@@ -164,6 +165,7 @@ pub fn run() {
             documents::import_library_document,
             documents::list_library_documents,
             documents::search_library_documents,
+            image_attachments::attach_chat_image,
             deliverables::list_deliverables,
             deliverables::read_deliverable,
             deliverables::export_deliverable,
