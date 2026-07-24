@@ -1300,30 +1300,6 @@ body {
   }
 }
 
-/* ---------- Approval ---------- */
-
-.message-approval {
-  width: min(100%, 38rem);
-  align-self: flex-start;
-  border: 1px solid color-mix(in srgb, var(--color-openwave) 45%, var(--line));
-  border-radius: 8px;
-  padding: 0.7rem 0.8rem;
-  background: var(--card);
-}
-
-.message-approval p {
-  margin: 0;
-  color: var(--ink);
-  font-size: 0.84rem;
-}
-
-.message-approval .approval-error {
-  margin-top: 0.5rem;
-  color: var(--danger);
-  font-size: 0.82rem;
-  overflow-wrap: anywhere;
-}
-
 /* ---------- Markdown ---------- */
 
 .message-markdown {
@@ -1606,75 +1582,6 @@ body {
   font-size: 0.82em;
 }
 
-/* ---------- Tool call cards ---------- */
-
-.tool-call-card {
-  display: flex;
-  width: min(100%, 31rem);
-  align-self: flex-start;
-  align-items: center;
-  gap: 0.65rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.6rem 0.7rem;
-  color: var(--muted-foreground);
-  background: var(--card);
-}
-
-.tool-call-icon {
-  display: grid;
-  width: 1.55rem;
-  height: 1.55rem;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: 5px;
-  color: var(--ink);
-  background: var(--muted);
-  font-size: 0.82rem;
-  font-weight: 600;
-}
-
-.tool-call-copy {
-  display: grid;
-  min-width: 0;
-  gap: 0.03rem;
-}
-
-.tool-call-copy strong {
-  color: var(--ink);
-  font-size: 0.82rem;
-  font-weight: 600;
-}
-
-.tool-call-copy span {
-  font-size: 0.75rem;
-}
-
-.tool-call-spinner {
-  width: 0.8rem;
-  height: 0.8rem;
-  flex: 0 0 auto;
-  margin-left: auto;
-  border: 2px solid color-mix(in srgb, var(--muted-foreground) 25%, transparent);
-  border-top-color: var(--muted-foreground);
-  border-radius: 999px;
-  animation: tool-call-spin 800ms linear infinite;
-}
-
-.tool-call-card.is-completed .tool-call-icon {
-  color: var(--success-foreground);
-  background: var(--success-background);
-}
-
-.tool-call-card.is-failed .tool-call-icon {
-  color: var(--danger);
-  background: var(--critical-background);
-}
-
-.tool-call-card.is-cancelled {
-  opacity: 0.7;
-}
-
 /* ---------- Tool activity groups ---------- */
 
 .tool-activity-group {
@@ -1723,7 +1630,9 @@ body {
 
 .tool-activity-group-status.is-failed,
 .tool-activity-group-status.is-unknown {
-  color: var(--danger);
+  /* Paired with its own background so the glyph keeps its contrast in dark
+     mode, where `--danger` and `--critical-background` are both mid reds. */
+  color: var(--critical-foreground);
   background: var(--critical-background);
 }
 
@@ -1814,14 +1723,7 @@ body {
   font-size: 0.8rem;
 }
 
-@keyframes tool-call-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .tool-call-spinner,
   .assistant-sources-chevron,
   .message-footer,
   .tool-activity-group-chevron,
@@ -2445,14 +2347,6 @@ body {
 
 .boot .btn {
   margin-top: 0.75rem;
-}
-
-.approval {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
-  margin-top: 0.5rem;
 }
 
 /* ---------- Documents view ---------- */

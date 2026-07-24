@@ -68,11 +68,83 @@ describe("MessageBubble", () => {
     expect(markup.indexOf("Search the web")).toBeLessThan(
       markup.indexOf("Approval needed"),
     );
-    expect(markup).toContain("message-approval");
-    expect(markup).toContain(">Approve once<");
-    expect(markup).toContain(">Allow for this chat<");
+    expect(markup).toContain('aria-label="Approval needed"');
+    expect(markup).toContain("Yes, allow it once");
+    expect(markup).toContain("Yes, and don&#x27;t ask again in this chat");
     expect(markup).not.toContain("Working");
     expect(markup).toContain('aria-live="polite"');
+  });
+
+  it("lets the approval card own the slot while its call is parked", () => {
+    const preview = {
+      tool: "exec" as const,
+      command: "cargo",
+      args: ["build"],
+      cwd: ".",
+    };
+    const tool = {
+      id: "tool-1",
+      role: "tool",
+      callId: "call-1",
+      name: "exec",
+      preview,
+    } as const;
+    const card = {
+      id: "approval-1",
+      role: "approval",
+      callId: "call-1",
+      summary: "Run this command?",
+      preview,
+      canApprove: true,
+      canRemember: true,
+    } as const;
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={[{ ...tool, status: "waiting_approval" }, card]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    // One copy of the command, on the card that can actually act on it.
+    expect(markup.match(/cargo build/g)).toHaveLength(1);
+    expect(markup).not.toContain("Waiting for approval");
+
+    // Once decided, the tool card comes back to carry the outcome.
+    const decided = renderToStaticMarkup(
+      <MessageList
+        messages={[
+          { ...tool, status: "completed" },
+          { ...card, resolved: true },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+    expect(decided).toContain("cargo build");
+    expect(decided).toContain(">Done<");
   });
 
   it("replaces an empty active assistant placeholder with one worker status", () => {
@@ -152,8 +224,8 @@ describe("MessageBubble", () => {
     );
 
     expect(markup).toContain("The exact action cannot be safely described.");
-    expect(markup).not.toContain(">Approve<");
-    expect(markup).toContain(">Reject<");
+    expect(markup).not.toContain("Yes,");
+    expect(markup).toContain("No, don&#x27;t allow this");
   });
 
   it("collapses only contiguous terminal tool activity using safe card copy", () => {
@@ -264,7 +336,7 @@ describe("MessageBubble", () => {
     );
 
     expect(markup).toContain("Used a tool and searched the web");
-    expect(markup).toContain("Use a tool");
+    expect(markup).toContain("Used a tool");
     expect(markup).toContain("Tool complete");
     expect(markup).not.toContain("private_server");
     expect(markup).not.toContain("sensitive_path");
@@ -470,7 +542,10 @@ describe("approval decision feedback", () => {
     );
 
     expect(markup).toContain('aria-busy="true"');
-    expect((markup.match(/disabled=""/g) ?? []).length).toBe(3);
+    // Every option is untabbable and the submit control is disabled, so no
+    // second decision can be sent while the first is in flight.
+    expect(markup.match(/tabindex="-1"/g)).toHaveLength(3);
+    expect(markup).toContain("disabled=\"\"");
   });
 
   it("renders a per-card error and keeps the buttons actionable for retry", () => {
@@ -488,10 +563,9 @@ describe("approval decision feedback", () => {
       />,
     );
 
-    expect(markup).toContain('class="approval-error"');
     expect(markup).toContain('role="alert"');
     expect(markup).toContain("Could not send your decision");
-    expect(markup).not.toContain("disabled");
+    expect(markup).not.toContain('disabled=""');
   });
 
   it("hides the error once the approval is resolved", () => {
@@ -507,7 +581,7 @@ describe("approval decision feedback", () => {
       />,
     );
 
-    expect(markup).not.toContain("approval-error");
+    expect(markup).not.toContain('role="alert"');
     expect(markup).not.toContain("Could not send your decision");
   });
 
@@ -524,8 +598,8 @@ describe("approval decision feedback", () => {
       />,
     );
 
-    expect(markup).not.toContain("approval-error");
-    expect(markup).not.toContain("disabled");
+    expect(markup).not.toContain('role="alert"');
+    expect(markup).not.toContain('disabled=""');
   });
 });
 

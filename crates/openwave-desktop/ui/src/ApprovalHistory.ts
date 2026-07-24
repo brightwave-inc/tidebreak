@@ -31,10 +31,12 @@ export function upsertPendingApprovalCard(
   approval: Pick<
     PendingToolApproval,
     "callId" | "action" | "approval" | "canApprove" | "canRemember"
-  >,
+  > &
+    Partial<Pick<PendingToolApproval, "preview">>,
 ): ChatMessage[] {
     let next = messages;
     const presentation = toolApprovalPresentation(approval.approval);
+    const preview = approval.preview ?? null;
     const toolIndex = next.findIndex(
       (message) =>
         message.role === "tool" && message.callId === approval.callId,
@@ -46,6 +48,7 @@ export function upsertPendingApprovalCard(
               ...message,
               name: approval.action,
               status: "waiting_approval",
+              preview,
             }
           : message,
       );
@@ -58,6 +61,7 @@ export function upsertPendingApprovalCard(
           callId: approval.callId,
           name: approval.action,
           status: "waiting_approval",
+          preview,
         },
       ];
     }
@@ -71,6 +75,7 @@ export function upsertPendingApprovalCard(
       role: "approval",
       callId: approval.callId,
       summary: presentation.summary,
+      preview,
       canApprove: approval.canApprove && presentation.canApprove,
       canRemember: approval.canRemember && presentation.canRemember,
     };

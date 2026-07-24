@@ -173,3 +173,51 @@ describe("ToolCallCard", () => {
     });
   });
 });
+
+describe("command cards", () => {
+  const preview = {
+    tool: "exec" as const,
+    command: "cargo",
+    args: ["test", "--workspace"],
+    cwd: "checkout",
+  };
+
+  it("titles itself with the command instead of a generic phrase", () => {
+    const markup = renderToStaticMarkup(
+      <ToolCallCard name="exec" status="completed" preview={preview} />,
+    );
+
+    expect(visibleText(markup)).toContain("cargo test --workspace");
+    expect(visibleText(markup)).not.toContain("Ran a command");
+    // The allowlisted phrase still names the card for assistive technology.
+    expect(markup).toContain('aria-label="Run a command: Command complete"');
+  });
+
+  it("opens onto the command only when there is a command to open onto", () => {
+    const withCommand = renderToStaticMarkup(
+      <ToolCallCard name="exec" status="running" preview={preview} />,
+    );
+    const withoutCommand = renderToStaticMarkup(
+      <ToolCallCard name="exec" status="running" />,
+    );
+
+    expect(withCommand).toContain('aria-expanded="false"');
+    expect(withoutCommand).not.toContain("aria-expanded");
+    expect(visibleText(withoutCommand)).toContain("Running a command");
+  });
+
+  it("carries the status in a badge rather than a second line of prose", () => {
+    for (const [status, badge] of [
+      ["running", "Running…"],
+      ["waiting_approval", "Waiting for approval"],
+      ["completed", "Done"],
+      ["failed", "Failed"],
+      ["cancelled", "Not run"],
+    ] as const) {
+      const markup = renderToStaticMarkup(
+        <ToolCallCard name="exec" status={status} preview={preview} />,
+      );
+      expect(visibleText(markup)).toContain(badge);
+    }
+  });
+});
