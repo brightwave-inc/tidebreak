@@ -281,8 +281,12 @@ pub const DEFAULT_MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
 /// Per-turn tuning for an [`Agent`].
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
+    /// Explicit provider route resolved from the host model registry.
+    pub provider: Option<crate::provider::ProviderId>,
     /// Provider model identifier (e.g. `claude-opus-4-8`).
     pub model: String,
+    /// Whether this model uses the provider's reasoning request shape.
+    pub reasoning_model: bool,
     /// Reasoning-effort hint for models that expose the control; ignored by the
     /// rest. `None` leaves the provider default in force.
     pub reasoning_effort: Option<crate::model::ReasoningEffort>,
@@ -312,7 +316,9 @@ pub const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            provider: None,
             model: String::new(),
+            reasoning_model: false,
             reasoning_effort: None,
             system_prompt: None,
             max_tokens: None,
@@ -1006,7 +1012,9 @@ impl Agent {
                 let (fitted, reduced) = self.fit_transcript(&transcript, reduction_level);
                 let fitted_tokens = context::estimate_transcript_tokens(&fitted);
                 let request = ChatRequest {
+                    provider: self.config.provider.clone(),
                     model: self.config.model.clone(),
+                    reasoning_model: self.config.reasoning_model,
                     system: self.config.system_prompt.clone(),
                     messages: fitted,
                     tools: self

@@ -25,7 +25,11 @@ impl InputModality {
     }
 }
 
-const TEXT_AND_IMAGE: &[InputModality] = &[InputModality::Text, InputModality::Image];
+const TEXT_ONLY: &[InputModality] = &[InputModality::Text];
+
+/// Separator in the stable provider-scoped selection key persisted for new
+/// defaults, chat overrides, and turn receipts.
+pub const MODEL_KEY_SEPARATOR: &str = "::";
 
 /// Capability and presentation metadata for a curated model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +54,7 @@ pub struct ModelSpec {
 
 impl ModelSpec {
     /// Whether this model accepts `modality`.
+    #[cfg(test)]
     pub fn accepts(&self, modality: InputModality) -> bool {
         self.input_modalities.contains(&modality)
     }
@@ -63,7 +68,10 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Anthropic,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_AND_IMAGE,
+        // The upstream model accepts images, but OpenWave's normalized content
+        // contract is text/tool-only today. Do not advertise a capability that
+        // cannot make it through the complete request path.
+        input_modalities: TEXT_ONLY,
         supports_reasoning: true,
         // The Anthropic adapter can stream thinking blocks, but it does not
         // currently send a caller-selected effort or thinking budget.
@@ -75,7 +83,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Anthropic,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_AND_IMAGE,
+        input_modalities: TEXT_ONLY,
         supports_reasoning: true,
         supports_reasoning_effort: false,
     },
@@ -85,7 +93,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Anthropic,
         context_window: 200_000,
         max_output_tokens: 64_000,
-        input_modalities: TEXT_AND_IMAGE,
+        input_modalities: TEXT_ONLY,
         supports_reasoning: true,
         supports_reasoning_effort: false,
     },
@@ -95,7 +103,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Openai,
         context_window: 128_000,
         max_output_tokens: 16_384,
-        input_modalities: TEXT_AND_IMAGE,
+        input_modalities: TEXT_ONLY,
         supports_reasoning: false,
         supports_reasoning_effort: false,
     },
@@ -105,7 +113,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Openai,
         context_window: 128_000,
         max_output_tokens: 16_384,
-        input_modalities: TEXT_AND_IMAGE,
+        input_modalities: TEXT_ONLY,
         supports_reasoning: false,
         supports_reasoning_effort: false,
     },
@@ -115,7 +123,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Openai,
         context_window: 200_000,
         max_output_tokens: 100_000,
-        input_modalities: TEXT_AND_IMAGE,
+        input_modalities: TEXT_ONLY,
         supports_reasoning: true,
         supports_reasoning_effort: true,
     },
@@ -125,7 +133,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Openai,
         context_window: 200_000,
         max_output_tokens: 100_000,
-        input_modalities: TEXT_AND_IMAGE,
+        input_modalities: TEXT_ONLY,
         supports_reasoning: true,
         supports_reasoning_effort: true,
     },
@@ -138,9 +146,49 @@ pub fn models_for(provider: ProviderKind) -> impl Iterator<Item = &'static Model
         .filter(move |spec| spec.provider == provider)
 }
 
-/// Find an exact curated model id.
+/// Find a bare curated model id only when exactly one provider owns it.
 pub fn find(id: &str) -> Option<&'static ModelSpec> {
-    MODEL_REGISTRY.iter().find(|spec| spec.id == id)
+    let mut matches = models_named(id);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+/// Curated provider owners for a raw model id.
+pub fn models_named(id: &str) -> impl Iterator<Item = &'static ModelSpec> + Clone + '_ {
+    MODEL_REGISTRY.iter().filter(move |spec| spec.id == id)
+}
+
+/// Find an exact curated model under the provider that owns it.
+pub fn find_for(provider: ProviderKind, id: &str) -> Option<&'static ModelSpec> {
+    MODEL_REGISTRY
+        .iter()
+        .find(|spec| spec.provider == provider && spec.id == id)
+}
+
+/// Build the stable provider-scoped key used at all public selection
+/// boundaries. The provider is never inferred again after this point.
+pub fn selection_key(provider: ProviderKind, id: &str) -> String {
+    format!("{}{MODEL_KEY_SEPARATOR}{id}", provider.as_str())
+}
+
+/// Parse a provider-scoped selection key. Model ids may themselves contain the
+/// separator; only the first separator is structural.
+pub fn parse_selection_key(value: &str) -> Option<(ProviderKind, &str)> {
+    let (provider, id) = value.split_once(MODEL_KEY_SEPARATOR)?;
+    let provider = ProviderKind::parse(provider)?;
+    if id.is_empty() {
+        return None;
+    }
+    Some((provider, id))
+}
+
+/// Canonicalize an old bare curated id without changing which provider owns it.
+#[cfg(test)]
+pub fn migrate_curated_selection(value: &str) -> Option<String> {
+    if let Some((provider, id)) = parse_selection_key(value) {
+        return find_for(provider, id).map(|_| selection_key(provider, id));
+    }
+    find(value).map(|spec| selection_key(spec.provider, spec.id))
 }
 
 /// Human label for a model id, including a readable fallback for custom ids.
@@ -209,14 +257,24 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_ids_are_unique_and_capabilities_are_well_formed() {
-        let mut ids = HashSet::new();
+    fn registry_provider_model_keys_are_unique_and_capabilities_are_well_formed() {
+        let mut keys = HashSet::new();
         for spec in MODEL_REGISTRY {
-            assert!(ids.insert(spec.id), "duplicate model id {}", spec.id);
+            assert!(
+                keys.insert((spec.provider, spec.id)),
+                "duplicate provider/model key {}::{}",
+                spec.provider,
+                spec.id
+            );
             assert!(spec.context_window > 0);
             assert!(spec.max_output_tokens > 0);
             assert!(spec.context_window >= spec.max_output_tokens);
             assert!(spec.accepts(InputModality::Text));
+            assert!(
+                !spec.accepts(InputModality::Image),
+                "{} advertises image input before the provider contract supports it",
+                spec.id
+            );
             assert!(
                 !spec.supports_reasoning_effort || spec.supports_reasoning,
                 "{} exposes reasoning effort without reasoning",
@@ -260,5 +318,25 @@ mod tests {
         );
         assert_eq!(display_name_for("gpt-6-2026-01-01"), "GPT 6");
         assert_eq!(display_name_for("local-model"), "Local Model");
+    }
+
+    #[test]
+    fn selection_keys_are_provider_scoped_and_legacy_ids_migrate_losslessly() {
+        let key = selection_key(ProviderKind::Openai, "gpt-4o");
+        assert_eq!(key, "openai::gpt-4o");
+        assert_eq!(
+            parse_selection_key(&key),
+            Some((ProviderKind::Openai, "gpt-4o"))
+        );
+        assert_eq!(
+            parse_selection_key("openai_compatible::vendor::model"),
+            Some((ProviderKind::OpenaiCompatible, "vendor::model"))
+        );
+        assert_eq!(
+            migrate_curated_selection("gpt-4o").as_deref(),
+            Some("openai::gpt-4o")
+        );
+        assert!(migrate_curated_selection("anthropic::gpt-4o").is_none());
+        assert!(parse_selection_key("unknown::gpt-4o").is_none());
     }
 }

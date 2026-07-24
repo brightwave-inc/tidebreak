@@ -28,14 +28,24 @@ pub trait ProviderResolver: Send + Sync {
     /// Resolve the provider. Infallible: with no credentials it returns a
     /// fail-closed provider, so a turn surfaces `TurnFailed` instead of egressing.
     async fn resolve(&self) -> Arc<dyn ModelProvider>;
+
+    /// Whether public model selections must resolve through the host registry.
+    ///
+    /// Production configured routing returns true. Test/custom embedders that
+    /// inject one provider keep their existing free-form model contract.
+    fn enforces_model_registry(&self) -> bool {
+        false
+    }
 }
 
 /// Resolves a composite [`Router`] from enabled, credentialed providers — or a
 /// fail-closed provider when none are configured.
 ///
-/// Selection happens inside the router on `stream(req)` from `req.model`
-/// (curated catalog match, else openai_compatible free-form fallback). No
-/// default provider: empty config ⇒ no egress.
+/// Selection happens inside the router from the host-resolved provider hint and
+/// raw provider model ID. It never crosses to another provider implicitly. The
+/// OpenAI-compatible free-form fallback remains only for legacy stored rows;
+/// new public selections must be registered first. No default provider: empty
+/// config ⇒ no egress.
 pub struct ConfiguredResolver {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
@@ -81,5 +91,9 @@ impl ProviderResolver for ConfiguredResolver {
         };
         *cached = Some((fingerprint, provider.clone()));
         provider
+    }
+
+    fn enforces_model_registry(&self) -> bool {
+        true
     }
 }

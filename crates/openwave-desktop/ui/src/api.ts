@@ -5,6 +5,8 @@ export type ServerInfo = {
 };
 
 export type ProviderKind = "anthropic" | "openai" | "openai_compatible";
+/** Stable provider-scoped key used for new settings and chat overrides. */
+export type ModelSelectionKey = `${ProviderKind}::${string}`;
 
 /** How hard a reasoning-capable model should think before answering. */
 export type ReasoningEffort = "low" | "medium" | "high";
@@ -14,13 +16,25 @@ export type ProviderInfo = {
   enabled: boolean;
   has_credential: boolean;
   base_url: string | null;
+  models: CustomModelConfig[];
+};
+
+export type CustomModelConfig = {
+  id: string;
+  display_name: string | null;
+  context_window: number;
+  max_output_tokens: number;
 };
 
 export type ModelInfo = {
+  /** Stable provider-qualified selection key. */
+  key: ModelSelectionKey;
   id: string;
   /** Human-readable label for the selector (e.g. "Claude Opus 4.8"). */
   display_name: string;
-  provider: string;
+  provider: ProviderKind;
+  /** Provider is enabled, configured, and credentialed. */
+  available: boolean;
   /** Approximate context window in tokens. */
   context_window: number;
   /** Maximum response size in tokens. */
@@ -330,6 +344,7 @@ export class ApiClient {
       enabled?: boolean;
       base_url?: string | null;
       credential?: { type: "api_key"; key: string };
+      models?: CustomModelConfig[];
     },
   ): Promise<ProviderInfo> {
     return this.json(`/providers/${kind}`, {
@@ -359,7 +374,7 @@ export class ApiClient {
    * it to the server default, and a value sets it (matching the double-option
    * body the server expects).
    */
-  putSettings(body: { model?: string | null }): Promise<RuntimeSettings> {
+  putSettings(body: { model?: ModelSelectionKey | null }): Promise<RuntimeSettings> {
     return this.json("/settings", {
       method: "PUT",
       headers: this.headers(true),
@@ -450,7 +465,7 @@ export class ApiClient {
     });
   }
 
-  createChat(model?: string, projectId?: string | null): Promise<Chat> {
+  createChat(model?: ModelSelectionKey, projectId?: string | null): Promise<Chat> {
     return this.json("/chats", {
       method: "POST",
       headers: this.headers(true),
@@ -486,7 +501,10 @@ export class ApiClient {
     });
   }
 
-  patchChatModel(chatId: string, model: string | null): Promise<Chat> {
+  patchChatModel(
+    chatId: string,
+    model: ModelSelectionKey | null,
+  ): Promise<Chat> {
     return this.json(`/chats/${chatId}`, {
       method: "PATCH",
       headers: this.headers(true),

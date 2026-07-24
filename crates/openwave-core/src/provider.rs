@@ -87,8 +87,19 @@ impl ChatMessage {
 /// A request for one streamed model completion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
+    /// Explicit provider route selected by the host. Composite routers must
+    /// honor this hint exactly and must not silently fall back to another
+    /// provider. Direct adapters may ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderId>,
     /// Provider-specific model identifier (e.g. `claude-opus-4-8`).
     pub model: String,
+    /// Whether the resolved model uses a reasoning-model request shape.
+    ///
+    /// This is host-owned registry policy, rather than an adapter guess based
+    /// on the model name.
+    #[serde(default)]
+    pub reasoning_model: bool,
     /// System prompt, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
@@ -251,7 +262,9 @@ mod tests {
     fn provider_stream_outlives_the_provider_borrow() {
         let provider: Arc<dyn ModelProvider> = Arc::new(Dummy);
         let stream = futures::executor::block_on(provider.stream(ChatRequest {
+            provider: None,
             model: "m".into(),
+            reasoning_model: false,
             system: None,
             messages: vec![],
             tools: vec![],
@@ -276,7 +289,9 @@ mod tests {
     #[test]
     fn chat_request_omits_empty_optionals() {
         let req = ChatRequest {
+            provider: None,
             model: "m".into(),
+            reasoning_model: false,
             system: None,
             messages: vec![ChatMessage::text(Role::User, "hello")],
             tools: vec![],

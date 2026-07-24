@@ -292,7 +292,7 @@ describe("project-scoped conversation API", () => {
     const client = new ApiClient("http://127.0.0.1", "token");
 
     await client.createProject("Research");
-    await client.createChat("model-1", "project-1");
+    await client.createChat("anthropic::model-1", "project-1");
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -307,7 +307,10 @@ describe("project-scoped conversation API", () => {
       "http://127.0.0.1/chats",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ model: "model-1", project_id: "project-1" }),
+        body: JSON.stringify({
+          model: "anthropic::model-1",
+          project_id: "project-1",
+        }),
       }),
     );
   });

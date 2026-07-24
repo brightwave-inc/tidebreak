@@ -140,12 +140,19 @@ closed until a matching provider is enabled and credentialed. OpenAI-compatible
 routes currently require a nonempty credential even when a local endpoint would
 otherwise accept unauthenticated requests.
 
-Curated model metadata has one server-owned registry. It records the canonical
-provider ID, display name, token limits, accepted input modalities, and reasoning
-capabilities used by both `GET /models` and model-to-provider routing. Provider
-configuration filters that registry; it does not maintain a second list of model
-IDs. Custom OpenAI-compatible model IDs remain allowed outside the curated
-registry and receive a derived display name.
+Model metadata has one server-owned registry. Every selection uses a
+provider-qualified key (`provider::model`) and records the provider ID, display
+name, token limits, accepted input modalities, and reasoning capabilities used
+by both `GET /models` and model-to-provider routing. The host applies that
+metadata to the runtime request; clients cannot override token or capability
+policy.
+
+OpenAI-compatible endpoints can register custom model IDs and their context and
+output limits in provider settings. Those models enter the same catalog with
+conservative text-only, non-reasoning capabilities. Existing unqualified model
+settings are migrated at the API boundary when exactly one configured provider
+owns the ID. Ambiguous IDs fail closed and must be reselected with their
+provider, so routing never depends on registry order.
 
 ## What happens during a chat turn
 
@@ -162,6 +169,12 @@ The operational store commits the user message and a queued `TurnRun` together.
 Only then does the API return `202 Accepted`. Repeating the same `turn_id`, chat,
 and text returns the existing accepted turn. Reusing the identity for different
 input is a conflict.
+
+Before that commit, the server canonicalizes the chosen model to its
+provider-qualified registry key and verifies that the provider is enabled and
+credentialed. The worker later resolves that key back to the same immutable
+model policy. Authentication and invalid-request failures are terminal; rate
+limits and provider overload remain retryable.
 
 Each chat has one live durable turn slot. This makes ordering and transcript
 construction straightforward. A second turn is not queued behind the first; the

@@ -5,6 +5,41 @@
 //! extract the `data:` JSON payload — the same shape Anthropic and OpenAI-compat
 //! both speak.
 
+use futures::{Stream, StreamExt};
+
+/// Maximum provider error bytes inspected for classification.
+///
+/// Error responses are untrusted and may be arbitrarily large. The adapters
+/// stop reading at this boundary before parsing or constructing a durable
+/// client-visible failure.
+pub const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 8 * 1024;
+
+/// Consume at most [`MAX_PROVIDER_ERROR_BODY_BYTES`] from an HTTP byte stream.
+///
+/// The caller drops the remaining response stream after this returns. Invalid
+/// or truncated UTF-8 is tolerated because the result is only an untrusted
+/// classification hint and is never forwarded verbatim.
+pub async fn read_bounded_error_body<S, B, E>(chunks: S) -> String
+where
+    S: Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+{
+    futures::pin_mut!(chunks);
+    let mut body = Vec::with_capacity(MAX_PROVIDER_ERROR_BODY_BYTES);
+    while body.len() < MAX_PROVIDER_ERROR_BODY_BYTES {
+        let Some(Ok(chunk)) = chunks.next().await else {
+            break;
+        };
+        let bytes = chunk.as_ref();
+        let take = bytes.len().min(MAX_PROVIDER_ERROR_BODY_BYTES - body.len());
+        body.extend_from_slice(&bytes[..take]);
+        if take < bytes.len() {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
+}
+
 /// Naive byte-substring search.
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
@@ -75,12 +110,26 @@ pub fn safe_http_error(provider: &str, status: u16, body: &str) -> String {
             err.get("type")
                 .or_else(|| err.get("code"))
                 .and_then(serde_json::Value::as_str)
+                .filter(|code| safe_error_code(code))
                 .map(str::to_owned)
         });
     match detail {
         Some(code) => format!("{provider} returned {status} ({code})"),
         None => format!("{provider} returned {status}"),
     }
+}
+
+/// Accept only a compact enum-style token. Error fields come from an
+/// untrusted gateway and may otherwise contain echoed credentials, prompts, or
+/// control characters that would reach the renderer through `TurnFailed`.
+fn safe_error_code(code: &str) -> bool {
+    const MAX_ERROR_CODE_BYTES: usize = 48;
+    let bytes = code.as_bytes();
+    matches!(bytes.first(), Some(b'a'..=b'z'))
+        && bytes.len() <= MAX_ERROR_CODE_BYTES
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
 /// Classify a provider HTTP error, detecting prompt-too-long patterns that the
@@ -92,29 +141,64 @@ pub fn classify_provider_error(
 ) -> openwave_core::error::AgentError {
     use openwave_core::error::AgentError;
 
-    if status == 400 {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
-            let err = parsed.get("error").unwrap_or(&parsed);
-            let code = err
-                .get("code")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let message = err
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let error = parsed
+        .as_ref()
+        .map(|value| value.get("error").unwrap_or(value));
+    let code = error
+        .and_then(|error| error.get("code").or_else(|| error.get("type")))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let message = error
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let safe = || safe_http_error(provider, status, body);
 
-            if code == "context_length_exceeded" || message.contains("prompt is too long") {
-                return AgentError::PromptTooLong(safe_http_error(provider, status, body));
-            }
-        }
+    if status == 400
+        && (code == "context_length_exceeded" || message.contains("prompt is too long"))
+    {
+        return AgentError::PromptTooLong(safe());
     }
-    AgentError::Provider(safe_http_error(provider, status, body))
+    if matches!(status, 401 | 403) || matches!(code, "authentication_error" | "invalid_api_key") {
+        return AgentError::Authentication(safe());
+    }
+    if status == 429 || code == "rate_limit_error" {
+        return AgentError::RateLimited(safe());
+    }
+    if matches!(status, 502 | 503 | 504 | 529)
+        || matches!(code, "overloaded_error" | "server_overloaded")
+    {
+        return AgentError::Overloaded(safe());
+    }
+    if matches!(
+        code,
+        "content_policy_violation" | "content_filter" | "refusal"
+    ) {
+        return AgentError::Refusal(safe());
+    }
+    if status == 400 || status == 422 || code == "invalid_request_error" {
+        return AgentError::InvalidRequest(safe());
+    }
+    AgentError::Provider(safe())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn provider_error_body_reader_stops_at_the_fixed_byte_limit() {
+        let chunks = futures::stream::iter([
+            Ok::<_, ()>(vec![b'a'; MAX_PROVIDER_ERROR_BODY_BYTES - 2]),
+            Ok(vec![b'b'; 16 * 1024]),
+            Ok(b"must not be consumed".to_vec()),
+        ]);
+        let body = read_bounded_error_body(chunks).await;
+        assert_eq!(body.len(), MAX_PROVIDER_ERROR_BODY_BYTES);
+        assert!(body.ends_with("bb"));
+        assert!(!body.contains("must not be consumed"));
+    }
 
     #[test]
     fn drain_frames_handles_lf_crlf_and_partial_tail() {
@@ -174,24 +258,55 @@ mod tests {
     }
 
     #[test]
-    fn classify_returns_provider_for_other_400s() {
+    fn classify_returns_invalid_request_for_other_400s() {
         use openwave_core::error::AgentError;
         let body = r#"{"error":{"type":"invalid_request_error","message":"invalid api key"}}"#;
         let err = classify_provider_error("anthropic", 400, body);
         assert!(
-            matches!(err, AgentError::Provider(_)),
-            "expected Provider, got {err:?}"
+            matches!(err, AgentError::InvalidRequest(_)),
+            "expected InvalidRequest, got {err:?}"
         );
     }
 
     #[test]
-    fn classify_returns_provider_for_non_400_status() {
+    fn classify_distinguishes_auth_rate_limit_overload_and_refusal() {
         use openwave_core::error::AgentError;
-        let body = r#"{"error":{"type":"overloaded_error"}}"#;
-        let err = classify_provider_error("anthropic", 529, body);
-        assert!(
-            matches!(err, AgentError::Provider(_)),
-            "expected Provider, got {err:?}"
+        assert!(matches!(
+            classify_provider_error("provider", 401, "{}"),
+            AgentError::Authentication(_)
+        ));
+        assert!(matches!(
+            classify_provider_error("provider", 429, "{}"),
+            AgentError::RateLimited(_)
+        ));
+        assert!(matches!(
+            classify_provider_error("anthropic", 529, r#"{"error":{"type":"overloaded_error"}}"#),
+            AgentError::Overloaded(_)
+        ));
+        assert!(matches!(
+            classify_provider_error("provider", 400, r#"{"error":{"code":"content_filter"}}"#),
+            AgentError::Refusal(_)
+        ));
+    }
+
+    #[test]
+    fn safe_http_error_rejects_untrusted_code_text() {
+        let raw = "sk-secret request fragment\nnext";
+        let body = serde_json::json!({
+            "error": {
+                "code": raw,
+                "message": "another secret"
+            }
+        })
+        .to_string();
+        let error = safe_http_error("openai-compat", 401, &body);
+        assert_eq!(error, "openai-compat returned 401");
+        assert!(!error.contains("secret"));
+        assert!(!error.contains("fragment"));
+
+        assert_eq!(
+            safe_http_error("anthropic", 429, r#"{"error":{"type":"rate_limit_error"}}"#),
+            "anthropic returned 429 (rate_limit_error)"
         );
     }
 }
