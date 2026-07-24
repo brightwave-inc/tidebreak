@@ -1573,7 +1573,8 @@ fn default_pending_approvals_limit() -> u64 {
 }
 
 /// Closed renderer-safe pending approval projection. Canonical arguments,
-/// model-authored summaries, and unknown tool names never cross this boundary.
+/// model-authored summaries, and unknown tool names never cross this boundary;
+/// only a tool's own closed preview of the action under review does.
 #[derive(Debug, Serialize)]
 pub(crate) struct PendingApprovalSnapshot {
     pub call_id: CallId,
@@ -1581,6 +1582,8 @@ pub(crate) struct PendingApprovalSnapshot {
     pub action: crate::event_projection::RendererToolName,
     pub approval: openwave_core::ToolApprovalKind,
     pub class: openwave_core::ApprovalClass,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<openwave_core::ToolApprovalPreview>,
     pub can_approve: bool,
     pub can_remember: bool,
 }
@@ -1616,6 +1619,7 @@ pub(crate) async fn list_pending_approvals(
                     action,
                     approval: kind,
                     class: approval.class,
+                    preview: approval.preview,
                     can_approve: kind.is_approvable(),
                     can_remember: kind.is_standing_grantable(),
                 }

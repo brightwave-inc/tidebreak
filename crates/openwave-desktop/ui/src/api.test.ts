@@ -189,12 +189,52 @@ describe("pending approval recovery", () => {
       action: "search",
       approval: "search_may_share_query_and_excerpts",
       class: "sensitive",
+      preview: null,
       canApprove: true,
       canRemember: true,
     });
     expect(parsePendingToolApproval({ ...safe, arguments: { query: "private" } })).toBeNull();
     expect(parsePendingToolApproval({ ...safe, can_approve: false })).toBeNull();
     expect(parsePendingToolApproval({ ...safe, action: "private_plugin" })).toBeNull();
+  });
+
+  it("recovers the command an exec approval is granting", () => {
+    expect(
+      parsePendingToolApproval({
+        ...safe,
+        action: "exec",
+        approval: "exec_may_run_networked_command",
+        preview: {
+          tool: "exec",
+          command: "cargo",
+          args: ["test", "--workspace"],
+          cwd: "checkout",
+        },
+      })?.preview,
+    ).toEqual({
+      tool: "exec",
+      command: "cargo",
+      args: ["test", "--workspace"],
+      cwd: "checkout",
+    });
+  });
+
+  it("drops a preview it cannot fully validate rather than half-rendering it", () => {
+    const exec = {
+      ...safe,
+      action: "exec",
+      approval: "exec_may_run_networked_command",
+    };
+    for (const preview of [
+      { tool: "shell", command: "rm", args: [], cwd: "." },
+      { tool: "exec", command: "", args: [], cwd: "." },
+      { tool: "exec", command: "cargo", args: "test", cwd: "." },
+      { tool: "exec", command: "cargo", args: [{ hidden: true }], cwd: "." },
+      { tool: "exec", command: "cargo", args: [] },
+      "cargo test",
+    ]) {
+      expect(parsePendingToolApproval({ ...exec, preview })?.preview).toBeNull();
+    }
   });
 
   it("recovers an approvable escaping exec action", () => {

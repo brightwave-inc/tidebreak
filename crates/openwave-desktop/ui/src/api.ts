@@ -250,6 +250,7 @@ export type AgentEvent =
       action: RendererToolName;
       approval: RendererApprovalKind;
       class: "read_only" | "workspace" | "sensitive";
+      preview?: ToolApprovalPreview;
     }
   | { type: "approval_decided"; call_id: string; approved: boolean }
   | {
@@ -285,6 +286,21 @@ export type RendererToolName =
   | "exec"
   | "other";
 
+/**
+ * The action a parked call will take, in a form a human can inspect.
+ *
+ * The renderer boundary otherwise carries no tool arguments. This is the one
+ * exception: a tool may project a closed, field-by-field view of what it is
+ * about to do, because consent to an action you cannot see is not consent.
+ * Tools without a variant send nothing.
+ */
+export type ToolApprovalPreview = {
+  tool: "exec";
+  command: string;
+  args: string[];
+  cwd: string;
+};
+
 export type RendererApprovalKind =
   | "search_may_share_query_and_excerpts"
   | "web_search_may_share_query"
@@ -314,6 +330,8 @@ export type PendingToolApproval = {
   action: RendererToolName;
   approval: RendererApprovalKind;
   class: "read_only" | "workspace" | "sensitive";
+  /** What the parked call will do, when its tool projects a preview. */
+  preview: ToolApprovalPreview | null;
   canApprove: boolean;
   canRemember: boolean;
 };
@@ -948,6 +966,7 @@ export function parsePendingToolApproval(
         key !== "action" &&
         key !== "approval" &&
         key !== "class" &&
+        key !== "preview" &&
         key !== "can_approve" &&
         key !== "can_remember",
     ) ||
@@ -973,9 +992,34 @@ export function parsePendingToolApproval(
     action: value.action,
     approval: value.approval,
     class: value.class,
+    preview: parseToolApprovalPreview(value.preview),
     canApprove: value.can_approve,
     canRemember: value.can_remember,
   };
+}
+
+/**
+ * Validate a preview field by field. A malformed or unrecognized preview is
+ * dropped rather than partially rendered: an approval card that describes the
+ * wrong action is worse than one that describes no action.
+ */
+export function parseToolApprovalPreview(
+  value: unknown,
+): ToolApprovalPreview | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value) || value.tool !== "exec") return null;
+  const { command, args, cwd } = value;
+  if (
+    typeof command !== "string" ||
+    command.length === 0 ||
+    !Array.isArray(args) ||
+    !args.every((arg): arg is string => typeof arg === "string") ||
+    typeof cwd !== "string" ||
+    cwd.length === 0
+  ) {
+    return null;
+  }
+  return { tool: "exec", command, args, cwd };
 }
 
 function isRendererToolName(value: unknown): value is RendererToolName {

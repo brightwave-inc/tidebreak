@@ -11345,6 +11345,21 @@ async fn claimed_sensitive_call_named(
     chat: &Chat,
     tool_name: &str,
 ) -> (TurnId, uuid::Uuid, ToolCallRecord, ApprovalRequest) {
+    claimed_sensitive_call_with(
+        store,
+        chat,
+        tool_name,
+        serde_json::json!({"query": "private"}),
+    )
+    .await
+}
+
+async fn claimed_sensitive_call_with(
+    store: &DbStore,
+    chat: &Chat,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> (TurnId, uuid::Uuid, ToolCallRecord, ApprovalRequest) {
     let turn_id = TurnId::new();
     let accepted = match store
         .accept_turn(turn_id, chat.id, "gpt-5", "search")
@@ -11382,7 +11397,7 @@ async fn claimed_sensitive_call_named(
         turn_id,
         provider_id: "approval-call".into(),
         name: tool_name.into(),
-        arguments: serde_json::json!({"query": "private"}),
+        arguments,
         execution: ToolCallExecution::Server,
         status: ToolCallStatus::Pending,
         result: None,
@@ -11404,9 +11419,51 @@ async fn claimed_sensitive_call_named(
         tool_name: call.name.clone(),
         class: ApprovalClass::Sensitive,
         kind: crate::ToolApprovalKind::for_tool_name(&call.name),
+        preview: None,
         summary: "search requires approval".into(),
     };
     (turn_id, lease_token, call, request)
+}
+
+#[tokio::test]
+async fn recovered_exec_approval_still_names_the_command_it_will_run() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (_turn_id, lease_token, _call, request) = claimed_sensitive_call_with(
+        &store,
+        &chat,
+        "exec",
+        serde_json::json!({ "command": "cargo", "args": ["build"], "cwd": "checkout" }),
+    )
+    .await;
+
+    store
+        .request_tool_call_approval_and_append_event(
+            &request,
+            lease_token,
+            1,
+            DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The preview is rebuilt from the arguments the call is parked on, so a
+    // card recovered after a restart describes the command that will actually
+    // run rather than whatever was in flight when the process died.
+    let recovered = store
+        .get_tool_call_approval(request.call_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recovered.preview,
+        Some(crate::ToolApprovalPreview::Exec {
+            command: "cargo".into(),
+            args: vec!["build".into()],
+            cwd: "checkout".into(),
+        })
+    );
 }
 
 #[tokio::test]

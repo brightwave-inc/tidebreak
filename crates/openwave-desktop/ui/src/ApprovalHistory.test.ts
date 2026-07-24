@@ -10,6 +10,7 @@ const pending = {
   action: "search" as const,
   approval: "search_may_share_query_and_excerpts" as const,
   class: "sensitive" as const,
+  preview: null,
   canApprove: true,
   canRemember: true,
 };
