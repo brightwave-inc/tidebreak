@@ -570,10 +570,18 @@ byte length and SHA-256 digest, and parses it into:
 - canonical UTF-8 text, the text-of-record used by indexing;
 - source regions that map text byte ranges back to locations such as pages.
 
-The parse completion and creation of the matching `Index` job are atomic. Today
-the configured parser registry handles `text/*` content. Richer PDF and office
-parsers are future work. The model can represent page provenance, but the
-production plain-text parser does not emit page regions today.
+The parse completion and creation of the matching `Index` job are atomic. The
+configured registry selects a parser by media type: liteparse handles PDF,
+Office, and raster image formats, a plain-text parser handles `text/*`, and a
+fallback keeps anything else storable by indexing it when it decodes as UTF-8
+and leaving it empty when it does not. The model can represent page provenance,
+but the parsers do not emit page regions today.
+
+Because that selection is by media type, the media type has to be right. The
+trusted native side decides it from the bytes rather than from the filename, so
+a document cannot be routed to a parser that cannot read it — and a parser that
+produces no text yields a source the catalog reports as stored but not
+searchable rather than as ready.
 
 ### 4. Chunk, embed, and stage
 

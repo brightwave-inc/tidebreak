@@ -222,13 +222,17 @@ pub(crate) async fn import_library_document(
     let Some(path) = pick_document(&app).await? else {
         return Ok(None);
     };
-    let (media_type, display_name) = import_metadata(&path)?;
+    let display_name = import_display_name(&path)?;
+    let sniff_path = path.clone();
     let source_bytes = tauri::async_runtime::spawn_blocking(move || read_selected_document(&path))
         .await
         .map_err(|_| "Could not read the selected document".to_owned())??;
     if source_bytes.is_empty() {
         return Err("The selected document is empty".to_owned());
     }
+    // Decided from the bytes, not the name the file happens to carry, so the
+    // server routes the source to the parser that can actually read it.
+    let media_type = crate::media_type::sniff_media_type_for_path(&source_bytes, &sniff_path);
 
     let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
     let info = wait_server_info(app_state.inner()).await?;
@@ -329,36 +333,17 @@ async fn pick_document(app: &AppHandle) -> Result<Option<PathBuf>, String> {
         .map_err(|_| "The document picker returned an invalid file".to_owned())
 }
 
-fn import_metadata(path: &Path) -> Result<(&'static str, String), String> {
+fn import_display_name(path: &Path) -> Result<String, String> {
     if !path.is_absolute() {
         return Err("The document picker returned an invalid file".to_owned());
     }
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase);
-    // Map common extensions to a media type; anything else is imported as opaque
-    // bytes (`application/octet-stream`). The server accepts every type — text is
-    // indexed, binary is stored — so an unknown extension is never an error here.
-    let media_type = match extension.as_deref() {
-        Some("md" | "markdown") => "text/markdown",
-        Some("txt" | "text" | "log") => "text/plain",
-        Some("csv") => "text/csv",
-        Some("html" | "htm") => "text/html",
-        Some("json") => "application/json",
-        Some("xml") => "application/xml",
-        Some("yaml" | "yml") => "application/yaml",
-        Some("pdf") => "application/pdf",
-        _ => "application/octet-stream",
-    };
-    let display_name = path
-        .file_name()
+    path.file_name()
         .and_then(|name| name.to_str())
         .filter(|name| {
             !name.is_empty() && name.chars().count() <= 255 && name.chars().all(is_safe_title_char)
         })
-        .ok_or_else(|| "The selected document has an invalid name".to_owned())?;
-    Ok((media_type, display_name.to_owned()))
+        .map(str::to_owned)
+        .ok_or_else(|| "The selected document has an invalid name".to_owned())
 }
 
 fn read_selected_document(path: &Path) -> Result<Vec<u8>, String> {
@@ -518,44 +503,26 @@ mod tests {
     }
 
     #[test]
-    fn import_metadata_exposes_only_a_bounded_filename() {
-        let (media_type, name) =
-            import_metadata(Path::new("/Users/private/notes/plan.md")).unwrap();
-        assert_eq!(media_type, "text/markdown");
+    fn import_display_name_exposes_only_a_bounded_filename() {
+        let name = import_display_name(Path::new("/Users/private/notes/plan.md")).unwrap();
         assert_eq!(name, "plan.md");
         assert!(!name.contains("private"));
-        // Known extensions map to their media type…
+        // The title is the only thing the name decides. Media type comes from
+        // the bytes, so an unfamiliar extension is never a reason to refuse.
         assert_eq!(
-            import_metadata(Path::new("/Users/private/plan.pdf"))
-                .unwrap()
-                .0,
-            "application/pdf"
+            import_display_name(Path::new("/Users/private/archive.bin")).unwrap(),
+            "archive.bin"
         );
         assert_eq!(
-            import_metadata(Path::new("/Users/private/sheet.csv"))
-                .unwrap()
-                .0,
-            "text/csv"
-        );
-        // …and any other file is imported as opaque bytes rather than rejected.
-        assert_eq!(
-            import_metadata(Path::new("/Users/private/archive.bin"))
-                .unwrap()
-                .0,
-            "application/octet-stream"
-        );
-        assert_eq!(
-            import_metadata(Path::new("/Users/private/no_extension"))
-                .unwrap()
-                .0,
-            "application/octet-stream"
+            import_display_name(Path::new("/Users/private/no_extension")).unwrap(),
+            "no_extension"
         );
         // Path and filename safety still apply regardless of type.
-        assert!(import_metadata(Path::new("relative.md")).is_err());
-        assert!(import_metadata(Path::new("/Users/private/bad\u{202e}txt.md")).is_err());
+        assert!(import_display_name(Path::new("relative.md")).is_err());
+        assert!(import_display_name(Path::new("/Users/private/bad\u{202e}txt.md")).is_err());
         for unsafe_character in ['\u{200d}', '\u{206a}', '\u{206f}', '\u{2028}', '\u{2029}'] {
             let path = format!("/Users/private/bad{unsafe_character}.md");
-            assert!(import_metadata(Path::new(&path)).is_err());
+            assert!(import_display_name(Path::new(&path)).is_err());
         }
     }
 
