@@ -736,6 +736,7 @@ fn historical_tool_title(name: &str) -> &'static str {
         crate::ASK_USER_QUESTIONS_TOOL => "Ask a question",
         "spawn_sandbox_agent" => "Delegate a task",
         "wait_for_agents" => "Wait for background agents",
+        "exec" => "Run a command",
         _ => "Use a tool",
     }
 }
@@ -1175,5 +1176,44 @@ mod historical_tool_title_tests {
             historical_tool_title(crate::ASK_USER_QUESTIONS_TOOL),
             "Ask a question"
         );
+    }
+
+    /// A tool the renderer can name live must also have a historical title.
+    ///
+    /// `exec` had one and not the other, so a command read as "Ran a command"
+    /// while streaming and "Used a tool" after a reload — with its own command
+    /// card still visible underneath. The renderer folds anything it does not
+    /// recognize to `other`, which is the one name that legitimately has no
+    /// title of its own.
+    #[test]
+    fn every_renderer_visible_tool_has_a_historical_title() {
+        for name in [
+            "search",
+            "list_sources",
+            "read_source",
+            "web_search",
+            crate::SANDBOX_READ_DELEGATED_FILE_TOOL,
+            "read_file",
+            "list_dir",
+            "write_file",
+            "create_deliverable",
+            "request_folder_access",
+            "connect_folder",
+            "list_connected_folders",
+            "list_folder",
+            "read_connected_file",
+            "import_connected_file",
+            "spawn_sandbox_agent",
+            "wait_for_agents",
+            crate::ASK_USER_QUESTIONS_TOOL,
+            "exec",
+        ] {
+            assert_ne!(
+                historical_tool_title(name),
+                "Use a tool",
+                "{name} has no historical title"
+            );
+        }
+        assert_eq!(historical_tool_title("other"), "Use a tool");
     }
 }

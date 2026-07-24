@@ -183,6 +183,7 @@ export type ChatToolActivity = {
     | "Ask a question"
     | "Delegate a task"
     | "Wait for background agents"
+    | "Run a command"
     | "Use a tool";
   status: "completed" | "failed" | "cancelled";
   started_at: string;
