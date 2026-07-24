@@ -12034,6 +12034,9 @@ async fn foreground_web_search_runs_end_to_end_through_durable_approval() {
     assert_eq!(pending[0]["class"], "sensitive");
     assert_eq!(pending[0]["can_approve"], true);
     assert_eq!(pending[0]["can_remember"], true);
+    // Web search consents to an egress class, not to an inspectable action, so
+    // recovery carries no preview of the query.
+    assert!(pending[0].get("preview").is_none());
     let pending_json = pending.to_string();
     assert!(!pending_json.contains("OpenWave release"));
     assert!(!pending_json.contains("Example.com"));

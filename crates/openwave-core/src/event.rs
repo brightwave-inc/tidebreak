@@ -78,6 +78,10 @@ pub enum AgentEvent {
         /// The approval class that triggered the prompt.
         class: ApprovalClass,
         kind: crate::approval::ToolApprovalKind,
+        /// Closed projection of what the call will do, when its tool has one.
+        /// Absent on journal rows written before previews existed.
+        #[serde(default)]
+        preview: Option<crate::approval::ToolApprovalPreview>,
         /// A short, human-readable summary of what will happen.
         summary: String,
     },

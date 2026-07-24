@@ -5,7 +5,8 @@ use sea_orm::{
 };
 
 use crate::approval::{
-    ApprovalDecision, ApprovalRequest, ToolApproval, ToolApprovalKind, ToolApprovalStatus,
+    ApprovalDecision, ApprovalRequest, ToolApproval, ToolApprovalKind, ToolApprovalPreview,
+    ToolApprovalStatus,
 };
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
@@ -38,6 +39,7 @@ pub(in crate::db) async fn request_and_append_event(
         tool_name: request.tool_name.clone(),
         class: request.class,
         kind: request.kind,
+        preview: request.preview.clone(),
         summary: request.summary.clone(),
     };
     let transaction = store.conn.begin().await.map_err(store_err)?;
@@ -483,6 +485,10 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
         tool_name: model.name.clone(),
         class,
         kind,
+        // Rebuilt from the arguments the call is durably parked on rather than
+        // stored separately, so a recovered card can never describe a different
+        // action from the one that will run.
+        preview: ToolApprovalPreview::build(&model.name, &model.arguments),
         status,
         reason: model.approval_reason.clone(),
         requested_at: model

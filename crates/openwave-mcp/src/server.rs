@@ -18,7 +18,7 @@ use std::sync::{
 
 use openwave_core::{
     ApprovalClass, ApprovalDecision, ApprovalGate, ApprovalRequest, CallId, ChatId, StandingGrants,
-    ToolApprovalKind, ToolCtx, ToolOutput, ToolRegistry, TurnId, VERSION,
+    ToolApprovalKind, ToolApprovalPreview, ToolCtx, ToolOutput, ToolRegistry, TurnId, VERSION,
 };
 use serde_json::Value;
 
@@ -66,6 +66,7 @@ impl ApprovalBridge {
         chat_id: ChatId,
         tool_name: &str,
         class: ApprovalClass,
+        arguments: &Value,
     ) -> Option<String> {
         let kind = ToolApprovalKind::for_tool_name(tool_name);
         if self.grants.covers(chat_id, tool_name, kind) {
@@ -78,6 +79,7 @@ impl ApprovalBridge {
             tool_name: tool_name.to_string(),
             class,
             kind,
+            preview: ToolApprovalPreview::build(tool_name, arguments),
             summary: format!("{tool_name} requires approval"),
         };
         // MCP has no durable steer journal, so register without a journal identity.
@@ -292,7 +294,10 @@ impl McpServer {
         let class = tool.approval_class();
         if class != ApprovalClass::ReadOnly {
             if let Some(bridge) = self.approval.as_ref() {
-                if let Some(reason) = bridge.decide(self.ctx.chat_id, &params.name, class).await {
+                if let Some(reason) = bridge
+                    .decide(self.ctx.chat_id, &params.name, class, &params.arguments)
+                    .await
+                {
                     // Denied or unpresentable: a clear error result, not a
                     // silent drop and not a protocol error.
                     return tool_result(ToolOutput::error(reason));

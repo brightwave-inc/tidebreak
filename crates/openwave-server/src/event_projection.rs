@@ -6,7 +6,8 @@
 //! projection instead.
 
 use openwave_core::{
-    AgentEvent, ApprovalClass, CallId, MessageId, SequencedEvent, ToolApprovalKind, TurnId,
+    AgentEvent, ApprovalClass, CallId, MessageId, SequencedEvent, ToolApprovalKind,
+    ToolApprovalPreview, TurnId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,12 @@ pub(crate) enum RendererAgentEvent {
         action: RendererToolName,
         approval: ToolApprovalKind,
         class: ApprovalClass,
+        /// The one deliberate opening in this boundary. A human cannot consent
+        /// to a command they are not shown, so a tool may project a closed,
+        /// field-by-field view of the action under review. Tools without one
+        /// send nothing, as every tool did before.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        preview: Option<ToolApprovalPreview>,
     },
     ApprovalDecided {
         call_id: CallId,
@@ -155,12 +162,14 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 tool_name,
                 class,
                 kind,
+                preview,
                 ..
             } => RendererAgentEvent::ApprovalRequired {
                 call_id: *call_id,
                 action: tool_name.as_str().into(),
                 approval: *kind,
                 class: *class,
+                preview: preview.clone(),
             },
             AgentEvent::ApprovalDecided { call_id, approved } => {
                 RendererAgentEvent::ApprovalDecided {
@@ -225,6 +234,7 @@ mod tests {
                 tool_name: "provider_tool_with_secret".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::Unsupported,
+                preview: None,
                 summary: "upload /Users/private/document.txt".into(),
             },
             AgentEvent::ToolCallCompleted {
@@ -292,6 +302,57 @@ mod tests {
         let encoded = serde_json::to_value(projected).unwrap();
         assert_eq!(encoded["event"]["type"], "user_questions_asked");
         assert_eq!(encoded["event"].as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn exec_approval_projects_the_command_under_review() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 10,
+            event: AgentEvent::ApprovalRequired {
+                call_id: CallId::new(),
+                tool_name: "exec".into(),
+                class: ApprovalClass::Sensitive,
+                kind: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                preview: ToolApprovalPreview::build(
+                    "exec",
+                    &serde_json::json!({
+                        "command": "cargo",
+                        "args": ["test", "--workspace"],
+                        "cwd": "checkout",
+                    }),
+                ),
+                summary: "private model-authored summary".into(),
+            },
+        });
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(json.contains(r#""action":"exec""#));
+        assert!(json.contains(r#""tool":"exec""#));
+        assert!(json.contains(r#""command":"cargo""#));
+        assert!(json.contains(r#""args":["test","--workspace"]"#));
+        assert!(json.contains(r#""cwd":"checkout""#));
+        // The preview replaces the model-authored summary; it does not join it.
+        assert!(!json.contains("private model-authored summary"));
+    }
+
+    #[test]
+    fn approvals_without_a_preview_stay_closed() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 11,
+            event: AgentEvent::ApprovalRequired {
+                call_id: CallId::new(),
+                tool_name: "web_search".into(),
+                class: ApprovalClass::Sensitive,
+                kind: ToolApprovalKind::WebSearchMayShareQuery,
+                preview: ToolApprovalPreview::build(
+                    "web_search",
+                    &serde_json::json!({ "query": "private query" }),
+                ),
+                summary: "private query".into(),
+            },
+        });
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(!json.contains("preview"));
+        assert!(!json.contains("private query"));
     }
 
     #[test]
@@ -364,6 +425,7 @@ mod tests {
                 tool_name: "search".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::SearchMayShareQueryAndExcerpts,
+                preview: None,
                 summary: "private query and document title".into(),
             },
         });
@@ -382,6 +444,7 @@ mod tests {
                 tool_name: "web_search".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::WebSearchMayShareQuery,
+                preview: None,
                 summary: "private query and domain filters".into(),
             },
         });
@@ -401,6 +464,7 @@ mod tests {
                 tool_name: "mcp__private_server__private_tool".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::ExternalMcpMayCallServer,
+                preview: None,
                 summary: "private model-authored arguments".into(),
             },
         });

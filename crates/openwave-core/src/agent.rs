@@ -33,7 +33,7 @@ use crate::agent_tools::{
 };
 use crate::approval::{
     ApprovalDecision, ApprovalGate, ApprovalJournalIdentity, ApprovalRequest,
-    ApprovalRequiredPublication, RefuseGate, StandingGrants, ToolApprovalKind,
+    ApprovalRequiredPublication, RefuseGate, StandingGrants, ToolApprovalKind, ToolApprovalPreview,
 };
 use crate::cancel::CancelToken;
 use crate::citation::{
@@ -2072,6 +2072,15 @@ impl Agent {
             let kind = durable_approval
                 .map(|approval| approval.kind)
                 .unwrap_or_else(|| ToolApprovalKind::for_tool_name(&call.name));
+            // A recovered call re-presents the preview durable state already
+            // holds, so a reconnecting client sees the same command it was
+            // asked about before the restart.
+            let preview = match durable_approval {
+                Some(approval) => approval.preview.clone(),
+                None => serde_json::from_str(&call.args)
+                    .ok()
+                    .and_then(|args| ToolApprovalPreview::build(&call.name, &args)),
+            };
             if self.durable_steer_lease.is_some() && events.flush().await.is_err() {
                 return ToolOutput::error("approval event journal is unavailable");
             }
@@ -2092,6 +2101,7 @@ impl Agent {
                     tool_name: call.name.clone(),
                     class: ApprovalClass::Sensitive,
                     kind,
+                    preview: preview.clone(),
                     summary: summary.clone(),
                 },
                 journal,
@@ -2107,6 +2117,7 @@ impl Agent {
                 tool_name: call.name.clone(),
                 class: ApprovalClass::Sensitive,
                 kind,
+                preview,
                 summary,
             };
             match registration.publication {
@@ -5986,6 +5997,7 @@ mod tests {
                     tool_name: call.name.clone(),
                     class: ApprovalClass::Sensitive,
                     kind: ToolApprovalKind::for_tool_name(&call.name),
+                    preview: None,
                     summary: "search requires approval".into(),
                 },
                 Utc::now(),
@@ -6182,6 +6194,7 @@ mod tests {
                     tool_name: call.name.clone(),
                     class: ApprovalClass::Sensitive,
                     kind: ToolApprovalKind::for_tool_name(&call.name),
+                    preview: None,
                     summary: "persisted write requires approval".into(),
                 },
                 Utc::now(),
