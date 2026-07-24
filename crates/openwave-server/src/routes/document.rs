@@ -76,6 +76,12 @@ pub struct DocumentSummary {
     pub content_revision: i64,
     /// Processing lifecycle of the current source revision.
     pub processing_status: openwave_core::DocumentProcessingStatus,
+    /// Whether a search of this conversation can actually match this source.
+    ///
+    /// A `ready` source with `searchable: false` was stored and can be opened
+    /// by name, but its parser produced no text — a scanned image, or a format
+    /// whose parser is not installed on this host.
+    pub searchable: bool,
     /// Source revision currently represented in the index.
     pub indexed_revision: Option<i64>,
     /// Parser/chunker/embedder identity for the current indexed revision.
@@ -99,6 +105,7 @@ impl From<DocumentSummaryRecord> for DocumentSummary {
             title: document.title,
             content_revision: document.content_revision,
             processing_status: document.processing_status,
+            searchable: document.searchable,
             indexed_revision: document.indexed_revision,
             index_fingerprint: document.index_fingerprint,
             created_at: document.created_at,
@@ -119,6 +126,7 @@ impl From<&DocumentRecord> for DocumentSummary {
             title: document.title.clone(),
             content_revision: document.content_revision,
             processing_status: document.processing_status,
+            searchable: document.is_searchable(),
             indexed_revision: document.indexed_revision,
             index_fingerprint: document.index_fingerprint.clone(),
             created_at: document.created_at,

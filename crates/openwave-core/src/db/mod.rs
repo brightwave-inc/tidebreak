@@ -85,6 +85,9 @@ struct DocumentSummaryRow {
     title: Option<String>,
     content_revision: i64,
     processing_status: String,
+    /// Emptiness of the canonical text, evaluated in the database so a listing
+    /// still never transfers the text itself.
+    has_canonical_text: bool,
     indexed_revision: Option<i64>,
     index_fingerprint: Option<String>,
     created_at: chrono::DateTime<Utc>,
@@ -366,6 +369,13 @@ impl Store for DbStore {
                 entities::document::Column::UpdatedAt,
                 entities::document::Column::IndexedAt,
             ])
+            .column_as(
+                sea_orm::sea_query::ExprTrait::ne(
+                    sea_orm::sea_query::Expr::col(entities::document::Column::CanonicalText),
+                    "",
+                ),
+                "has_canonical_text",
+            )
             .order_by_desc(entities::document::Column::CreatedAt)
             .order_by_desc(entities::document::Column::Id)
             .limit(limit)
@@ -3645,6 +3655,7 @@ fn document_from_model(model: entities::document::Model) -> Result<DocumentRecor
 }
 
 fn document_summary_from_row(row: DocumentSummaryRow) -> Result<DocumentSummaryRecord> {
+    let processing_status = document_processing_status_from_db(&row.processing_status)?;
     Ok(DocumentSummaryRecord {
         id: DocumentId(row.id),
         chat_id: row.chat_id.map(ChatId),
@@ -3653,7 +3664,8 @@ fn document_summary_from_row(row: DocumentSummaryRow) -> Result<DocumentSummaryR
         media_type: row.media_type,
         title: row.title,
         content_revision: row.content_revision,
-        processing_status: document_processing_status_from_db(&row.processing_status)?,
+        processing_status,
+        searchable: processing_status == DocumentProcessingStatus::Ready && row.has_canonical_text,
         indexed_revision: row.indexed_revision,
         index_fingerprint: row.index_fingerprint,
         created_at: row.created_at,

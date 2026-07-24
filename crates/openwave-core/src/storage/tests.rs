@@ -1982,6 +1982,7 @@ fn document_summary(document: &DocumentRecord) -> DocumentSummaryRecord {
         title: document.title.clone(),
         content_revision: document.content_revision,
         processing_status: document.processing_status,
+        searchable: document.is_searchable(),
         indexed_revision: document.indexed_revision,
         index_fingerprint: document.index_fingerprint.clone(),
         created_at: document.created_at,

@@ -829,6 +829,58 @@ async fn document_summaries_page_by_created_at_then_id_without_gaps() {
 }
 
 #[tokio::test]
+async fn ready_summaries_report_whether_anything_is_actually_searchable() {
+    let (_dir, store) = temp_store().await;
+    let indexed_at = DateTime::<Utc>::from_timestamp(1_700_000_200, 0).unwrap();
+    let ready = |raw_id: u128, canonical_text: &str| {
+        let mut document = sample_document(None);
+        document.id = DocumentId(uuid::Uuid::from_u128(raw_id));
+        document.canonical_text = canonical_text.to_owned();
+        document.processing_status = DocumentProcessingStatus::Ready;
+        document.indexed_revision = Some(document.content_revision);
+        document.index_fingerprint = Some("chunker=test;embedder=test".to_owned());
+        document.indexed_at = Some(indexed_at);
+        document
+    };
+    // A parser can succeed and still produce nothing to index: an image with
+    // no OCR, or a format whose parser is not installed on this host.
+    let with_text = ready(2, "売上 grew by 10%.");
+    let without_text = ready(1, "");
+    let mut still_queued = sample_document(None);
+    still_queued.id = DocumentId(uuid::Uuid::from_u128(3));
+    for document in [&with_text, &without_text, &still_queued] {
+        store.create_document(document).await.unwrap();
+    }
+
+    let searchable = store
+        .list_document_summaries(DocumentScope::All, None, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|document| (document.id, document.processing_status, document.searchable))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        searchable,
+        vec![
+            (
+                still_queued.id,
+                DocumentProcessingStatus::Queued,
+                // Not yet searchable, but for a reason the caller must not
+                // confuse with a parser that found nothing.
+                false
+            ),
+            (with_text.id, DocumentProcessingStatus::Ready, true),
+            (without_text.id, DocumentProcessingStatus::Ready, false),
+        ]
+    );
+    // The listing decides emptiness in the database, so it must still never
+    // carry the text itself.
+    assert!(with_text.is_searchable());
+    assert!(!without_text.is_searchable());
+    assert!(!still_queued.is_searchable());
+}
+
+#[tokio::test]
 async fn document_project_fk_rejects_orphans_and_direct_project_deletion() {
     let (_dir, store) = temp_store().await;
     let orphan = sample_document(Some(ProjectId::new()));

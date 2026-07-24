@@ -251,7 +251,7 @@ export function DocumentsView({
                       {mediaTypeLabel(document.mediaType)} · Updated {formatDate(document.updatedAt)}
                     </span>
                   </div>
-                  <DocumentStatus status={document.processingStatus} />
+                  <DocumentStatus document={document} />
                 </article>
               ))}
             </div>
@@ -262,7 +262,21 @@ export function DocumentsView({
   );
 }
 
-function DocumentStatus({ status }: { status: LibraryDocument["processingStatus"] }) {
+function DocumentStatus({ document }: { document: LibraryDocument }) {
+  const { processingStatus: status, searchable } = document;
+  // A source can finish processing without producing anything to search — a
+  // scan without OCR, or a format whose parser is missing on this host. Saying
+  // "Available" there would promise a search that silently never matches.
+  if (status === "ready" && !searchable) {
+    return (
+      <span
+        className="document-status is-unsearchable"
+        title="Stored in this conversation, but nothing in it can be searched."
+      >
+        Not searchable
+      </span>
+    );
+  }
   const label =
     status === "ready"
       ? "Available"

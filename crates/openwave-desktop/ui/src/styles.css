@@ -2754,6 +2754,12 @@ body {
   background: color-mix(in srgb, var(--danger) 9%, var(--page-background));
 }
 
+/* Stored but with nothing to search: neither a success nor a failure, so it
+   keeps the neutral base and only hints that an explanation is available. */
+.document-status.is-unsearchable {
+  cursor: help;
+}
+
 .document-empty,
 .document-empty-small {
   display: grid;

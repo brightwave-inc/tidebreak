@@ -11,6 +11,8 @@ export type LibraryDocument = {
   title: string | null;
   mediaType: string;
   processingStatus: DocumentProcessingStatus;
+  /** Whether searching this conversation can actually match this source. */
+  searchable: boolean;
   updatedAt: string;
 };
 
@@ -124,6 +126,7 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
       "title",
       "mediaType",
       "processingStatus",
+      "searchable",
       "updatedAt",
     ])
   ) {
@@ -138,6 +141,7 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
     value.mediaType.length === 0 ||
     value.mediaType.length > 255 ||
     !isProcessingStatus(value.processingStatus) ||
+    typeof value.searchable !== "boolean" ||
     typeof value.updatedAt !== "string" ||
     !Number.isFinite(Date.parse(value.updatedAt))
   ) {
@@ -148,6 +152,7 @@ function parseLibraryDocument(value: unknown): LibraryDocument {
     title: value.title,
     mediaType: value.mediaType,
     processingStatus: value.processingStatus,
+    searchable: value.searchable,
     updatedAt: value.updatedAt,
   };
 }
