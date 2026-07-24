@@ -34,9 +34,10 @@ pub use protocol::{
     EntryKind, ErrorCode, ErrorResponse, HelloResult, LookupRegisterRootReceiptRequest,
     LookupRegisterRootReceiptResult, LookupRootAttachmentReceiptRequest,
     LookupRootAttachmentReceiptResult, OperationEnvelope, OperationRequest,
-    OperationResponseEnvelope, OperationResult, PathRequest, ReadFileResult, RegisterRootReceipt,
-    RegisterRootRequest, RegisterRootResult, Response, ResponseEnvelope, RevokeRootRequest,
-    RevokeRootResult, RootAttachmentMutationKind, RootAttachmentMutationReceipt,
-    RootAttachmentMutationRequest, RootAttachmentMutationResult, RootSummary, PROTOCOL_VERSION,
+    OperationResponseEnvelope, OperationResult, PathRequest, ReadFileBinaryResult, ReadFileResult,
+    RegisterRootReceipt, RegisterRootRequest, RegisterRootResult, Response, ResponseEnvelope,
+    RevokeRootRequest, RevokeRootResult, RootAttachmentMutationKind, RootAttachmentMutationReceipt,
+    RootAttachmentMutationRequest, RootAttachmentMutationResult, RootSummary,
+    MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
 };
 pub use relative_path::{RelativePath, RelativePathError};

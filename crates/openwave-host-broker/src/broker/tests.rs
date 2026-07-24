@@ -2349,3 +2349,114 @@ fn restart_rejects_an_oversized_state_file_before_parsing_it() {
         Err(BrokerError::StateTooLarge)
     ));
 }
+
+#[test]
+fn binary_reads_return_bytes_that_text_reads_refuse() {
+    let (_temp, broker, path, audit) = audited_setup();
+    // A minimal PDF header followed by a byte sequence that is not valid UTF-8.
+    let document: Vec<u8> = [b"%PDF-1.7\n".as_slice(), &[0xff, 0xfe, 0x00, 0x80]].concat();
+    std::fs::write(path.join("report.pdf"), &document).unwrap();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let registered = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path,
+        OperationId::new(),
+    );
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let request = || PathRequest {
+        root_id: registered.root.root_id,
+        path: RelativePath::parse("report.pdf").unwrap(),
+    };
+
+    assert!(matches!(
+        operate(
+            &broker.operator(),
+            context,
+            OperationRequest::ReadFile(request()),
+        ),
+        Err(ErrorResponse {
+            code: ErrorCode::UnsupportedContent,
+            ..
+        })
+    ));
+    let result = operate(
+        &broker.operator(),
+        context,
+        OperationRequest::ReadFileBinary(request()),
+    )
+    .unwrap();
+    let OperationResult::ReadFileBinary(result) = result else {
+        panic!("expected binary content")
+    };
+    assert_eq!(result.bytes, document.len());
+    assert_eq!(BASE64.decode(&result.content_base64).unwrap(), document);
+    // Content must not leak through Debug, which is where audit and log
+    // formatting would otherwise pick it up.
+    assert!(!format!("{result:?}").contains(&result.content_base64));
+
+    let events = audit.events.lock().unwrap();
+    let recorded = events
+        .iter()
+        .find(|event| event.operation == AuditOperation::ReadFileBinary)
+        .expect("binary reads are audited under their own operation name");
+    assert_eq!(recorded.capability, Some(Capability::ReadFiles));
+    assert_eq!(recorded.outcome, AuditOutcome::Allowed);
+    assert_eq!(recorded.bytes, Some(document.len()));
+}
+
+#[test]
+fn binary_reads_are_bounded_and_fenced_by_revocation() {
+    let (_temp, broker, path) = setup();
+    std::fs::write(
+        path.join("huge.bin"),
+        vec![0u8; MAX_READ_FILE_BINARY_BYTES + 1],
+    )
+    .unwrap();
+    let conversation = Uuid::new_v4();
+    let subject = GrantSubject::conversation(conversation).unwrap();
+    let registered = register(
+        &broker.controller(),
+        subject,
+        conversation,
+        path,
+        OperationId::new(),
+    );
+    let context = ExecutionContext::standalone(conversation).unwrap();
+    let binary_request = |name: &str| {
+        OperationRequest::ReadFileBinary(PathRequest {
+            root_id: registered.root.root_id,
+            path: RelativePath::parse(name).unwrap(),
+        })
+    };
+
+    assert!(matches!(
+        operate(&broker.operator(), context, binary_request("huge.bin")),
+        Err(ErrorResponse {
+            code: ErrorCode::TooLarge,
+            ..
+        })
+    ));
+    // A directory is not a document, and the larger bound must not relax that.
+    assert!(matches!(
+        operate(&broker.operator(), context, binary_request("reports")),
+        Err(ErrorResponse { .. })
+    ));
+    assert!(operate(&broker.operator(), context, binary_request("note.txt")).is_ok());
+
+    revoke(
+        &broker.controller(),
+        OperationId::new(),
+        subject,
+        registered.root.root_id,
+    );
+    assert!(matches!(
+        operate(&broker.operator(), context, binary_request("note.txt")),
+        Err(ErrorResponse {
+            code: ErrorCode::Denied,
+            ..
+        })
+    ));
+}

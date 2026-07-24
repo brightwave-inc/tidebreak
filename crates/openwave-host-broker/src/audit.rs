@@ -69,6 +69,7 @@ pub enum AuditOperation {
     ListRoots,
     ListDirectory,
     ReadFile,
+    ReadFileBinary,
     ProtocolVersionMismatch,
 }
 
