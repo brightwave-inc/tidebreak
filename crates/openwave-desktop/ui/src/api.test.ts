@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiClient,
   parseFolderAccessRequest,
+  parsePendingUserQuestions,
   parsePendingToolApproval,
   parseSandboxAgentCancellation,
 } from "./api";
@@ -93,6 +94,78 @@ describe("parseFolderAccessRequest", () => {
         reason: " ",
         folder_hint: "desktop",
         claimed: "yes",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("parsePendingUserQuestions", () => {
+  const safe = {
+    call_id: "call-1",
+    turn_id: "turn-1",
+    asked_at: "2026-07-24T12:00:00Z",
+    questions: [
+      {
+        id: "target",
+        header: "Target",
+        question: "Where should I deploy?",
+        options: [
+          {
+            id: "staging",
+            label: "Staging",
+            description: "Deploy for internal verification.",
+          },
+        ],
+        allow_free_form: true,
+      },
+    ],
+  };
+
+  it("accepts the closed bounded projection", () => {
+    expect(parsePendingUserQuestions(safe)).toEqual({
+      callId: "call-1",
+      turnId: "turn-1",
+      askedAt: "2026-07-24T12:00:00Z",
+      questions: [
+        {
+          id: "target",
+          header: "Target",
+          question: "Where should I deploy?",
+          options: [
+            {
+              id: "staging",
+              label: "Staging",
+              description: "Deploy for internal verification.",
+            },
+          ],
+          allowFreeForm: true,
+        },
+      ],
+    });
+  });
+
+  it("rejects private, duplicate, and unanswerable payloads", () => {
+    expect(
+      parsePendingUserQuestions({ ...safe, provider_id: "private" }),
+    ).toBeNull();
+    expect(
+      parsePendingUserQuestions({
+        ...safe,
+        questions: [safe.questions[0], safe.questions[0]],
+      }),
+    ).toBeNull();
+    expect(
+      parsePendingUserQuestions({
+        ...safe,
+        questions: [
+          { ...safe.questions[0], options: [], allow_free_form: false },
+        ],
+      }),
+    ).toBeNull();
+    expect(
+      parsePendingUserQuestions({
+        ...safe,
+        questions: [{ ...safe.questions[0], header: "Target\u0085hidden" }],
       }),
     ).toBeNull();
   });

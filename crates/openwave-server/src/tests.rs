@@ -3359,6 +3359,68 @@ async fn park_client_wait_for_route_test(
     (turn_id, call)
 }
 
+async fn park_user_questions_for_route_test(
+    store: &dyn Store,
+    chat_id: ChatId,
+) -> (TurnId, ClientToolCallRequest) {
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(turn_id, chat_id, "fake", "ask a question")
+        .await
+        .unwrap();
+    let turn_token = uuid::Uuid::new_v4();
+    let claimed_at = chrono::Utc::now();
+    store
+        .claim_turn_run(
+            turn_token,
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    let call = ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id,
+        turn_id,
+        provider_id: "provider-question".into(),
+        name: openwave_core::ASK_USER_QUESTIONS_TOOL.into(),
+        arguments: serde_json::json!({
+            "questions": [{
+                "id": "target",
+                "header": "Target",
+                "question": "Where should I deploy?",
+                "options": [
+                    {"id": "staging", "label": "Staging", "description": "Deploy for internal verification."},
+                    {"id": "production", "label": "Production", "description": "Deploy to customers."}
+                ],
+                "allow_free_form": true
+            }]
+        }),
+    };
+    let parked = store
+        .park_turn_for_client_tool_call(
+            turn_id,
+            turn_token,
+            0,
+            test_client_checkpoint_progress(1),
+            chrono::Utc::now(),
+            &call,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        parked,
+        ParkTurnForClientCallOutcome::Parked {
+            renderer_event: Some(_),
+            ..
+        }
+    ));
+    (turn_id, call)
+}
+
 fn test_client_checkpoint_progress(model_steps: i32) -> TurnCheckpointProgress {
     TurnCheckpointProgress {
         model_steps,
@@ -3411,6 +3473,110 @@ async fn resolve_parked_client_call(
         resolved.turn,
         Some(turn) if turn.status == TurnRunStatus::Resuming
     ));
+}
+
+#[tokio::test]
+async fn user_question_api_is_renderer_safe_exact_and_not_native_claimable() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let (turn_id, call) = park_user_questions_for_route_test(&*store, chat.id).await;
+
+    let pending = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/questions/pending", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.status(), StatusCode::OK);
+    let pending: serde_json::Value = json_body(pending).await;
+    assert_eq!(pending[0]["call_id"], call.id.to_string());
+    assert_eq!(pending[0]["turn_id"], turn_id.to_string());
+    assert_eq!(pending[0]["questions"][0]["id"], "target");
+    let serialized = pending.to_string();
+    for private in [
+        "provider-question",
+        "client_executor_id",
+        "lease_token",
+        "history_order",
+        "arguments",
+    ] {
+        assert!(
+            !serialized.contains(private),
+            "renderer question projection exposed {private}"
+        );
+    }
+
+    let raw = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/client-executions/pending/raw", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(
+                    crate::auth::CLIENT_EXECUTOR_HEADER,
+                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(raw.status(), StatusCode::OK);
+    assert!(json_body::<Vec<ToolCallRecord>>(raw).await.is_empty());
+    let native_claim = post_native_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/client-executions/{}/claim", chat.id, call.id),
+        serde_json::json!({
+            "executor_id": uuid::Uuid::new_v4(),
+            "lease_token": uuid::Uuid::new_v4(),
+        }),
+    )
+    .await;
+    assert_eq!(native_claim.status(), StatusCode::CONFLICT);
+
+    let answer_uri = format!("/chats/{}/questions/{}/answer", chat.id, call.id);
+    let invalid = post_json(
+        &router,
+        &bearer,
+        &answer_uri,
+        serde_json::json!({
+            "answers": [{"question_id": "target", "option_id": "unknown"}]
+        }),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let answer = serde_json::json!({
+        "answers": [{"question_id": "target", "option_id": "staging"}]
+    });
+    let first = post_json(&router, &bearer, &answer_uri, answer.clone()).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<serde_json::Value>(first).await["disposition"],
+        "answered"
+    );
+    let retry = post_json(&router, &bearer, &answer_uri, answer).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<serde_json::Value>(retry).await["disposition"],
+        "existing"
+    );
+    let conflict = post_json(
+        &router,
+        &bearer,
+        &answer_uri,
+        serde_json::json!({
+            "answers": [{"question_id": "target", "option_id": "production"}]
+        }),
+    )
+    .await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -6274,7 +6440,7 @@ async fn root_search_never_returns_project_owned_vectors() {
 }
 
 #[tokio::test]
-async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration() {
+async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() {
     struct UnavailableCodeExecution;
 
     #[async_trait::async_trait]
@@ -6330,6 +6496,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
         .as_deref()
         .expect("production foreground turns receive an operating prompt");
     assert!(system_prompt.contains("You are OpenWave"));
+    assert!(system_prompt.contains("## User clarification"));
     assert!(system_prompt.contains("## Conversation sources and citations"));
     assert!(system_prompt.contains("## Connected folders"));
     assert!(system_prompt.contains("## Background delegation"));
@@ -6372,6 +6539,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
         ApprovalClass::Sensitive
     );
     assert!([
+        openwave_core::ASK_USER_QUESTIONS_TOOL,
         openwave_core::SPAWN_SANDBOX_AGENT_TOOL,
         openwave_core::WAIT_FOR_AGENTS_TOOL,
     ]
@@ -6384,6 +6552,7 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
         .map(|spec| spec.name)
         .collect::<std::collections::HashSet<_>>();
     assert!([
+        openwave_core::ASK_USER_QUESTIONS_TOOL,
         openwave_core::SPAWN_SANDBOX_AGENT_TOOL,
         openwave_core::WAIT_FOR_AGENTS_TOOL,
     ]

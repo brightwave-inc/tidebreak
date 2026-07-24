@@ -42,6 +42,7 @@ export type ChatSessionState = {
 export type ChatSessionEffect =
   | { type: "refresh_agent_runs" }
   | { type: "refresh_folder_access" }
+  | { type: "refresh_user_questions" }
   /** A turn began; the host resets cancel state (and steer state when asked). */
   | { type: "turn_began"; turnId: string; startsDifferentTurn: boolean }
   /** A turn reached a terminal event; the host clears cancel/steer state. */
@@ -223,6 +224,11 @@ export function reduceChatSessionEvent(
       };
     }
 
+    case "user_questions_asked": {
+      effects.push({ type: "refresh_user_questions" });
+      return { state, effects };
+    }
+
     case "approval_required": {
       const approval = toolApprovalPresentation(event.approval);
       const provisionalToolCallIds = new Set(state.provisionalToolCallIds);
@@ -319,6 +325,7 @@ export function reduceChatSessionEvent(
       effects.push(
         { type: "turn_resolved" },
         { type: "refresh_agent_runs" },
+        { type: "refresh_user_questions" },
         { type: "hydrate_terminal_transcript" },
       );
       return {
@@ -339,6 +346,7 @@ export function reduceChatSessionEvent(
         { type: "invalidate_terminal_hydration" },
         { type: "turn_resolved" },
         { type: "refresh_agent_runs" },
+        { type: "refresh_user_questions" },
       );
       return {
         state: {
@@ -362,6 +370,7 @@ export function reduceChatSessionEvent(
         { type: "invalidate_terminal_hydration" },
         { type: "turn_resolved" },
         { type: "refresh_agent_runs" },
+        { type: "refresh_user_questions" },
       );
       return {
         state: {

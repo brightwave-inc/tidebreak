@@ -1057,8 +1057,17 @@ impl TurnWorker {
                             }
                         };
                         match park_result {
-                            Ok(Some(ParkTurnForClientCallOutcome::Parked { .. }))
-                            | Ok(Some(ParkTurnForClientCallOutcome::Existing { .. })) => {
+                            Ok(Some(ParkTurnForClientCallOutcome::Parked {
+                                renderer_event,
+                                ..
+                            }))
+                            | Ok(Some(ParkTurnForClientCallOutcome::Existing {
+                                renderer_event,
+                                ..
+                            })) => {
+                                if let Some(event) = renderer_event {
+                                    self.publish(turn.chat_id, event);
+                                }
                                 checkpoint_heartbeat.abort_and_wait().await;
                                 return Ok(TurnWorkerOutcome::WaitingForClient(turn.id));
                             }
@@ -2208,7 +2217,12 @@ mod committed_event_drain_tests {
 
     #[test]
     fn mcp_refresh_keeps_prompt_and_tools_on_one_immutable_snapshot() {
-        let original_tools = Arc::new(ToolRegistry::new());
+        let mut original_registry = ToolRegistry::new();
+        original_registry.register_validated_foreground_client(
+            openwave_core::ask_user_questions_tool_spec(),
+            openwave_core::validate_ask_user_questions_arguments,
+        );
+        let original_tools = Arc::new(original_registry);
         let original =
             freeze_foreground_turn_surface(original_tools.clone(), &AgentConfig::default());
 
@@ -2242,11 +2256,19 @@ mod committed_event_drain_tests {
         let refreshed_prompt = refreshed.agent_config.system_prompt.as_deref().unwrap();
 
         assert!(!original_names.iter().any(|name| name.starts_with("mcp__")));
+        assert!(original_names
+            .iter()
+            .any(|name| name == openwave_core::ASK_USER_QUESTIONS_TOOL));
         assert!(!original_prompt.contains("## External MCP tools"));
+        assert!(original_prompt.contains("## User clarification"));
         assert!(refreshed_names
             .iter()
             .any(|name| name == "mcp__documents__lookup"));
+        assert!(refreshed_names
+            .iter()
+            .any(|name| name == openwave_core::ASK_USER_QUESTIONS_TOOL));
         assert!(refreshed_prompt.contains("## External MCP tools"));
+        assert!(refreshed_prompt.contains("## User clarification"));
         for prompt in [original_prompt, refreshed_prompt] {
             assert!(!prompt.contains("mcp__documents__lookup"));
             assert!(!prompt.contains("untrusted remote description marker"));

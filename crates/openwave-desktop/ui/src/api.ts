@@ -171,6 +171,7 @@ export type ChatToolActivity = {
     | "Request folder access"
     | "Connect a folder"
     | "Check connected folders"
+    | "Ask a question"
     | "Delegate a task"
     | "Wait for background agents"
     | "Use a tool";
@@ -242,6 +243,7 @@ export type AgentEvent =
   | { type: "stream_interrupted" }
   | { type: "tool_call_started"; call_id: string; name: RendererToolName }
   | { type: "tool_call_args_delta"; call_id: string }
+  | { type: "user_questions_asked"; call_id: string; turn_id: string }
   | {
       type: "approval_required";
       call_id: string;
@@ -279,6 +281,7 @@ export type RendererToolName =
   | "read_connected_file"
   | "spawn_sandbox_agent"
   | "wait_for_agents"
+  | "ask_user_questions"
   | "exec"
   | "other";
 
@@ -324,6 +327,34 @@ export type PendingFolderAccessRequest = {
   reason: string;
   folderHint: FolderAccessHint | null;
   claimedByDesktop: boolean;
+};
+
+export type UserQuestionOption = {
+  id: string;
+  label: string;
+  description: string;
+};
+
+export type UserQuestion = {
+  id: string;
+  header: string;
+  question: string;
+  options: UserQuestionOption[];
+  allowFreeForm: boolean;
+};
+
+/** Closed renderer projection of one durable question continuation. */
+export type PendingUserQuestions = {
+  callId: string;
+  turnId: string;
+  questions: UserQuestion[];
+  askedAt: string;
+};
+
+export type UserQuestionAnswer = {
+  questionId: string;
+  optionId?: string;
+  freeForm?: string;
 };
 
 const RENDERER_FOLDER_ACCESS_REASON =
@@ -695,6 +726,48 @@ export class ApiClient {
     return [...requests.values()];
   }
 
+  async listPendingUserQuestions(
+    chatId: string,
+  ): Promise<PendingUserQuestions[]> {
+    const body = await this.json<unknown>(`/chats/${chatId}/questions/pending`, {
+      headers: this.headers(),
+    });
+    if (!Array.isArray(body)) {
+      throw new Error("pending question response is not an array");
+    }
+    const requests = new Map<string, PendingUserQuestions>();
+    for (const item of body) {
+      const request = parsePendingUserQuestions(item);
+      if (!request || requests.has(request.callId)) {
+        throw new Error("pending question response contains invalid data");
+      }
+      requests.set(request.callId, request);
+    }
+    return [...requests.values()];
+  }
+
+  async answerUserQuestions(
+    chatId: string,
+    callId: string,
+    answers: UserQuestionAnswer[],
+  ): Promise<void> {
+    await this.json(`/chats/${chatId}/questions/${callId}/answer`, {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({
+        answers: answers.map((answer) => ({
+          question_id: answer.questionId,
+          ...(answer.optionId === undefined
+            ? {}
+            : { option_id: answer.optionId }),
+          ...(answer.freeForm === undefined
+            ? {}
+            : { free_form: answer.freeForm }),
+        })),
+      }),
+    });
+  }
+
   /** Open the chat event stream; auth via Sec-WebSocket-Protocol. */
   openEvents(chatId: string, after: number, onEvent: (e: SequencedEvent) => void): WebSocket {
     const url = `${this.baseUrl.replace(/^http/, "ws")}/chats/${chatId}/events?after=${after}`;
@@ -751,6 +824,99 @@ export function parseFolderAccessRequest(
     folderHint,
     claimedByDesktop: value.claimed,
   };
+}
+
+export function parsePendingUserQuestions(
+  value: unknown,
+): PendingUserQuestions | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys(value, ["call_id", "turn_id", "questions", "asked_at"]) ||
+    !nonEmptyBounded(value.call_id, 128) ||
+    !nonEmptyBounded(value.turn_id, 128) ||
+    typeof value.asked_at !== "string" ||
+    value.asked_at.length > 64 ||
+    !Array.isArray(value.questions) ||
+    value.questions.length < 1 ||
+    value.questions.length > 3
+  ) {
+    return null;
+  }
+  const questions: UserQuestion[] = [];
+  const questionIds = new Set<string>();
+  for (const item of value.questions) {
+    if (
+      !isRecord(item) ||
+      !onlyKeys(item, [
+        "id",
+        "header",
+        "question",
+        "options",
+        "allow_free_form",
+      ]) ||
+      !nonEmptyBounded(item.id, 64) ||
+      questionIds.has(item.id) ||
+      !nonEmptyBounded(item.header, 32) ||
+      !nonEmptyBounded(item.question, 500) ||
+      !Array.isArray(item.options) ||
+      item.options.length > 5 ||
+      typeof item.allow_free_form !== "boolean" ||
+      (item.options.length === 0 && !item.allow_free_form)
+    ) {
+      return null;
+    }
+    questionIds.add(item.id);
+    const options: UserQuestionOption[] = [];
+    const optionIds = new Set<string>();
+    for (const option of item.options) {
+      if (
+        !isRecord(option) ||
+        !onlyKeys(option, ["id", "label", "description"]) ||
+        !nonEmptyBounded(option.id, 64) ||
+        optionIds.has(option.id) ||
+        !nonEmptyBounded(option.label, 80) ||
+        !nonEmptyBounded(option.description, 240)
+      ) {
+        return null;
+      }
+      optionIds.add(option.id);
+      options.push({
+        id: option.id,
+        label: option.label,
+        description: option.description,
+      });
+    }
+    questions.push({
+      id: item.id,
+      header: item.header,
+      question: item.question,
+      options,
+      allowFreeForm: item.allow_free_form,
+    });
+  }
+  return {
+    callId: value.call_id,
+    turnId: value.turn_id,
+    questions,
+    askedAt: value.asked_at,
+  };
+}
+
+function onlyKeys(value: Record<string, unknown>, allowed: string[]): boolean {
+  const set = new Set(allowed);
+  return Object.keys(value).every((key) => set.has(key));
+}
+
+function nonEmptyBounded(value: unknown, maxChars: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    Array.from(value).length <= maxChars &&
+    !Array.from(value).some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code < 32 || (code >= 127 && code <= 159);
+    })
+  );
 }
 
 export function parseSandboxAgentCancellation(
@@ -830,6 +996,7 @@ function isRendererToolName(value: unknown): value is RendererToolName {
     value === "read_connected_file" ||
     value === "spawn_sandbox_agent" ||
     value === "wait_for_agents" ||
+    value === "ask_user_questions" ||
     value === "exec" ||
     value === "other"
   );

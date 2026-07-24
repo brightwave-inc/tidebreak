@@ -2742,6 +2742,21 @@ impl Store for DbStore {
         ops::client_execution::list_pending_client_tool_calls(self, chat_id).await
     }
 
+    async fn list_pending_user_questions(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<crate::PendingUserQuestions>> {
+        ops::user_question::list_pending(self, chat_id).await
+    }
+
+    async fn answer_user_questions(
+        &self,
+        request: &crate::AnswerUserQuestionsRequest,
+        answered_at: chrono::DateTime<Utc>,
+    ) -> Result<crate::AnswerUserQuestionsOutcome> {
+        ops::user_question::answer(self, request, answered_at).await
+    }
+
     async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
         ops::conversation::list_tool_calls(self, chat_id).await
     }

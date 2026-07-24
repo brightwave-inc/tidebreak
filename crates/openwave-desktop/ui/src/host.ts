@@ -12,6 +12,12 @@ export function hasNativeHost(): boolean {
   return isTauri();
 }
 
+/** Best-effort only; durable pending-question polling remains authoritative. */
+export async function requestUserAttention(): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("request_user_attention");
+}
+
 export function listConnectedFolders(chat: Chat): Promise<ConnectedFolder[]> {
   return invoke("list_connected_folders", { chatId: chat.id });
 }

@@ -41,10 +41,12 @@ mod client_execution;
 mod delegated_file_execution;
 mod document;
 mod root_attachment;
+mod user_questions;
 pub use client_execution::*;
 pub use delegated_file_execution::*;
 pub use document::*;
 pub use root_attachment::*;
+pub use user_questions::*;
 
 /// `GET /mcp/servers` — renderer-safe definitions and current connection health.
 pub async fn get_mcp_servers(

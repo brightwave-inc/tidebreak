@@ -3,6 +3,8 @@ import type {
   AgentRun,
   Chat,
   PendingFolderAccessRequest,
+  PendingUserQuestions,
+  UserQuestionAnswer,
 } from "./api";
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import { ChatTabs } from "./ChatTabs";
@@ -28,8 +30,11 @@ export type ChatViewProps = {
   onRetryAgentRuns: () => void;
   onStopSandboxRun: (runId: string) => void;
   folderAccessRequests: PendingFolderAccessRequest[];
+  userQuestionRequests: PendingUserQuestions[];
   resolvingFolderCalls: Set<string>;
   folderAccessErrors: Record<string, string>;
+  answeringQuestionCalls: Set<string>;
+  userQuestionErrors: Record<string, string>;
   decidingApprovalCalls: Set<string>;
   approvalErrors: Record<string, string>;
   onApproval: (
@@ -42,6 +47,11 @@ export type ChatViewProps = {
     decision: FolderAccessDecision,
   ) => void;
   onFolderAccessCancel: (callId: string, turnId: string) => void;
+  onAnswerUserQuestions: (
+    callId: string,
+    answers: UserQuestionAnswer[],
+  ) => void;
+  onUserQuestionsCancel: (turnId: string) => void;
   draft: string;
   composerModelMenu: ReactNode;
   attachingSource: boolean;
@@ -80,13 +90,18 @@ export function ChatView({
   onRetryAgentRuns,
   onStopSandboxRun,
   folderAccessRequests,
+  userQuestionRequests,
   resolvingFolderCalls,
   folderAccessErrors,
+  answeringQuestionCalls,
+  userQuestionErrors,
   decidingApprovalCalls,
   approvalErrors,
   onApproval,
   onFolderAccessDecision,
   onFolderAccessCancel,
+  onAnswerUserQuestions,
+  onUserQuestionsCancel,
   draft,
   composerModelMenu,
   attachingSource,
@@ -115,7 +130,7 @@ export function ChatView({
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followsLatestRef = useRef(true);
-  const visibleFolderCallIdsRef = useRef<Set<string>>(new Set());
+  const visibleContinuationCallIdsRef = useRef<Set<string>>(new Set());
   const [hasUnreadActivity, setHasUnreadActivity] = useState(false);
 
   useEffect(() => {
@@ -129,11 +144,14 @@ export function ChatView({
   }, [messages, busy]);
 
   useEffect(() => {
-    const next = new Set(folderAccessRequests.map((request) => request.callId));
+    const next = new Set([
+      ...folderAccessRequests.map((request) => request.callId),
+      ...userQuestionRequests.map((request) => request.callId),
+    ]);
     const gainedRequest = [...next].some(
-      (callId) => !visibleFolderCallIdsRef.current.has(callId),
+      (callId) => !visibleContinuationCallIdsRef.current.has(callId),
     );
-    visibleFolderCallIdsRef.current = next;
+    visibleContinuationCallIdsRef.current = next;
     if (!gainedRequest) return;
     const scroll = scrollRef.current;
     if (!scroll) return;
@@ -142,7 +160,7 @@ export function ChatView({
     } else {
       setHasUnreadActivity(true);
     }
-  }, [folderAccessRequests]);
+  }, [folderAccessRequests, userQuestionRequests]);
 
   return (
     <section className="chat-pane">
@@ -182,10 +200,13 @@ export function ChatView({
         <MessageList
           messages={messages}
           folderAccessRequests={folderAccessRequests}
+          userQuestionRequests={userQuestionRequests}
           nativeHost={nativeHost}
           nativeBusy={resolvingFolderCalls.size > 0}
           resolvingFolderCalls={resolvingFolderCalls}
           folderAccessErrors={folderAccessErrors}
+          answeringQuestionCalls={answeringQuestionCalls}
+          userQuestionErrors={userQuestionErrors}
           decidingApprovalCalls={decidingApprovalCalls}
           approvalErrors={approvalErrors}
           busy={busy}
@@ -199,6 +220,8 @@ export function ChatView({
           onApproval={onApproval}
           onFolderAccessDecision={onFolderAccessDecision}
           onFolderAccessCancel={onFolderAccessCancel}
+          onAnswerUserQuestions={onAnswerUserQuestions}
+          onUserQuestionsCancel={onUserQuestionsCancel}
           onSelectPrompt={onSelectPrompt}
           hydrated={hydrated}
         />

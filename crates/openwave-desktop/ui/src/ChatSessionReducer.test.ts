@@ -184,6 +184,18 @@ describe("tool call lifecycle", () => {
     expect(effects).toContainEqual({ type: "refresh_folder_access" });
   });
 
+  it("refreshes durable question cards from the bounded question event", () => {
+    const { state, effects } = play([
+      {
+        type: "user_questions_asked",
+        call_id: "question-call",
+        turn_id: "turn-1",
+      },
+    ]);
+    expect(effects).toContainEqual({ type: "refresh_user_questions" });
+    expect(state.messages).toEqual([]);
+  });
+
   it("keeps args streaming from downgrading an approval wait", () => {
     const { state } = play([
       TURN,
@@ -357,6 +369,7 @@ describe("terminal events", () => {
     expect(effects).toEqual([
       { type: "turn_resolved" },
       { type: "refresh_agent_runs" },
+      { type: "refresh_user_questions" },
       { type: "hydrate_terminal_transcript" },
     ]);
   });
@@ -389,6 +402,7 @@ describe("terminal events", () => {
       { type: "invalidate_terminal_hydration" },
       { type: "turn_resolved" },
       { type: "refresh_agent_runs" },
+      { type: "refresh_user_questions" },
     ]);
   });
 

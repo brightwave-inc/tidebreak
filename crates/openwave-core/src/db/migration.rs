@@ -25,7 +25,253 @@ impl MigratorTrait for Migrator {
             Box::new(AddClaimedTurnEffectLeases),
             Box::new(AddChatReasoningEffort),
             Box::new(AddDocumentChatScope),
+            Box::new(AddUserQuestions),
         ]
+    }
+}
+
+struct AddUserQuestions;
+
+impl MigrationName for AddUserQuestions {
+    fn name(&self) -> &str {
+        "m20260724_000012_add_user_questions"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddUserQuestions {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(UserQuestionRequest::Table)
+                    .col(
+                        ColumnDef::new(UserQuestionRequest::CallId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(UserQuestionRequest::TurnId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(UserQuestionRequest::ChatId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(UserQuestionRequest::Status)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(UserQuestionRequest::EventSeq)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(UserQuestionRequest::AskedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(UserQuestionRequest::ResolvedAt).timestamp_with_time_zone())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_user_question_request_call")
+                            .from(UserQuestionRequest::Table, UserQuestionRequest::CallId)
+                            .to(ToolCall::Table, ToolCall::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_user_question_request_turn")
+                            .from(UserQuestionRequest::Table, UserQuestionRequest::TurnId)
+                            .to(TurnRun::Table, TurnRun::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_user_question_request_chat")
+                            .from(UserQuestionRequest::Table, UserQuestionRequest::ChatId)
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_user_question_request_event")
+                            .from_tbl(UserQuestionRequest::Table)
+                            .from_col(UserQuestionRequest::ChatId)
+                            .from_col(UserQuestionRequest::EventSeq)
+                            .to_tbl(Event::Table)
+                            .to_col(Event::ChatId)
+                            .to_col(Event::Seq)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(Expr::col(UserQuestionRequest::Status).is_in([
+                        crate::UserQuestionRequestStatus::Pending.as_str(),
+                        crate::UserQuestionRequestStatus::Answered.as_str(),
+                        crate::UserQuestionRequestStatus::Cancelled.as_str(),
+                    ]))
+                    .check(
+                        Expr::col(UserQuestionRequest::Status)
+                            .eq(crate::UserQuestionRequestStatus::Pending.as_str())
+                            .and(Expr::col(UserQuestionRequest::ResolvedAt).is_null())
+                            .or(Expr::col(UserQuestionRequest::Status)
+                                .ne(crate::UserQuestionRequestStatus::Pending.as_str())
+                                .and(Expr::col(UserQuestionRequest::ResolvedAt).is_not_null())),
+                    )
+                    .check(
+                        Expr::col(UserQuestionRequest::ResolvedAt)
+                            .is_null()
+                            .or(Expr::col(UserQuestionRequest::ResolvedAt)
+                                .gte(Expr::col(UserQuestionRequest::AskedAt))),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_user_question_request_pending")
+                    .table(UserQuestionRequest::Table)
+                    .col(UserQuestionRequest::ChatId)
+                    .col(UserQuestionRequest::AskedAt)
+                    .col(UserQuestionRequest::CallId)
+                    .and_where(
+                        Expr::col(UserQuestionRequest::Status)
+                            .eq(crate::UserQuestionRequestStatus::Pending.as_str()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_user_question_request_chat")
+                    .table(UserQuestionRequest::Table)
+                    .col(UserQuestionRequest::ChatId)
+                    .col(UserQuestionRequest::CallId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_user_question_request_turn")
+                    .table(UserQuestionRequest::Table)
+                    .col(UserQuestionRequest::TurnId)
+                    .col(UserQuestionRequest::CallId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_user_question_request_event")
+                    .table(UserQuestionRequest::Table)
+                    .col(UserQuestionRequest::ChatId)
+                    .col(UserQuestionRequest::EventSeq)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(UserQuestion::Table)
+                    .col(ColumnDef::new(UserQuestion::CallId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(UserQuestion::QuestionId)
+                            .string_len(crate::MAX_QUESTION_ID_CHARS as u32)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(UserQuestion::Position).integer().not_null())
+                    .col(
+                        ColumnDef::new(UserQuestion::Header)
+                            .string_len(crate::MAX_QUESTION_HEADER_CHARS as u32)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(UserQuestion::Prompt)
+                            .string_len(crate::MAX_QUESTION_PROMPT_CHARS as u32)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(UserQuestion::Options)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(UserQuestion::AllowFreeForm)
+                            .boolean()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(UserQuestion::AnswerOptionId)
+                            .string_len(crate::MAX_QUESTION_OPTION_ID_CHARS as u32),
+                    )
+                    .col(
+                        ColumnDef::new(UserQuestion::AnswerFreeForm)
+                            .string_len(crate::MAX_FREE_FORM_ANSWER_CHARS as u32),
+                    )
+                    .col(ColumnDef::new(UserQuestion::AnsweredAt).timestamp_with_time_zone())
+                    .primary_key(
+                        Index::create()
+                            .name("pk_user_question")
+                            .col(UserQuestion::CallId)
+                            .col(UserQuestion::QuestionId),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_user_question_request")
+                            .from(UserQuestion::Table, UserQuestion::CallId)
+                            .to(UserQuestionRequest::Table, UserQuestionRequest::CallId)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(
+                        Expr::col(UserQuestion::Position)
+                            .between(0, crate::MAX_USER_QUESTIONS as i32 - 1),
+                    )
+                    .check(
+                        Expr::col(UserQuestion::AnswerOptionId)
+                            .is_null()
+                            .and(Expr::col(UserQuestion::AnswerFreeForm).is_null())
+                            .and(Expr::col(UserQuestion::AnsweredAt).is_null())
+                            .or(Expr::col(UserQuestion::AnswerOptionId)
+                                .is_not_null()
+                                .and(Expr::col(UserQuestion::AnswerFreeForm).is_null())
+                                .and(Expr::col(UserQuestion::AnsweredAt).is_not_null()))
+                            .or(Expr::col(UserQuestion::AnswerOptionId)
+                                .is_null()
+                                .and(Expr::col(UserQuestion::AnswerFreeForm).is_not_null())
+                                .and(Expr::col(UserQuestion::AnsweredAt).is_not_null())),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_user_question_order")
+                    .table(UserQuestion::Table)
+                    .col(UserQuestion::CallId)
+                    .col(UserQuestion::Position)
+                    .unique()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(UserQuestion::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(UserQuestionRequest::Table).to_owned())
+            .await
     }
 }
 
@@ -5585,6 +5831,33 @@ enum TurnClientWait {
     Status,
     ParkedAt,
     ClosedAt,
+}
+
+#[derive(DeriveIden)]
+enum UserQuestionRequest {
+    Table,
+    CallId,
+    TurnId,
+    ChatId,
+    Status,
+    EventSeq,
+    AskedAt,
+    ResolvedAt,
+}
+
+#[derive(DeriveIden)]
+enum UserQuestion {
+    Table,
+    CallId,
+    QuestionId,
+    Position,
+    Header,
+    Prompt,
+    Options,
+    AllowFreeForm,
+    AnswerOptionId,
+    AnswerFreeForm,
+    AnsweredAt,
 }
 
 #[derive(DeriveIden)]

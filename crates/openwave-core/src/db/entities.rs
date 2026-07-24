@@ -808,6 +808,55 @@ pub mod turn_client_wait {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod user_question_request {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "user_question_request")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub call_id: Uuid,
+        pub turn_id: Uuid,
+        pub chat_id: Uuid,
+        pub status: String,
+        pub event_seq: i64,
+        pub asked_at: DateTimeUtc,
+        pub resolved_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod user_question {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "user_question")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub call_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub question_id: String,
+        pub position: i32,
+        pub header: String,
+        pub prompt: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub options: Json,
+        pub allow_free_form: bool,
+        pub answer_option_id: Option<String>,
+        pub answer_free_form: Option<String>,
+        pub answered_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod message_identity {
     use sea_orm::entity::prelude::*;
 

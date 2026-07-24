@@ -1867,6 +1867,98 @@ body {
   margin-top: 0.75rem;
 }
 
+/* ---------- User questions ---------- */
+
+.user-questions {
+  align-self: flex-start;
+  width: min(100%, 40rem);
+  border: 1px solid color-mix(in srgb, var(--color-openwave) 55%, var(--line));
+  border-radius: 8px;
+  padding: 0.95rem;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+}
+
+.user-questions h2 {
+  margin: 0 0 0.1rem;
+  font-size: 0.95rem;
+}
+
+.user-question-list {
+  display: grid;
+  gap: 1rem;
+  margin-top: 0.9rem;
+}
+
+.user-question {
+  display: grid;
+  min-width: 0;
+  gap: 0.55rem;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.user-question legend {
+  padding: 0;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.user-question > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.user-question-options {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.user-question-option {
+  display: flex;
+  cursor: pointer;
+  gap: 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0.65rem;
+}
+
+.user-question-option:has(input:checked) {
+  border-color: var(--color-openwave);
+  background: color-mix(in srgb, var(--color-openwave) 8%, transparent);
+}
+
+.user-question-option input {
+  margin-top: 0.2rem;
+}
+
+.user-question-option span,
+.user-question-free-form {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+}
+
+.user-question-option small,
+.user-question-free-form > span {
+  color: var(--muted-foreground);
+}
+
+.user-question-free-form textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0.6rem;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+}
+
 /* ---------- Composer ---------- */
 
 .composer-wrap {

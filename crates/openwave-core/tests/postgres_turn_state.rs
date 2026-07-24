@@ -7,6 +7,7 @@ use openwave_core::{
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentError, AgentEvent,
     AgentRunCancellationReason, AgentRunExecution, AgentRunId, AgentRunInboxStatus,
     AgentRunResultPayload, AgentRunStatus, AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest,
+    AnswerUserQuestions, AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest,
     ApplyTurnSteerOutcome, AssistantCitationReference, BeginRootAttachmentChange,
     BeginRootAttachmentChangeOutcome, ByteSpan, CallId, Chat, ChatId, ChatRootAttachment,
     CheckpointSandboxSpawnOutcome, ChunkId, ClaimClientToolCallOutcome, ClientToolCallRequest,
@@ -21,7 +22,8 @@ use openwave_core::{
     RootAttachmentChangeTerminal, RootAttachmentOrigin, SandboxSpawnCheckpointRequest,
     SpawnSandboxAgentResult, StopReason, Store, SubmitAgentRunResultOutcome, ToolCallExecution,
     ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry,
-    TurnId, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
+    TurnId, TurnRun, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage, UserQuestionAnswer,
+    ASK_USER_QUESTIONS_TOOL,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement, TransactionTrait};
 
@@ -262,6 +264,45 @@ fn sample_chat() -> Chat {
         root_attachments: Vec::new(),
         created_at: utc_now_at_postgres_precision(),
     }
+}
+
+async fn postgres_claim_exact_turn(
+    store: &DbStore,
+    target: TurnId,
+    now: chrono::DateTime<Utc>,
+) -> (TurnRun, uuid::Uuid) {
+    for offset in 0..64 {
+        let claim_at = now + Duration::milliseconds(offset);
+        let lease = uuid::Uuid::new_v4();
+        let outcome = store
+            .claim_turn_run(lease, claim_at, claim_at + Duration::hours(1))
+            .await
+            .unwrap();
+        let Some(turn) = outcome.turn else {
+            continue;
+        };
+        if turn.id == target {
+            return (turn, lease);
+        }
+
+        // PostgreSQL tests share an isolated database and a few older fixtures
+        // intentionally leave queued work behind. Retire such stale fixtures so
+        // this test can prove which exact continuation was made claimable.
+        let cancel_at = claim_at + Duration::seconds(1);
+        let cancellation = store
+            .request_turn_cancellation(turn.id, cancel_at)
+            .await
+            .unwrap()
+            .expect("claimed stale fixture remains cancellable");
+        if matches!(cancellation, RequestTurnCancellationOutcome::Requested(_)) {
+            store
+                .finish_turn_cancellation(turn.id, lease, cancel_at + Duration::seconds(1))
+                .await
+                .unwrap()
+                .expect("claimed stale fixture cancellation remains owned");
+        }
+    }
+    panic!("target PostgreSQL turn {target} was not claimable");
 }
 
 async fn postgres_live_turn(
@@ -3495,5 +3536,240 @@ async fn postgres_root_attachment_detach_compacts_the_ordered_projection() {
             .map(|attachment| attachment.root_id)
             .collect::<Vec<_>>(),
         vec![roots[0], roots[2]]
+    );
+}
+
+#[tokio::test]
+async fn postgres_user_questions_resume_exactly_and_serialize_with_cancellation() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("OPENWAVE_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("OPENWAVE_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("OPENWAVE_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
+
+    let park = |store: Arc<DbStore>, chat: Chat, turn_id: TurnId| async move {
+        store.create_chat(&chat).await.unwrap();
+        let accepted = match store
+            .accept_turn(turn_id, chat.id, "gpt-5", "ask before acting")
+            .await
+            .unwrap()
+        {
+            AcceptTurnOutcome::Accepted(turn) => turn,
+            outcome => panic!("unexpected question turn acceptance: {outcome:?}"),
+        };
+        let claimed_at = accepted.available_at + Duration::seconds(1);
+        let (claimed, lease) = postgres_claim_exact_turn(&store, turn_id, claimed_at).await;
+        assert_eq!(claimed.id, turn_id);
+        let parked_at = claimed_at + Duration::seconds(1);
+        let request = ClientToolCallRequest {
+            id: CallId::new(),
+            chat_id: chat.id,
+            turn_id,
+            provider_id: format!("question-{turn_id}"),
+            name: ASK_USER_QUESTIONS_TOOL.into(),
+            arguments: serde_json::json!({
+                "questions": [{
+                    "id": "target",
+                    "header": "Target",
+                    "question": "Where should I deploy?",
+                    "options": [
+                        {
+                            "id": "staging",
+                            "label": "Staging",
+                            "description": "Deploy for verification."
+                        },
+                        {
+                            "id": "production",
+                            "label": "Production",
+                            "description": "Deploy to customers."
+                        }
+                    ]
+                }]
+            }),
+        };
+        assert!(matches!(
+            store
+                .park_turn_for_client_tool_call(
+                    turn_id,
+                    lease,
+                    0,
+                    TurnCheckpointProgress {
+                        model_steps: 1,
+                        usage: Usage::default(),
+                    },
+                    parked_at,
+                    &request,
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+            ParkTurnForClientCallOutcome::Parked {
+                renderer_event: Some(_),
+                ..
+            }
+        ));
+        (request, parked_at)
+    };
+
+    let chat = sample_chat();
+    let turn_id = TurnId::new();
+    let (request, parked_at) = park(store.clone(), chat.clone(), turn_id).await;
+    let answers = AnswerUserQuestions {
+        answers: vec![UserQuestionAnswer {
+            question_id: "target".into(),
+            option_id: Some("staging".into()),
+            free_form: None,
+        }],
+    };
+    let answer_request = AnswerUserQuestionsRequest {
+        chat_id: chat.id,
+        call_id: request.id,
+        answers: answers.clone(),
+    };
+    let answered_at = parked_at + Duration::seconds(1);
+    let resume_scan_at = answered_at + Duration::seconds(1);
+    let first_resume_lease = uuid::Uuid::new_v4();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let answer_store = store.clone();
+    let answer_barrier = barrier.clone();
+    let submitted_answer = answer_request.clone();
+    let answer_task = tokio::spawn(async move {
+        answer_barrier.wait().await;
+        answer_store
+            .answer_user_questions(&submitted_answer, answered_at)
+            .await
+            .unwrap()
+    });
+    let claim_store = store.clone();
+    let claim_task = tokio::spawn(async move {
+        barrier.wait().await;
+        claim_store
+            .claim_turn_run(
+                first_resume_lease,
+                resume_scan_at,
+                resume_scan_at + Duration::hours(1),
+            )
+            .await
+            .unwrap()
+    });
+    assert!(matches!(
+        answer_task.await.unwrap(),
+        AnswerUserQuestionsOutcome::Answered(turn)
+            if turn.id == turn_id && turn.status == TurnRunStatus::Resuming
+    ));
+    let first_claim = claim_task.await.unwrap();
+    let (resumed, resumed_lease) = if let Some(turn) = first_claim.turn {
+        (turn, first_resume_lease)
+    } else {
+        postgres_claim_exact_turn(&store, turn_id, resume_scan_at + Duration::seconds(1)).await
+    };
+    assert_eq!(resumed.id, turn_id);
+    assert_eq!((resumed.attempt_count, resumed.claim_count), (1, 2));
+    assert!(matches!(
+        store
+            .answer_user_questions(&answer_request, answered_at)
+            .await
+            .unwrap(),
+        AnswerUserQuestionsOutcome::Existing(turn) if turn.id == turn_id
+    ));
+    assert!(store
+        .list_pending_user_questions(chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+    let call = store
+        .list_tool_calls(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|call| call.id == request.id)
+        .unwrap();
+    assert_eq!(call.execution, ToolCallExecution::Orchestration);
+    assert_eq!(call.status, ToolCallStatus::Completed);
+    assert_eq!(
+        serde_json::from_str::<AnswerUserQuestions>(call.result.as_deref().unwrap()).unwrap(),
+        answers
+    );
+    let cancel_at = resume_scan_at + Duration::seconds(2);
+    assert!(matches!(
+        store
+            .request_turn_cancellation(turn_id, cancel_at)
+            .await
+            .unwrap()
+            .unwrap(),
+        RequestTurnCancellationOutcome::Requested(_)
+    ));
+    assert!(matches!(
+        store
+            .finish_turn_cancellation(turn_id, resumed_lease, cancel_at + Duration::seconds(1),)
+            .await
+            .unwrap()
+            .unwrap(),
+        FinishTurnCancellationOutcome::Cancelled(_)
+    ));
+
+    let race_chat = sample_chat();
+    let race_turn_id = TurnId::new();
+    let (race_request, race_parked_at) = park(store.clone(), race_chat.clone(), race_turn_id).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let answer_store = store.clone();
+    let answer_barrier = barrier.clone();
+    let race_answers = answers.clone();
+    let answer_task = tokio::spawn(async move {
+        answer_barrier.wait().await;
+        answer_store
+            .answer_user_questions(
+                &AnswerUserQuestionsRequest {
+                    chat_id: race_chat.id,
+                    call_id: race_request.id,
+                    answers: race_answers,
+                },
+                race_parked_at + Duration::seconds(1),
+            )
+            .await
+            .unwrap()
+    });
+    let cancel_store = store.clone();
+    let cancel_task = tokio::spawn(async move {
+        barrier.wait().await;
+        cancel_store
+            .request_turn_cancellation(race_turn_id, race_parked_at + Duration::seconds(1))
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert!(matches!(
+        answer_task.await.unwrap(),
+        AnswerUserQuestionsOutcome::Answered(_) | AnswerUserQuestionsOutcome::Unavailable
+    ));
+    assert!(matches!(
+        cancel_task.await.unwrap(),
+        RequestTurnCancellationOutcome::Cancelled(_) | RequestTurnCancellationOutcome::Existing(_)
+    ));
+    assert_eq!(
+        store
+            .get_turn_run(race_turn_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TurnRunStatus::Cancelled
+    );
+    assert!(store
+        .list_pending_user_questions(race_chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.delete_chat(chat.id).await.unwrap(),
+        DeleteChatOutcome::Deleted
+    );
+    assert_eq!(
+        store.delete_chat(race_chat.id).await.unwrap(),
+        DeleteChatOutcome::Deleted
     );
 }

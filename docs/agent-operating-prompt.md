@@ -27,6 +27,7 @@ Runtime MCP refreshes therefore affect only later turns. The baseline covers:
 Additional fixed sections are enabled only when their corresponding tools are
 registered:
 
+- structured user clarification;
 - private scratch;
 - conversation sources and opaque citation references;
 - public web research;

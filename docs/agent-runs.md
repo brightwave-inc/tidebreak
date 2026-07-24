@@ -151,6 +151,13 @@ A wait records the exact dependency and checkpoint, releases worker ownership,
 and becomes claimable again only after a durable receipt resolves it. A process
 notification may reduce latency, but it is never the source of truth.
 
+`ask_user_questions` now uses this continuation boundary directly. It
+atomically stores a bounded renderer projection with the client wait, releases
+the foreground lease, and resumes the same turn only after an exact answer is
+committed. Exact retries recover the prior answer; contradictory retries and
+answer/cancel races cannot produce two results. See
+[Durable user questions](user-questions.md).
+
 ## Sandbox and host-access boundary
 
 A background agent has private runtime scratch but cannot access that scratch,

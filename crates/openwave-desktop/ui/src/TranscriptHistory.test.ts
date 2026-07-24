@@ -65,6 +65,21 @@ describe("hydrateTranscriptHistory", () => {
     expect(JSON.stringify(entries)).not.toContain("finished_at");
   });
 
+  it("hydrates answered questions with a fixed presentation kind", () => {
+    const entries = hydrateTranscriptHistory([], [
+      {
+        title: "Ask a question",
+        status: "completed",
+        started_at: "2026-07-16T10:00:00Z",
+        finished_at: "2026-07-16T10:00:01Z",
+      },
+    ]);
+
+    expect(entries).toEqual([
+      expect.objectContaining({ name: "ask_user_questions" }),
+    ]);
+  });
+
   it("hydrates delegated file reads as their fixed presentation kind", () => {
     const entries = hydrateTranscriptHistory([], [
       {

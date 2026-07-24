@@ -48,6 +48,7 @@ pub mod storage;
 pub mod tool;
 #[cfg(feature = "tools")]
 pub mod tools;
+pub mod user_questions;
 
 pub use agent::{
     Agent, AgentConfig, AgentTurnOutcome, ClaimedAgentEvent, ForegroundAgentWaitRequest,
@@ -130,11 +131,11 @@ pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
     AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptSandboxAgentRunAndParkTurnOutcome,
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
-    AppendClaimedMessageOutcome, ApplyTurnSteerOutcome, BeginRootAttachmentChangeOutcome,
-    BlobStore, ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot,
-    CheckpointSandboxSpawnOutcome, ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome,
-    ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome, ClaimScanTerminalEvent,
-    ClaimTurnRunOutcome, ClientToolCallClaim, CompleteTurnRunOutcome,
+    AnswerUserQuestionsOutcome, AppendClaimedMessageOutcome, ApplyTurnSteerOutcome,
+    BeginRootAttachmentChangeOutcome, BlobStore, ChatToolActivitySnapshot, ChatToolActivityStatus,
+    ChatTranscriptSnapshot, CheckpointSandboxSpawnOutcome, ClaimAgentRunInboxOutcome,
+    ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome,
+    ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim, CompleteTurnRunOutcome,
     ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,
     DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome, DocumentIndexJobReason,
     EnsureDocumentIndexJobOutcome, EnsureDocumentParseJobOutcome, FailAgentRunOutcome,
@@ -150,3 +151,11 @@ pub use storage::{
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
 #[cfg(feature = "tools")]
 pub use tools::{CreateDeliverable, ListDir, ReadFile, WriteFile};
+pub use user_questions::{
+    ask_user_questions_tool_spec, validate_ask_user_questions_arguments, AnswerUserQuestions,
+    AnswerUserQuestionsRequest, AskUserQuestionsArgs, PendingUserQuestions, UserQuestion,
+    UserQuestionAnswer, UserQuestionOption, UserQuestionRequestStatus, ASK_USER_QUESTIONS_TOOL,
+    MAX_FREE_FORM_ANSWER_CHARS, MAX_QUESTION_HEADER_CHARS, MAX_QUESTION_ID_CHARS,
+    MAX_QUESTION_OPTIONS, MAX_QUESTION_OPTION_DESCRIPTION_CHARS, MAX_QUESTION_OPTION_ID_CHARS,
+    MAX_QUESTION_OPTION_LABEL_CHARS, MAX_QUESTION_PROMPT_CHARS, MAX_USER_QUESTIONS,
+};

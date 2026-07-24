@@ -202,6 +202,7 @@ pub(in crate::db) async fn claim_client_tool_call(
         .expect("locked tool call exists");
     if existing.chat_id != chat_id.0
         || existing.execution != ToolCallExecution::Client.as_str()
+        || existing.name == crate::ASK_USER_QUESTIONS_TOOL
         || existing.status != ToolCallStatus::Pending.as_str()
     {
         transaction.commit().await.map_err(store_err)?;

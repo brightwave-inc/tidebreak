@@ -29,6 +29,7 @@ You are OpenWave, an assistant working with the user inside one conversation.
 - Never expose credentials, private broker state, hidden identifiers, or internal paths. Refer only to user-visible names and opaque identifiers returned by available tools when needed.
 - Respect tool approval and capability boundaries. A request or proposal is not proof that access was granted.";
 
+const USER_QUESTIONS_HEADING: &str = "## User clarification";
 const PRIVATE_SCRATCH_HEADING: &str = "## Private scratch";
 const SOURCES_HEADING: &str = "## Conversation sources and citations";
 const WEB_SEARCH_HEADING: &str = "## Public web research";
@@ -52,6 +53,18 @@ pub(crate) fn compose(specs: &[ToolSpec]) -> String {
         .collect::<BTreeSet<_>>();
     let has = |name: &str| names.contains(name);
     let mut prompt = BASELINE.to_owned();
+
+    if has(openwave_core::ASK_USER_QUESTIONS_TOOL) {
+        push_section(
+            &mut prompt,
+            USER_QUESTIONS_HEADING,
+            &[
+                "- Use `ask_user_questions` when work should continue but a missing choice would materially change the result or authorize a consequential action. Do not use it for minor reversible assumptions.",
+                "- Ask no more than three focused questions at once. Prefer clear mutually exclusive options, and allow a free-form answer only when the listed choices may not cover the user's intent.",
+                "- After asking, wait for the user's structured answer; do not guess, repeat the question in prose, or start the dependent work.",
+            ],
+        );
+    }
 
     if ["read_file", "list_dir", "write_file"]
         .iter()
@@ -266,6 +279,7 @@ mod tests {
         assert_eq!(prompt, BASELINE);
         assert!(prompt.contains("reasonable, reversible assumptions"));
         for unavailable in [
+            USER_QUESTIONS_HEADING,
             PRIVATE_SCRATCH_HEADING,
             SOURCES_HEADING,
             WEB_SEARCH_HEADING,
@@ -275,6 +289,7 @@ mod tests {
             DELEGATION_HEADING,
             MCP_HEADING,
             "`search`",
+            "`ask_user_questions`",
             "`request_folder_access`",
             "`create_deliverable`",
             "`spawn_sandbox_agent`",
@@ -291,6 +306,7 @@ mod tests {
         let prompt = compose(&[
             spec("read_file"),
             spec("write_file"),
+            spec("ask_user_questions"),
             spec("list_sources"),
             spec("read_source"),
             spec("web_search"),
@@ -305,6 +321,7 @@ mod tests {
 
         for enabled in [
             PRIVATE_SCRATCH_HEADING,
+            USER_QUESTIONS_HEADING,
             SOURCES_HEADING,
             WEB_SEARCH_HEADING,
             CONNECTED_FOLDERS_HEADING,
@@ -314,6 +331,7 @@ mod tests {
             MCP_HEADING,
             "`read_file`",
             "`write_file`",
+            "`ask_user_questions`",
             "`list_sources`",
             "`read_source`",
             "`web_search`",
@@ -404,6 +422,7 @@ mod tests {
             spec("read_file"),
             spec("list_dir"),
             spec("write_file"),
+            spec("ask_user_questions"),
             spec("search"),
             spec("list_sources"),
             spec("read_source"),
@@ -421,7 +440,7 @@ mod tests {
 
         assert_eq!(
             identity(&prompt),
-            "foreground-v1:sha256:56b913013bb043ae64c514ceaff7554c04db812c218762413a0ad093ffd26e5b"
+            "foreground-v1:sha256:e459918082cacf1fd2b7859b939d9a969d06858d59f540babc361ea2a107cbfa"
         );
     }
 }

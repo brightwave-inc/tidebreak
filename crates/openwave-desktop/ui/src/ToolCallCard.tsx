@@ -121,6 +121,12 @@ const TOOL_PRESENTATIONS: Record<string, ToolPresentation> = {
     complete: "Connected file read complete",
     settled: "Read a connected file",
   },
+  ask_user_questions: {
+    label: "Ask a question",
+    active: "Waiting for your answer",
+    complete: "Answer received",
+    settled: "Asked a question",
+  },
   spawn_sandbox_agent: {
     label: "Delegate a task",
     active: "Delegating a task",

@@ -102,6 +102,18 @@ describe("ToolCallCard", () => {
     expect(finished).toContain("Background agents finished");
   });
 
+  it("uses fixed copy while waiting for a structured answer", () => {
+    const waiting = renderToStaticMarkup(
+      <ToolCallCard name="ask_user_questions" status="running" />,
+    );
+    const answered = renderToStaticMarkup(
+      <ToolCallCard name="ask_user_questions" status="completed" />,
+    );
+
+    expect(waiting).toContain("Waiting for your answer");
+    expect(answered).toContain("Answer received");
+  });
+
   it("uses fixed terminal failure copy for background-agent waits", () => {
     const failed = renderToStaticMarkup(
       <ToolCallCard name="wait_for_agents" status="failed" />,

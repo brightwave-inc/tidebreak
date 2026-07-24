@@ -13,6 +13,8 @@ Project documentation, versioned alongside the code.
   bounded sandbox scheduling plan.
 - [Foreground agent operating prompt](agent-operating-prompt.md) — deterministic
   capability composition, trust boundaries, versioning, and extension rules.
+- [Durable user questions](user-questions.md) — foreground-only structured
+  clarification with exact wait/resume behavior across reload and restart.
 - [Tool architecture and roadmap](tools.md) — the current tool surface,
   foreground/sandbox split, provider boundaries, and web-search plan.
 - [Web search configuration](web-search.md) — the local host-owned Exa/Tavily

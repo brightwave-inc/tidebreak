@@ -75,10 +75,13 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
             && progress_from_wait_model(&wait)? == progress
             && exact_call_request(&existing_call, call);
         let outcome = if exact {
+            let renderer_event =
+                super::super::user_question::recover_checkpoint_on(&transaction, call).await?;
             ParkTurnForClientCallOutcome::Existing {
                 turn: turn_run_from_model(turn)?,
                 call: super::super::client_execution::tool_call_from_model(existing_call)?,
                 wait: wait_from_model(wait)?,
+                renderer_event,
             }
         } else {
             ParkTurnForClientCallOutcome::IdentityConflict
@@ -140,7 +143,7 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         history_order: Set(history_order),
         name: Set(call.name.clone()),
         arguments: Set(call.arguments.clone()),
-        execution: Set(ToolCallExecution::Client.as_str().into()),
+        execution: Set(checkpoint_execution(&call.name).as_str().into()),
         status: Set(ToolCallStatus::Pending.as_str().into()),
         result: Set(None),
         error_code: Set(None),
@@ -256,10 +259,13 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("parked call {} disappeared", call.id)))?;
+    let renderer_event =
+        super::super::user_question::checkpoint_on(&transaction, call, now).await?;
     let outcome = ParkTurnForClientCallOutcome::Parked {
         turn: turn_run_from_model(parked_turn)?,
         call: super::super::client_execution::tool_call_from_model(inserted_call)?,
         wait: wait_from_model(wait)?,
+        renderer_event,
     };
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(outcome))
@@ -294,7 +300,18 @@ fn exact_call_request(
         && existing.provider_id == request.provider_id
         && existing.name == request.name
         && existing.arguments == request.arguments
-        && existing.execution == ToolCallExecution::Client.as_str()
+        && existing.execution == checkpoint_execution(&request.name).as_str()
+}
+
+fn checkpoint_execution(name: &str) -> ToolCallExecution {
+    if name == crate::ASK_USER_QUESTIONS_TOOL {
+        // The foreground user, rather than a separately leased native
+        // executor, supplies this call's result. Orchestration records are
+        // intentionally ineligible for either generic execution path.
+        ToolCallExecution::Orchestration
+    } else {
+        ToolCallExecution::Client
+    }
 }
 
 pub(super) fn wait_from_model(model: entities::turn_client_wait::Model) -> Result<TurnClientWait> {

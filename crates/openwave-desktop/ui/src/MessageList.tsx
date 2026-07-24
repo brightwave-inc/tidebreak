@@ -1,6 +1,10 @@
 import { memo, useMemo } from "react";
 import type { ReactNode, RefObject, UIEvent } from "react";
-import type { PendingFolderAccessRequest } from "./api";
+import type {
+  PendingFolderAccessRequest,
+  PendingUserQuestions,
+  UserQuestionAnswer,
+} from "./api";
 import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
 import { FolderAccessCard } from "./FolderAccessCard";
 import type { FolderAccessDecision } from "./host";
@@ -10,6 +14,7 @@ import { AssistantSources, type AssistantSource } from "./AssistantSources";
 import { ToolCallCard, type ToolCallStatus } from "./ToolCallCard";
 import { ToolActivityGroup } from "./ToolActivityGroup";
 import { WelcomeState } from "./WelcomeState";
+import { UserQuestionsCard } from "./UserQuestionsCard";
 
 export type ChatMessage =
   | { id: string; role: "user"; text: string; createdAt?: string }
@@ -45,10 +50,13 @@ export type ChatMessage =
 type MessageListProps = {
   messages: ChatMessage[];
   folderAccessRequests: PendingFolderAccessRequest[];
+  userQuestionRequests?: PendingUserQuestions[];
   nativeHost: boolean;
   nativeBusy: boolean;
   resolvingFolderCalls: Set<string>;
   folderAccessErrors: Record<string, string>;
+  answeringQuestionCalls?: Set<string>;
+  userQuestionErrors?: Record<string, string>;
   decidingApprovalCalls: Set<string>;
   approvalErrors: Record<string, string>;
   busy: boolean;
@@ -65,6 +73,11 @@ type MessageListProps = {
     decision: FolderAccessDecision,
   ) => void;
   onFolderAccessCancel: (callId: string, turnId: string) => void;
+  onAnswerUserQuestions?: (
+    callId: string,
+    answers: UserQuestionAnswer[],
+  ) => void;
+  onUserQuestionsCancel?: (turnId: string) => void;
   onSelectPrompt?: (prompt: string) => void;
   hydrated?: boolean;
 };
@@ -72,10 +85,13 @@ type MessageListProps = {
 export function MessageList({
   messages,
   folderAccessRequests,
+  userQuestionRequests = [],
   nativeHost,
   nativeBusy,
   resolvingFolderCalls,
   folderAccessErrors,
+  answeringQuestionCalls = new Set(),
+  userQuestionErrors = {},
   decidingApprovalCalls,
   approvalErrors,
   busy,
@@ -85,6 +101,8 @@ export function MessageList({
   onApproval,
   onFolderAccessDecision,
   onFolderAccessCancel,
+  onAnswerUserQuestions = () => undefined,
+  onUserQuestionsCancel = () => undefined,
   onSelectPrompt,
   hydrated = true,
 }: MessageListProps) {
@@ -107,6 +125,7 @@ export function MessageList({
     hydrated &&
     messages.length === 0 &&
     folderAccessRequests.length === 0 &&
+    userQuestionRequests.length === 0 &&
     !busy;
 
   if (isEmpty) {
@@ -135,10 +154,22 @@ export function MessageList({
             onCancel={() => onFolderAccessCancel(request.callId, request.turnId)}
           />
         ))}
+        {userQuestionRequests.map((request) => (
+          <UserQuestionsCard
+            key={request.callId}
+            request={request}
+            working={answeringQuestionCalls.has(request.callId)}
+            error={userQuestionErrors[request.callId]}
+            onAnswer={(answers) =>
+              onAnswerUserQuestions(request.callId, answers)
+            }
+            onCancel={() => onUserQuestionsCancel(request.turnId)}
+          />
+        ))}
         {shouldShowAssistantWorking(
           messages,
           busy,
-          folderAccessRequests.length,
+          folderAccessRequests.length + userQuestionRequests.length,
         ) && <AssistantWorkingIndicator thinking={reasoningActive} />}
       </div>
     </div>
