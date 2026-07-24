@@ -344,6 +344,18 @@ id_type!(
     /// Identifies one tool call, stable across its request/approval/result.
     CallId
 );
+id_type!(
+    /// Identifies one conversation-owned output across all of its revisions.
+    ///
+    /// This is the durable handle a model, renderer, or export names. It is
+    /// deliberately opaque: possession of an id is not authority, and it never
+    /// encodes a filename or a host path.
+    OutputId
+);
+id_type!(
+    /// Identifies one immutable revision of an output.
+    OutputRevisionId
+);
 
 #[cfg(test)]
 mod tests {
