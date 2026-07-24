@@ -18,7 +18,7 @@ use std::sync::{
 
 use openwave_core::{
     ApprovalClass, ApprovalDecision, ApprovalGate, ApprovalRequest, CallId, ChatId, StandingGrants,
-    ToolApprovalKind, ToolApprovalPreview, ToolCtx, ToolOutput, ToolRegistry, TurnId, VERSION,
+    ToolActionPreview, ToolApprovalKind, ToolCtx, ToolOutput, ToolRegistry, TurnId, VERSION,
 };
 use serde_json::Value;
 
@@ -79,7 +79,7 @@ impl ApprovalBridge {
             tool_name: tool_name.to_string(),
             class,
             kind,
-            preview: ToolApprovalPreview::build(tool_name, arguments),
+            preview: ToolActionPreview::build(tool_name, arguments),
             summary: format!("{tool_name} requires approval"),
         };
         // MCP has no durable steer journal, so register without a journal identity.

@@ -1,5 +1,5 @@
 import type { SequencedEvent } from "./api";
-import { parseToolApprovalPreview } from "./api";
+import { parseToolActionPreview, parseToolResultPreview } from "./api";
 import { shouldRefreshAgentRunsAfterToolEvent } from "./AgentRunRefresh";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import type { ChatMessage } from "./MessageList";
@@ -245,7 +245,7 @@ export function reduceChatSessionEvent(
             // Validated here rather than trusted: the socket frame is the one
             // place a preview arrives without having gone through the HTTP
             // recovery parser.
-            preview: parseToolApprovalPreview(event.preview),
+            preview: parseToolActionPreview(event.preview),
             canApprove: approval.canApprove,
             canRemember: approval.canRemember,
           }),
@@ -283,6 +283,12 @@ export function reduceChatSessionEvent(
                 : event.status === "failed"
                   ? "failed"
                   : "completed",
+            // Validated here rather than trusted: the socket frame is the one
+            // place a projection arrives without going through the HTTP parser.
+            // A call approved by a standing grant never had an approval card,
+            // so completion is the first time the action itself arrives.
+            preview: parseToolActionPreview(event.action) ?? tool.preview,
+            result: parseToolResultPreview(event.result),
           })),
         },
         effects,

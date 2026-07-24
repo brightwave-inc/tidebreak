@@ -33,7 +33,7 @@ use crate::agent_tools::{
 };
 use crate::approval::{
     ApprovalDecision, ApprovalGate, ApprovalJournalIdentity, ApprovalRequest,
-    ApprovalRequiredPublication, RefuseGate, StandingGrants, ToolApprovalKind, ToolApprovalPreview,
+    ApprovalRequiredPublication, RefuseGate, StandingGrants, ToolApprovalKind,
 };
 use crate::cancel::CancelToken;
 use crate::citation::{
@@ -48,6 +48,7 @@ use crate::model::{
     Chat, Message, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
     TurnRunStatus,
 };
+use crate::preview::{ToolActionPreview, ToolResultPreview};
 use crate::provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, StopReason, Usage,
 };
@@ -785,6 +786,14 @@ struct PendingCall {
     provider_id: String,
     name: String,
     args: String,
+}
+
+/// The closed action projection for a pending call, parsed from the arguments
+/// it will run with. Arguments that never parsed cannot describe an action.
+fn call_action_preview(call: &PendingCall) -> Option<ToolActionPreview> {
+    serde_json::from_str(&call.args)
+        .ok()
+        .and_then(|args| ToolActionPreview::build(&call.name, &args))
 }
 
 struct AssistantCandidate {
@@ -1595,6 +1604,8 @@ impl Agent {
                 events.send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
                     output: output.clone(),
+                    action: call_action_preview(call),
+                    result: ToolResultPreview::build(&call.name, output.data.as_ref()),
                 });
                 if needs_resolution {
                     let resolution = if output.is_error {
@@ -2077,9 +2088,7 @@ impl Agent {
             // asked about before the restart.
             let preview = match durable_approval {
                 Some(approval) => approval.preview.clone(),
-                None => serde_json::from_str(&call.args)
-                    .ok()
-                    .and_then(|args| ToolApprovalPreview::build(&call.name, &args)),
+                None => call_action_preview(call),
             };
             if self.durable_steer_lease.is_some() && events.flush().await.is_err() {
                 return ToolOutput::error("approval event journal is unavailable");
@@ -2315,6 +2324,8 @@ impl Agent {
                 events.send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
                     output: output.clone(),
+                    action: call_action_preview(&call),
+                    result: ToolResultPreview::build(&call.name, output.data.as_ref()),
                 });
                 transcript.push(ChatMessage {
                     role: Role::User,
@@ -2381,6 +2392,8 @@ impl Agent {
             events.send(AgentEvent::ToolCallCompleted {
                 call_id: call.call_id,
                 output: output.clone(),
+                action: call_action_preview(&call),
+                result: ToolResultPreview::build(&call.name, output.data.as_ref()),
             });
             transcript.push(ChatMessage {
                 role: Role::User,

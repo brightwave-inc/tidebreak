@@ -15,6 +15,7 @@ use std::sync::RwLock;
 
 use crate::event::SequencedEvent;
 use crate::id::{CallId, ChatId, TurnId};
+use crate::preview::ToolActionPreview;
 use crate::tool::ApprovalClass;
 use chrono::{DateTime, Utc};
 
@@ -140,83 +141,6 @@ impl ToolApprovalKind {
     }
 }
 
-/// The exact action a parked call will take, in a form a human can inspect.
-///
-/// [`ToolApprovalKind`] names the *class* of egress being consented to; it
-/// cannot say which command is about to run. Consent that cannot be inspected
-/// is not consent, so a tool may additionally project a preview.
-///
-/// This is not an arguments passthrough. Each variant enumerates exactly the
-/// fields a decision needs, a tool without a variant projects nothing, and
-/// values are clamped so a model cannot use the card as an unbounded canvas.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "tool", rename_all = "snake_case")]
-pub enum ToolApprovalPreview {
-    /// A command execution, as the argument vector it will actually run. There
-    /// is no shell string to show because no shell parses it.
-    Exec {
-        /// Executable name or path the model chose.
-        command: String,
-        /// Arguments passed directly to the executable.
-        args: Vec<String>,
-        /// Working directory relative to the chat's private scratch, never a
-        /// host path.
-        cwd: String,
-    },
-}
-
-impl ToolApprovalPreview {
-    /// Longest command, argument, or directory string a preview carries.
-    pub const MAX_FIELD_CHARS: usize = 512;
-
-    /// Most arguments a preview carries before it elides the tail.
-    pub const MAX_ARGS: usize = 32;
-
-    /// Project the preview for a call, or `None` when the tool has none.
-    ///
-    /// `arguments` are the canonical model-authored arguments. Only the fields
-    /// named by a variant are read; malformed arguments simply yield `None`
-    /// rather than degrading the card into a raw JSON dump.
-    #[must_use]
-    pub fn build(tool_name: &str, arguments: &serde_json::Value) -> Option<Self> {
-        match tool_name {
-            // Kept beside `ToolApprovalKind::for_tool_name`, which already owns
-            // the closed mapping from tool name to consent semantics.
-            "exec" => {
-                let command = clamp(arguments.get("command")?.as_str()?)?;
-                let args = arguments
-                    .get("args")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|args| {
-                        args.iter()
-                            .take(Self::MAX_ARGS)
-                            .filter_map(|arg| arg.as_str().and_then(clamp))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let cwd = arguments
-                    .get("cwd")
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(clamp)
-                    .unwrap_or_else(|| ".".into());
-                Some(Self::Exec { command, args, cwd })
-            }
-            _ => None,
-        }
-    }
-}
-
-/// Bound one preview field, dropping control characters that could forge card
-/// structure. An empty or all-control field is not presentable.
-fn clamp(value: &str) -> Option<String> {
-    let cleaned: String = value
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(ToolApprovalPreview::MAX_FIELD_CHARS)
-        .collect();
-    (!cleaned.is_empty()).then_some(cleaned)
-}
-
 impl ToolApprovalStatus {
     /// Stable database representation.
     #[must_use]
@@ -231,7 +155,7 @@ impl ToolApprovalStatus {
 
 /// Private durable approval state. Canonical tool arguments and model summaries
 /// deliberately remain outside this read model; only the closed
-/// [`ToolApprovalPreview`] projection of those arguments is presentable.
+/// [`ToolActionPreview`] projection of those arguments is presentable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolApproval {
     pub call_id: CallId,
@@ -241,7 +165,7 @@ pub struct ToolApproval {
     pub class: ApprovalClass,
     pub kind: ToolApprovalKind,
     /// What the call will do, when the tool projects it.
-    pub preview: Option<ToolApprovalPreview>,
+    pub preview: Option<ToolActionPreview>,
     pub status: ToolApprovalStatus,
     pub reason: Option<String>,
     pub requested_at: DateTime<Utc>,
@@ -438,7 +362,7 @@ pub struct ApprovalRequest {
     pub kind: ToolApprovalKind,
     /// Closed projection of the arguments this call will run with, when the
     /// tool has one. Registration ignores it; it exists to be presented.
-    pub preview: Option<ToolApprovalPreview>,
+    pub preview: Option<ToolActionPreview>,
     /// Short human-readable summary of what will happen.
     pub summary: String,
 }
@@ -660,73 +584,5 @@ mod standing_grant_tests {
 
         grants.clear();
         assert!(!grants.covers(chat, "search", kind));
-    }
-
-    #[test]
-    fn exec_preview_carries_the_argument_vector_and_defaults_its_directory() {
-        let preview = ToolApprovalPreview::build(
-            "exec",
-            &serde_json::json!({ "command": "python3", "args": ["-c", "print(1)"] }),
-        );
-        assert_eq!(
-            preview,
-            Some(ToolApprovalPreview::Exec {
-                command: "python3".into(),
-                args: vec!["-c".into(), "print(1)".into()],
-                cwd: ".".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn only_tools_with_a_variant_project_a_preview() {
-        for (tool, arguments) in [
-            ("search", serde_json::json!({ "query": "private" })),
-            ("web_search", serde_json::json!({ "query": "private" })),
-            (
-                "write_file",
-                serde_json::json!({ "path": "/Users/private" }),
-            ),
-            ("mcp__server__tool", serde_json::json!({ "any": "thing" })),
-        ] {
-            assert_eq!(ToolApprovalPreview::build(tool, &arguments), None);
-        }
-    }
-
-    #[test]
-    fn malformed_exec_arguments_yield_no_preview_rather_than_a_raw_dump() {
-        for arguments in [
-            serde_json::json!({}),
-            serde_json::json!({ "command": "" }),
-            serde_json::json!({ "command": 7 }),
-            serde_json::json!("not an object"),
-        ] {
-            assert_eq!(ToolApprovalPreview::build("exec", &arguments), None);
-        }
-    }
-
-    #[test]
-    fn exec_preview_bounds_the_card_a_model_can_paint() {
-        let long = "a".repeat(ToolApprovalPreview::MAX_FIELD_CHARS * 2);
-        let many: Vec<_> = (0..ToolApprovalPreview::MAX_ARGS * 2)
-            .map(|index| index.to_string())
-            .collect();
-        let Some(ToolApprovalPreview::Exec { command, args, cwd }) = ToolApprovalPreview::build(
-            "exec",
-            &serde_json::json!({
-                "command": long,
-                "args": many,
-                // Control characters could otherwise forge card structure.
-                "cwd": "scratch\n\u{1b}[31mapproved",
-            }),
-        ) else {
-            panic!("exec projects a preview");
-        };
-        assert_eq!(
-            command.chars().count(),
-            ToolApprovalPreview::MAX_FIELD_CHARS
-        );
-        assert_eq!(args.len(), ToolApprovalPreview::MAX_ARGS);
-        assert_eq!(cwd, "scratch[31mapproved");
     }
 }

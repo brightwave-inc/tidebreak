@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { Check, ChevronDown, Clock, Loader2, Terminal, X } from "lucide-react";
-import type { ToolApprovalPreview } from "./api";
+import type { ToolActionPreview, ToolResultPreview } from "./api";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { ToolTone } from "./ToolStatusIcon";
@@ -18,7 +18,9 @@ type ToolCommandCardProps = {
   name: string;
   status: ToolCallStatus;
   /** The tool's own view of the command, which is what the card is for. */
-  preview: ToolApprovalPreview;
+  preview: ToolActionPreview;
+  /** What the command produced, once it has produced anything. */
+  result: ToolResultPreview | null;
 };
 
 type ToolPresentation = {
@@ -175,12 +177,22 @@ const FALLBACK_TOOL: ToolPresentation = {
  * Only tools that project a preview get a card. Everything else lives in the
  * activity rail, where a line of text is the whole story the renderer has.
  */
-export function ToolCommandCard({ name, status, preview }: ToolCommandCardProps) {
+export function ToolCommandCard({
+  name,
+  status,
+  preview,
+  result,
+}: ToolCommandCardProps) {
   const presentation = toolCallPresentation(name, status);
-  const command = toolPreviewPresentation(preview);
+  const command = toolPreviewPresentation(preview, result);
   const running = presentation.tone === "running";
   const [expanded, setExpanded] = useState(running);
+  const [tab, setTab] = useState<"command" | "output">("output");
   const bodyId = useId();
+  const output = commandOutput(result);
+  // A command that finished silently has nothing to tab between, and a
+  // "Command / Output → no output" pair reads as confusing noise.
+  const tabbed = running || output !== null;
 
   return (
     <section
@@ -208,29 +220,107 @@ export function ToolCommandCard({ name, status, preview }: ToolCommandCardProps)
           <Terminal className="size-3.5 shrink-0" aria-hidden="true" />
           <span className="truncate font-mono">{command.headline}</span>
         </span>
-        <ToolStatusBadge presentation={presentation} />
+        <ToolStatusBadge presentation={presentation} result={result} />
       </button>
       {expanded && (
-        <div id={bodyId} className="border-t p-1">
-          <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
-            {command.detail}
-          </ScrollableContainer>
+        <div id={bodyId} className="border-t">
+          {tabbed && (
+            <div
+              role="tablist"
+              aria-label="Command detail"
+              className="flex w-full items-center justify-start gap-1 border-b px-1"
+            >
+              {(["command", "output"] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === value}
+                  onClick={() => setTab(value)}
+                  className={cn(
+                    "cursor-pointer rounded-md px-2.5 py-1 text-xs font-medium capitalize transition-colors",
+                    tab === value
+                      ? "text-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="p-1">
+            {!tabbed || tab === "command" ? (
+              <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
+                {command.detail}
+              </ScrollableContainer>
+            ) : output === null ? (
+              <p className="text-muted-foreground flex items-center gap-1.5 p-2 text-xs">
+                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                Waiting for output…
+              </p>
+            ) : (
+              <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
+                {output}
+              </ScrollableContainer>
+            )}
+          </div>
         </div>
       )}
     </section>
   );
 }
 
+/**
+ * The captured streams, labelled and in the order they matter.
+ *
+ * `null` means nothing was captured — which for a finished command is a fact
+ * worth stating by omission rather than by an empty pane.
+ */
+export function commandOutput(result: ToolResultPreview | null): string | null {
+  if (!result) return null;
+  // Streams almost always end in a newline of their own; joining those with a
+  // blank line would open a three-line gap between the two sections.
+  const sections = [
+    result.stdout && `$ stdout\n${result.stdout.replace(/\s+$/, "")}`,
+    result.stderr && `$ stderr\n${result.stderr.replace(/\s+$/, "")}`,
+  ].filter((section): section is string => Boolean(section));
+  if (sections.length === 0) return null;
+  const body = sections.join("\n\n");
+  return result.outputTruncated
+    ? `${body}\n\n# output was truncated at the capture limit`
+    : body;
+}
+
 function ToolStatusBadge({
   presentation,
+  result,
 }: {
   presentation: ToolCallPresentation;
+  result: ToolResultPreview | null;
 }) {
   if (presentation.tone === "running") {
     return (
       <Badge variant="outline" className="shrink-0 gap-1">
         <Loader2 className="size-3 animate-spin" aria-hidden="true" />
         Running…
+      </Badge>
+    );
+  }
+  if (result?.timedOut) {
+    return (
+      <Badge variant="warning" className="shrink-0">
+        Timed out
+      </Badge>
+    );
+  }
+  // A non-zero exit is the most specific thing anyone can be told about a
+  // failed command, so it outranks the generic outcome word.
+  if (typeof result?.exitCode === "number" && result.exitCode !== 0) {
+    return (
+      <Badge variant="outline" className="text-destructive shrink-0 gap-1">
+        <X className="size-3" aria-hidden="true" />
+        Exit {result.exitCode}
       </Badge>
     );
   }

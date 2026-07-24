@@ -158,6 +158,8 @@ export type ChatMessageCitation = {
 
 /** A fixed, terminal tool-card projection with no canonical tool data. */
 export type ChatToolActivity = {
+  /** What the call did, when its tool projects it. */
+  action?: ToolActionPreview;
   title:
     | "Search sources"
     | "Check sources"
@@ -250,13 +252,15 @@ export type AgentEvent =
       action: RendererToolName;
       approval: RendererApprovalKind;
       class: "read_only" | "workspace" | "sensitive";
-      preview?: ToolApprovalPreview;
+      preview?: ToolActionPreview;
     }
   | { type: "approval_decided"; call_id: string; approved: boolean }
   | {
       type: "tool_call_completed";
       call_id: string;
       status: "completed" | "failed";
+      action?: ToolActionPreview;
+      result?: ToolResultPreview;
     }
   | { type: "turn_completed" }
   | { type: "turn_failed" }
@@ -287,18 +291,34 @@ export type RendererToolName =
   | "other";
 
 /**
- * The action a parked call will take, in a form a human can inspect.
+ * The action a call will take, in a form a human can inspect.
  *
- * The renderer boundary otherwise carries no tool arguments. This is the one
- * exception: a tool may project a closed, field-by-field view of what it is
- * about to do, because consent to an action you cannot see is not consent.
- * Tools without a variant send nothing.
+ * The renderer boundary otherwise carries no tool arguments. This is one of two
+ * exceptions: a tool may project a closed, field-by-field view of what it is
+ * about to do, because consent to an action you cannot see is not consent, and
+ * because a result is unreadable without knowing what produced it.
  */
-export type ToolApprovalPreview = {
+export type ToolActionPreview = {
   tool: "exec";
   command: string;
   args: string[];
   cwd: string;
+};
+
+/**
+ * What a call produced.
+ *
+ * The other exception. A command's output is the whole reason to run it;
+ * withholding it leaves the transcript asserting that something happened
+ * without ever showing what.
+ */
+export type ToolResultPreview = {
+  tool: "exec";
+  exitCode: number | null;
+  timedOut: boolean;
+  outputTruncated: boolean;
+  stdout: string;
+  stderr: string;
 };
 
 export type RendererApprovalKind =
@@ -331,7 +351,7 @@ export type PendingToolApproval = {
   approval: RendererApprovalKind;
   class: "read_only" | "workspace" | "sensitive";
   /** What the parked call will do, when its tool projects a preview. */
-  preview: ToolApprovalPreview | null;
+  preview: ToolActionPreview | null;
   canApprove: boolean;
   canRemember: boolean;
 };
@@ -992,7 +1012,7 @@ export function parsePendingToolApproval(
     action: value.action,
     approval: value.approval,
     class: value.class,
-    preview: parseToolApprovalPreview(value.preview),
+    preview: parseToolActionPreview(value.preview),
     canApprove: value.can_approve,
     canRemember: value.can_remember,
   };
@@ -1003,9 +1023,9 @@ export function parsePendingToolApproval(
  * dropped rather than partially rendered: an approval card that describes the
  * wrong action is worse than one that describes no action.
  */
-export function parseToolApprovalPreview(
+export function parseToolActionPreview(
   value: unknown,
-): ToolApprovalPreview | null {
+): ToolActionPreview | null {
   if (value === undefined || value === null) return null;
   if (!isRecord(value) || value.tool !== "exec") return null;
   const { command, args, cwd } = value;
@@ -1020,6 +1040,35 @@ export function parseToolApprovalPreview(
     return null;
   }
   return { tool: "exec", command, args, cwd };
+}
+
+/**
+ * Validate a result field by field, on the same terms as an action: anything
+ * that cannot be fully verified is dropped rather than half-rendered.
+ */
+export function parseToolResultPreview(
+  value: unknown,
+): ToolResultPreview | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value) || value.tool !== "exec") return null;
+  const { exit_code, timed_out, output_truncated, stdout, stderr } = value;
+  if (
+    (exit_code !== null && typeof exit_code !== "number") ||
+    typeof timed_out !== "boolean" ||
+    typeof output_truncated !== "boolean" ||
+    typeof stdout !== "string" ||
+    typeof stderr !== "string"
+  ) {
+    return null;
+  }
+  return {
+    tool: "exec",
+    exitCode: exit_code,
+    timedOut: timed_out,
+    outputTruncated: output_truncated,
+    stdout,
+    stderr,
+  };
 }
 
 function isRendererToolName(value: unknown): value is RendererToolName {

@@ -107,6 +107,8 @@ where
         } else {
             crate::ToolOutput::text(result)
         },
+        action: None,
+        result: None,
     };
     Ok(event.turn_id == Some(wait.turn_id)
         && event.lease_token == Some(wait.park_lease_token)

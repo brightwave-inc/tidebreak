@@ -110,6 +110,8 @@ async fn assert_cancelled_wait_shape(
         AgentEvent::ToolCallCompleted {
             call_id: wait_id,
             output: crate::ToolOutput::error(expected_result),
+            action: None,
+            result: None,
         }
     );
 }
@@ -756,7 +758,10 @@ async fn ordered_all_wait_consumes_once_and_exactly_recovers_after_reclaim() {
     }));
     assert_eq!(completed_call.status, ToolCallStatus::Completed);
     assert_eq!(completed_call.execution, ToolCallExecution::Orchestration);
-    let AgentEvent::ToolCallCompleted { call_id, output } = completed_event.event else {
+    let AgentEvent::ToolCallCompleted {
+        call_id, output, ..
+    } = completed_event.event
+    else {
         panic!("wait completion emitted the wrong event")
     };
     assert_eq!(call_id, wait_id);

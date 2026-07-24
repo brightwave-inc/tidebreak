@@ -42,6 +42,7 @@ pub mod id;
 #[cfg(feature = "keychain")]
 pub mod keychain;
 pub mod model;
+pub mod preview;
 pub mod provider;
 pub mod steer;
 pub mod storage;
@@ -67,8 +68,7 @@ pub use agent_tools::{
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
     ApprovalRegistrationFuture, ApprovalRequest, ApprovalRequiredPublication, AutoApproveGate,
-    RefuseGate, StandingGrant, StandingGrants, ToolApproval, ToolApprovalKind, ToolApprovalPreview,
-    ToolApprovalStatus,
+    RefuseGate, StandingGrant, StandingGrants, ToolApproval, ToolApprovalKind, ToolApprovalStatus,
 };
 #[cfg(feature = "blob-fs")]
 pub use blob::FsBlobStore;
@@ -124,6 +124,7 @@ pub use model::{
     TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
     MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
 };
+pub use preview::{ToolActionPreview, ToolResultPreview};
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
     Usage,

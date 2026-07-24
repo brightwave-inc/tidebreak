@@ -247,6 +247,8 @@ where
     let payload = AgentEvent::ToolCallCompleted {
         call_id: request.call_id,
         output: ToolOutput::text(request.result.clone()),
+        action: None,
+        result: None,
     };
     let event_seq = append_event_on(
         conn,
@@ -407,6 +409,8 @@ where
     let expected_event = AgentEvent::ToolCallCompleted {
         call_id: checkpoint.call_id,
         output: ToolOutput::text(checkpoint.result.clone()),
+        action: None,
+        result: None,
     };
     let stored_event: AgentEvent = serde_json::from_value(event.payload)?;
     let arguments = canonical_arguments(request)?;

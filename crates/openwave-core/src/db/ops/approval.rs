@@ -5,13 +5,13 @@ use sea_orm::{
 };
 
 use crate::approval::{
-    ApprovalDecision, ApprovalRequest, ToolApproval, ToolApprovalKind, ToolApprovalPreview,
-    ToolApprovalStatus,
+    ApprovalDecision, ApprovalRequest, ToolApproval, ToolApprovalKind, ToolApprovalStatus,
 };
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{CallId, ChatId, TurnId};
 use crate::model::{ToolCallExecution, ToolCallStatus, TurnRunStatus};
+use crate::preview::ToolActionPreview;
 use crate::storage::{
     DecideToolApprovalOutcome, JournaledToolApprovalOutcome, RequestToolApprovalOutcome,
 };
@@ -488,7 +488,7 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
         // Rebuilt from the arguments the call is durably parked on rather than
         // stored separately, so a recovered card can never describe a different
         // action from the one that will run.
-        preview: ToolApprovalPreview::build(&model.name, &model.arguments),
+        preview: ToolActionPreview::build(&model.name, &model.arguments),
         status,
         reason: model.approval_reason.clone(),
         requested_at: model

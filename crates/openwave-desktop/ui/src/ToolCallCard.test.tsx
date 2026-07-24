@@ -1,7 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import type { ToolResultPreview } from "./api";
+import { toolPreviewPresentation } from "./ToolPreview";
 import {
   ToolCommandCard,
+  commandOutput,
   toolCallPresentation,
   toolApprovalPresentation,
 } from "./ToolCallCard";
@@ -84,7 +87,7 @@ describe("toolCallPresentation", () => {
 describe("ToolCommandCard", () => {
   it("titles itself with the command instead of a generic phrase", () => {
     const markup = renderToStaticMarkup(
-      <ToolCommandCard name="exec" status="completed" preview={preview} />,
+      <ToolCommandCard name="exec" status="completed" preview={preview} result={null} />,
     );
 
     expect(visibleText(markup)).toContain("cargo test --workspace");
@@ -95,14 +98,13 @@ describe("ToolCommandCard", () => {
 
   it("opens while the command is running and closes once it has settled", () => {
     const running = renderToStaticMarkup(
-      <ToolCommandCard name="exec" status="running" preview={preview} />,
+      <ToolCommandCard name="exec" status="running" preview={preview} result={null} />,
     );
     const done = renderToStaticMarkup(
-      <ToolCommandCard name="exec" status="completed" preview={preview} />,
+      <ToolCommandCard name="exec" status="completed" preview={preview} result={null} />,
     );
 
     expect(running).toContain('aria-expanded="true"');
-    expect(visibleText(running)).toContain("# working directory: checkout");
     expect(done).toContain('aria-expanded="false"');
   });
 
@@ -115,7 +117,7 @@ describe("ToolCommandCard", () => {
       ["cancelled", "Not run"],
     ] as const) {
       const markup = renderToStaticMarkup(
-        <ToolCommandCard name="exec" status={status} preview={preview} />,
+        <ToolCommandCard name="exec" status={status} preview={preview} result={null} />,
       );
       expect(visibleText(markup)).toContain(badge);
     }
@@ -155,5 +157,102 @@ describe("toolApprovalPresentation", () => {
       canApprove: false,
       canRemember: false,
     });
+  });
+});
+
+describe("command output", () => {
+  const ran = {
+    tool: "exec" as const,
+    exitCode: 0,
+    timedOut: false,
+    outputTruncated: false,
+    stdout: "",
+    stderr: "",
+  };
+
+  it("labels each captured stream and keeps them in order", () => {
+    // Each stream's own trailing newline is trimmed, so the two sections are
+    // separated by exactly one blank line rather than three.
+    expect(
+      commandOutput({ ...ran, stdout: "one\n", stderr: "boom\n" }),
+    ).toBe("$ stdout\none\n\n$ stderr\nboom");
+  });
+
+  it("says nothing at all when nothing was captured", () => {
+    expect(commandOutput(ran)).toBeNull();
+    expect(commandOutput(null)).toBeNull();
+  });
+
+  it("says so when the provider stopped capturing", () => {
+    expect(
+      commandOutput({ ...ran, stdout: "one\n", outputTruncated: true }),
+    ).toContain("# output was truncated at the capture limit");
+  });
+
+  it("states the outcome alongside the command", () => {
+    const detail = (result: Parameters<typeof commandOutput>[0]) =>
+      toolPreviewPresentation(preview, result).detail;
+
+    expect(detail({ ...ran, exitCode: 2 })).toContain("# exit code: 2");
+    expect(detail({ ...ran, exitCode: null, timedOut: true })).toContain(
+      "# stopped at the time limit",
+    );
+    expect(detail({ ...ran, exitCode: null })).toContain(
+      "# killed by a signal",
+    );
+    // Before it has run there is no outcome to state.
+    expect(detail(null)).toBe(
+      "cargo test --workspace\n# working directory: checkout",
+    );
+  });
+
+  it("says it is waiting rather than showing an empty pane mid-run", () => {
+    const markup = renderToStaticMarkup(
+      <ToolCommandCard
+        name="exec"
+        status="running"
+        preview={preview}
+        result={null}
+      />,
+    );
+
+    expect(markup).toContain('role="tab"');
+    expect(visibleText(markup)).toContain("Waiting for output…");
+  });
+});
+
+describe("outcome badges", () => {
+  const ran: ToolResultPreview = {
+    tool: "exec",
+    exitCode: 0,
+    timedOut: false,
+    outputTruncated: false,
+    stdout: "",
+    stderr: "",
+  };
+
+  it("prefers the most specific thing it can say about a failure", () => {
+    const badge = (
+      result: ToolResultPreview | null,
+      status: "completed" | "failed",
+    ) =>
+      visibleText(
+        renderToStaticMarkup(
+          <ToolCommandCard
+            name="exec"
+            status={status}
+            preview={preview}
+            result={result}
+          />,
+        ),
+      );
+
+    expect(badge({ ...ran, exitCode: 101 }, "failed")).toContain("Exit 101");
+    expect(badge({ ...ran, exitCode: null, timedOut: true }, "failed")).toContain(
+      "Timed out",
+    );
+    expect(badge(ran, "completed")).toContain("Done");
+    // No result to be specific about yet.
+    expect(badge(null, "failed")).toContain("Failed");
   });
 });

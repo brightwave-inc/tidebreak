@@ -199,7 +199,9 @@ enum LiveTurnState {
 
 enum ResolutionState {
     Retry,
-    Resolved(SequencedEvent),
+    /// Boxed: an event carrying a tool's projected command output dwarfs the
+    /// other variants, and this enum is returned on every resolution poll.
+    Resolved(Box<SequencedEvent>),
     Cancelling,
     Lost,
 }
@@ -863,7 +865,7 @@ impl TurnWorker {
                                 {
                                     ResolutionState::Retry => {}
                                     ResolutionState::Resolved(event) => {
-                                        self.publish(turn.chat_id, event);
+                                        self.publish(turn.chat_id, *event);
                                         return Ok(TurnWorkerOutcome::Completed(turn.id));
                                     }
                                     ResolutionState::Cancelling => break false,
@@ -1890,7 +1892,7 @@ impl TurnWorker {
                             }
                         };
                         return match recovered {
-                            Ok(Some(event)) => ResolutionState::Resolved(event),
+                            Ok(Some(event)) => ResolutionState::Resolved(Box::new(event)),
                             Ok(None) => ResolutionState::Lost,
                             Err(error) => {
                                 self.retry_after("terminal recovery", turn.id, &error).await;
@@ -1954,7 +1956,7 @@ impl TurnWorker {
                     {
                         ResolutionState::Retry | ResolutionState::Cancelling => {}
                         ResolutionState::Resolved(event) => {
-                            self.publish(turn.chat_id, event);
+                            self.publish(turn.chat_id, *event);
                             return Ok(TurnWorkerOutcome::Cancelled(turn.id));
                         }
                         ResolutionState::Lost => {
@@ -2097,7 +2099,7 @@ impl TurnWorker {
                     {
                         ResolutionState::Retry => {}
                         ResolutionState::Resolved(event) => {
-                            self.publish(turn.chat_id, event);
+                            self.publish(turn.chat_id, *event);
                             return Ok(TurnWorkerOutcome::Failed(turn.id));
                         }
                         ResolutionState::Cancelling => {

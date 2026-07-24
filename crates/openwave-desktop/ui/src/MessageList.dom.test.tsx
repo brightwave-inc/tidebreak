@@ -320,3 +320,71 @@ describe("card order", () => {
     ]);
   });
 });
+
+describe("command output", () => {
+  const preview = {
+    tool: "exec" as const,
+    command: "cargo",
+    args: ["build"],
+    cwd: ".",
+  };
+  const ran = {
+    tool: "exec" as const,
+    exitCode: 0,
+    timedOut: false,
+    outputTruncated: false,
+    stdout: "",
+    stderr: "",
+  };
+
+  function list(result: typeof ran | null) {
+    return render(
+      <MessageList
+        messages={[
+          {
+            id: "t1",
+            role: "tool",
+            callId: "c1",
+            name: "exec",
+            status: "completed",
+            preview,
+            result,
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+  }
+
+  it("opens onto the output, with the command one tab away", async () => {
+    const user = userEvent.setup();
+    list({ ...ran, stdout: "two tests passed\n" });
+
+    await user.click(screen.getByRole("button", { name: /cargo build/ }));
+    expect(screen.getByText(/two tests passed/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "command" }));
+    expect(screen.getByText(/cargo build/, { selector: "pre" })).toBeInTheDocument();
+  });
+
+  it("drops the tab pair for a command that finished silently", async () => {
+    const user = userEvent.setup();
+    list(ran);
+
+    await user.click(screen.getByRole("button", { name: /cargo build/ }));
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(screen.getByText(/cargo build/, { selector: "pre" })).toBeInTheDocument();
+  });
+});

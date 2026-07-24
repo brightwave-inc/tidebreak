@@ -6,8 +6,8 @@
 //! projection instead.
 
 use openwave_core::{
-    AgentEvent, ApprovalClass, CallId, MessageId, SequencedEvent, ToolApprovalKind,
-    ToolApprovalPreview, TurnId,
+    AgentEvent, ApprovalClass, CallId, MessageId, SequencedEvent, ToolActionPreview,
+    ToolApprovalKind, ToolResultPreview, TurnId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -51,7 +51,7 @@ pub(crate) enum RendererAgentEvent {
         /// field-by-field view of the action under review. Tools without one
         /// send nothing, as every tool did before.
         #[serde(skip_serializing_if = "Option::is_none")]
-        preview: Option<ToolApprovalPreview>,
+        preview: Option<ToolActionPreview>,
     },
     ApprovalDecided {
         call_id: CallId,
@@ -60,6 +60,15 @@ pub(crate) enum RendererAgentEvent {
     ToolCallCompleted {
         call_id: CallId,
         status: RendererToolStatus,
+        /// What the call did, when its tool projects it. Approval is not the
+        /// only moment a person needs to see the action.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<ToolActionPreview>,
+        /// What the call produced. A command's output is the reason it ran;
+        /// withholding it leaves the transcript asserting that something
+        /// happened without ever showing what.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<ToolResultPreview>,
     },
     TurnCompleted,
     TurnFailed,
@@ -177,16 +186,21 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                     approved: *approved,
                 }
             }
-            AgentEvent::ToolCallCompleted { call_id, output } => {
-                RendererAgentEvent::ToolCallCompleted {
-                    call_id: *call_id,
-                    status: if output.is_error {
-                        RendererToolStatus::Failed
-                    } else {
-                        RendererToolStatus::Completed
-                    },
-                }
-            }
+            AgentEvent::ToolCallCompleted {
+                call_id,
+                output,
+                action,
+                result,
+            } => RendererAgentEvent::ToolCallCompleted {
+                call_id: *call_id,
+                status: if output.is_error {
+                    RendererToolStatus::Failed
+                } else {
+                    RendererToolStatus::Completed
+                },
+                action: action.clone(),
+                result: result.clone(),
+            },
             AgentEvent::TurnCompleted { .. } => RendererAgentEvent::TurnCompleted,
             AgentEvent::TurnFailed { .. } => RendererAgentEvent::TurnFailed,
             AgentEvent::TurnCancelled { .. } => RendererAgentEvent::TurnCancelled,
@@ -242,6 +256,8 @@ mod tests {
                 output: ToolOutput::error("secret output").with_data(serde_json::json!({
                     "path": "/Users/private/document.txt",
                 })),
+                action: None,
+                result: None,
             },
             AgentEvent::TurnFailed {
                 error: (&AgentError::config("provider diagnostic")).into(),
@@ -313,7 +329,7 @@ mod tests {
                 tool_name: "exec".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::ExecMayRunNetworkedCommand,
-                preview: ToolApprovalPreview::build(
+                preview: ToolActionPreview::build(
                     "exec",
                     &serde_json::json!({
                         "command": "cargo",
@@ -335,6 +351,73 @@ mod tests {
     }
 
     #[test]
+    fn exec_completion_projects_what_ran_and_what_it_produced() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 12,
+            event: AgentEvent::ToolCallCompleted {
+                call_id: CallId::new(),
+                output: ToolOutput::text("provider: local\nexit: 0").with_data(serde_json::json!({
+                    "provider": "local",
+                    "exit_code": 0,
+                    "timed_out": false,
+                    "output_truncated": false,
+                    "duration_ms": 12,
+                    "stdout": "two tests passed\n",
+                    "stderr": "",
+                })),
+                action: ToolActionPreview::build(
+                    "exec",
+                    &serde_json::json!({ "command": "cargo", "args": ["test"] }),
+                ),
+                result: ToolResultPreview::build(
+                    "exec",
+                    Some(&serde_json::json!({
+                        "provider": "local",
+                        "exit_code": 0,
+                        "duration_ms": 12,
+                        "stdout": "two tests passed\n",
+                        "stderr": "",
+                    })),
+                ),
+            },
+        });
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(json.contains(r#""command":"cargo""#));
+        assert!(json.contains(r#""stdout":"two tests passed\n""#));
+        assert!(json.contains(r#""exit_code":0"#));
+        // Only the enumerated fields cross. The provider identity and the
+        // model-facing content stay behind the boundary.
+        assert!(!json.contains("provider"));
+        assert!(!json.contains("duration_ms"));
+        assert!(!json.contains("exit: 0"));
+    }
+
+    #[test]
+    fn completions_without_a_projection_stay_closed() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 13,
+            event: AgentEvent::ToolCallCompleted {
+                call_id: CallId::new(),
+                output: ToolOutput::text("private result").with_data(serde_json::json!({
+                    "stdout": "private stream",
+                })),
+                action: ToolActionPreview::build(
+                    "web_search",
+                    &serde_json::json!({ "query": "private query" }),
+                ),
+                result: ToolResultPreview::build(
+                    "web_search",
+                    Some(&serde_json::json!({ "stdout": "private stream" })),
+                ),
+            },
+        });
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(!json.contains("action"));
+        assert!(!json.contains("result"));
+        assert!(!json.contains("private"));
+    }
+
+    #[test]
     fn approvals_without_a_preview_stay_closed() {
         let projected = RendererSequencedEvent::from(&SequencedEvent {
             seq: 11,
@@ -343,7 +426,7 @@ mod tests {
                 tool_name: "web_search".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::WebSearchMayShareQuery,
-                preview: ToolApprovalPreview::build(
+                preview: ToolActionPreview::build(
                     "web_search",
                     &serde_json::json!({ "query": "private query" }),
                 ),
