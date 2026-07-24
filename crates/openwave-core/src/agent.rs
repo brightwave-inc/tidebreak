@@ -1323,14 +1323,20 @@ impl Agent {
                         .is_some_and(|tool| tool.approval_class() == ApprovalClass::Sensitive)
                 })
                 .collect::<Vec<_>>();
-            if !sensitive_calls.is_empty()
-                && (calls.len() != 1 || sensitive_calls.len() != 1 || !text.is_empty())
-            {
+            // A sensitive call may carry assistant prose ("I'll search for…"):
+            // the step then persists its message and parks exactly like any
+            // other text+tool step — three lease-fenced writes, with recovery
+            // abandoning an interrupted call behind its visible preamble. Only
+            // sibling calls stay forbidden: a multi-call sensitive batch has no
+            // unambiguous resume shape (see resume_pending_server_calls).
+            // Rejecting prose here used to burn the whole step budget on
+            // corrective retries the model never satisfied (#372).
+            if !sensitive_calls.is_empty() && (calls.len() != 1 || sensitive_calls.len() != 1) {
                 events.send(AgentEvent::StreamInterrupted);
                 transcript.push(ChatMessage {
                     role: Role::User,
                     content: vec![ContentBlock::Text {
-                        text: "A sensitive tool must be requested alone, without assistant text or sibling tool calls. Retry the request in that form.".into(),
+                        text: "A sensitive tool must be requested alone, without sibling tool calls. Retry the request in that form.".into(),
                     }],
                 });
                 continue;
@@ -4374,6 +4380,224 @@ mod tests {
             AgentEvent::ToolCallCompleted { output, .. }
                 if output.content == "boomed" && !output.is_error
         )));
+    }
+
+    /// Provider that prefaces a sensitive `boom` call with prose, then
+    /// finishes on the next step.
+    struct ProseBoomProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ProseBoomProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("prose-boom")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![
+                    ProviderEvent::TextDelta {
+                        text: "I'll run the sensitive tool for you.".into(),
+                    },
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_boom".into(),
+                        name: "boom".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta { text: "ok".into() },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    /// The failure that motivated #372: prose plus one sensitive call must
+    /// keep the preamble, persist it like any other text+tool step, and reach
+    /// the approval gate on the first step instead of burning the budget on
+    /// corrective retries.
+    #[tokio::test]
+    async fn sensitive_call_with_prose_keeps_the_preamble_and_parks() {
+        use crate::approval::AutoApproveGate;
+
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let tools = Arc::new(ToolRegistry::new().with(Box::new(BoomTool { ran: ran.clone() })));
+        let provider = Arc::new(ProseBoomProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let agent = Agent::new(
+            provider.clone(),
+            tools,
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_approvals(Arc::new(AutoApproveGate));
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        // The step is never rejected or scrubbed: the streamed preamble stands.
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::StreamInterrupted)));
+        // The call parks on the first step and runs once approved.
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        // No corrective retry: the tool step plus the closing step.
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        // The preamble is persisted exactly once, like any other text+tool step.
+        let history = store.list_messages(chat.id).await.unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|message| message.content.contains("sensitive tool for you"))
+                .count(),
+            1
+        );
+    }
+
+    /// Provider that pairs the sensitive call with a sibling call, which is
+    /// still malformed and must keep the corrective retry.
+    struct SiblingBoomProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for SiblingBoomProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("sibling-boom")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_a".into(),
+                        name: "boom".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::ToolCallStarted {
+                        index: 1,
+                        id: "call_b".into(),
+                        name: "boom".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 1,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta { text: "ok".into() },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn sensitive_call_with_sibling_calls_still_retries() {
+        use crate::approval::AutoApproveGate;
+
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let tools = Arc::new(ToolRegistry::new().with(Box::new(BoomTool { ran: ran.clone() })));
+        let provider = Arc::new(SiblingBoomProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let agent = Agent::new(
+            provider.clone(),
+            tools,
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_approvals(Arc::new(AutoApproveGate));
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::StreamInterrupted)));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     }
 
     /// A Sensitive, standing-grantable tool (`search`) that records whether it
