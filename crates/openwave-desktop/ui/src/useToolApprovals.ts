@@ -60,14 +60,21 @@ export function useToolApprovals(
     });
     try {
       await client.decideApproval(startedChatId, callId, decision, grant);
-      useChatSessionStore.getState().update((session) => ({
-        ...session,
-        messages: session.messages.map((message) =>
-          message.role === "approval" && message.callId === callId
-            ? { ...message, resolved: true }
-            : message,
-        ),
-      }));
+      // The session store holds whichever conversation is open now, not the one
+      // this decision was made in. Marking the card resolved without checking
+      // would rewrite a different chat's transcript — and because the map
+      // allocates unconditionally, that is a visible re-render even though no
+      // message matches.
+      if (stillOpen(startedChatId)) {
+        useChatSessionStore.getState().update((session) => ({
+          ...session,
+          messages: session.messages.map((message) =>
+            message.role === "approval" && message.callId === callId
+              ? { ...message, resolved: true }
+              : message,
+          ),
+        }));
+      }
     } catch (err) {
       // A decision that fails against a chat on its way out has nowhere to be
       // read; the conversation it belonged to is going with it.
