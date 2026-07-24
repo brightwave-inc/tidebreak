@@ -6,7 +6,7 @@ import type {
 } from "./api";
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import { ChatTabs } from "./ChatTabs";
-import { isNearBottom, scrollToLatest } from "./ChatScroll";
+import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { useUiStore } from "./UiStore";
 import { Composer } from "./Composer";
@@ -122,11 +122,11 @@ export function ChatView({
     const scroll = scrollRef.current;
     if (!scroll) return;
     if (followsLatestRef.current) {
-      scrollToLatest(scroll);
+      scrollToLatest(scroll, followScrollBehavior(busy));
     } else {
       setHasUnreadActivity(true);
     }
-  }, [messages]);
+  }, [messages, busy]);
 
   useEffect(() => {
     const next = new Set(folderAccessRequests.map((request) => request.callId));
@@ -138,7 +138,7 @@ export function ChatView({
     const scroll = scrollRef.current;
     if (!scroll) return;
     if (followsLatestRef.current) {
-      scrollToLatest(scroll);
+      scrollToLatest(scroll, followScrollBehavior(false));
     } else {
       setHasUnreadActivity(true);
     }
@@ -209,7 +209,9 @@ export function ChatView({
             onClick={() => {
               followsLatestRef.current = true;
               setHasUnreadActivity(false);
-              if (scrollRef.current) scrollToLatest(scrollRef.current);
+              if (scrollRef.current) {
+                scrollToLatest(scrollRef.current, followScrollBehavior(false));
+              }
             }}
           >
             New activity
