@@ -134,3 +134,14 @@ describe("AssistantWorkingIndicator", () => {
     expect(shouldShowAssistantWorking(messages, true, 0)).toBe(true);
   });
 });
+
+describe("thinking variant", () => {
+  it("announces thinking while reasoning is active", () => {
+    expect(
+      renderToStaticMarkup(<AssistantWorkingIndicator thinking />),
+    ).toContain("Thinking…");
+    expect(renderToStaticMarkup(<AssistantWorkingIndicator />)).toContain(
+      "Working",
+    );
+  });
+});

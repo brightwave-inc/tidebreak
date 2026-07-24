@@ -48,6 +48,7 @@ type MessageListProps = {
   decidingApprovalCalls: Set<string>;
   approvalErrors: Record<string, string>;
   busy: boolean;
+  reasoningActive?: boolean;
   scrollRef: RefObject<HTMLDivElement | null>;
   onScroll: (event: UIEvent<HTMLDivElement>) => void;
   onApproval: (
@@ -74,6 +75,7 @@ export function MessageList({
   decidingApprovalCalls,
   approvalErrors,
   busy,
+  reasoningActive = false,
   scrollRef,
   onScroll,
   onApproval,
@@ -133,7 +135,7 @@ export function MessageList({
           messages,
           busy,
           folderAccessRequests.length,
-        ) && <AssistantWorkingIndicator />}
+        ) && <AssistantWorkingIndicator thinking={reasoningActive} />}
       </div>
     </div>
   );
