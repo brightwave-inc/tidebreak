@@ -525,3 +525,24 @@ describe("approval decision feedback", () => {
     expect(markup).not.toContain("disabled");
   });
 });
+
+describe("superseded responses", () => {
+  it("renders a superseded bubble dimmed with an accessible label", () => {
+    const markup = renderToStaticMarkup(
+      <MessageBubble
+        message={{
+          id: "a1",
+          role: "assistant",
+          text: "abandoned partial",
+          sources: [],
+          superseded: true,
+        }}
+        busy={false}
+        onApproval={noop}
+      />,
+    );
+    expect(markup).toContain("message-superseded");
+    expect(markup).toContain("Superseded response");
+    expect(markup).toContain("abandoned partial");
+  });
+});

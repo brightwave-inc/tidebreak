@@ -19,6 +19,9 @@ export type ChatMessage =
       text: string;
       sources: AssistantSource[];
       createdAt?: string;
+      /** Interrupted mid-stream and replaced; rendered dimmed until the
+       *  authoritative transcript sweeps it. */
+      superseded?: boolean;
     }
   | { id: string; role: "system"; text: string }
   | {
@@ -180,7 +183,7 @@ export function groupMessageItems(
       messageIndex -= 1
     ) {
       const candidate = messages[messageIndex];
-      if (candidate?.role === "assistant") {
+      if (candidate?.role === "assistant" && !candidate.superseded) {
         streamingAssistantId = candidate.id;
         break;
       }
@@ -328,6 +331,17 @@ function MessageBubbleImpl({
 
   if (message.role === "assistant") {
     if (!message.text && message.sources.length === 0) return null;
+
+    if (message.superseded) {
+      return (
+        <article
+          className="message message-assistant message-superseded"
+          aria-label="Superseded response, replaced below"
+        >
+          <MessageMarkdown>{message.text}</MessageMarkdown>
+        </article>
+      );
+    }
 
     return (
       <article className="message message-assistant" aria-label="Assistant">

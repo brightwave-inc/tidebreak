@@ -3150,3 +3150,9 @@ body {
   min-height: 0;
   width: 100%;
 }
+
+/* A response interrupted mid-stream (a steer, a step retry) stays visible
+   but recedes; the replacement streams in beneath it. */
+.message-superseded {
+  opacity: 0.5;
+}

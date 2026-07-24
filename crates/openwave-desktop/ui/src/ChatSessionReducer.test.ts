@@ -279,7 +279,7 @@ describe("approvals", () => {
 });
 
 describe("stream_interrupted", () => {
-  it("discards the optimistic candidate but keeps settled work", () => {
+  it("keeps a visible partial as superseded and discards provisional tools", () => {
     const { state } = play([
       TURN,
       { type: "tool_call_started", call_id: "done", name: "search" },
@@ -288,14 +288,39 @@ describe("stream_interrupted", () => {
       { type: "tool_call_started", call_id: "pending", name: "search" },
       { type: "stream_interrupted" },
     ]);
-    // The empty bubble minted at turn start survives (it renders as nothing);
-    // the streamed partial answer and the pending tool card are discarded.
     const roles = state.messages.map((m) => m.role);
-    expect(roles).toEqual(["assistant", "tool"]);
-    expect(state.messages[0]).toMatchObject({ role: "assistant", text: "" });
-    expect(state.messages[1]).toMatchObject({ callId: "done" });
+    expect(roles).toEqual(["assistant", "tool", "assistant"]);
+    expect(state.messages[2]).toMatchObject({
+      text: "partial answer",
+      superseded: true,
+    });
+    expect(state.messages.find((m) => m.role === "tool")).toMatchObject({
+      callId: "done",
+    });
     expect(state.assistantBuffer).toBe("");
     expect(state.provisionalToolCallIds.size).toBe(0);
+  });
+
+  it("streams the replacement into a fresh bubble beneath the superseded one", () => {
+    const { state } = play([
+      TURN,
+      { type: "text_delta", text: "first try" },
+      { type: "stream_interrupted" },
+      { type: "text_delta", text: "second try" },
+    ]);
+    const assistants = state.messages.filter((m) => m.role === "assistant");
+    expect(assistants).toHaveLength(2);
+    expect(assistants[0]).toMatchObject({
+      text: "first try",
+      superseded: true,
+    });
+    expect(assistants[1]).toMatchObject({ text: "second try" });
+    expect(assistants[1]).not.toHaveProperty("superseded", true);
+  });
+
+  it("still drops an empty streaming bubble outright", () => {
+    const { state } = play([TURN, { type: "stream_interrupted" }]);
+    expect(state.messages).toEqual([]);
   });
 });
 

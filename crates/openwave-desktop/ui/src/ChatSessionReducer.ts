@@ -153,8 +153,16 @@ export function reduceChatSessionEvent(
         state.messages,
         state.provisionalToolCallIds,
       );
-      if (messages[messages.length - 1]?.role === "assistant") {
-        messages.pop();
+      // A visible partial stays on screen as superseded — dimmed until the
+      // replacement streams beneath it and the authoritative transcript
+      // sweeps it at turn completion. Empty bubbles just drop.
+      const last = messages[messages.length - 1];
+      if (last?.role === "assistant") {
+        if (last.text) {
+          messages[messages.length - 1] = { ...last, superseded: true };
+        } else {
+          messages.pop();
+        }
       }
       return {
         state: {
@@ -441,7 +449,7 @@ function withTrailingAssistantText(
 ): ChatMessage[] {
   const copy = [...messages];
   const last = copy[copy.length - 1];
-  if (last?.role === "assistant") {
+  if (last?.role === "assistant" && !last.superseded) {
     copy[copy.length - 1] = { ...last, text };
   } else {
     copy.push({
