@@ -26,6 +26,7 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 cap-fs-ext.workspace = true
 cap-std.workspace = true
+infer = { version = "=0.19.0", default-features = false }
 openwave-core = { path = "../openwave-core", default-features = false }
 openwave-host-broker = { path = "../openwave-host-broker" }
 openwave-server = { path = "../openwave-server" }

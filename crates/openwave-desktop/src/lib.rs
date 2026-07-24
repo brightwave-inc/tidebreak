@@ -19,6 +19,7 @@ mod client_execution;
 mod deliverables;
 mod documents;
 mod host_access;
+mod media_type;
 mod updater;
 
 /// Connection details the webview needs to reach the in-process API.
