@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, FileOutput, RefreshCw } from "lucide-react";
+import { ChatTabs } from "./ChatTabs";
 import {
   exportDeliverable,
   listDeliverables,
@@ -23,11 +24,9 @@ const defaultApis: DeliverableApis = {
 
 export function DeliverablesView({
   chatId,
-  onBack,
   apis = defaultApis,
 }: {
   chatId: string;
-  onBack: () => void;
   apis?: DeliverableApis;
 }) {
   const [catalog, setCatalog] = useState<DeliverablesCatalog>({
@@ -142,9 +141,7 @@ export function DeliverablesView({
           </p>
         </div>
         <div className="deliverables-header-actions">
-          <button type="button" className="btn deliverables-back" onClick={onBack}>
-            Back to chat
-          </button>
+          <ChatTabs />
           <button
             type="button"
             className="btn"

@@ -1077,12 +1077,9 @@ export default function App() {
         className={`main${primaryView === "chat" && settingsPanel ? " with-settings" : ""}`}
       >
         {primaryView === "documents" ? (
-          <DocumentsView chatId={chat.id} onBack={() => uiActions.showChat({ keepPanels: true })} />
+          <DocumentsView chatId={chat.id} />
         ) : primaryView === "deliverables" ? (
-          <DeliverablesView
-            chatId={chat.id}
-            onBack={() => uiActions.showChat({ keepPanels: true })}
-          />
+          <DeliverablesView chatId={chat.id} />
         ) : primaryView === "settings" ? (
           <SettingsView
             client={client}

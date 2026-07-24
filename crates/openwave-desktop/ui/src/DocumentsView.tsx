@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { FileText } from "lucide-react";
+import { ChatTabs } from "./ChatTabs";
 import {
   importLibraryDocument,
   listLibraryDocuments,
@@ -11,10 +12,8 @@ import {
 
 export function DocumentsView({
   chatId,
-  onBack,
 }: {
   chatId: string;
-  onBack: () => void;
 }) {
   const [documents, setDocuments] = useState<LibraryDocument[]>([]);
   const [catalogTruncated, setCatalogTruncated] = useState(false);
@@ -136,9 +135,7 @@ export function DocumentsView({
           </p>
         </div>
         <div className="documents-header-actions">
-          <button type="button" className="btn documents-back" onClick={onBack}>
-            Back to chat
-          </button>
+          <ChatTabs />
           <button
             type="button"
             className="btn btn-primary"
