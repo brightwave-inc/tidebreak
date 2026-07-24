@@ -8,6 +8,11 @@ import {
   type DeliverablesCatalog,
 } from "./deliverables";
 import { MessageMarkdown } from "./MessageMarkdown";
+import {
+  PICKER_BUSY_MESSAGE,
+  PICKER_HOLDERS,
+  useNativePickerLatch,
+} from "./NativePickerLatch";
 
 type DeliverableApis = {
   list: (chatId: string) => Promise<DeliverablesCatalog>;
@@ -137,6 +142,10 @@ export function DeliverablesView({
 
   async function onExport() {
     if (!selected || exporting) return;
+    if (!useNativePickerLatch.getState().claim(PICKER_HOLDERS.exportOutput)) {
+      setExportStatus({ message: PICKER_BUSY_MESSAGE, error: true });
+      return;
+    }
     setExporting(true);
     setExportStatus(null);
     try {
@@ -150,6 +159,7 @@ export function DeliverablesView({
         error: true,
       });
     } finally {
+      useNativePickerLatch.getState().release(PICKER_HOLDERS.exportOutput);
       setExporting(false);
     }
   }

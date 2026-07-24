@@ -3,7 +3,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "./api";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
-import { useFolderDecisionLatch } from "./FolderDecisionLatch";
+import { useNativePickerLatch } from "./NativePickerLatch";
 import { useRefreshSignals } from "./RefreshSignals";
 import * as host from "./host";
 
@@ -29,7 +29,7 @@ beforeEach(() => {
   vi.mocked(host.resolveFolderAccessRequest).mockReset();
   // The latch is app-wide, so a decision left open by one case would block
   // the next one.
-  useFolderDecisionLatch.setState({ resolving: new Set() });
+  useNativePickerLatch.setState({ holder: null });
 });
 
 afterEach(cleanup);
