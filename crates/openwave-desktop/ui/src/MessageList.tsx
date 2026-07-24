@@ -182,7 +182,6 @@ export function MessageList({
 }
 
 type ToolMessage = Extract<ChatMessage, { role: "tool" }>;
-type ApprovalMessage = Extract<ChatMessage, { role: "approval" }>;
 
 /** Whether this message belongs to an activity phase rather than to the conversation. */
 function isActivityMessage(message: ChatMessage | undefined): boolean {
@@ -247,27 +246,23 @@ export function groupMessageItems(
       index += 1;
     }
 
-    const tools = phase.filter((entry): entry is ToolMessage => entry.role === "tool");
-    const approvals = phase.filter(
-      (entry): entry is ApprovalMessage => entry.role === "approval",
-    );
     // A call parked on approval is represented by its approval card, so the
     // rail would otherwise announce the same pending action twice.
     const parked = new Set(
-      approvals.filter((entry) => !entry.resolved).map((entry) => entry.callId),
+      phase.flatMap((entry) =>
+        entry.role === "approval" && !entry.resolved ? [entry.callId] : [],
+      ),
     );
+    const activities = phase.filter(
+      (entry): entry is ToolMessage =>
+        entry.role === "tool" && !parked.has(entry.callId),
+    );
+    const cards = surfacedCards(phase, parked, onApproval, approvalState);
 
-    const cards = surfacedCards(
-      tools,
-      approvals,
-      parked,
-      onApproval,
-      approvalState,
-    );
     items.push(
       <ToolActivityGroup
         key={`tool-activity-group-${groupIndex}`}
-        activities={tools.filter((tool) => !parked.has(tool.callId))}
+        activities={activities}
         groupIndex={groupIndex}
       >
         {cards.length > 0 ? cards : undefined}
@@ -287,8 +282,7 @@ export function groupMessageItems(
  * says stays in the rail.
  */
 function surfacedCards(
-  tools: ToolMessage[],
-  approvals: ApprovalMessage[],
+  phase: ChatMessage[],
   parked: Set<string>,
   onApproval: (
     callId: string,
@@ -301,33 +295,37 @@ function surfacedCards(
   },
 ): ReactNode[] {
   const cards: ReactNode[] = [];
-  for (const approval of approvals) {
-    if (approval.resolved) continue;
-    cards.push(
-      <ApprovalCard
-        key={approval.id}
-        callId={approval.callId}
-        summary={approval.summary}
-        preview={approval.preview ?? null}
-        canApprove={approval.canApprove}
-        canRemember={approval.canRemember}
-        deciding={
-          approvalState?.decidingApprovalCalls.has(approval.callId) ?? false
-        }
-        error={approvalState?.approvalErrors[approval.callId]}
-        onDecide={onApproval}
-      />,
-    );
-  }
-  for (const tool of tools) {
+  // In the order the calls happened, so the cards read as a sequence rather
+  // than as two piles sorted by what kind of card they are.
+  for (const entry of phase) {
+    if (entry.role === "approval") {
+      if (entry.resolved) continue;
+      cards.push(
+        <ApprovalCard
+          key={entry.id}
+          callId={entry.callId}
+          summary={entry.summary}
+          preview={entry.preview ?? null}
+          canApprove={entry.canApprove}
+          canRemember={entry.canRemember}
+          deciding={
+            approvalState?.decidingApprovalCalls.has(entry.callId) ?? false
+          }
+          error={approvalState?.approvalErrors[entry.callId]}
+          onDecide={onApproval}
+        />,
+      );
+      continue;
+    }
+    if (entry.role !== "tool") continue;
     // The approval card already shows this command and owns the decision.
-    if (!tool.preview || parked.has(tool.callId)) continue;
+    if (!entry.preview || parked.has(entry.callId)) continue;
     cards.push(
       <ToolCommandCard
-        key={tool.id}
-        name={tool.name}
-        status={tool.status}
-        preview={tool.preview}
+        key={entry.id}
+        name={entry.name}
+        status={entry.status}
+        preview={entry.preview}
       />,
     );
   }

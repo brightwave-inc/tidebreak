@@ -271,3 +271,52 @@ describe("row memoization", () => {
     );
   });
 });
+
+describe("card order", () => {
+  it("follows the order the calls happened, not the kind of card", () => {
+    const preview = {
+      tool: "exec" as const,
+      command: "cargo",
+      args: ["build"],
+      cwd: ".",
+    };
+    const { container } = render(
+      <MessageList
+        messages={[
+          { id: "t1", role: "tool", callId: "c1", name: "exec", status: "completed", preview },
+          {
+            id: "a1",
+            role: "approval",
+            callId: "c2",
+            summary: "Allow web search?",
+            preview: null,
+            canApprove: true,
+            canRemember: true,
+          },
+          { id: "t2", role: "tool", callId: "c2", name: "web_search", status: "waiting_approval" },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    const cards = Array.from(
+      container.querySelectorAll("section[aria-label]"),
+    ).map((card) => card.getAttribute("aria-label"));
+    expect(cards).toEqual([
+      "Run a command: Command complete",
+      "Approval needed",
+    ]);
+  });
+});
