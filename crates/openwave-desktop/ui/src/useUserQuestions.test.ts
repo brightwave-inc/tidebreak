@@ -152,4 +152,29 @@ describe("useUserQuestions", () => {
 
     expect(result.current.errors).toEqual({});
   });
+
+  it("does not carry an answer error into the next conversation", async () => {
+    const answer = deferred<void>();
+    const client = stubClient({
+      listPendingUserQuestions: vi.fn().mockResolvedValue([pending("call-1")]),
+      answerUserQuestions: vi.fn(() => answer.promise),
+    });
+    const { result, rerender } = renderHook(
+      ({ chatId }) => useUserQuestions(client, chatId),
+      { initialProps: { chatId: "chat-1" } },
+    );
+    await waitFor(() => expect(result.current.requests).toHaveLength(1));
+
+    act(() => result.current.answer("call-1", []));
+    await act(async () => {
+      answer.reject(new Error("gone"));
+      await answer.promise.catch(() => {});
+    });
+    expect(result.current.errors).not.toEqual({});
+
+    rerender({ chatId: "chat-2" });
+
+    expect(result.current.errors).toEqual({});
+    expect(result.current.answering.size).toBe(0);
+  });
 });

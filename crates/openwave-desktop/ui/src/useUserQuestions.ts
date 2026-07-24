@@ -78,6 +78,19 @@ export function useUserQuestions(
     };
   }, [client, chatId]);
 
+  // The pane is keyed on the conversation, so this hook is normally replaced
+  // rather than reused. Reset anyway: nothing held here belongs to a different
+  // conversation, and leaving the keying to do it makes removing that key a
+  // silent bug rather than a loud one.
+  useEffect(
+    () => () => {
+      setAnswering(new Set());
+      setErrors({});
+      answeringRef.current = new Set();
+    },
+    [chatId],
+  );
+
   // Only a signal raised after this hook mounted means anything to it; the
   // counter is app-wide and may already be well past zero on arrival.
   const lastSignalRef = useRef(signal);

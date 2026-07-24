@@ -1,5 +1,5 @@
 import type { ApprovalGrantRung } from "./api";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ApiClient } from "./api";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { useOpenConversation } from "./OpenConversation";
@@ -30,6 +30,19 @@ export function useToolApprovals(
   const [errors, setErrors] = useState<Record<string, string>>({});
   const decidingRef = useRef<Set<string>>(new Set());
   const stillOpen = useOpenConversation(chatId);
+
+  // The pane is keyed on the conversation, so this hook is normally replaced
+  // rather than reused. Reset anyway: nothing held here belongs to a different
+  // conversation, and leaving the keying to do it makes removing that key a
+  // silent bug rather than a loud one.
+  useEffect(
+    () => () => {
+      setDeciding(new Set());
+      setErrors({});
+      decidingRef.current = new Set();
+    },
+    [chatId],
+  );
 
   async function send(
     callId: string,

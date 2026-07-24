@@ -125,6 +125,22 @@ export function useAgentRuns(
     setStopErrorRunIds(new Set());
   }, [chatId, deletingChatId]);
 
+  // The pane is keyed on the conversation, so this hook is normally replaced
+  // rather than reused. Reset anyway: nothing held here belongs to a different
+  // conversation, and leaving the keying to do it makes removing that key a
+  // silent bug rather than a loud one.
+  useEffect(
+    () => () => {
+      stopFenceRef.current.invalidate();
+      setRuns([]);
+      setLoading(true);
+      setError(null);
+      setStoppingRunIds(new Set());
+      setStopErrorRunIds(new Set());
+    },
+    [chatId],
+  );
+
   /**
    * The chat a stop completion should be measured against: this conversation
    * while it is still open, and nothing once it is not. Naming no chat makes

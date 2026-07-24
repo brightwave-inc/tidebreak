@@ -327,4 +327,29 @@ describe("useAgentRuns", () => {
     await waitFor(() => expect(result.current.runs).toHaveLength(0));
     expect(client.listAgentRuns).toHaveBeenLastCalledWith("chat-2");
   });
+
+  it("does not carry a stop error into the next conversation", async () => {
+    const stop = deferred<never>();
+    const client = stubClient({
+      listAgentRuns: vi.fn().mockResolvedValue([run()]),
+      cancelAgentRun: vi.fn(() => stop.promise),
+    });
+    const { result, rerender } = renderHook(
+      ({ chatId }) => useAgentRuns(client, chatId),
+      { initialProps: { chatId: "chat-1" } },
+    );
+    await waitFor(() => expect(result.current.runs).toHaveLength(1));
+
+    act(() => result.current.stop("run-1"));
+    await act(async () => {
+      stop.reject(new Error("gone"));
+      await stop.promise.catch(() => {});
+    });
+    expect(result.current.stopErrorRunIds.size).toBe(1);
+
+    rerender({ chatId: "chat-2" });
+
+    expect(result.current.stopErrorRunIds.size).toBe(0);
+    expect(result.current.stoppingRunIds.size).toBe(0);
+  });
 });
