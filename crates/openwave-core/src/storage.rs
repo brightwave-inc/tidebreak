@@ -27,15 +27,16 @@ use crate::id::{
     AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, OutputId, OutputRevisionId, ProjectId,
     RootAttachmentChangeId, TurnId, TurnSteerId,
 };
+use crate::image::ImageRef;
 use crate::model::{
     AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult, AgentRunWaitSetCandidate,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
     DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
     DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceUpsert,
-    DocumentSummaryRecord, DocumentUpsert, Message, Project, ReasoningEffort, RootAttachmentChange,
-    RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution, TurnAgentRunWait,
-    TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait, TurnFailureReceipt,
-    TurnFailureRetry, TurnRun, TurnSteer,
+    DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment, Project, ReasoningEffort,
+    RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
+    TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait,
+    TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
 use crate::{AnswerUserQuestionsRequest, PendingUserQuestions};
@@ -1919,10 +1920,35 @@ pub trait Store: Send + Sync {
     /// chat returns [`AcceptTurnOutcome::ChatBusy`].
     async fn accept_turn(
         &self,
+        id: TurnId,
+        chat_id: ChatId,
+        model: &str,
+        content: &str,
+    ) -> Result<AcceptTurnOutcome> {
+        self.accept_turn_with_attachments(id, chat_id, model, content, &[])
+            .await
+    }
+
+    /// Accept a turn whose input message also carries image attachments.
+    ///
+    /// The attachments commit in the same transaction as the message and turn,
+    /// and they participate in the same idempotency proof: a retry with the same
+    /// id but different images is an [`AcceptTurnOutcome::IdentityConflict`],
+    /// not a silent acceptance of the first submission's images. Each image is
+    /// recorded at its position in `images`, which is the order a reloaded
+    /// transcript replays them in.
+    ///
+    /// Recording an attachment makes its blob live: any queued retirement for
+    /// that blob is cancelled in the same transaction. Because blob ids are
+    /// content-derived, re-submitting identical bytes re-references the existing
+    /// blob rather than storing a second copy.
+    async fn accept_turn_with_attachments(
+        &self,
         _id: TurnId,
         _chat_id: ChatId,
         _model: &str,
         _content: &str,
+        _images: &[ImageRef],
     ) -> Result<AcceptTurnOutcome> {
         turn_storage_unavailable()
     }
@@ -2307,6 +2333,16 @@ pub trait Store: Send + Sync {
 
     /// List a chat's messages in creation order.
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>>;
+
+    /// List a chat's image attachments, ordered by message then position.
+    ///
+    /// The block transcript is rebuilt on load rather than stored, so this is
+    /// how history regains the images a turn was submitted with. Stores without
+    /// attachment support report none, which degrades a reloaded turn to its
+    /// text rather than failing the load.
+    async fn list_message_attachments(&self, _chat_id: ChatId) -> Result<Vec<MessageAttachment>> {
+        Ok(Vec::new())
+    }
 
     /// Accept immutable canonical tool-call identity and arguments exactly once.
     async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome>;

@@ -26,6 +26,7 @@ use crate::id::{
     AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, HostRootId, OutputId, OutputRevisionId,
     ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
 };
+use crate::image::ImageRef;
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
@@ -34,7 +35,7 @@ use crate::model::{
     BlobRetirementStatus, Chat, DocumentGeneration, DocumentJob, DocumentJobKind,
     DocumentJobStatus, DocumentListCursor, DocumentParseOutput, DocumentProcessingStatus,
     DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord,
-    DocumentUpsert, Message, Project, ReasoningEffort, RootAttachmentChange,
+    DocumentUpsert, Message, MessageAttachment, Project, ReasoningEffort, RootAttachmentChange,
     RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallReceipt, SandboxToolCallRequest,
     SourceRegion, ToolCallRecord, ToolCallResolution, TurnAgentRunWaitStatus,
     TurnCheckpointProgress, TurnClientWaitStatus, TurnFailureRetry, TurnRun, TurnRunStatus,
@@ -2254,7 +2255,18 @@ impl Store for DbStore {
         model: &str,
         content: &str,
     ) -> Result<AcceptTurnOutcome> {
-        ops::turn::accept_turn(self, id, chat_id, model, content).await
+        ops::turn::accept_turn(self, id, chat_id, model, content, &[]).await
+    }
+
+    async fn accept_turn_with_attachments(
+        &self,
+        id: TurnId,
+        chat_id: ChatId,
+        model: &str,
+        content: &str,
+        images: &[ImageRef],
+    ) -> Result<AcceptTurnOutcome> {
+        ops::turn::accept_turn(self, id, chat_id, model, content, images).await
     }
 
     async fn claim_turn_run(
@@ -2557,6 +2569,10 @@ impl Store for DbStore {
 
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>> {
         ops::conversation::list_messages(self, chat_id).await
+    }
+
+    async fn list_message_attachments(&self, chat_id: ChatId) -> Result<Vec<MessageAttachment>> {
+        ops::message_attachment::list_for_chat(self, chat_id).await
     }
 
     async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome> {

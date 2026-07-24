@@ -27,6 +27,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddDocumentChatScope),
             Box::new(AddUserQuestions),
             Box::new(AddConversationOutputs),
+            Box::new(AddMessageAttachments),
         ]
     }
 }
@@ -409,6 +410,150 @@ impl MigrationTrait for AddConversationOutputs {
             .await?;
         manager
             .drop_table(Table::drop().table(Output::Table).to_owned())
+            .await
+    }
+}
+
+/// Records the images a message was submitted with, so a reloaded conversation
+/// replays the same turn rather than a text-only approximation of it.
+///
+/// Only identity is stored: a content-addressed blob id plus the bounded
+/// metadata a renderer or provider adapter needs. Filesystem paths are
+/// deliberately absent — the bytes live in the blob store and are reachable
+/// only through the blob id.
+///
+/// This makes `message_attachment.blob_id` a second class of live blob
+/// reference alongside `document.source_blob_id`. Blob liveness is a union
+/// across both, computed in one place; see `db::ops::blob::is_referenced_on`.
+struct AddMessageAttachments;
+
+impl MigrationName for AddMessageAttachments {
+    fn name(&self) -> &str {
+        "m20260724_000014_add_message_attachments"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddMessageAttachments {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(MessageAttachment::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(MessageAttachment::MessageId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageAttachment::Ordinal)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(MessageAttachment::ChatId).uuid().not_null())
+                    .col(ColumnDef::new(MessageAttachment::BlobId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(MessageAttachment::MediaType)
+                            .string_len(64)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageAttachment::Width)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageAttachment::Height)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageAttachment::ByteLen)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MessageAttachment::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    // The composite key is the ordering contract: one image per
+                    // position per message, so a retried submit cannot leave a
+                    // message holding two images at the same index.
+                    .primary_key(
+                        Index::create()
+                            .col(MessageAttachment::MessageId)
+                            .col(MessageAttachment::Ordinal),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_message_attachment_message")
+                            .from(MessageAttachment::Table, MessageAttachment::MessageId)
+                            .to(Message::Table, Message::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_message_attachment_chat")
+                            .from(MessageAttachment::Table, MessageAttachment::ChatId)
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(Expr::col(MessageAttachment::BlobId).ne(uuid::Uuid::nil()))
+                    .check(Expr::col(MessageAttachment::Ordinal).gte(0))
+                    .check(
+                        Expr::col(MessageAttachment::Ordinal)
+                            .lt(crate::model::MAX_MESSAGE_ATTACHMENTS as i32),
+                    )
+                    .check(Expr::col(MessageAttachment::MediaType).is_in([
+                        crate::image::ImageMediaType::Png.as_str(),
+                        crate::image::ImageMediaType::Jpeg.as_str(),
+                        crate::image::ImageMediaType::Webp.as_str(),
+                        crate::image::ImageMediaType::Gif.as_str(),
+                    ]))
+                    .check(
+                        Expr::col(MessageAttachment::Width)
+                            .between(1, crate::image::MAX_IMAGE_DIMENSION as i32),
+                    )
+                    .check(
+                        Expr::col(MessageAttachment::Height)
+                            .between(1, crate::image::MAX_IMAGE_DIMENSION as i32),
+                    )
+                    .check(
+                        Expr::col(MessageAttachment::ByteLen)
+                            .between(1, crate::image::MAX_IMAGE_BYTES as i64),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        // The orphan auditor and every retirement decision ask "does any
+        // attachment still reference this blob?"; that lookup must not scan.
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_message_attachment_blob")
+                    .table(MessageAttachment::Table)
+                    .col(MessageAttachment::BlobId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_message_attachment_chat")
+                    .table(MessageAttachment::Table)
+                    .col(MessageAttachment::ChatId)
+                    .col(MessageAttachment::MessageId)
+                    .col(MessageAttachment::Ordinal)
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(MessageAttachment::Table).to_owned())
             .await
     }
 }
@@ -5852,6 +5997,20 @@ enum Message {
     Role,
     Content,
     TurnLeaseToken,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum MessageAttachment {
+    Table,
+    MessageId,
+    Ordinal,
+    ChatId,
+    BlobId,
+    MediaType,
+    Width,
+    Height,
+    ByteLen,
     CreatedAt,
 }
 

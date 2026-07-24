@@ -24,6 +24,7 @@ use super::super::{
     try_advance_document_generation_on, DbStore,
 };
 use super::blob as blob_ops;
+use super::message_attachment as message_attachment_ops;
 use super::turn::canonical_db_timestamp;
 use super::{
     acquire_chat_write_lock, acquire_project_write_lock, acquire_turn_write_lock,
@@ -433,6 +434,20 @@ pub(in crate::db) async fn delete_chat(
         if let Some(blob_id) = document.source_blob_id {
             blob_ops::enqueue_on(&transaction, blob_id).await?;
         }
+    }
+
+    // Image attachments are the conversation's other class of blob reference.
+    // Dropping them here only creates retirement candidates: blob ids are
+    // content-derived, so another conversation may still attach the same bytes.
+    // The retirement claim performs the authoritative union reference check and
+    // cancels a candidate that is still live, exactly as it does for documents.
+    // Attachments must go before the message rows they point at, which the
+    // ordering below depends on.
+    let attachment_blob_ids =
+        message_attachment_ops::list_chat_blob_ids_on(&transaction, chat_id).await?;
+    message_attachment_ops::delete_for_chat_on(&transaction, chat_id).await?;
+    for blob_id in attachment_blob_ids {
+        blob_ops::enqueue_on(&transaction, blob_id).await?;
     }
 
     // Delete dependency leaves before their parent lifecycle rows. These

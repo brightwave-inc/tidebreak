@@ -329,6 +329,46 @@ pub mod message {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod message_attachment {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "message_attachment")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub message_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub ordinal: i32,
+        pub chat_id: Uuid,
+        pub blob_id: Uuid,
+        pub media_type: String,
+        pub width: i32,
+        pub height: i32,
+        pub byte_len: i64,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::message::Entity",
+            from = "Column::MessageId",
+            to = "super::message::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Restrict"
+        )]
+        Message,
+    }
+
+    impl Related<super::message::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Message.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod agent_run {
     use sea_orm::entity::prelude::*;
 

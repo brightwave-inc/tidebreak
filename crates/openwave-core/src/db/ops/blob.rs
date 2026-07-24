@@ -22,6 +22,47 @@ pub(in crate::db) async fn get(
         .transpose()
 }
 
+/// Whether any table still holds a live reference to `blob_id`.
+///
+/// Blob ids are content-derived, so one blob legitimately backs many referrers:
+/// two conversations attaching identical bytes share a single blob. Liveness is
+/// therefore the *union* across every referring table, never "does this one
+/// table reference it". Getting that wrong is silent data loss — the orphan
+/// auditor would delete bytes another table still needs once the grace period
+/// elapses.
+///
+/// Every caller that decides whether a blob may be retired or deleted goes
+/// through this function, so a future referring table is added here once rather
+/// than at each decision site. Callers must already hold the retirement write
+/// lock, so the result is stable for the rest of their transaction.
+pub(in crate::db) async fn is_referenced_on<C>(conn: &C, blob_id: uuid::Uuid) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let by_document = entities::document::Entity::find()
+        .select_only()
+        .column(entities::document::Column::Id)
+        .filter(entities::document::Column::SourceBlobId.eq(blob_id))
+        .into_tuple::<uuid::Uuid>()
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if by_document {
+        return Ok(true);
+    }
+    let by_attachment = entities::message_attachment::Entity::find()
+        .select_only()
+        .column(entities::message_attachment::Column::MessageId)
+        .filter(entities::message_attachment::Column::BlobId.eq(blob_id))
+        .into_tuple::<uuid::Uuid>()
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    Ok(by_attachment)
+}
+
 pub(in crate::db) async fn ensure_orphan(store: &DbStore, blob_id: uuid::Uuid) -> Result<bool> {
     loop {
         let transaction = store.conn.begin().await.map_err(store_err)?;
@@ -30,15 +71,7 @@ pub(in crate::db) async fn ensure_orphan(store: &DbStore, blob_id: uuid::Uuid) -
             .one(&transaction)
             .await
             .map_err(store_err)?;
-        let referenced = entities::document::Entity::find()
-            .select_only()
-            .column(entities::document::Column::Id)
-            .filter(entities::document::Column::SourceBlobId.eq(blob_id))
-            .into_tuple::<uuid::Uuid>()
-            .one(&transaction)
-            .await
-            .map_err(store_err)?
-            .is_some();
+        let referenced = is_referenced_on(&transaction, blob_id).await?;
         if referenced {
             if let Some(candidate) = candidate
                 .filter(|candidate| candidate.status != BlobRetirementStatus::Cancelled.as_str())
@@ -168,15 +201,7 @@ pub(in crate::db) async fn claim(
             transaction.rollback().await.map_err(store_err)?;
             continue;
         };
-        let referenced = entities::document::Entity::find()
-            .select_only()
-            .column(entities::document::Column::Id)
-            .filter(entities::document::Column::SourceBlobId.eq(candidate.blob_id))
-            .into_tuple::<uuid::Uuid>()
-            .one(&transaction)
-            .await
-            .map_err(store_err)?
-            .is_some();
+        let referenced = is_referenced_on(&transaction, candidate.blob_id).await?;
         if referenced {
             if !cancel_candidate_on(&transaction, &candidate, now).await? {
                 transaction.rollback().await.map_err(store_err)?;
@@ -372,15 +397,7 @@ pub(in crate::db) async fn validate_lease(
             transaction.rollback().await.map_err(store_err)?;
             return Ok(false);
         };
-        let referenced = entities::document::Entity::find()
-            .select_only()
-            .column(entities::document::Column::Id)
-            .filter(entities::document::Column::SourceBlobId.eq(blob_id))
-            .into_tuple::<uuid::Uuid>()
-            .one(&transaction)
-            .await
-            .map_err(store_err)?
-            .is_some();
+        let referenced = is_referenced_on(&transaction, blob_id).await?;
         if referenced {
             if !cancel_candidate_on(&transaction, &candidate, now).await? {
                 transaction.rollback().await.map_err(store_err)?;
