@@ -1,4 +1,4 @@
-import { FileOutput, LibraryBig, MessageSquare } from "lucide-react";
+import { FileOutput, FolderOpen, LibraryBig, MessageSquare } from "lucide-react";
 import { useUiStore } from "./UiStore";
 
 /**
@@ -13,13 +13,14 @@ export function ChatTabs() {
   const showChat = useUiStore((state) => state.showChat);
   const showDocuments = useUiStore((state) => state.showDocuments);
   const showDeliverables = useUiStore((state) => state.showDeliverables);
+  const showFolders = useUiStore((state) => state.showFolders);
 
   const tabs = [
     {
       key: "chat" as const,
       label: "Chat",
       icon: MessageSquare,
-      onSelect: () => showChat({ keepPanels: true }),
+      onSelect: showChat,
     },
     {
       key: "documents" as const,
@@ -32,6 +33,12 @@ export function ChatTabs() {
       label: "Outputs",
       icon: FileOutput,
       onSelect: showDeliverables,
+    },
+    {
+      key: "folders" as const,
+      label: "Folders",
+      icon: FolderOpen,
+      onSelect: showFolders,
     },
   ];
 

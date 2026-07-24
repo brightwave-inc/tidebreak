@@ -12,7 +12,7 @@ import { useUiStore } from "./UiStore";
 import { Composer } from "./Composer";
 import type { FolderAccessDecision } from "./host";
 import { MessageList } from "./MessageList";
-import { ArrowDown, FolderOpen, Settings } from "lucide-react";
+import { ArrowDown, Settings } from "lucide-react";
 
 export type ChatViewProps = {
   chat: Chat;
@@ -105,11 +105,7 @@ export function ChatView({
   onSteer,
   onStop,
 }: ChatViewProps) {
-  const foldersPanelOpen = useUiStore(
-    (state) => state.settingsPanel === "folders",
-  );
   const showSettings = useUiStore((state) => state.showSettings);
-  const toggleFoldersPanel = useUiStore((state) => state.toggleFoldersPanel);
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
@@ -157,16 +153,6 @@ export function ChatView({
         {nativeHost && <ChatTabs />}
         <div className="conversation-header-actions">
           <div className="mobile-settings-actions">
-            {nativeHost && (
-              <button
-                type="button"
-                className={`btn${foldersPanelOpen ? " is-active" : ""}`}
-                aria-label="Folders"
-                onClick={() => toggleFoldersPanel()}
-              >
-                <FolderOpen size={14} />
-              </button>
-            )}
             <button
               type="button"
               className="btn"

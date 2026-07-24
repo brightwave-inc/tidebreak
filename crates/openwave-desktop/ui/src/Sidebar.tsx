@@ -2,7 +2,6 @@ import type { Chat } from "./api";
 import { Logomark } from "./Logomark";
 import {
   Ellipsis,
-  FolderOpen,
   Monitor,
   Moon,
   Pencil,
@@ -25,7 +24,6 @@ import { useChatListStore } from "./ChatListStore";
 import { useUiStore } from "./UiStore";
 
 export type SidebarProps = {
-  nativeHost: boolean;
   themeMode: ThemeMode;
   updateReady: boolean;
   updateVersion: string | null;
@@ -46,7 +44,6 @@ export type SidebarProps = {
  * session lifecycle) lives with the owner.
  */
 export function Sidebar({
-  nativeHost,
   themeMode,
   updateReady,
   updateVersion,
@@ -69,11 +66,7 @@ export function Sidebar({
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const setRenameDraft = useChatListStore((state) => state.setRenameDraft);
   const primaryView = useUiStore((state) => state.primaryView);
-  const foldersPanelOpen = useUiStore(
-    (state) => state.settingsPanel === "folders",
-  );
   const showSettings = useUiStore((state) => state.showSettings);
-  const toggleFoldersPanel = useUiStore((state) => state.toggleFoldersPanel);
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -208,16 +201,6 @@ export function Sidebar({
             {updateVersion && (
               <span className="sidebar-update-version">v{updateVersion}</span>
             )}
-          </button>
-        )}
-        {nativeHost && (
-          <button
-            type="button"
-            className={`sidebar-action${primaryView === "chat" && foldersPanelOpen ? " is-active" : ""}`}
-            onClick={() => toggleFoldersPanel({ showChat: true })}
-          >
-            <FolderOpen size={16} />
-            Folders
           </button>
         )}
         <button

@@ -24,12 +24,11 @@ function seedStores(overrides: Partial<ChatListStore> = {}) {
     savingTitle: false,
     ...overrides,
   });
-  useUiStore.setState({ primaryView: "chat", settingsPanel: null });
+  useUiStore.setState({ primaryView: "chat" });
 }
 
 function renderSidebar(overrides: Partial<SidebarProps> = {}) {
   const props: SidebarProps = {
-    nativeHost: false,
     themeMode: "light",
     updateReady: false,
     updateVersion: null,
@@ -100,22 +99,18 @@ describe("Sidebar", () => {
     expect(screen.getByText("Retro notes")).toBeInTheDocument();
   });
 
-  it("keeps chat-scoped sources and outputs out of the sidebar", () => {
-    renderSidebar({ nativeHost: true });
+  it("keeps chat-scoped sources, outputs, and folders out of the sidebar", () => {
+    renderSidebar();
     expect(screen.queryByText("Sources")).not.toBeInTheDocument();
     expect(screen.queryByText("Outputs")).not.toBeInTheDocument();
+    expect(screen.queryByText("Folders")).not.toBeInTheDocument();
   });
 
-  it("navigates through the UI store for folders and settings", async () => {
+  it("navigates to settings through the UI store", async () => {
     const user = userEvent.setup();
-    renderSidebar({ nativeHost: true });
-    await user.click(screen.getByText("Folders"));
-    expect(useUiStore.getState().primaryView).toBe("chat");
-    expect(useUiStore.getState().settingsPanel).toBe("folders");
-
+    renderSidebar();
     await user.click(screen.getByText("Settings"));
     expect(useUiStore.getState().primaryView).toBe("settings");
-    expect(useUiStore.getState().settingsPanel).toBeNull();
   });
 
   it("shows update affordances only when an update is ready", () => {

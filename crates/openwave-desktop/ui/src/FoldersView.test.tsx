@@ -3,7 +3,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Chat } from "./api";
-import { FoldersPanel } from "./FoldersPanel";
+import { FoldersView } from "./FoldersView";
 import * as host from "./host";
 
 vi.mock("./host", () => ({
@@ -33,9 +33,9 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("FoldersPanel", () => {
+describe("FoldersView", () => {
   it("renders an empty chat without treating the missing grant as an error", async () => {
-    render(<FoldersPanel chat={chat} />);
+    render(<FoldersView chat={chat} />);
 
     expect(
       await screen.findByText("No folders connected to this chat."),
@@ -58,7 +58,7 @@ describe("FoldersPanel", () => {
       displayName: "Research",
     });
     const user = userEvent.setup();
-    render(<FoldersPanel chat={chat} />);
+    render(<FoldersView chat={chat} />);
 
     expect(await screen.findByText("Available on this Mac")).toBeInTheDocument();
     expect(screen.getByText("Current project")).toBeInTheDocument();
