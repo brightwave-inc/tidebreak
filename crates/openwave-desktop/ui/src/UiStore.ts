@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type PrimaryView = "chat" | "documents" | "settings";
+export type PrimaryView = "chat" | "documents" | "deliverables" | "settings";
 export type SettingsPanel = "folders" | null;
 
 /**
@@ -18,6 +18,7 @@ export type UiStore = {
    */
   showChat: (options?: { keepPanels?: boolean }) => void;
   showDocuments: () => void;
+  showDeliverables: () => void;
   showSettings: () => void;
   /** Toggle the folders panel; optionally force the chat view first. */
   toggleFoldersPanel: (options?: { showChat?: boolean }) => void;
@@ -33,6 +34,8 @@ export function createUiStore() {
         settingsPanel: options?.keepPanels ? state.settingsPanel : null,
       })),
     showDocuments: () => set({ primaryView: "documents", settingsPanel: null }),
+    showDeliverables: () =>
+      set({ primaryView: "deliverables", settingsPanel: null }),
     showSettings: () => set({ primaryView: "settings", settingsPanel: null }),
     toggleFoldersPanel: (options) =>
       set((state) => ({

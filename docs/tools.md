@@ -7,13 +7,14 @@ identity.
 
 ## What exists today
 
-The current foreground agent surface contains fourteen tools:
+The current foreground agent surface contains fifteen tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
 | `read_file` | Read UTF-8 text from private per-chat scratch | Server, read-only |
 | `list_dir` | List a private-scratch directory | Server, read-only |
 | `write_file` | Atomically write private-scratch text | Server, workspace |
+| `create_deliverable` | Create or update a bounded user-visible text output | Server, workspace |
 | `exec` | Run a bounded command through the configured execution provider | Server, sensitive native sandbox |
 | `search` | Search sources indexed for this exact conversation | Server, read-only |
 | `list_sources` | List bounded metadata for sources in this exact conversation | Server, read-only |
@@ -56,6 +57,7 @@ tools/
 ├── definitions.rs       model-facing names, descriptions, and JSON Schemas
 ├── arguments.rs         typed argument decoding
 ├── private_scratch.rs   confined filesystem primitives and limits
+├── create_deliverable.rs bounded user-visible text output
 ├── read_file.rs         one Tool implementation
 ├── list_dir.rs          one Tool implementation
 ├── write_file.rs        one Tool implementation
@@ -114,6 +116,7 @@ advertise every installed integration to every model call.
 The foreground coordinator needs tools for:
 
 - conversation-scoped source search plus source list/read;
+- conversation-private deliverable creation for explicit native export;
 - web search and page retrieval;
 - connected-root list/read/import and explicit export;
 - asking the user a structured question;
@@ -183,9 +186,9 @@ receipt before it can finalize. Sandboxes do not receive
 `spawn_sandbox_agent` or `wait_for_agents` and cannot create further agents.
 
 Later additions may include a scratchpad, pinned context, plan/execution modes,
-deliverable export, clipboard operations, generated images, and connected apps.
-Office-suite automation, general computer control, scheduled tasks, enterprise
-database tools, and recursive fleets remain deferred.
+clipboard operations, generated images, richer deliverables, and connected
+apps. Office-suite automation, general computer control, scheduled tasks,
+enterprise database tools, and recursive fleets remain deferred.
 
 ## Web search
 

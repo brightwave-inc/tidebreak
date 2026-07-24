@@ -61,6 +61,19 @@ describe("ToolCallCard", () => {
     expect(reading).toContain("Source read complete");
   });
 
+  it("renders a fixed user-visible output presentation", () => {
+    const active = renderToStaticMarkup(
+      <ToolCallCard name="create_deliverable" status="running" />,
+    );
+    const complete = renderToStaticMarkup(
+      <ToolCallCard name="create_deliverable" status="completed" />,
+    );
+
+    expect(active).toContain("Creating an output");
+    expect(complete).toContain("Output ready");
+    expect(visibleText(complete)).not.toContain("artifacts/");
+  });
+
   it("renders a fixed delegated-file presentation without resource details", () => {
     const markup = renderToStaticMarkup(
       <ToolCallCard name="read_delegated_file" status="running" />,

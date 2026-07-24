@@ -8,8 +8,11 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::path::Path as FsPath;
 use tokio::sync::broadcast::error::RecvError;
 
 use openwave_core::{
@@ -727,6 +730,21 @@ pub async fn delete_chat(
         DeleteChatOutcome::Deleted => {
             state.document_job_wake.notify_one();
             state.blob_retirement_wake.notify_one();
+            let scratch_root = state.config.data_dir.join("scratch");
+            let cleanup =
+                tokio::task::spawn_blocking(move || remove_private_chat_scratch(&scratch_root, id))
+                    .await;
+            match cleanup {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    eprintln!("openwave: could not remove private scratch for chat {id}: {error}");
+                }
+                Err(error) => {
+                    eprintln!(
+                        "openwave: private scratch cleanup task stopped for chat {id}: {error}"
+                    );
+                }
+            }
             Ok(StatusCode::NO_CONTENT)
         }
         DeleteChatOutcome::NotFound => Err(ServerError::not_found(format!("chat {id} not found"))),
@@ -742,6 +760,50 @@ pub async fn delete_chat(
             "chat_root_attachment_unresolved",
             "reconcile connected-folder changes before deleting this conversation",
         )),
+    }
+}
+
+/// Remove a deleted chat's private scratch without following a replacement
+/// root or chat-directory symlink. Database deletion remains authoritative, so
+/// callers log cleanup failure rather than turning a committed delete into an
+/// ambiguous HTTP failure.
+fn remove_private_chat_scratch(root: &FsPath, id: ChatId) -> std::io::Result<()> {
+    let root_metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "private scratch root is not a regular directory",
+        ));
+    }
+    let directory = Dir::open_ambient_dir(root, ambient_authority())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let opened = directory.dir_metadata()?;
+        if root_metadata.dev() != cap_std::fs::MetadataExt::dev(&opened)
+            || root_metadata.ino() != cap_std::fs::MetadataExt::ino(&opened)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "private scratch root changed while it was opened",
+            ));
+        }
+    }
+    let chat_name = id.to_string();
+    match directory.symlink_metadata(&chat_name) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            directory.remove_dir_all(chat_name)
+        }
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "private chat scratch is not a regular directory",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 

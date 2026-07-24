@@ -693,6 +693,7 @@ fn historical_tool_title(name: &str) -> &'static str {
         "read_file" | "read_connected_file" => "Read a file",
         "list_dir" => "Browse files",
         "write_file" => "Update a file",
+        "create_deliverable" => "Create an output",
         "request_folder_access" => "Request folder access",
         "connect_folder" => "Connect a folder",
         "list_connected_folders" => "Check connected folders",
@@ -1129,5 +1130,9 @@ mod historical_tool_title_tests {
         assert_eq!(historical_tool_title("search"), "Search sources");
         assert_eq!(historical_tool_title("list_sources"), "Check sources");
         assert_eq!(historical_tool_title("read_source"), "Read a source");
+        assert_eq!(
+            historical_tool_title("create_deliverable"),
+            "Create an output"
+        );
     }
 }

@@ -253,7 +253,7 @@ pub(crate) async fn import_library_document(
     }))
 }
 
-async fn resolve_conversation_scope(
+pub(crate) async fn resolve_conversation_scope(
     host_access: &HostAccess,
     chat_id: Uuid,
 ) -> Result<ChatId, String> {

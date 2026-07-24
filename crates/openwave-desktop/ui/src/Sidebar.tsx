@@ -2,6 +2,7 @@ import type { Chat } from "./api";
 import { Logomark } from "./Logomark";
 import {
   Ellipsis,
+  FileOutput,
   FolderOpen,
   LibraryBig,
   Monitor,
@@ -74,6 +75,7 @@ export function Sidebar({
     (state) => state.settingsPanel === "folders",
   );
   const showDocuments = useUiStore((state) => state.showDocuments);
+  const showDeliverables = useUiStore((state) => state.showDeliverables);
   const showSettings = useUiStore((state) => state.showSettings);
   const toggleFoldersPanel = useUiStore((state) => state.toggleFoldersPanel);
   return (
@@ -124,6 +126,16 @@ export function Sidebar({
         >
           <LibraryBig size={16} />
           Sources
+        </button>
+      )}
+      {nativeHost && (
+        <button
+          type="button"
+          className={`sidebar-action sidebar-library${primaryView === "deliverables" ? " is-active" : ""}`}
+          onClick={showDeliverables}
+        >
+          <FileOutput size={16} />
+          Outputs
         </button>
       )}
 

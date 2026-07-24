@@ -110,6 +110,21 @@ describe("hydrateTranscriptHistory", () => {
     ]);
   });
 
+  it("hydrates generated outputs with fixed renderer copy", () => {
+    const entries = hydrateTranscriptHistory([], [
+      {
+        title: "Create an output",
+        status: "completed",
+        started_at: "2026-07-16T10:00:00Z",
+        finished_at: "2026-07-16T10:00:01Z",
+      },
+    ]);
+
+    expect(entries).toEqual([
+      expect.objectContaining({ name: "create_deliverable" }),
+    ]);
+  });
+
   it("attaches sources only to their exact owning assistant message", () => {
     const entries = hydrateTranscriptHistory(
       [

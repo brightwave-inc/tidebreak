@@ -90,6 +90,12 @@ const TOOL_PRESENTATIONS: Record<string, ToolPresentation> = {
     complete: "File update complete",
     settled: "Updated a file",
   },
+  create_deliverable: {
+    label: "Create an output",
+    active: "Creating an output",
+    complete: "Output ready",
+    settled: "Created an output",
+  },
   request_folder_access: {
     label: "Request folder access",
     active: "Requesting folder access",

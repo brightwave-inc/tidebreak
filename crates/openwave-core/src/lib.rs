@@ -35,6 +35,7 @@ pub mod config;
 pub mod context;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod db;
+pub mod deliverable;
 pub mod error;
 pub mod event;
 pub mod id;
@@ -88,6 +89,10 @@ pub use client_tools::{
 pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use db::DbStore;
+pub use deliverable::{
+    deliverable_media_type, validate_deliverable_name, DELIVERABLES_DIRECTORY,
+    MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
+};
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{
@@ -144,4 +149,4 @@ pub use storage::{
 };
 pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
 #[cfg(feature = "tools")]
-pub use tools::{ListDir, ReadFile, WriteFile};
+pub use tools::{CreateDeliverable, ListDir, ReadFile, WriteFile};

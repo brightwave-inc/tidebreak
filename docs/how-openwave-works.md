@@ -201,6 +201,8 @@ The built-in server registry currently contains:
 - `read_file` and `list_dir`, which are read-only;
 - `write_file`, which is confined to private per-chat scratch and runs without a
   prompt;
+- `create_deliverable`, which atomically writes one bounded text output into the
+  current chat's private Outputs catalog;
 - `search`, which queries the indexed corpus and always requires approval because
   matching excerpts are returned to the selected chat model, which may be remote;
 - `request_folder_access`, a client-owned consent proposal with a bounded
@@ -220,10 +222,10 @@ named one exact attached root and relative path. The tool accepts no arguments;
 it cannot browse, choose a path, open a picker, write, or run commands. The
 headless server does not advertise it.
 
-The built-in `read_file`, `list_dir`, and `write_file` tools operate only inside
-a server-derived, pinned per-chat scratch capability. Its path is neither
-persisted on the chat nor returned by the product API. The desktop can connect,
-list, and revoke multiple folders
+The built-in `read_file`, `list_dir`, `write_file`, and `create_deliverable`
+tools operate only inside a server-derived, pinned per-chat scratch capability.
+Its path is neither persisted on the chat nor returned by the product API. The
+desktop can connect, list, and revoke multiple folders
 through a native picker and capability-gated host-broker sidecar; it exposes only
 opaque root IDs and display names to the renderer. Foreground tool calls can now
 list/read roots already attached to their stored chat context. An approved
@@ -734,6 +736,15 @@ cursor. The desktop then replays and follows later events, so durable history
 and the live stream meet at an explicit sequence boundary instead of relying on
 transient renderer state.
 
+The native **Outputs** surface completes a narrow deliverable loop. The
+foreground `create_deliverable` tool writes only a portable, bounded UTF-8 file
+below the exact chat's private output directory. The renderer receives a closed
+catalog and bounded text preview, never the scratch path. A native **Save As…**
+action snapshots the complete output and atomically writes it only to the
+user-selected destination; HTML is previewed as text and Markdown uses the same
+remote-load-blocking renderer as assistant messages. See
+[`deliverables.md`](deliverables.md).
+
 ### Headless server
 
 `openwave serve` starts the same local HTTP/WebSocket server and prints the
@@ -819,7 +830,9 @@ cancellation, reconnectable event stream, durable foreground/sandbox agent-run
 leases and result delivery, bounded non-blocking child admission, ordered
 multi-child waits, the foreground terminal guard, Markdown and tool-call
 transcript rendering, the agent activity/status-and-stop surface, and
-fail-closed provider routing.
+fail-closed provider routing. The first native Outputs loop also closes the path
+from a bounded conversation-private text file to an explicit user-selected
+export.
 
 The main next steps are:
 
@@ -837,6 +850,8 @@ The main next steps are:
   refresh;
 - finish the self-host profile rather than only testing Postgres state logic;
 - add health-aware provider failover;
+- add output deletion, version history, richer formats, and durable export
+  receipts without widening the native write boundary;
 - bound the agent-to-worker event channel and batch or page journal traffic so
   long, fast turns cannot create unbounded memory or replay work;
 - introduce ANN and maintenance policy when corpus measurements justify it;

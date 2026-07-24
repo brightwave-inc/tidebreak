@@ -17,12 +17,19 @@ describe("UiStore", () => {
     expect(store.getState().settingsPanel).toBeNull();
   });
 
-  it("documents and settings views always close the folders panel", () => {
+  it("documents, outputs, and settings views always close the folders panel", () => {
     const store = createUiStore();
     store.getState().toggleFoldersPanel();
     store.getState().showDocuments();
     expect(store.getState()).toMatchObject({
       primaryView: "documents",
+      settingsPanel: null,
+    });
+
+    store.getState().toggleFoldersPanel();
+    store.getState().showDeliverables();
+    expect(store.getState()).toMatchObject({
+      primaryView: "deliverables",
       settingsPanel: null,
     });
 

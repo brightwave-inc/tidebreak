@@ -11,7 +11,13 @@ import { useUiStore } from "./UiStore";
 import { Composer } from "./Composer";
 import type { FolderAccessDecision } from "./host";
 import { MessageList } from "./MessageList";
-import { ArrowDown, FolderOpen, LibraryBig, Settings } from "lucide-react";
+import {
+  ArrowDown,
+  FileOutput,
+  FolderOpen,
+  LibraryBig,
+  Settings,
+} from "lucide-react";
 
 export type ChatViewProps = {
   chat: Chat;
@@ -108,6 +114,7 @@ export function ChatView({
     (state) => state.settingsPanel === "folders",
   );
   const showDocuments = useUiStore((state) => state.showDocuments);
+  const showDeliverables = useUiStore((state) => state.showDeliverables);
   const showSettings = useUiStore((state) => state.showSettings);
   const toggleFoldersPanel = useUiStore((state) => state.toggleFoldersPanel);
   const messages = useChatSessionStore((session) => session.messages);
@@ -161,6 +168,16 @@ export function ChatView({
                 onClick={showDocuments}
               >
                 <LibraryBig size={14} />
+              </button>
+            )}
+            {nativeHost && (
+              <button
+                type="button"
+                className="btn"
+                aria-label="Outputs"
+                onClick={showDeliverables}
+              >
+                <FileOutput size={14} />
               </button>
             )}
             {nativeHost && (
