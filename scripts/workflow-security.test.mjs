@@ -76,18 +76,27 @@ test("workflow container images are pinned by digest", () => {
   assert.doesNotMatch(workflows["ci.yml"], /gitleaks\/gitleaks:latest/);
 });
 
-test("Rust CI makes PostgreSQL required without a redundant build lane", () => {
+test("Rust CI requires the same PostgreSQL lane on pull requests and main", () => {
   const ci = workflows["ci.yml"];
   const postgres = workflowJob(ci, "postgres");
   const testJob = workflowJob(ci, "test");
   const aggregate = workflowJob(ci, "rust");
 
+  assert.match(
+    ci,
+    /^on:\n  push:\n    branches: \[main\]\n  pull_request:/m,
+  );
   assert.doesNotMatch(ci, /^  build:$/m);
   assert.match(postgres, /if:.*needs\.changes\.outputs\.rust == 'true'/);
   assert.doesNotMatch(postgres, /github\.event_name != 'pull_request'/);
   assert.match(postgres, /OPENWAVE_REQUIRE_POSTGRES_TEST: "true"/);
   assert.match(aggregate, /^\s+postgres,$/m);
   assert.match(aggregate, /test "\$POSTGRES_RESULT" = success/);
+  assert.match(
+    aggregate,
+    /pull_request\) test "\$PR_TITLE_RESULT" = success ;;/,
+  );
+  assert.match(aggregate, /\*\) test "\$PR_TITLE_RESULT" = skipped ;;/);
 
   for (const job of [
     workflowJob(ci, "lint"),

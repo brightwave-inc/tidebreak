@@ -601,7 +601,7 @@ async fn postgres_nonblocking_spawn_and_parent_cancellation_are_one_ordered_tran
         })
     };
     let checkpoint = checkpoint_task.await.unwrap();
-    cancellation_task.await.unwrap();
+    let cancellation = cancellation_task.await.unwrap();
     let parent = store.get_turn_run(turn.id).await.unwrap().unwrap();
     let children = store
         .list_agent_runs(chat.id)
@@ -610,14 +610,30 @@ async fn postgres_nonblocking_spawn_and_parent_cancellation_are_one_ordered_tran
         .into_iter()
         .filter(|run| run.execution == AgentRunExecution::Sandbox)
         .collect::<Vec<_>>();
-    match checkpoint {
-        CheckpointSandboxSpawnOutcome::Checkpointed { .. } => {
+    match (checkpoint, cancellation) {
+        (
+            CheckpointSandboxSpawnOutcome::Checkpointed { .. },
+            Some(RequestTurnCancellationOutcome::Cancelled(_)),
+        ) => {
             assert_eq!(parent.status, TurnRunStatus::Cancelled);
             assert_eq!(children.len(), 1);
             assert_eq!(children[0].status, AgentRunStatus::Cancelled);
             assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
         }
-        CheckpointSandboxSpawnOutcome::LeaseLost => {
+        // Cancellation timestamps are mutation fences. If the checkpoint
+        // commits after the request timestamp was captured, rejecting that
+        // stale request is correct even though it wins the scheduler lock
+        // second.
+        (CheckpointSandboxSpawnOutcome::Checkpointed { .. }, None) => {
+            assert_eq!(parent.status, TurnRunStatus::Resuming);
+            assert_eq!(children.len(), 1);
+            assert_eq!(children[0].status, AgentRunStatus::Queued);
+            assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
+        }
+        (
+            CheckpointSandboxSpawnOutcome::LeaseLost,
+            Some(RequestTurnCancellationOutcome::Requested(_)),
+        ) => {
             assert_eq!(parent.status, TurnRunStatus::Cancelling);
             assert!(children.is_empty());
             assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
