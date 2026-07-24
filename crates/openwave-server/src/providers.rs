@@ -12,10 +12,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use openwave_core::{Result, SecretProvider, Store};
+use openwave_core::{AgentConfig, ProviderId, ReasoningEffort, Result, SecretProvider, Store};
 
 use crate::error::ServerError;
-use crate::model_registry::{self, ModelSpec};
+use crate::model_registry::{self, InputModality, ModelSpec};
 
 /// Setting-key prefix for per-provider non-secret config (`provider.<kind>`).
 const PROVIDER_SETTING_PREFIX: &str = "provider.";
@@ -131,6 +131,13 @@ pub struct ProviderConfig {
     /// Optional base URL override (required for `openai_compatible`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Explicit model ids served by a custom OpenAI-compatible endpoint.
+    ///
+    /// Curated providers ignore this field and obtain their models from the
+    /// host registry. Keeping custom entries beside the endpoint removes the
+    /// old ambiguous global free-form model setting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<CustomModelConfig>,
 }
 
 impl ProviderConfig {
@@ -139,8 +146,135 @@ impl ProviderConfig {
         Self {
             enabled: false,
             base_url: None,
+            models: Vec::new(),
         }
     }
+}
+
+fn default_custom_context_window() -> u32 {
+    32_768
+}
+
+fn default_custom_max_output_tokens() -> u32 {
+    4_096
+}
+
+/// Conservative, user-inspectable capabilities for one model served by an
+/// OpenAI-compatible endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomModelConfig {
+    /// Exact model id sent to the endpoint.
+    pub id: String,
+    /// Optional human-facing label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Context limit used by OpenWave's reducer.
+    #[serde(default = "default_custom_context_window")]
+    pub context_window: u32,
+    /// Maximum output sent to the endpoint.
+    #[serde(default = "default_custom_max_output_tokens")]
+    pub max_output_tokens: u32,
+}
+
+/// Owned runtime policy resolved from a provider-qualified selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModelPolicy {
+    /// Stable provider-qualified selection key.
+    pub key: String,
+    /// Raw model id sent to the provider.
+    pub id: String,
+    /// Human-readable label.
+    pub display_name: String,
+    /// Exact provider route.
+    pub provider: ProviderKind,
+    /// Runtime context reduction limit.
+    pub context_window: u32,
+    /// Runtime output cap.
+    pub max_output_tokens: u32,
+    /// End-to-end supported input modalities.
+    pub input_modalities: Vec<InputModality>,
+    /// Whether the provider request uses a reasoning-model shape.
+    pub supports_reasoning: bool,
+    /// Whether the chat may set a reasoning-effort override.
+    pub supports_reasoning_effort: bool,
+}
+
+impl ResolvedModelPolicy {
+    fn curated(spec: &ModelSpec) -> Self {
+        Self {
+            key: model_registry::selection_key(spec.provider, spec.id),
+            id: spec.id.to_owned(),
+            display_name: spec.display_name.to_owned(),
+            provider: spec.provider,
+            context_window: spec.context_window,
+            max_output_tokens: spec.max_output_tokens,
+            input_modalities: spec.input_modalities.to_vec(),
+            supports_reasoning: spec.supports_reasoning,
+            supports_reasoning_effort: spec.supports_reasoning_effort,
+        }
+    }
+
+    fn custom(model: &CustomModelConfig) -> Self {
+        Self {
+            key: model_registry::selection_key(ProviderKind::OpenaiCompatible, &model.id),
+            id: model.id.clone(),
+            display_name: model
+                .display_name
+                .clone()
+                .unwrap_or_else(|| model_registry::display_name_for(&model.id)),
+            provider: ProviderKind::OpenaiCompatible,
+            context_window: model.context_window,
+            max_output_tokens: model.max_output_tokens,
+            input_modalities: vec![InputModality::Text],
+            // Unknown endpoints get deliberately conservative request shaping.
+            // Capability editing can be added later without changing the key.
+            supports_reasoning: false,
+            supports_reasoning_effort: false,
+        }
+    }
+
+    fn legacy_custom(id: &str) -> Self {
+        Self::custom(&CustomModelConfig {
+            id: id.to_owned(),
+            display_name: None,
+            context_window: default_custom_context_window(),
+            max_output_tokens: default_custom_max_output_tokens(),
+        })
+    }
+}
+
+/// Apply one resolved registry row to the provider-neutral agent config.
+///
+/// The stored selection key never reaches an adapter: requests carry the raw
+/// model id plus the exact provider hint. Unsupported reasoning controls are
+/// normalized away before provider dispatch.
+pub fn apply_model_policy(
+    config: &mut AgentConfig,
+    policy: &ResolvedModelPolicy,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Result<()> {
+    config.provider = Some(ProviderId::new(policy.provider.as_str()));
+    config.model = policy.id.clone();
+    config.reasoning_model = policy.supports_reasoning;
+    config.context_window = usize::try_from(policy.context_window)
+        .map_err(|_| openwave_core::AgentError::config("model context window is unsupported"))?;
+    config.max_tokens = Some(policy.max_output_tokens);
+    config.reasoning_effort = policy
+        .supports_reasoning_effort
+        .then_some(reasoning_effort)
+        .flatten();
+    if policy.supports_reasoning {
+        config.temperature = None;
+    }
+    Ok(())
+}
+
+/// Public catalog row plus current provider readiness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogModel {
+    pub policy: ResolvedModelPolicy,
+    pub available: bool,
 }
 
 /// Public view of a provider — never includes the credential itself.
@@ -155,6 +289,8 @@ pub struct ProviderInfo {
     pub base_url: Option<String>,
     /// Whether a credential is stored (never the credential itself).
     pub has_credential: bool,
+    /// Explicit custom model entries for this endpoint.
+    pub models: Vec<CustomModelConfig>,
 }
 
 /// Deserialize a present field (including JSON `null`) as `Some(..)`;
@@ -178,6 +314,9 @@ pub struct ProviderUpdate {
     pub base_url: Option<Option<String>>,
     #[serde(default)]
     pub credential: Option<ProviderCredential>,
+    /// Replacement custom-model list. Only valid for `openai_compatible`.
+    #[serde(default)]
+    pub models: Option<Vec<CustomModelConfig>>,
 }
 
 /// Read the stored config for `kind`, or the disabled default.
@@ -275,8 +414,9 @@ pub async fn list_providers(
         out.push(ProviderInfo {
             kind,
             enabled: config.enabled,
-            base_url: config.base_url,
+            base_url: config.base_url.clone(),
             has_credential: has_credential(secrets, kind).await,
+            models: config.models,
         });
     }
     Ok(out)
@@ -304,6 +444,15 @@ pub async fn update_provider(
             config.base_url = Some(url);
         }
     }
+    if let Some(models) = update.models {
+        if kind != ProviderKind::OpenaiCompatible {
+            return Err(ServerError::bad_request(
+                "custom models are only supported by openai_compatible",
+            ));
+        }
+        validate_custom_models(&models)?;
+        config.models = models;
+    }
 
     // openai_compatible needs a base URL to be useful when enabled.
     if kind == ProviderKind::OpenaiCompatible && config.enabled && config.base_url.is_none() {
@@ -327,9 +476,81 @@ pub async fn update_provider(
     Ok(ProviderInfo {
         kind,
         enabled: config.enabled,
-        base_url: config.base_url,
+        base_url: config.base_url.clone(),
         has_credential: has_credential(secrets, kind).await,
+        models: config.models,
     })
+}
+
+fn validate_custom_models(models: &[CustomModelConfig]) -> std::result::Result<(), ServerError> {
+    validate_custom_models_against(models, |id| {
+        model_registry::find_for(ProviderKind::OpenaiCompatible, id).is_some()
+    })
+}
+
+fn validate_custom_models_against(
+    models: &[CustomModelConfig],
+    is_curated: impl Fn(&str) -> bool,
+) -> std::result::Result<(), ServerError> {
+    const MAX_CUSTOM_MODELS: usize = 64;
+    const MAX_MODEL_ID_CHARS: usize = 240;
+    const MAX_DISPLAY_NAME_CHARS: usize = 120;
+    const MAX_CONTEXT_WINDOW: u32 = 4_000_000;
+
+    if models.len() > MAX_CUSTOM_MODELS {
+        return Err(ServerError::bad_request(format!(
+            "openai_compatible supports at most {MAX_CUSTOM_MODELS} custom models"
+        )));
+    }
+    let mut ids = std::collections::HashSet::new();
+    for model in models {
+        let id = model.id.trim();
+        if id.is_empty()
+            || id.chars().count() > MAX_MODEL_ID_CHARS
+            || id.chars().any(char::is_whitespace)
+            || id.chars().any(char::is_control)
+        {
+            return Err(ServerError::bad_request(
+                "custom model id must be non-empty, bounded, and contain no whitespace or control characters",
+            ));
+        }
+        if id != model.id {
+            return Err(ServerError::bad_request(
+                "custom model id must not have leading or trailing whitespace",
+            ));
+        }
+        if !ids.insert(id) {
+            return Err(ServerError::bad_request(format!(
+                "duplicate custom model id `{id}`"
+            )));
+        }
+        if is_curated(id) {
+            return Err(ServerError::bad_request(format!(
+                "custom model id `{id}` conflicts with a curated openai_compatible model"
+            )));
+        }
+        if model.display_name.as_ref().is_some_and(|name| {
+            name.trim().is_empty()
+                || name.trim() != name
+                || name.chars().count() > MAX_DISPLAY_NAME_CHARS
+                || name.chars().any(char::is_control)
+        }) {
+            return Err(ServerError::bad_request(
+                "custom model display_name must be non-empty, bounded, and contain no control characters",
+            ));
+        }
+        if !(1_024..=MAX_CONTEXT_WINDOW).contains(&model.context_window) {
+            return Err(ServerError::bad_request(format!(
+                "custom model `{id}` context_window must be between 1024 and {MAX_CONTEXT_WINDOW}"
+            )));
+        }
+        if model.max_output_tokens == 0 || model.max_output_tokens > model.context_window {
+            return Err(ServerError::bad_request(format!(
+                "custom model `{id}` max_output_tokens must be positive and not exceed context_window"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve an API-key credential for `kind`: stored blob (or Anthropic legacy),
@@ -404,6 +625,7 @@ pub async fn collect_routes(
             base_url: config.base_url,
             curated_models: model_registry::models_for(kind)
                 .map(|spec| spec.id.to_string())
+                .chain(config.models.into_iter().map(|model| model.id))
                 .collect(),
         });
     }
@@ -434,6 +656,7 @@ pub async fn migrate_legacy_anthropic(
             &ProviderConfig {
                 enabled: true,
                 base_url: None,
+                models: Vec::new(),
             },
         )
         .await?;
@@ -441,27 +664,92 @@ pub async fn migrate_legacy_anthropic(
     Ok(())
 }
 
-/// Model specs from providers that are both enabled and credentialed.
+/// Resolve a stored or wire selection into an authoritative runtime policy.
+///
+/// Bare curated ids are migrated losslessly to their owning provider. Bare
+/// custom ids resolve only when explicitly configured, except when
+/// `allow_legacy_custom` is true: that narrow path preserves pre-registry rows
+/// which historically routed unknown ids to OpenAI-compatible.
+pub async fn resolve_model_policy(
+    store: &dyn Store,
+    value: &str,
+    allow_legacy_custom: bool,
+) -> Result<Option<ResolvedModelPolicy>> {
+    if let Some((provider, id)) = model_registry::parse_selection_key(value) {
+        if let Some(spec) = model_registry::find_for(provider, id) {
+            return Ok(Some(ResolvedModelPolicy::curated(spec)));
+        }
+        if provider != ProviderKind::OpenaiCompatible {
+            return Ok(None);
+        }
+        let config = read_config(store, provider).await?;
+        return Ok(config
+            .models
+            .iter()
+            .find(|model| model.id == id)
+            .map(ResolvedModelPolicy::custom));
+    }
+
+    let config = read_config(store, ProviderKind::OpenaiCompatible).await?;
+    let mut owners = model_registry::models_named(value)
+        .map(ResolvedModelPolicy::curated)
+        .collect::<Vec<_>>();
+    owners.extend(
+        config
+            .models
+            .iter()
+            .filter(|model| model.id == value)
+            .map(ResolvedModelPolicy::custom),
+    );
+    match owners.len() {
+        1 => return Ok(owners.pop()),
+        count if count > 1 => return Ok(None),
+        _ => {}
+    }
+    Ok(allow_legacy_custom.then(|| ResolvedModelPolicy::legacy_custom(value)))
+}
+
+/// Whether the provider can accept a new turn right now.
+pub async fn provider_is_usable(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+    kind: ProviderKind,
+) -> Result<bool> {
+    let config = read_config(store, kind).await?;
+    if !config.enabled || !has_credential(secrets, kind).await {
+        return Ok(false);
+    }
+    if kind == ProviderKind::OpenaiCompatible {
+        let Some(base) = config.base_url.as_deref() else {
+            return Ok(false);
+        };
+        if !(base.starts_with("https://") || base.starts_with("http://")) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Full typed catalog. Unavailable rows remain visible for provider-scoped
+/// settings, but clients must not offer them as usable selections.
 pub async fn catalog_models(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
-) -> Result<Vec<&'static ModelSpec>> {
-    let mut models: Vec<&'static ModelSpec> = Vec::new();
+) -> Result<Vec<CatalogModel>> {
+    let mut models = Vec::new();
     for &kind in ProviderKind::ALL {
         let config = read_config(store, kind).await?;
-        if !config.enabled {
-            continue;
+        let available = provider_is_usable(store, secrets, kind).await?;
+        models.extend(model_registry::models_for(kind).map(|spec| CatalogModel {
+            policy: ResolvedModelPolicy::curated(spec),
+            available,
+        }));
+        if kind == ProviderKind::OpenaiCompatible {
+            models.extend(config.models.iter().map(|model| CatalogModel {
+                policy: ResolvedModelPolicy::custom(model),
+                available,
+            }));
         }
-        if !has_credential(secrets, kind).await {
-            continue;
-        }
-        models.extend(model_registry::models_for(kind));
-    }
-    // If nothing is enabled+credentialed yet, still surface Anthropic's curated
-    // list so a fresh install's model selector isn't empty before the user
-    // finishes provider setup (turns still fail-closed without a key).
-    if models.is_empty() {
-        models.extend(model_registry::models_for(ProviderKind::Anthropic));
     }
     Ok(models)
 }
@@ -492,5 +780,107 @@ mod tests {
             "provider.anthropic.credential"
         );
         assert_eq!(ProviderKind::Openai.setting_key(), "provider.openai");
+    }
+
+    #[test]
+    fn custom_model_validation_is_conservative_and_rejects_duplicates() {
+        let valid = CustomModelConfig {
+            id: "local/model".into(),
+            display_name: Some("Local Model".into()),
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+        };
+        assert!(validate_custom_models(std::slice::from_ref(&valid)).is_ok());
+        assert!(validate_custom_models(&[valid.clone(), valid.clone()]).is_err());
+        assert!(
+            validate_custom_models_against(std::slice::from_ref(&valid), |id| id == "local/model")
+                .is_err(),
+            "custom ids must not shadow a curated id under the same provider"
+        );
+        assert!(validate_custom_models(&[CustomModelConfig {
+            id: "bad model".into(),
+            display_name: None,
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+        }])
+        .is_err());
+        assert!(validate_custom_models(&[CustomModelConfig {
+            id: "bad".into(),
+            display_name: None,
+            context_window: 1_000,
+            max_output_tokens: 4_096,
+        }])
+        .is_err());
+    }
+
+    #[test]
+    fn registry_policy_controls_context_output_provider_and_reasoning() {
+        let mut config = AgentConfig {
+            temperature: Some(0.7),
+            reasoning_effort: Some(ReasoningEffort::High),
+            ..AgentConfig::default()
+        };
+        let opus = ResolvedModelPolicy::curated(
+            model_registry::find_for(ProviderKind::Anthropic, "claude-opus-4-8").unwrap(),
+        );
+        apply_model_policy(&mut config, &opus, Some(ReasoningEffort::High)).unwrap();
+        assert_eq!(config.provider, Some(ProviderId::new("anthropic")));
+        assert_eq!(config.model, "claude-opus-4-8");
+        assert_eq!(config.context_window, 1_000_000);
+        assert_eq!(config.max_tokens, Some(128_000));
+        assert_eq!(config.reasoning_effort, None);
+        assert_eq!(config.temperature, None);
+
+        let mut config = AgentConfig::default();
+        let gpt = ResolvedModelPolicy::curated(
+            model_registry::find_for(ProviderKind::Openai, "gpt-4o").unwrap(),
+        );
+        apply_model_policy(&mut config, &gpt, Some(ReasoningEffort::High)).unwrap();
+        assert_eq!(config.provider, Some(ProviderId::new("openai")));
+        assert_eq!(config.context_window, 128_000);
+        assert_eq!(config.max_tokens, Some(16_384));
+        assert!(!config.reasoning_model);
+        assert_eq!(config.reasoning_effort, None);
+
+        let mut config = AgentConfig::default();
+        let o3 = ResolvedModelPolicy::curated(
+            model_registry::find_for(ProviderKind::Openai, "o3").unwrap(),
+        );
+        apply_model_policy(&mut config, &o3, Some(ReasoningEffort::Low)).unwrap();
+        assert!(config.reasoning_model);
+        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Low));
+    }
+
+    #[test]
+    fn every_curated_model_applies_its_exact_runtime_contract() {
+        for &provider in ProviderKind::ALL {
+            for spec in model_registry::models_for(provider) {
+                let mut config = AgentConfig {
+                    temperature: Some(0.7),
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    ..AgentConfig::default()
+                };
+                let policy = ResolvedModelPolicy::curated(spec);
+                apply_model_policy(&mut config, &policy, Some(ReasoningEffort::Low)).unwrap();
+
+                assert_eq!(config.provider, Some(ProviderId::new(provider.as_str())));
+                assert_eq!(config.model, spec.id);
+                assert_eq!(
+                    config.context_window,
+                    usize::try_from(spec.context_window).unwrap()
+                );
+                assert_eq!(config.max_tokens, Some(spec.max_output_tokens));
+                assert_eq!(config.reasoning_model, spec.supports_reasoning);
+                assert_eq!(
+                    config.reasoning_effort,
+                    spec.supports_reasoning_effort
+                        .then_some(ReasoningEffort::Low)
+                );
+                assert_eq!(
+                    config.temperature,
+                    (!spec.supports_reasoning).then_some(0.7)
+                );
+            }
+        }
     }
 }

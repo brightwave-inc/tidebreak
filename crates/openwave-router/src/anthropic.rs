@@ -16,7 +16,7 @@ use openwave_core::provider::{
 };
 use openwave_core::Role;
 
-use crate::sse::{classify_provider_error, drain_frames, frame_data};
+use crate::sse::{classify_provider_error, drain_frames, frame_data, read_bounded_error_body};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -82,7 +82,7 @@ impl ModelProvider for AnthropicProvider {
         // stable error type/code when present) is enough for classification.
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = read_bounded_error_body(response.bytes_stream()).await;
             return Err(classify_provider_error("anthropic", status.as_u16(), &body));
         }
 
@@ -284,7 +284,9 @@ mod tests {
     #[test]
     fn request_maps_system_messages_and_tools() {
         let req = ChatRequest {
+            provider: Some(ProviderId::new("anthropic")),
             model: "claude-opus-4-8".into(),
+            reasoning_model: true,
             system: Some("be brief".into()),
             messages: vec![ChatMessage::text(Role::User, "hi")],
             tools: vec![ToolSpec {

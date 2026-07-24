@@ -6506,6 +6506,7 @@ async fn resolve_embedder_uses_openai_only_when_enabled_and_keyed() {
         &providers::ProviderConfig {
             enabled: true,
             base_url: None,
+            models: Vec::new(),
         },
     )
     .await
@@ -6523,6 +6524,7 @@ async fn resolve_embedder_uses_openai_only_when_enabled_and_keyed() {
         &providers::ProviderConfig {
             enabled: false,
             base_url: None,
+            models: Vec::new(),
         },
     )
     .await
@@ -8097,14 +8099,13 @@ async fn models_catalog_is_served() {
         .find(|m| m["id"] == "claude-opus-4-8")
         .expect("curated Anthropic model is present");
     assert_eq!(opus["display_name"], "Claude Opus 4.8");
+    assert_eq!(opus["key"], "anthropic::claude-opus-4-8");
     assert_eq!(opus["context_window"], 1_000_000);
     assert_eq!(opus["max_output_tokens"], 128_000);
-    assert_eq!(
-        opus["input_modalities"],
-        serde_json::json!(["text", "image"])
-    );
+    assert_eq!(opus["input_modalities"], serde_json::json!(["text"]));
     assert!(opus["supports_reasoning"].as_bool().unwrap());
-    assert!(opus["multimodal"].as_bool().unwrap());
+    assert!(!opus["multimodal"].as_bool().unwrap());
+    assert!(!opus["available"].as_bool().unwrap());
     // Capabilities describe what the current adapter implements, not only
     // what the upstream model could support with a different request shape.
     assert!(!opus["supports_reasoning_effort"].as_bool().unwrap());
@@ -9424,7 +9425,213 @@ async fn models_catalog_includes_enabled_credentialed_providers() {
     assert_eq!(response.status(), StatusCode::OK);
     let catalog: serde_json::Value = json_body(response).await;
     let models = catalog["models"].as_array().unwrap();
-    assert!(models.iter().any(|m| m["provider"] == "openai"));
+    assert!(models
+        .iter()
+        .any(|m| m["provider"] == "openai" && m["available"] == true));
+}
+
+#[tokio::test]
+async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unavailable_providers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("typed-models.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Openai,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Openai,
+        &providers::ProviderCredential::api_key("sk-openai"),
+    )
+    .await
+    .unwrap();
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(resolver::ConfiguredResolver::new(
+            store.clone(),
+            secrets.clone(),
+        )),
+        secrets,
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "gpt-4o".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let bearer = format!("Bearer {}", state.token);
+    let router = app(state);
+
+    // Old bare curated ids are accepted but persisted under their exact owner.
+    let configured = put_settings(&router, &bearer, serde_json::json!({"model": "gpt-4o"})).await;
+    assert_eq!(configured.status(), StatusCode::OK);
+    let settings: serde_json::Value = json_body(configured).await;
+    assert_eq!(settings["model"], "openai::gpt-4o");
+
+    let wrong_provider = put_settings(
+        &router,
+        &bearer,
+        serde_json::json!({"model": "anthropic::gpt-4o"}),
+    )
+    .await;
+    assert_eq!(wrong_provider.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(wrong_provider).await;
+    assert_eq!(error.kind, "unknown_model");
+
+    let unavailable = put_settings(
+        &router,
+        &bearer,
+        serde_json::json!({"model": "anthropic::claude-opus-4-8"}),
+    )
+    .await;
+    assert_eq!(unavailable.status(), StatusCode::CONFLICT);
+    let error: AgentErrorInfo = json_body(unavailable).await;
+    assert_eq!(error.kind, "model_provider_unavailable");
+
+    let chat_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"model": "openai::gpt-4o"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chat_response.status(), StatusCode::CREATED);
+    let chat: Chat = json_body(chat_response).await;
+    assert_eq!(chat.model.as_deref(), Some("openai::gpt-4o"));
+
+    let turn_id = TurnId::new();
+    let accepted = send_message_with_id(&router, &bearer, chat.id, turn_id, "hello").await;
+    assert_eq!(accepted, StatusCode::ACCEPTED);
+    assert_eq!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().model,
+        "openai::gpt-4o"
+    );
+
+    // The same raw id may be explicitly configured under another provider.
+    // Once two owners exist, the old bare value is ambiguous and fails closed.
+    let configure_compatible = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/openai_compatible")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": true,
+                        "base_url": "http://127.0.0.1:1234/v1",
+                        "credential": {"type": "api_key", "key": "sk-local"},
+                        "models": [{
+                            "id": "gpt-4o",
+                            "context_window": 32768,
+                            "max_output_tokens": 4096
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(configure_compatible.status(), StatusCode::OK);
+
+    let ambiguous = put_settings(&router, &bearer, serde_json::json!({"model": "gpt-4o"})).await;
+    assert_eq!(ambiguous.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(ambiguous).await;
+    assert_eq!(error.kind, "unknown_model");
+
+    for qualified in ["openai::gpt-4o", "openai_compatible::gpt-4o"] {
+        let exact = put_settings(&router, &bearer, serde_json::json!({"model": qualified})).await;
+        assert_eq!(exact.status(), StatusCode::OK);
+        let settings: serde_json::Value = json_body(exact).await;
+        assert_eq!(settings["model"], qualified);
+    }
+}
+
+#[tokio::test]
+async fn custom_models_live_under_openai_compatible_with_conservative_capabilities() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/openai_compatible")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": true,
+                        "base_url": "http://127.0.0.1:1234/v1",
+                        "credential": {"type": "api_key", "key": "sk-local"},
+                        "models": [{
+                            "id": "vendor/model",
+                            "display_name": "Vendor Model",
+                            "context_window": 65536,
+                            "max_output_tokens": 8192
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/models")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let catalog: serde_json::Value = json_body(response).await;
+    let custom = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["key"] == "openai_compatible::vendor/model")
+        .unwrap();
+    assert_eq!(custom["display_name"], "Vendor Model");
+    assert_eq!(custom["context_window"], 65_536);
+    assert_eq!(custom["max_output_tokens"], 8_192);
+    assert_eq!(custom["input_modalities"], serde_json::json!(["text"]));
+    assert!(!custom["supports_reasoning"].as_bool().unwrap());
+    assert!(custom["available"].as_bool().unwrap());
 }
 
 #[tokio::test]
@@ -9452,6 +9659,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
         &providers::ProviderConfig {
             enabled: true,
             base_url: None,
+            models: Vec::new(),
         },
     )
     .await
@@ -9485,6 +9693,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
         &providers::ProviderConfig {
             enabled: false,
             base_url: None,
+            models: Vec::new(),
         },
     )
     .await
@@ -9517,6 +9726,7 @@ async fn resolver_includes_openai_when_enabled() {
         &providers::ProviderConfig {
             enabled: true,
             base_url: None,
+            models: Vec::new(),
         },
     )
     .await
@@ -9565,6 +9775,7 @@ async fn openai_compatible_route_is_free_form_fallback() {
         &providers::ProviderConfig {
             enabled: true,
             base_url: Some("http://127.0.0.1:1234/v1".into()),
+            models: Vec::new(),
         },
     )
     .await

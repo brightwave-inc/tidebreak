@@ -95,8 +95,11 @@ pub async fn get_settings(State(state): State<AppState>) -> Result<Json<Settings
 /// fields present in the body are touched.
 pub async fn put_settings(
     State(state): State<AppState>,
-    Json(body): Json<SettingsUpdate>,
+    Json(mut body): Json<SettingsUpdate>,
 ) -> Result<Json<Settings>, ServerError> {
+    if let Some(Some(model)) = body.model.as_mut() {
+        *model = validate_model_selection(&state, model, false).await?;
+    }
     match body.model {
         // Absent: leave the model unchanged.
         None => {}
@@ -249,6 +252,43 @@ async fn read_model(store: &dyn Store) -> Result<Option<String>, ServerError> {
         .and_then(|value| value.as_str().map(str::to_owned)))
 }
 
+/// Resolve, canonicalize, and availability-check a model selection before it
+/// crosses a persistence boundary. Custom embedders with an injected provider
+/// retain their free-form model contract; the production configured resolver
+/// always enforces the typed registry.
+async fn validate_model_selection(
+    state: &AppState,
+    value: &str,
+    allow_legacy_custom: bool,
+) -> Result<String, ServerError> {
+    if value.is_empty() {
+        return Err(ServerError::bad_request("model must not be empty"));
+    }
+    if !state.resolver.enforces_model_registry() {
+        return Ok(value.to_owned());
+    }
+    let Some(policy) =
+        providers::resolve_model_policy(&*state.store, value, allow_legacy_custom).await?
+    else {
+        return Err(ServerError::bad_request_kind(
+            "unknown_model",
+            format!(
+                "model `{value}` is not registered for that provider; configure it under OpenAI-compatible models first"
+            ),
+        ));
+    };
+    if !providers::provider_is_usable(&*state.store, &*state.secrets, policy.provider).await? {
+        return Err(ServerError::conflict_kind(
+            "model_provider_unavailable",
+            format!(
+                "provider `{}` for model `{}` is disabled, unconfigured, or missing a credential",
+                policy.provider, policy.id
+            ),
+        ));
+    }
+    Ok(policy.key)
+}
+
 /// Whether any model provider credential is configured — stored or via the
 /// env fallbacks the resolver also honors. Prefer `GET /providers` for
 /// per-kind detail; this field is the legacy "is anything ready?" signal.
@@ -353,12 +393,16 @@ pub async fn delete_provider_credential(
 /// A selectable model in the catalog.
 #[derive(Debug, Serialize)]
 pub struct ModelInfo {
+    /// Stable provider-qualified selection key used by settings and chats.
+    pub key: String,
     /// The identifier passed to the provider and stored as `chat.model`.
     pub id: String,
     /// Human-readable label for the selector (e.g. `"Claude Opus 4.8"`).
     pub display_name: String,
     /// The provider that serves the model.
-    pub provider: String,
+    pub provider: ProviderKind,
+    /// Whether the provider is enabled, configured, and credentialed.
+    pub available: bool,
     /// Approximate context window in tokens.
     pub context_window: u32,
     /// Maximum model output in tokens.
@@ -382,26 +426,32 @@ pub struct ModelCatalog {
 
 /// `GET /models` — the catalog a chat's model selector chooses from.
 ///
-/// Models of enabled, credentialed providers. Falls back to Anthropic's curated
-/// list when nothing is configured yet so the selector isn't empty on first run.
+/// All typed registry rows plus current availability. Clients may explain
+/// unavailable rows, but must never offer them as usable selections.
 pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCatalog>, ServerError> {
     let models = providers::catalog_models(&*state.store, &*state.secrets)
         .await?
         .into_iter()
-        .map(|spec| ModelInfo {
-            id: spec.id.to_string(),
-            display_name: crate::model_registry::display_name_for(spec.id),
-            provider: spec.provider.as_str().to_string(),
-            context_window: spec.context_window,
-            max_output_tokens: spec.max_output_tokens,
-            input_modalities: spec
+        .map(|entry| ModelInfo {
+            key: entry.policy.key,
+            id: entry.policy.id,
+            display_name: entry.policy.display_name,
+            provider: entry.policy.provider,
+            available: entry.available,
+            context_window: entry.policy.context_window,
+            max_output_tokens: entry.policy.max_output_tokens,
+            input_modalities: entry
+                .policy
                 .input_modalities
                 .iter()
                 .map(|modality| modality.as_str().to_string())
                 .collect(),
-            supports_reasoning: spec.supports_reasoning,
-            supports_reasoning_effort: spec.supports_reasoning_effort,
-            multimodal: spec.accepts(crate::model_registry::InputModality::Image),
+            supports_reasoning: entry.policy.supports_reasoning,
+            supports_reasoning_effort: entry.policy.supports_reasoning_effort,
+            multimodal: entry
+                .policy
+                .input_modalities
+                .contains(&crate::model_registry::InputModality::Image),
         })
         .collect();
     Ok(Json(ModelCatalog { models }))
@@ -537,7 +587,7 @@ pub struct CreateChat {
 /// `POST /chats` — create a chat and return it (`201 Created`).
 pub async fn create_chat(
     State(state): State<AppState>,
-    Json(body): Json<CreateChat>,
+    Json(mut body): Json<CreateChat>,
 ) -> Result<impl IntoResponse, ServerError> {
     // Return a product-facing 400 for an unknown project. The Store and schema
     // independently enforce the same membership invariant inside insertion.
@@ -548,8 +598,8 @@ pub async fn create_chat(
             .await?
             .ok_or_else(|| ServerError::not_found(format!("project {project_id} not found")))?;
     }
-    if body.model.as_deref().is_some_and(str::is_empty) {
-        return Err(ServerError::bad_request("model must not be empty"));
+    if let Some(model) = body.model.as_mut() {
+        *model = validate_model_selection(&state, model, false).await?;
     }
     let chat = Chat {
         id: ChatId::new(),
@@ -586,16 +636,12 @@ pub struct ChatUpdate {
 pub async fn patch_chat(
     State(state): State<AppState>,
     Path(id): Path<ChatId>,
-    Json(body): Json<ChatUpdate>,
+    Json(mut body): Json<ChatUpdate>,
 ) -> Result<Json<Chat>, ServerError> {
     // Validate every supplied field before touching durable state. This keeps a
     // mixed request all-or-nothing from the user's point of view.
-    if body
-        .model
-        .as_ref()
-        .is_some_and(|model| model.as_deref().is_some_and(str::is_empty))
-    {
-        return Err(ServerError::bad_request("model must not be empty"));
+    if let Some(Some(model)) = body.model.as_mut() {
+        *model = validate_model_selection(&state, model, false).await?;
     }
     let title = body.title.map(|title| {
         title
@@ -1237,12 +1283,13 @@ pub async fn post_message(
         existing.model
     } else {
         // New-turn resolution order: chat override, global default, boot default.
-        match chat.model.clone() {
+        let selected = match chat.model.clone() {
             Some(model) => model,
             None => read_model(&*state.store)
                 .await?
                 .unwrap_or_else(|| state.agent_config.model.clone()),
-        }
+        };
+        validate_model_selection(&state, &selected, true).await?
     };
     match state
         .store

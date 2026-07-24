@@ -479,8 +479,21 @@ impl SandboxAgentRunWorker {
         } else {
             false
         };
+        let mut agent_config = self.agent_config.clone();
+        if let Some(policy) = if self.resolver.enforces_model_registry() {
+            crate::providers::resolve_model_policy(&*self.store, &agent_config.model, true).await?
+        } else {
+            None
+        } {
+            let reasoning_effort = agent_config.reasoning_effort;
+            crate::providers::apply_model_policy(&mut agent_config, &policy, reasoning_effort)?;
+        } else if self.resolver.enforces_model_registry() {
+            return Err(AgentError::config(
+                "sandbox model is not registered for its provider",
+            ));
+        }
         let request = sandbox_request(
-            &self.agent_config,
+            &agent_config,
             task,
             &previous_calls,
             &*self.store,
@@ -927,7 +940,9 @@ async fn sandbox_request(
         });
     }
     Ok(ChatRequest {
+        provider: config.provider.clone(),
         model: config.model.clone(),
+        reasoning_model: config.reasoning_model,
         system: Some(
             if delegated_file_available {
                 SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT
@@ -1635,7 +1650,9 @@ mod tests {
     #[tokio::test]
     async fn refuses_ambiguous_or_unavailable_sandbox_tool_events_without_checkpointing() {
         let request = ChatRequest {
+            provider: None,
             model: "m".into(),
+            reasoning_model: false,
             system: None,
             messages: vec![],
             tools: vec![],
@@ -2630,7 +2647,9 @@ mod tests {
     #[tokio::test]
     async fn delegated_file_read_rejects_nonempty_arguments() {
         let request = ChatRequest {
+            provider: None,
             model: "m".into(),
+            reasoning_model: false,
             system: Some(SANDBOX_DELEGATED_FILE_SYSTEM_PROMPT.into()),
             messages: vec![ChatMessage::text(Role::User, "task")],
             tools: vec![sandbox_read_delegated_file_tool_spec()],

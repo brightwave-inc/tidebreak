@@ -43,6 +43,17 @@ impl ServerError {
         }
     }
 
+    /// A `400 Bad Request` with a route-specific stable machine-readable kind.
+    pub(crate) fn bad_request_kind(kind: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            info: AgentErrorInfo {
+                kind: kind.to_owned(),
+                message: message.into(),
+            },
+        }
+    }
+
     /// A `413 Payload Too Large` for a request that exceeds an endpoint's
     /// explicit body-size limit.
     pub fn payload_too_large(message: impl Into<String>) -> Self {

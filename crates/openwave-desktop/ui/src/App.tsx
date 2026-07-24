@@ -4,12 +4,14 @@ import {
   type AgentRun,
   type Chat,
   type ModelInfo,
+  type ModelSelectionKey,
   type PendingFolderAccessRequest,
   type ProviderInfo,
   type ReasoningEffort,
   type SequencedEvent,
   type ServerInfo,
 } from "./api";
+import { modelForSelection } from "./ModelSelection";
 import { resolveServerInfo } from "./boot";
 import {
   hasNativeHost,
@@ -199,7 +201,7 @@ export default function App() {
         chatListActions.setChats(existingChats);
         const created =
           existingChats[0] ??
-          (await client.createChat(catalog.models[0]?.id));
+          (await client.createChat());
         if (cancelled) return;
         if (existingChats.length === 0) chatListActions.setChats([created]);
         activateChat(created);
@@ -716,10 +718,7 @@ export default function App() {
     chatListActions.setCreatingChat(true);
     uiActions.showChat();
     try {
-      const created = await client.createChat(
-        chat?.model ?? models[0]?.id,
-        null,
-      );
+      const created = await client.createChat();
       openCreatedChat(created);
     } catch (err) {
       updateSession((session) => ({
@@ -798,7 +797,7 @@ export default function App() {
 
       let next: Chat | undefined = refreshed[0];
       if (!next) {
-        next = await client.createChat(models[0]?.id, null);
+        next = await client.createChat();
         refreshed = prependReplacementChat(refreshed, next);
       }
       chatListActions.setChats(refreshed);
@@ -900,7 +899,7 @@ export default function App() {
     }
   }
 
-  async function onModelChange(modelId: string | null) {
+  async function onModelChange(modelId: ModelSelectionKey | null) {
     if (!client || !chat || deletionInFlightRef.current) return;
     const chatId = chat.id;
     const selection = chatSelectionRef.current;
@@ -1142,8 +1141,7 @@ export default function App() {
                 disabled={deletingChatId !== null}
                 onChange={onModelChange}
               />
-              {models.find((model) => model.id === chat.model)
-                ?.supports_reasoning_effort && (
+              {modelForSelection(models, chat.model)?.supports_reasoning_effort && (
                 <ReasoningEffortMenu
                   value={chat.reasoning_effort}
                   disabled={deletingChatId !== null}

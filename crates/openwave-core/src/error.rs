@@ -37,6 +37,26 @@ pub enum AgentError {
     #[error("provider error: {0}")]
     Provider(String),
 
+    /// The provider rejected the configured credential.
+    #[error("provider authentication failed: {0}")]
+    Authentication(String),
+
+    /// The provider is rate limiting requests.
+    #[error("provider rate limited the request: {0}")]
+    RateLimited(String),
+
+    /// The provider is temporarily overloaded or unavailable.
+    #[error("provider overloaded: {0}")]
+    Overloaded(String),
+
+    /// The provider rejected a request that is invalid for the selected model.
+    #[error("invalid provider request: {0}")]
+    InvalidRequest(String),
+
+    /// The provider refused the requested content.
+    #[error("provider refused the request: {0}")]
+    Refusal(String),
+
     /// The prompt exceeded the model's context window. The agent loop retries
     /// with a tighter context budget before giving up.
     #[error("prompt too long: {0}")]
@@ -73,6 +93,11 @@ impl AgentError {
             Self::ProjectNotFound(_) => "not_found",
             Self::Secret(_) => "secret",
             Self::Provider(_) => "provider",
+            Self::Authentication(_) => "authentication",
+            Self::RateLimited(_) => "rate_limited",
+            Self::Overloaded(_) => "overloaded",
+            Self::InvalidRequest(_) => "invalid_request",
+            Self::Refusal(_) => "refusal",
             Self::PromptTooLong(_) => "prompt_too_long",
             Self::Message(_) => "message",
             Self::Serde(_) => "serde",

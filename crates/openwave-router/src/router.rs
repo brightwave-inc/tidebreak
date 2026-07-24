@@ -43,6 +43,15 @@ impl RouteKind {
             RouteKind::OpenaiCompatible => "openai_compatible",
         }
     }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "anthropic" => Some(Self::Anthropic),
+            "openai" => Some(Self::Openai),
+            "openai_compatible" => Some(Self::OpenaiCompatible),
+            _ => None,
+        }
+    }
 }
 
 /// One enabled, credentialed provider endpoint the router may select.
@@ -79,7 +88,8 @@ impl std::fmt::Debug for Route {
 /// 3. Else fail closed — no network call.
 pub struct Router {
     adapters: HashMap<RouteKind, Arc<dyn ModelProvider>>,
-    /// model id → preferred route kind (first curated claim wins).
+    /// provider + model claims. The provider dimension is intentional: two
+    /// endpoints may expose the same raw model id without becoming ambiguous.
     curated: HashMap<String, RouteKind>,
     has_openai_compat: bool,
     /// Fingerprint of the routes this was built from, for cache invalidation.
@@ -100,7 +110,7 @@ impl Router {
                 has_openai_compat = true;
             }
             for model in &route.curated_models {
-                curated.entry(model.clone()).or_insert(route.kind);
+                curated.insert(format!("{}::{model}", route.kind.as_str()), route.kind);
             }
             if let Some(adapter) = build_adapter(&route) {
                 adapters.insert(route.kind, adapter);
@@ -123,15 +133,45 @@ impl Router {
 
     /// Select the route kind for `model`, if any candidate can serve it.
     pub fn select(&self, model: &str) -> Option<RouteKind> {
-        if let Some(kind) = self.curated.get(model) {
-            if self.adapters.contains_key(kind) {
-                return Some(*kind);
+        for kind in [
+            RouteKind::Anthropic,
+            RouteKind::Openai,
+            RouteKind::OpenaiCompatible,
+        ] {
+            if self
+                .curated
+                .contains_key(&format!("{}::{model}", kind.as_str()))
+                && self.adapters.contains_key(&kind)
+            {
+                return Some(kind);
             }
         }
         if self.has_openai_compat && self.adapters.contains_key(&RouteKind::OpenaiCompatible) {
             return Some(RouteKind::OpenaiCompatible);
         }
         None
+    }
+
+    /// Select the exact provider requested by the host model registry.
+    ///
+    /// Curated Anthropic/OpenAI routes must claim the model. A custom
+    /// OpenAI-compatible route accepts a legacy free-form model id so existing
+    /// pre-registry settings continue to work; new API writes require an
+    /// explicit configured custom entry before they can reach this boundary.
+    pub fn select_for(&self, provider: Option<&ProviderId>, model: &str) -> Option<RouteKind> {
+        let Some(provider) = provider else {
+            return self.select(model);
+        };
+        let kind = RouteKind::parse(&provider.0)?;
+        if !self.adapters.contains_key(&kind) {
+            return None;
+        }
+        if kind == RouteKind::OpenaiCompatible {
+            return Some(kind);
+        }
+        self.curated
+            .contains_key(&format!("{}::{model}", kind.as_str()))
+            .then_some(kind)
     }
 }
 
@@ -141,11 +181,14 @@ impl ModelProvider for Router {
         ProviderId::new("router")
     }
 
-    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let Some(kind) = self.select(&req.model) else {
+    async fn stream(&self, mut req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        let Some(kind) = self.select_for(req.provider.as_ref(), &req.model) else {
             return Err(AgentError::config(format!(
-                "no enabled provider can serve model `{}`",
-                req.model
+                "provider `{}` is unavailable or cannot serve model `{}`",
+                req.provider
+                    .as_ref()
+                    .map_or("unspecified", |provider| provider.0.as_str()),
+                req.model,
             )));
         };
         let Some(adapter) = self.adapters.get(&kind) else {
@@ -154,6 +197,8 @@ impl ModelProvider for Router {
                 req.model
             )));
         };
+        // The route hint is host policy, not provider wire data.
+        req.provider = None;
         adapter.stream(req).await
     }
 }
@@ -207,10 +252,15 @@ fn fingerprint_routes(routes: &[Route]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "{}|{:x}|{}",
+                "{}|{:x}|{}|{}",
                 r.kind.as_str(),
                 fnv1a64(&r.api_key),
-                r.base_url.as_deref().unwrap_or("")
+                r.base_url.as_deref().unwrap_or(""),
+                {
+                    let mut models = r.curated_models.clone();
+                    models.sort();
+                    models.join(",")
+                }
             )
         })
         .collect();
@@ -266,6 +316,30 @@ mod tests {
     }
 
     #[test]
+    fn explicit_provider_never_cross_routes_an_ambiguous_model() {
+        let router = Router::build(vec![
+            route(RouteKind::Anthropic, "sk-a", &["shared"], None),
+            route(RouteKind::Openai, "sk-o", &["shared"], None),
+        ]);
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("anthropic")), "shared"),
+            Some(RouteKind::Anthropic)
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("openai")), "shared"),
+            Some(RouteKind::Openai)
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("anthropic")), "openai-only"),
+            None
+        );
+        assert_eq!(
+            router.select_for(Some(&ProviderId::new("unknown")), "shared"),
+            None
+        );
+    }
+
+    #[test]
     fn empty_router_selects_nothing() {
         let router = Router::build(vec![]);
         assert_eq!(router.select("claude-opus-4-8"), None);
@@ -311,7 +385,9 @@ mod tests {
         let router = Router::build(vec![]);
         let result = router
             .stream(ChatRequest {
+                provider: Some(ProviderId::new("anthropic")),
                 model: "nope".into(),
+                reasoning_model: false,
                 system: None,
                 messages: vec![],
                 tools: vec![],
@@ -321,7 +397,7 @@ mod tests {
             })
             .await;
         match result {
-            Err(err) => assert!(err.to_string().contains("no enabled provider")),
+            Err(err) => assert!(err.to_string().contains("unavailable")),
             Ok(_) => panic!("expected fail-closed error"),
         }
     }

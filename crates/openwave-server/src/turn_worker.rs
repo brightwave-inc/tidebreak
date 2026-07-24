@@ -410,6 +410,23 @@ impl TurnWorker {
                 )
                 .await;
         };
+        let model_policy = if self.resolver.enforces_model_registry() {
+            crate::providers::resolve_model_policy(&*self.store, &turn.model, true).await?
+        } else {
+            None
+        };
+        if model_policy.is_none() && self.resolver.enforces_model_registry() {
+            return self
+                .record_failure(
+                    &turn,
+                    lease_token,
+                    total_model_steps,
+                    total_usage,
+                    "unknown_model",
+                    "the turn's model is no longer registered for its provider",
+                )
+                .await;
+        }
         let active = loop {
             if let Some(active) = self.signals.register(turn.chat_id, turn.id, lease_token) {
                 break active;
@@ -464,8 +481,12 @@ impl TurnWorker {
             )));
             let mut heartbeat_open = true;
             let mut config = self.agent_config.clone();
-            config.model = turn.model.clone();
-            config.reasoning_effort = chat.reasoning_effort;
+            if let Some(policy) = model_policy.as_ref() {
+                crate::providers::apply_model_policy(&mut config, policy, chat.reasoning_effort)?;
+            } else {
+                config.model = turn.model.clone();
+                config.reasoning_effort = chat.reasoning_effort;
+            }
             config.max_steps = remaining_steps;
             config.tool_scratch = self.private_scratch_root.as_deref().and_then(|root| {
                 match private_chat_scratch(root, chat.id) {
@@ -1920,7 +1941,10 @@ impl TurnWorker {
         code: &str,
         detail: &str,
     ) -> Result<TurnWorkerOutcome> {
-        let retry = if matches!(code, "provider" | "store" | "secret") {
+        let retry = if matches!(
+            code,
+            "provider" | "rate_limited" | "overloaded" | "store" | "secret"
+        ) {
             TurnFailureRetry::RetryAt(Utc::now() + chrono_duration(self.config.failure_delay)?)
         } else {
             TurnFailureRetry::Permanent

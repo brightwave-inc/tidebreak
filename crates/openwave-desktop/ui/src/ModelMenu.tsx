@@ -1,5 +1,14 @@
 import { Bot, Brain, Check, ChevronDown, Image as ImageIcon } from "lucide-react";
-import type { ModelInfo, ReasoningEffort } from "./api";
+import type {
+  ModelInfo,
+  ModelSelectionKey,
+  ReasoningEffort,
+} from "./api";
+import {
+  canonicalModelSelection,
+  modelForSelection,
+  providerLabel,
+} from "./ModelSelection";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -93,14 +102,15 @@ export function ModelMenu({
   models: ModelInfo[];
   value: string | null;
   disabled?: boolean;
-  onChange: (id: string | null) => void | Promise<void>;
+  onChange: (key: ModelSelectionKey | null) => void | Promise<void>;
 }) {
-  const known = models.find((m) => m.id === value);
-  const label = value ? (known?.display_name ?? value) : "Default";
+  const known = modelForSelection(models, value);
+  const canonical = canonicalModelSelection(models, value);
+  const label = value ? (known?.display_name ?? `${value} (unavailable)`) : "Default";
 
   // Group by provider, preserving first-seen order.
-  const groups: { provider: string; models: ModelInfo[] }[] = [];
-  const byProvider = new Map<string, ModelInfo[]>();
+  const groups: { provider: ModelInfo["provider"]; models: ModelInfo[] }[] = [];
+  const byProvider = new Map<ModelInfo["provider"], ModelInfo[]>();
   for (const model of models) {
     const existing = byProvider.get(model.provider);
     if (existing) {
@@ -145,15 +155,16 @@ export function ModelMenu({
             <DropdownMenuSeparator />
             <div className="model-menu-group-label">
               <ProviderIcon provider={group.provider} size={12} />
-              <span>{group.provider}</span>
+              <span>{providerLabel(group.provider)}</span>
             </div>
             {group.models.map((model) => {
-              const selected = value === model.id;
+              const selected = canonical === model.key;
               return (
                 <DropdownMenuItem
-                  key={model.id}
+                  key={model.key}
+                  disabled={!model.available}
                   onSelect={() => {
-                    if (!selected) void onChange(model.id);
+                    if (!selected && model.available) void onChange(model.key);
                   }}
                 >
                   <ProviderIcon provider={model.provider} />
@@ -172,7 +183,7 @@ export function ModelMenu({
         {value !== null && !known && (
           <>
             <DropdownMenuSeparator />
-            <div className="model-menu-group-label">custom</div>
+            <div className="model-menu-group-label">Unavailable legacy selection</div>
             <DropdownMenuItem disabled>
               <span className="model-menu-item-label">{value}</span>
               <Check className="ml-auto" />

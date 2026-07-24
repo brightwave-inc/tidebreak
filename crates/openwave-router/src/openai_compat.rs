@@ -18,7 +18,7 @@ use openwave_core::provider::{
 };
 use openwave_core::Role;
 
-use crate::sse::{classify_provider_error, drain_frames, frame_data};
+use crate::sse::{classify_provider_error, drain_frames, frame_data, read_bounded_error_body};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
@@ -104,7 +104,7 @@ impl ModelProvider for OpenAiCompatProvider {
         if !status.is_success() {
             // Never forward the raw body — gateways sometimes echo key material
             // or request fragments, and `AgentError` strings reach the client.
-            let body = response.text().await.unwrap_or_default();
+            let body = read_bounded_error_body(response.bytes_stream()).await;
             return Err(classify_provider_error(
                 "openai-compat",
                 status.as_u16(),
@@ -172,7 +172,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     });
     // Reasoning models (o-series) reject `max_tokens` — they want
     // `max_completion_tokens`. Everything else still speaks `max_tokens`.
-    if is_reasoning_model(&req.model) {
+    if req.reasoning_model {
         body["max_completion_tokens"] = json!(max_tokens);
         // Only reasoning models understand `reasoning_effort`; forwarding it to a
         // plain chat model would be rejected. Absent, the provider's default holds.
@@ -204,15 +204,6 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         body["temperature"] = json!(temperature);
     }
     Ok(body)
-}
-
-/// OpenAI reasoning models reject `max_tokens` in favor of
-/// `max_completion_tokens`. Match the common `o`-prefix ids (o1, o3, o4-mini, …).
-fn is_reasoning_model(model: &str) -> bool {
-    let base = model.split('/').next_back().unwrap_or(model);
-    let base = base.strip_prefix("openai.").unwrap_or(base);
-    matches!(base.as_bytes().first(), Some(b'o'))
-        && base.as_bytes().get(1).is_some_and(|b| b.is_ascii_digit())
 }
 
 /// Append one normalized message as one or more OpenAI Chat Completions messages.
@@ -455,7 +446,9 @@ mod tests {
     #[test]
     fn request_maps_system_tools_and_messages() {
         let req = ChatRequest {
+            provider: Some(ProviderId::new("openai")),
             model: "gpt-4o".into(),
+            reasoning_model: false,
             system: Some("be brief".into()),
             messages: vec![ChatMessage::text(Role::User, "hi")],
             tools: vec![ToolSpec {
@@ -485,7 +478,9 @@ mod tests {
     #[test]
     fn reasoning_models_use_max_completion_tokens() {
         let req = ChatRequest {
+            provider: Some(ProviderId::new("openai")),
             model: "o3".into(),
+            reasoning_model: true,
             system: None,
             messages: vec![ChatMessage::text(Role::User, "hi")],
             tools: vec![],
@@ -498,16 +493,14 @@ mod tests {
         assert!(body.get("max_tokens").is_none());
         // Absent an override, the request carries no `reasoning_effort`.
         assert!(body.get("reasoning_effort").is_none());
-        assert!(is_reasoning_model("o4-mini"));
-        assert!(is_reasoning_model("o1-preview"));
-        assert!(!is_reasoning_model("gpt-4o"));
-        assert!(!is_reasoning_model("claude-opus-4-8"));
     }
 
     #[test]
     fn reasoning_models_forward_reasoning_effort() {
         let req = ChatRequest {
+            provider: Some(ProviderId::new("openai")),
             model: "o3".into(),
+            reasoning_model: true,
             system: None,
             messages: vec![ChatMessage::text(Role::User, "hi")],
             tools: vec![],

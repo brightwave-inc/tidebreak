@@ -11,6 +11,7 @@ import type { ModelInfo } from "./api";
 
 const MODELS: ModelInfo[] = [
   {
+    key: "anthropic::claude-sonnet-4",
     id: "claude-sonnet-4",
     display_name: "Claude Sonnet 4",
     provider: "anthropic",
@@ -20,8 +21,10 @@ const MODELS: ModelInfo[] = [
     supports_reasoning: true,
     supports_reasoning_effort: true,
     multimodal: true,
+    available: true,
   },
   {
+    key: "openai::gpt-4o",
     id: "gpt-4o",
     display_name: "GPT-4o",
     provider: "openai",
@@ -31,6 +34,7 @@ const MODELS: ModelInfo[] = [
     supports_reasoning: false,
     supports_reasoning_effort: false,
     multimodal: true,
+    available: true,
   },
 ];
 
@@ -48,15 +52,17 @@ describe("ModelMenu", () => {
   });
 
   it("labels the trigger with a selected model's display name", () => {
-    const markup = triggerMarkup("gpt-4o");
+    const markup = triggerMarkup("openai::gpt-4o");
     expect(markup).toContain('aria-label="Model: GPT-4o"');
     expect(markup).toContain(">GPT-4o<");
   });
 
   it("labels the trigger with an unknown (custom) override verbatim", () => {
     const markup = triggerMarkup("local-model:latest");
-    expect(markup).toContain('aria-label="Model: local-model:latest"');
-    expect(markup).toContain(">local-model:latest<");
+    expect(markup).toContain(
+      'aria-label="Model: local-model:latest (unavailable)"',
+    );
+    expect(markup).toContain(">local-model:latest (unavailable)<");
   });
 
   it("disables the trigger when asked", () => {
