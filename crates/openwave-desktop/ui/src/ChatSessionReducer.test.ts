@@ -57,20 +57,14 @@ describe("seq cursor", () => {
   });
 
   it("advances the cursor for decoded-but-unrendered events", () => {
-    for (const type of [
-      "reasoning_delta",
-      "context_truncated",
-      "event_omitted",
-    ] as const) {
-      const { state, effects } = reduceChatSessionEvent(
-        initialChatSessionState(),
-        framed(7, { type }),
-        makeDeps(),
-      );
-      expect(state.lastSeq).toBe(7);
-      expect(state.messages).toEqual([]);
-      expect(effects).toEqual([]);
-    }
+    const { state, effects } = reduceChatSessionEvent(
+      initialChatSessionState(),
+      framed(7, { type: "event_omitted" }),
+      makeDeps(),
+    );
+    expect(state.lastSeq).toBe(7);
+    expect(state.messages).toEqual([]);
+    expect(effects).toEqual([]);
   });
 });
 
@@ -463,5 +457,74 @@ describe("forward compatibility", () => {
     expect(state.lastSeq).toBe(9);
     expect(state.messages).toEqual([]);
     expect(effects).toEqual([]);
+  });
+});
+
+describe("reasoning presentation", () => {
+  it("marks reasoning active and clears it when visible output starts", () => {
+    const thinking = play([TURN, { type: "reasoning_delta" }]);
+    expect(thinking.state.reasoningActive).toBe(true);
+
+    const speaking = reduceChatSessionEvent(
+      thinking.state,
+      framed(thinking.state.lastSeq + 1, { type: "text_delta", text: "hi" }),
+      makeDeps(),
+    );
+    expect(speaking.state.reasoningActive).toBe(false);
+  });
+
+  it("clears reasoning at tool starts, interruptions, and terminals", () => {
+    for (const event of [
+      { type: "tool_call_started", call_id: "c", name: "search" },
+      { type: "stream_interrupted" },
+      { type: "turn_completed" },
+      { type: "turn_failed" },
+    ] as AgentEvent[]) {
+      const thinking = play([TURN, { type: "reasoning_delta" }]);
+      const next = reduceChatSessionEvent(
+        thinking.state,
+        framed(thinking.state.lastSeq + 1, event),
+        makeDeps(),
+      );
+      expect(next.state.reasoningActive).toBe(false);
+    }
+  });
+});
+
+describe("context truncation notice", () => {
+  const NOTICE = "Earlier conversation was trimmed";
+
+  it("inserts one notice above the streaming bubble and keeps the answer whole", () => {
+    const { state } = play([
+      TURN,
+      { type: "context_truncated" },
+      { type: "text_delta", text: "the answer" },
+      { type: "context_truncated" },
+      { type: "text_delta", text: " continues" },
+    ]);
+    const notices = state.messages.filter(
+      (m) => m.role === "system" && m.text.includes(NOTICE),
+    );
+    expect(notices).toHaveLength(1);
+    const last = state.messages[state.messages.length - 1];
+    expect(last).toMatchObject({
+      role: "assistant",
+      text: "the answer continues",
+    });
+  });
+
+  it("resets the once-per-turn dedup at the next turn", () => {
+    const first = play([TURN, { type: "context_truncated" }]);
+    const second = play(
+      [
+        { type: "turn_started", turn_id: "turn-2" },
+        { type: "context_truncated" },
+      ],
+      first.state,
+    );
+    const notices = second.state.messages.filter(
+      (m) => m.role === "system" && m.text.includes(NOTICE),
+    );
+    expect(notices).toHaveLength(2);
   });
 });

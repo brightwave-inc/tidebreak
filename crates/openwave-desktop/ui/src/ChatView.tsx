@@ -113,6 +113,9 @@ export function ChatView({
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
+  const reasoningActive = useChatSessionStore(
+    (session) => session.reasoningActive,
+  );
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followsLatestRef = useRef(true);
@@ -200,6 +203,7 @@ export function ChatView({
           decidingApprovalCalls={decidingApprovalCalls}
           approvalErrors={approvalErrors}
           busy={busy}
+          reasoningActive={reasoningActive}
           scrollRef={scrollRef}
           onScroll={(event) => {
             const followsLatest = isNearBottom(event.currentTarget);

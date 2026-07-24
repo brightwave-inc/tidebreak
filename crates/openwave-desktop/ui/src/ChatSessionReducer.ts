@@ -33,6 +33,10 @@ export type ChatSessionState = {
   provisionalToolCallIds: ReadonlySet<string>;
   /** Message ids already present via hydration; used to dedup steered echoes. */
   hydratedMessageIds: ReadonlySet<string>;
+  /** The model is emitting reasoning; cleared once visible output starts. */
+  reasoningActive: boolean;
+  /** One truncation notice per turn, however many truncation events arrive. */
+  contextTruncationNoted: boolean;
 };
 
 export type ChatSessionEffect =
@@ -68,6 +72,8 @@ export function initialChatSessionState(): ChatSessionState {
     markerScrubber: new AssistantSourceMarkerStreamScrubber(),
     provisionalToolCallIds: new Set(),
     hydratedMessageIds: new Set(),
+    reasoningActive: false,
+    contextTruncationNoted: false,
   };
 }
 
@@ -101,6 +107,8 @@ export function reduceChatSessionEvent(
           ...state,
           busy: true,
           activeTurnId: event.turn_id,
+          reasoningActive: false,
+          contextTruncationNoted: false,
           assistantBuffer: "",
           markerScrubber: new AssistantSourceMarkerStreamScrubber(),
           provisionalToolCallIds: new Set(),
@@ -125,6 +133,7 @@ export function reduceChatSessionEvent(
       return {
         state: {
           ...state,
+          reasoningActive: false,
           assistantBuffer,
           messages: withTrailingAssistantText(
             state.messages,
@@ -150,6 +159,7 @@ export function reduceChatSessionEvent(
       return {
         state: {
           ...state,
+          reasoningActive: false,
           assistantBuffer: "",
           provisionalToolCallIds: new Set(),
           messages,
@@ -175,6 +185,7 @@ export function reduceChatSessionEvent(
       return {
         state: {
           ...state,
+          reasoningActive: false,
           provisionalToolCallIds,
           messages: upsertToolCall(
             state.messages,
@@ -294,6 +305,7 @@ export function reduceChatSessionEvent(
           ...state,
           busy: false,
           activeTurnId: null,
+          reasoningActive: false,
           provisionalToolCallIds: new Set(),
         },
         effects,
@@ -312,6 +324,7 @@ export function reduceChatSessionEvent(
           ...state,
           busy: false,
           activeTurnId: null,
+          reasoningActive: false,
           provisionalToolCallIds: new Set(),
           messages: [
             ...settleActiveToolCalls(state.messages, "cancelled"),
@@ -334,6 +347,7 @@ export function reduceChatSessionEvent(
           ...state,
           busy: false,
           activeTurnId: null,
+          reasoningActive: false,
           provisionalToolCallIds: new Set(),
           messages: [
             ...settleActiveToolCalls(state.messages, "failed"),
@@ -348,9 +362,31 @@ export function reduceChatSessionEvent(
       };
     }
 
-    // Decoded but not yet presented; they still advance the seq cursor.
-    case "reasoning_delta":
-    case "context_truncated":
+    case "reasoning_delta": {
+      return { state: { ...state, reasoningActive: true }, effects };
+    }
+
+    case "context_truncated": {
+      if (state.contextTruncationNoted) return { state, effects };
+      // Insert above the trailing assistant bubble (if streaming has begun)
+      // so subsequent deltas keep extending one answer under the notice.
+      const messages = [...state.messages];
+      const insertAt =
+        messages[messages.length - 1]?.role === "assistant"
+          ? messages.length - 1
+          : messages.length;
+      messages.splice(insertAt, 0, {
+        id: deps.nextId(),
+        role: "system",
+        text: "Earlier conversation was trimmed to fit the model's context.",
+      });
+      return {
+        state: { ...state, contextTruncationNoted: true, messages },
+        effects,
+      };
+    }
+
+    // Decoded but not presented; still advances the seq cursor.
     case "event_omitted":
       return { state, effects };
 
