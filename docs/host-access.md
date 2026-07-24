@@ -229,10 +229,23 @@ Broker requests are divided into two typed channels:
    conversation, or revoke access. Only the desktop host or an equivalent
    explicit local CLI action may send them.
 2. **Operation requests** come from agent execution. The current protocol can
-   list connected roots, list a directory, and read a file; bounded import,
-   writes, and confined commands are later capability slices. Every operation
-   that can expose a host resource is denied unless a matching grant exists; an
-   unattached conversation may safely receive an empty root list.
+   list connected roots, list a directory, read a file as bounded UTF-8 text,
+   and read a file as bounded opaque bytes; writes and confined commands are
+   later capability slices. Every operation that can expose a host resource is
+   denied unless a matching grant exists; an unattached conversation may safely
+   receive an empty root list.
+
+The two read shapes carry the same read capability, because the user consented
+to reading files below a root rather than to a particular encoding. They differ
+in who the bytes are for. A text read returns content the agent will see, so it
+is small and refuses anything that is not valid UTF-8. A binary read returns
+opaque bytes for a trusted native handoff into a product pipeline, so it allows
+the megabytes a PDF or Office document routinely occupies and makes no claim
+about the content. Those bytes are base64-encoded on the sidecar pipe, and the
+transport's response bound is derived from the binary read bound so a
+maximum-size read can never be rejected as an oversized frame. Nothing in this
+path lets an agent read the bytes it moved; to see the content it must go
+through whatever the receiving pipeline exposes.
 
 Code should expose different controller and operator interfaces so an agent
 executor cannot accidentally call the control channel. The broker still
@@ -433,7 +446,8 @@ This will land in independently reviewable pieces:
 2. Add the versioned control/operation protocol and an owning in-memory broker
    that authorizes pinned handles, performs bounded-result I/O, and reauthorizes
    before releasing bytes so completed revocation fences in-flight results:
-   hello, register/revoke/list roots, list directory, and read file.
+   hello, register/revoke/list roots, list directory, and read file as text or
+   as opaque bytes.
 3. Persist the root/grant/attachment registry and idempotency receipts atomically
    under a broker-private, exclusively owned state directory. Restart must
    validate the bounded state file and revalidate and descriptor-pin every

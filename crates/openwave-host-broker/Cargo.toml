@@ -13,6 +13,7 @@ name = "openwave-host-broker"
 path = "src/bin/openwave-host-broker.rs"
 
 [dependencies]
+base64.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 chrono.workspace = true

@@ -6706,6 +6706,7 @@ dependencies = [
 name = "openwave-host-broker"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "cap-fs-ext",
  "cap-std",
  "chrono",

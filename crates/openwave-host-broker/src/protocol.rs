@@ -14,7 +14,16 @@ use crate::{
 };
 
 /// Current pre-v1 broker protocol. Bump this for incompatible wire changes.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
+
+/// Largest file the broker returns as opaque bytes.
+///
+/// Binary reads exist so trusted native code can hand a document the agent
+/// cannot read as text — a PDF or an Office file — to a product ingest
+/// pipeline. The bytes travel base64-encoded over the newline-delimited JSON
+/// transport, so [`crate::sidecar::MAX_RESPONSE_BYTES`] is derived from this
+/// bound rather than chosen independently.
+pub const MAX_READ_FILE_BINARY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Host-originated request envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +167,14 @@ pub enum OperationRequest {
     ListDirectory(PathRequest),
     /// Read one bounded UTF-8 file under an explicitly selected root.
     ReadFile(PathRequest),
+    /// Read one bounded file under an explicitly selected root as opaque bytes.
+    ///
+    /// This carries the same [`crate::Capability::ReadFiles`] authority as
+    /// [`OperationRequest::ReadFile`] — the user consented to reading files
+    /// below the root, not to a particular encoding. It exists so trusted
+    /// native code can move a file the agent cannot read as text into a
+    /// product pipeline; the bytes are not agent-readable.
+    ReadFileBinary(PathRequest),
 }
 
 /// Strict root-relative payload shared by list and read operations.
@@ -238,6 +255,7 @@ pub enum OperationResult {
     ListRoots { roots: Vec<RootSummary> },
     ListDirectory { entries: Vec<DirectoryEntry> },
     ReadFile(ReadFileResult),
+    ReadFileBinary(ReadFileBinaryResult),
 }
 
 /// Version handshake response.
@@ -353,6 +371,27 @@ pub struct DirectoryEntry {
 pub struct ReadFileResult {
     pub content: String,
     pub bytes: usize,
+}
+
+/// Bounded opaque file content, base64-encoded for the JSON transport.
+///
+/// `bytes` is the decoded length, so a caller can bound its own work before
+/// decoding. Content is deliberately not logged or `Debug`-printed.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadFileBinaryResult {
+    pub content_base64: String,
+    pub bytes: usize,
+}
+
+impl std::fmt::Debug for ReadFileBinaryResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReadFileBinaryResult")
+            .field("content_base64", &"[redacted]")
+            .field("bytes", &self.bytes)
+            .finish()
+    }
 }
 
 #[cfg(test)]

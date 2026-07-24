@@ -10,7 +10,12 @@ use crate::{
 };
 
 pub const MAX_REQUEST_BYTES: usize = 128 * 1024;
-pub const MAX_RESPONSE_BYTES: usize = 512 * 1024;
+
+/// Enough for a base64 [`crate::protocol::MAX_READ_FILE_BINARY_BYTES`] payload
+/// plus envelope overhead. Binary reads are the only response that approaches
+/// this bound; every other one is orders of magnitude smaller.
+pub const MAX_RESPONSE_BYTES: usize =
+    4 * crate::protocol::MAX_READ_FILE_BINARY_BYTES / 3 + 512 * 1024;
 
 /// One strictly typed request on the desktop-owned sidecar pipe.
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,6 +180,31 @@ mod tests {
             Vec::new(),
         );
         (temp, Broker::new(policy))
+    }
+
+    #[test]
+    fn response_bound_admits_a_maximum_binary_read() {
+        let response = SidecarResponse::Operation(crate::OperationResponseEnvelope {
+            protocol_version: crate::PROTOCOL_VERSION,
+            request_id: RequestId::new(),
+            response: crate::Response::Ok(crate::OperationResult::ReadFileBinary(
+                crate::ReadFileBinaryResult {
+                    content_base64: base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        vec![0xffu8; crate::MAX_READ_FILE_BINARY_BYTES],
+                    ),
+                    bytes: crate::MAX_READ_FILE_BINARY_BYTES,
+                },
+            )),
+        });
+        // MAX_RESPONSE_BYTES is derived from the binary bound rather than chosen
+        // independently, so a full-size read must never trip ResponseTooLarge.
+        let encoded = serde_json::to_vec(&response).unwrap();
+        assert!(
+            encoded.len() <= MAX_RESPONSE_BYTES,
+            "{} exceeds {MAX_RESPONSE_BYTES}",
+            encoded.len()
+        );
     }
 
     #[test]

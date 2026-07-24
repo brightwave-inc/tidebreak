@@ -16,6 +16,7 @@ use std::{
     },
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use cap_fs_ext::OpenOptionsSyncExt;
 use cap_std::fs::{Dir, OpenOptions};
 use chrono::Utc;
@@ -33,11 +34,11 @@ use crate::{
         EntryKind, ErrorCode, ErrorResponse, HelloResult, LookupRegisterRootReceiptRequest,
         LookupRegisterRootReceiptResult, LookupRootAttachmentReceiptRequest,
         LookupRootAttachmentReceiptResult, OperationEnvelope, OperationRequest,
-        OperationResponseEnvelope, OperationResult, PathRequest, ReadFileResult,
-        RegisterRootReceipt, RegisterRootRequest, RegisterRootResult, Response, ResponseEnvelope,
-        RevokeRootRequest, RevokeRootResult, RootAttachmentMutationKind,
+        OperationResponseEnvelope, OperationResult, PathRequest, ReadFileBinaryResult,
+        ReadFileResult, RegisterRootReceipt, RegisterRootRequest, RegisterRootResult, Response,
+        ResponseEnvelope, RevokeRootRequest, RevokeRootResult, RootAttachmentMutationKind,
         RootAttachmentMutationReceipt, RootAttachmentMutationRequest, RootAttachmentMutationResult,
-        RootSummary, PROTOCOL_VERSION,
+        RootSummary, MAX_READ_FILE_BINARY_BYTES, PROTOCOL_VERSION,
     },
     Capability, ConsentMethod, ConsentRecord, ExecutionContext, Grant, GrantError, GrantId,
     GrantSubject, OperationId, RelativePath, RootAttachment, RootId, RootPolicy, RootPolicyError,
@@ -78,8 +79,8 @@ pub enum BrokerError {
     StateTooLarge,
     #[error("path is not a regular file")]
     NotRegularFile,
-    #[error("file is too large (maximum {MAX_READ_FILE_BYTES} bytes)")]
-    FileTooLarge,
+    #[error("file is too large (maximum {maximum} bytes)")]
+    FileTooLarge { maximum: usize },
     #[error("file is not valid UTF-8")]
     NotUtf8,
     #[error("directory listing exceeds broker limits")]
@@ -306,6 +307,11 @@ impl OperationAudit {
             ),
             OperationRequest::ReadFile(request) => (
                 AuditOperation::ReadFile,
+                Capability::ReadFiles,
+                AuditTarget::path(request.root_id, &request.path),
+            ),
+            OperationRequest::ReadFileBinary(request) => (
+                AuditOperation::ReadFileBinary,
                 Capability::ReadFiles,
                 AuditTarget::path(request.root_id, &request.path),
             ),
@@ -844,6 +850,14 @@ impl Operator {
                     grant_id = Some(self.reauthorize(envelope.context, root_id, &path)?);
                     Ok(result)
                 }
+                OperationRequest::ReadFileBinary(PathRequest { root_id, path }) => {
+                    let (directory, authorized_by) =
+                        self.authorized_root(envelope.context, root_id, &path)?;
+                    grant_id = Some(authorized_by);
+                    let result = read_file_binary(&directory, &path)?;
+                    grant_id = Some(self.reauthorize(envelope.context, root_id, &path)?);
+                    Ok(result)
+                }
             }
         })();
         (result, grant_id)
@@ -866,6 +880,7 @@ impl Operator {
             Some(OperationResult::ListRoots { roots }) => (Some(roots.len()), None),
             Some(OperationResult::ListDirectory { entries }) => (Some(entries.len()), None),
             Some(OperationResult::ReadFile(result)) => (None, Some(result.bytes)),
+            Some(OperationResult::ReadFileBinary(result)) => (None, Some(result.bytes)),
             None => (None, None),
         };
         let event = AuditEvent {
@@ -956,6 +971,7 @@ fn hello() -> HelloResult {
             "list_roots".to_owned(),
             "list_directory".to_owned(),
             "read_file".to_owned(),
+            "read_file_binary".to_owned(),
         ],
     }
 }
@@ -1025,7 +1041,7 @@ fn error_response(error: BrokerError) -> ErrorResponse {
             "selected folder is not an allowed connected root",
             false,
         ),
-        BrokerError::FileTooLarge
+        BrokerError::FileTooLarge { .. }
         | BrokerError::DirectoryTooLarge
         | BrokerError::RootListTooLarge
         | BrokerError::StateTooLarge => (
@@ -1565,6 +1581,34 @@ fn list_directory(root: &Dir, path: &RelativePath) -> Result<OperationResult, Br
 }
 
 fn read_file(root: &Dir, path: &RelativePath) -> Result<OperationResult, BrokerError> {
+    let bytes = read_bounded(root, path, MAX_READ_FILE_BYTES)?;
+    let bytes_read = bytes.len();
+    let content = String::from_utf8(bytes).map_err(|_| BrokerError::NotUtf8)?;
+    Ok(OperationResult::ReadFile(ReadFileResult {
+        content,
+        bytes: bytes_read,
+    }))
+}
+
+/// Read one file as opaque bytes under the same read authority as [`read_file`].
+///
+/// The UTF-8 requirement is deliberately absent: the caller is handing the file
+/// to a trusted product pipeline rather than returning text to an agent. The
+/// larger bound reflects that a PDF or Office document is routinely megabytes.
+fn read_file_binary(root: &Dir, path: &RelativePath) -> Result<OperationResult, BrokerError> {
+    let bytes = read_bounded(root, path, MAX_READ_FILE_BINARY_BYTES)?;
+    Ok(OperationResult::ReadFileBinary(ReadFileBinaryResult {
+        bytes: bytes.len(),
+        content_base64: BASE64.encode(&bytes),
+    }))
+}
+
+/// Read a whole regular file in one open, refusing anything over `maximum`.
+///
+/// The length is checked twice: once from metadata to avoid buffering a file the
+/// caller will reject anyway, and once after reading one byte past the bound so
+/// a file that grows between the two checks is refused rather than truncated.
+fn read_bounded(root: &Dir, path: &RelativePath, maximum: usize) -> Result<Vec<u8>, BrokerError> {
     let mut options = OpenOptions::new();
     options.read(true).nonblock(true);
     let file = root.open_with(Path::new(path.as_str()), &options)?;
@@ -1572,21 +1616,15 @@ fn read_file(root: &Dir, path: &RelativePath) -> Result<OperationResult, BrokerE
     if !metadata.is_file() {
         return Err(BrokerError::NotRegularFile);
     }
-    if metadata.len() > MAX_READ_FILE_BYTES as u64 {
-        return Err(BrokerError::FileTooLarge);
+    if metadata.len() > maximum as u64 {
+        return Err(BrokerError::FileTooLarge { maximum });
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take((MAX_READ_FILE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_READ_FILE_BYTES {
-        return Err(BrokerError::FileTooLarge);
+    file.take((maximum + 1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > maximum {
+        return Err(BrokerError::FileTooLarge { maximum });
     }
-    let bytes_read = bytes.len();
-    let content = String::from_utf8(bytes).map_err(|_| BrokerError::NotUtf8)?;
-    Ok(OperationResult::ReadFile(ReadFileResult {
-        content,
-        bytes: bytes_read,
-    }))
+    Ok(bytes)
 }
 
 #[derive(Clone, Copy)]
