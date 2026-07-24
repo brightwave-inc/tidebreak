@@ -586,13 +586,112 @@ body {
   overflow: hidden;
 }
 
-/* Each surface scrolls inside the body; the header above it stays put. */
+/* Each surface scrolls inside its own slot; the header above stays put. */
 .workspace-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  display: flex;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+}
+
+.workspace-slot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace-slot[hidden] {
+  display: none;
+}
+
+.workspace-transcript {
+  flex: 1 1 auto;
+}
+
+.workspace-panel {
+  flex: 1 1 auto;
+}
+
+.workspace-panel.is-sharing {
+  border-left: 1px solid var(--line);
+}
+
+.panel-resizer {
+  flex: 0 0 auto;
+  width: 0.35rem;
+  margin: 0 -0.175rem;
+  z-index: 1;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+.panel-resizer:hover,
+.panel-resizer:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+.conversation-switcher {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.panel-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.panel-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.3rem;
+  color: var(--muted-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+
+.panel-control:hover {
+  color: var(--ink);
+  background: var(--muted);
+}
+
+.panel-control[aria-pressed="true"] {
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+/*
+ * Surface padding is sized against the viewport, which is too generous once a
+ * surface is only part of the width. Scale it to the slot instead.
+ */
+.workspace-panel.is-sharing .documents-header,
+.workspace-panel.is-sharing .folders-header,
+.workspace-panel.is-sharing .deliverables-header {
+  flex-direction: column;
+  gap: 0.9rem;
+  padding: 1.4rem 1.25rem 1.1rem;
+}
+
+.workspace-panel.is-sharing .documents-header h1,
+.workspace-panel.is-sharing .folders-header h1,
+.workspace-panel.is-sharing .deliverables-header h1 {
+  font-size: 1.2rem;
+  letter-spacing: -0.02em;
+}
+
+.workspace-panel.is-sharing .documents-content,
+.workspace-panel.is-sharing .folders-content,
+.workspace-panel.is-sharing .deliverables-content {
+  padding: 1.1rem 1.25rem 3rem;
 }
 
 .chat-pane {

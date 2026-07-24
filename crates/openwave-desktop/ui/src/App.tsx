@@ -780,7 +780,6 @@ export default function App() {
     if (!client || creationInFlightRef.current || deletionInFlightRef.current) return;
     creationInFlightRef.current = true;
     chatListActions.setCreatingChat(true);
-    uiActions.showChat();
     try {
       const created = await client.createChat();
       openCreatedChat(created);
@@ -803,7 +802,6 @@ export default function App() {
   }
 
   function openCreatedChat(created: Chat) {
-    uiActions.showChat();
     controllerRef.current?.dispose();
     controllerRef.current = null;
     useChatSessionStore.getState().reset();
@@ -858,6 +856,7 @@ export default function App() {
     }
     try {
       await client.deleteChat(target.id);
+      uiActions.forgetChatWorkspace(target.id);
       let refreshed = await client.listChats();
       if (!deletingSelectedChat) {
         chatListActions.setChats(refreshed);
@@ -880,6 +879,7 @@ export default function App() {
   }
 
   function activateChat(next: Chat) {
+    uiActions.selectChatWorkspace(next.id);
     chatSelectionRef.current += 1;
     terminalHydrationGenerationRef.current += 1;
     selectedChatIdRef.current = next.id;
@@ -894,7 +894,9 @@ export default function App() {
   }
 
   function selectChat(next: Chat, force = false) {
-    uiActions.showChat();
+    // Re-selecting the open chat still has work to do: it leaves a global
+    // surface like Settings and restores the layout this chat was left in.
+    if (next.id === chat?.id) uiActions.selectChatWorkspace(next.id);
     if (
       next.id === chat?.id ||
       creatingChat ||
@@ -1262,7 +1264,7 @@ export default function App() {
             models={models}
             providers={providers}
             onProvidersChanged={() => void refreshCatalog()}
-            onBack={() => uiActions.showChat()}
+            onBack={() => uiActions.selectChatWorkspace(chat.id)}
             themeMode={themeMode}
             onThemeChange={setThemeMode}
             updateState={desktopUpdates.state}
