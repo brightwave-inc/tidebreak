@@ -5,6 +5,7 @@ import {
   resolveFolderAccessRequest,
   type FolderAccessDecision,
 } from "./host";
+import { useFolderDecisionLatch } from "./FolderDecisionLatch";
 import { useRefreshSignals } from "./RefreshSignals";
 
 const POLL_INTERVAL_MS = 10_000;
@@ -24,16 +25,16 @@ export type FolderAccessRequests = {
  * Polling is the durable truth; the event stream only says when to look again.
  * A decision opens a native dialog, so at most one is in flight at a time —
  * a second prompt while the first is open would be answering a question the
- * reader cannot see.
+ * reader cannot see. That latch is held app-wide rather than here, because the
+ * picker outlives this conversation: see [FolderDecisionLatch].
  */
 export function useFolderAccessRequests(
   client: ApiClient | null,
   chatId: string | null,
 ): FolderAccessRequests {
   const [requests, setRequests] = useState<PendingFolderAccessRequest[]>([]);
-  const [resolving, setResolving] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const resolvingRef = useRef<Set<string>>(new Set());
+  const resolving = useFolderDecisionLatch((state) => state.resolving);
   const refreshRef = useRef<(() => void) | null>(null);
   const signal = useRefreshSignals((state) => state.folderAccess);
 
@@ -76,30 +77,25 @@ export function useFolderAccessRequests(
     refreshRef.current?.();
   }, [signal]);
 
-  function beginResolving(callId: string) {
-    resolvingRef.current.add(callId);
-    setResolving((calls) => new Set(calls).add(callId));
+  /** Takes the app-wide latch, or reports that another decision holds it. */
+  function beginResolving(callId: string): boolean {
+    if (!useFolderDecisionLatch.getState().claim(callId)) return false;
     setErrors((current) => {
       const next = { ...current };
       delete next[callId];
       return next;
     });
+    return true;
   }
 
   function finishResolving(callId: string) {
-    resolvingRef.current.delete(callId);
-    setResolving((calls) => {
-      const next = new Set(calls);
-      next.delete(callId);
-      return next;
-    });
+    useFolderDecisionLatch.getState().release(callId);
     refreshRef.current?.();
   }
 
   async function decide(callId: string, decision: FolderAccessDecision) {
     if (!chatId || !hasNativeHost()) return;
-    if (resolvingRef.current.size > 0) return;
-    beginResolving(callId);
+    if (!beginResolving(callId)) return;
     try {
       await resolveFolderAccessRequest(chatId, callId, decision);
     } catch (err) {
@@ -110,8 +106,8 @@ export function useFolderAccessRequests(
   }
 
   async function cancel(callId: string, turnId: string) {
-    if (!client || !chatId || resolvingRef.current.size > 0) return;
-    beginResolving(callId);
+    if (!client || !chatId) return;
+    if (!beginResolving(callId)) return;
     try {
       await client.cancel(chatId, turnId);
     } catch (err) {

@@ -3,6 +3,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "./api";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
+import { useFolderDecisionLatch } from "./FolderDecisionLatch";
 import { useRefreshSignals } from "./RefreshSignals";
 import * as host from "./host";
 
@@ -26,6 +27,9 @@ function stubClient(overrides: Partial<Record<string, unknown>> = {}) {
 beforeEach(() => {
   vi.mocked(host.hasNativeHost).mockReturnValue(true);
   vi.mocked(host.resolveFolderAccessRequest).mockReset();
+  // The latch is app-wide, so a decision left open by one case would block
+  // the next one.
+  useFolderDecisionLatch.setState({ resolving: new Set() });
 });
 
 afterEach(cleanup);
@@ -133,5 +137,48 @@ describe("useFolderAccessRequests", () => {
     expect(client.listPendingFolderAccessRequests).toHaveBeenLastCalledWith(
       "chat-2",
     );
+  });
+
+  it("keeps the native picker latched across a conversation switch", async () => {
+    // The picker is one shared host resource. Leaving the chat that opened it
+    // must not hand a second decision a fresh claim, or the host rejects it and
+    // the reader sees an error where the control should have read as blocked.
+    let openPicker!: () => void;
+    vi.mocked(host.resolveFolderAccessRequest).mockReturnValue(
+      new Promise<void>((resolve) => {
+        openPicker = resolve;
+      }),
+    );
+
+    const firstClient = stubClient();
+    const first = renderHook(() =>
+      useFolderAccessRequests(firstClient, "chat-1"),
+    );
+    act(() => first.result.current.decide("call-1", "allow"));
+    await waitFor(() =>
+      expect(first.result.current.resolving.has("call-1")).toBe(true),
+    );
+
+    // The reader switches conversations while the picker is still open.
+    first.unmount();
+    const secondClient = stubClient();
+    const second = renderHook(() =>
+      useFolderAccessRequests(secondClient, "chat-2"),
+    );
+
+    expect(second.result.current.resolving.size).toBe(1);
+    act(() => second.result.current.decide("call-2", "allow"));
+
+    expect(host.resolveFolderAccessRequest).toHaveBeenCalledTimes(1);
+    expect(host.resolveFolderAccessRequest).not.toHaveBeenCalledWith(
+      "chat-2",
+      "call-2",
+      "allow",
+    );
+
+    await act(async () => {
+      openPicker();
+    });
+    expect(second.result.current.resolving.size).toBe(0);
   });
 });
