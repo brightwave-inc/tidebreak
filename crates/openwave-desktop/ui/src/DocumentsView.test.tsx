@@ -1,11 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { DocumentsView } from "./DocumentsView";
 
 describe("DocumentsView", () => {
   it("presents sources as context owned by the current conversation", () => {
     const markup = renderToStaticMarkup(
-      <DocumentsView chatId="chat-1" onBack={vi.fn()} />,
+      <DocumentsView chatId="chat-1" />,
     );
 
     expect(markup).toContain("This conversation");

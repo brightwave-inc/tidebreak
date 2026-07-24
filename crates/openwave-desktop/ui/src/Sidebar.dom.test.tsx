@@ -100,15 +100,15 @@ describe("Sidebar", () => {
     expect(screen.getByText("Retro notes")).toBeInTheDocument();
   });
 
-  it("navigates through the UI store for sources, outputs, folders, and settings", async () => {
+  it("keeps chat-scoped sources and outputs out of the sidebar", () => {
+    renderSidebar({ nativeHost: true });
+    expect(screen.queryByText("Sources")).not.toBeInTheDocument();
+    expect(screen.queryByText("Outputs")).not.toBeInTheDocument();
+  });
+
+  it("navigates through the UI store for folders and settings", async () => {
     const user = userEvent.setup();
     renderSidebar({ nativeHost: true });
-    await user.click(screen.getByText("Sources"));
-    expect(useUiStore.getState().primaryView).toBe("documents");
-
-    await user.click(screen.getByText("Outputs"));
-    expect(useUiStore.getState().primaryView).toBe("deliverables");
-
     await user.click(screen.getByText("Folders"));
     expect(useUiStore.getState().primaryView).toBe("chat");
     expect(useUiStore.getState().settingsPanel).toBe("folders");

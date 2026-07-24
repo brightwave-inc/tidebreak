@@ -32,7 +32,7 @@ describe("DeliverablesView", () => {
     };
 
     render(
-      <DeliverablesView chatId="chat-1" onBack={() => {}} apis={apis} />,
+      <DeliverablesView chatId="chat-1" apis={apis} />,
     );
     expect(await screen.findByRole("heading", { name: "Findings" })).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /Save As/ }));
@@ -46,7 +46,6 @@ describe("DeliverablesView", () => {
     render(
       <DeliverablesView
         chatId="chat-1"
-        onBack={() => {}}
         apis={{
           list: vi.fn().mockResolvedValue({
             deliverables: [],
@@ -86,7 +85,7 @@ describe("DeliverablesView", () => {
     };
 
     render(
-      <DeliverablesView chatId="chat-1" onBack={() => {}} apis={apis} />,
+      <DeliverablesView chatId="chat-1" apis={apis} />,
     );
     await screen.findByText("brief");
     await userEvent.click(screen.getByRole("button", { name: /Save As/ }));
@@ -137,7 +136,7 @@ describe("DeliverablesView", () => {
     };
 
     render(
-      <DeliverablesView chatId="chat-1" onBack={() => {}} apis={apis} />,
+      <DeliverablesView chatId="chat-1" apis={apis} />,
     );
     await waitFor(() => expect(apis.read).toHaveBeenCalledTimes(1));
     await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
