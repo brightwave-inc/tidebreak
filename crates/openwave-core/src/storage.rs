@@ -109,8 +109,12 @@ pub enum ChatToolActivityStatus {
 /// it can carry are the ones a tool explicitly projects for display.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChatToolActivitySnapshot {
-    /// Fixed allowlisted presentation title, never a provider-supplied name.
-    pub title: &'static str,
+    /// Allowlisted renderer tool name, never a provider-supplied one.
+    ///
+    /// A name rather than display copy: the renderer already derives a live
+    /// call's wording from its name, and sending prose here made a copy change
+    /// silently break history hydration.
+    pub tool: &'static str,
     /// Closed projection of what the call did, when its tool has one. Rebuilt
     /// from the arguments it ran with, so history describes the same action
     /// the live stream did.

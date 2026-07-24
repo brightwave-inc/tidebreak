@@ -8795,14 +8795,14 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
     let activity = transcript["tool_activity"].as_array().unwrap();
     assert_eq!(activity.len(), 2);
     assert!(activity.iter().any(|card| {
-        card["title"] == "Use a tool"
+        card["tool"] == "other"
             && card["status"] == "failed"
             && card["started_at"].is_string()
             && card["finished_at"].is_string()
     }));
     assert!(activity
         .iter()
-        .any(|card| { card["title"] == "Request folder access" && card["status"] == "cancelled" }));
+        .any(|card| { card["tool"] == "request_folder_access" && card["status"] == "cancelled" }));
 }
 
 #[tokio::test]

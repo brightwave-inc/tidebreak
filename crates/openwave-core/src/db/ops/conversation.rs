@@ -706,7 +706,7 @@ fn tool_activity_from_call(call: ToolCallRecord) -> ChatToolActivitySnapshot {
         }
     };
     ChatToolActivitySnapshot {
-        title: historical_tool_title(&call.name),
+        tool: historical_tool_name(&call.name),
         action: crate::preview::ToolActionPreview::build(&call.name, &call.arguments),
         status,
         started_at: call.created_at,
@@ -714,30 +714,37 @@ fn tool_activity_from_call(call: ToolCallRecord) -> ChatToolActivitySnapshot {
     }
 }
 
-/// The tool name is canonical but still not renderer-safe: unknown names can
-/// leak provider, extension, or local capability details. Historical cards use
-/// this explicit vocabulary and collapse anything else to a generic action.
-fn historical_tool_title(name: &str) -> &'static str {
+/// The tool name is canonical but still not renderer-safe: an unknown name can
+/// leak provider, extension, or local capability details. Historical cards name
+/// only tools on this list and fold anything else to `other`, which is the same
+/// vocabulary and the same fold the live event projection uses.
+///
+/// Returning the name rather than its copy is deliberate. The renderer already
+/// owns the wording for a live call, so sending prose here meant maintaining a
+/// second copy of it plus an inverse lookup to get back to a name — and a copy
+/// change on either side silently broke hydration.
+fn historical_tool_name(name: &str) -> &'static str {
     match name {
-        "search" => "Search sources",
-        "list_sources" => "Check sources",
-        "read_source" => "Read a source",
-        "web_search" => "Search the web",
-        crate::SANDBOX_READ_DELEGATED_FILE_TOOL => "Read a delegated file",
-        "read_file" | "read_connected_file" => "Read a file",
-        "list_dir" => "Browse files",
-        "write_file" => "Update a file",
-        "create_deliverable" => "Create an output",
-        "request_folder_access" => "Request folder access",
-        "connect_folder" => "Connect a folder",
-        "list_connected_folders" => "Check connected folders",
-        "list_folder" => "Browse a connected folder",
-        "import_connected_file" => "Add a file as a source",
-        crate::ASK_USER_QUESTIONS_TOOL => "Ask a question",
-        "spawn_sandbox_agent" => "Delegate a task",
-        "wait_for_agents" => "Wait for background agents",
-        "exec" => "Run a command",
-        _ => "Use a tool",
+        "search" => "search",
+        "list_sources" => "list_sources",
+        "read_source" => "read_source",
+        "web_search" => "web_search",
+        crate::SANDBOX_READ_DELEGATED_FILE_TOOL => "read_delegated_file",
+        "read_file" => "read_file",
+        "read_connected_file" => "read_connected_file",
+        "list_dir" => "list_dir",
+        "write_file" => "write_file",
+        "create_deliverable" => "create_deliverable",
+        "request_folder_access" => "request_folder_access",
+        "connect_folder" => "connect_folder",
+        "list_connected_folders" => "list_connected_folders",
+        "list_folder" => "list_folder",
+        "import_connected_file" => "import_connected_file",
+        crate::ASK_USER_QUESTIONS_TOOL => "ask_user_questions",
+        "spawn_sandbox_agent" => "spawn_sandbox_agent",
+        "wait_for_agents" => "wait_for_agents",
+        "exec" => "exec",
+        _ => "other",
     }
 }
 
@@ -1155,38 +1162,33 @@ fn role_from_db(text: &str) -> Result<Role> {
 }
 
 #[cfg(test)]
-mod historical_tool_title_tests {
-    use super::historical_tool_title;
+mod historical_tool_name_tests {
+    use super::historical_tool_name;
 
     #[test]
-    fn delegated_file_reads_have_a_fixed_renderer_title() {
+    fn a_private_tool_name_never_reaches_the_renderer() {
         assert_eq!(
-            historical_tool_title(crate::SANDBOX_READ_DELEGATED_FILE_TOOL),
-            "Read a delegated file"
+            historical_tool_name(crate::SANDBOX_READ_DELEGATED_FILE_TOOL),
+            "read_delegated_file"
         );
-        assert_eq!(historical_tool_title("private_read_variant"), "Use a tool");
-        assert_eq!(historical_tool_title("search"), "Search sources");
-        assert_eq!(historical_tool_title("list_sources"), "Check sources");
-        assert_eq!(historical_tool_title("read_source"), "Read a source");
+        // The allowlist is the point: an unrecognized name folds rather than
+        // travelling, so it cannot leak a provider or extension detail.
+        assert_eq!(historical_tool_name("private_read_variant"), "other");
+        assert_eq!(historical_tool_name("mcp__vendor__search"), "other");
+        assert_eq!(historical_tool_name("search"), "search");
         assert_eq!(
-            historical_tool_title("create_deliverable"),
-            "Create an output"
-        );
-        assert_eq!(
-            historical_tool_title(crate::ASK_USER_QUESTIONS_TOOL),
-            "Ask a question"
+            historical_tool_name(crate::ASK_USER_QUESTIONS_TOOL),
+            "ask_user_questions"
         );
     }
 
-    /// A tool the renderer can name live must also have a historical title.
+    /// A tool the renderer can name live must survive the round trip.
     ///
-    /// `exec` had one and not the other, so a command read as "Ran a command"
+    /// `exec` used to be absent here, so a command read as "Ran a command"
     /// while streaming and "Used a tool" after a reload — with its own command
-    /// card still visible underneath. The renderer folds anything it does not
-    /// recognize to `other`, which is the one name that legitimately has no
-    /// title of its own.
+    /// card still visible underneath.
     #[test]
-    fn every_renderer_visible_tool_has_a_historical_title() {
+    fn every_renderer_visible_tool_keeps_its_name_through_history() {
         for name in [
             "search",
             "list_sources",
@@ -1208,12 +1210,14 @@ mod historical_tool_title_tests {
             crate::ASK_USER_QUESTIONS_TOOL,
             "exec",
         ] {
-            assert_ne!(
-                historical_tool_title(name),
-                "Use a tool",
-                "{name} has no historical title"
-            );
+            // Round-trips as itself, except the one private name that is
+            // deliberately renamed for the renderer.
+            let projected = historical_tool_name(name);
+            assert_ne!(projected, "other", "{name} does not survive history");
+            if name != crate::SANDBOX_READ_DELEGATED_FILE_TOOL {
+                assert_eq!(projected, name);
+            }
         }
-        assert_eq!(historical_tool_title("other"), "Use a tool");
+        assert_eq!(historical_tool_name("other"), "other");
     }
 }

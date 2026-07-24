@@ -165,26 +165,15 @@ export type ChatMessageCitation = {
 export type ChatToolActivity = {
   /** What the call did, when its tool projects it. */
   action?: ToolActionPreview;
-  title:
-    | "Search sources"
-    | "Check sources"
-    | "Read a source"
-    | "Search the web"
-    | "Read a delegated file"
-    | "Read a file"
-    | "Browse files"
-    | "Update a file"
-    | "Create an output"
-    | "Request folder access"
-    | "Connect a folder"
-    | "Check connected folders"
-    | "Browse a connected folder"
-    | "Add a file as a source"
-    | "Ask a question"
-    | "Delegate a task"
-    | "Wait for background agents"
-    | "Run a command"
-    | "Use a tool";
+  /**
+   * Allowlisted renderer tool name, folded server-side.
+   *
+   * A name rather than display copy: the renderer derives a live call's
+   * wording from its name, and carrying prose here meant a second copy of it
+   * plus an inverse lookup, where a change on either side silently broke
+   * hydration.
+   */
+  tool: RendererToolName;
   status: "completed" | "failed" | "cancelled";
   started_at: string;
   finished_at: string | null;
