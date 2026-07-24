@@ -1,21 +1,18 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type {
-  AgentRun,
-  Chat,
-  PendingFolderAccessRequest,
-  PendingUserQuestions,
-  UserQuestionAnswer,
-} from "./api";
+import type { AgentRun, ApiClient, Chat } from "./api";
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { Composer } from "./Composer";
-import type { FolderAccessDecision } from "./host";
 import { MessageList } from "./MessageList";
 import { useTranscriptVisible } from "./TranscriptVisibility";
+import { useFolderAccessRequests } from "./useFolderAccessRequests";
+import { useToolApprovals } from "./useToolApprovals";
+import { useUserQuestions } from "./useUserQuestions";
 import { ArrowDown } from "lucide-react";
 
 export type ChatViewProps = {
+  client: ApiClient;
   chat: Chat;
   hydrated: boolean;
   nativeHost: boolean;
@@ -27,29 +24,6 @@ export type ChatViewProps = {
   stopErrorRunIds: Set<string>;
   onRetryAgentRuns: () => void;
   onStopSandboxRun: (runId: string) => void;
-  folderAccessRequests: PendingFolderAccessRequest[];
-  userQuestionRequests: PendingUserQuestions[];
-  resolvingFolderCalls: Set<string>;
-  folderAccessErrors: Record<string, string>;
-  answeringQuestionCalls: Set<string>;
-  userQuestionErrors: Record<string, string>;
-  decidingApprovalCalls: Set<string>;
-  approvalErrors: Record<string, string>;
-  onApproval: (
-    callId: string,
-    decision: "approve" | "reject",
-    remember?: boolean,
-  ) => void;
-  onFolderAccessDecision: (
-    callId: string,
-    decision: FolderAccessDecision,
-  ) => void;
-  onFolderAccessCancel: (callId: string, turnId: string) => void;
-  onAnswerUserQuestions: (
-    callId: string,
-    answers: UserQuestionAnswer[],
-  ) => void;
-  onUserQuestionsCancel: (turnId: string) => void;
   draft: string;
   composerModelMenu: ReactNode;
   attachingSource: boolean;
@@ -76,6 +50,7 @@ export type ChatViewProps = {
  * Mount with `key={chat.id}` so scroll-follow state resets per conversation.
  */
 export function ChatView({
+  client,
   chat,
   hydrated,
   nativeHost,
@@ -87,19 +62,6 @@ export function ChatView({
   stopErrorRunIds,
   onRetryAgentRuns,
   onStopSandboxRun,
-  folderAccessRequests,
-  userQuestionRequests,
-  resolvingFolderCalls,
-  folderAccessErrors,
-  answeringQuestionCalls,
-  userQuestionErrors,
-  decidingApprovalCalls,
-  approvalErrors,
-  onApproval,
-  onFolderAccessDecision,
-  onFolderAccessCancel,
-  onAnswerUserQuestions,
-  onUserQuestionsCancel,
   draft,
   composerModelMenu,
   attachingSource,
@@ -119,6 +81,9 @@ export function ChatView({
   onStop,
 }: ChatViewProps) {
   const transcriptVisible = useTranscriptVisible();
+  const folderAccess = useFolderAccessRequests(client, chat.id);
+  const userQuestions = useUserQuestions(client, chat.id);
+  const approvals = useToolApprovals(client, chat.id);
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
@@ -145,8 +110,8 @@ export function ChatView({
 
   useEffect(() => {
     const next = new Set([
-      ...folderAccessRequests.map((request) => request.callId),
-      ...userQuestionRequests.map((request) => request.callId),
+      ...folderAccess.requests.map((request) => request.callId),
+      ...userQuestions.requests.map((request) => request.callId),
     ]);
     const gainedRequest = [...next].some(
       (callId) => !visibleContinuationCallIdsRef.current.has(callId),
@@ -160,7 +125,7 @@ export function ChatView({
     } else {
       setHasUnreadActivity(true);
     }
-  }, [folderAccessRequests, userQuestionRequests]);
+  }, [folderAccess.requests, userQuestions.requests]);
 
   return (
     <section className="chat-pane">
@@ -177,16 +142,16 @@ export function ChatView({
       <div className="message-view">
         <MessageList
           messages={messages}
-          folderAccessRequests={folderAccessRequests}
-          userQuestionRequests={userQuestionRequests}
+          folderAccessRequests={folderAccess.requests}
+          userQuestionRequests={userQuestions.requests}
           nativeHost={nativeHost}
-          nativeBusy={resolvingFolderCalls.size > 0}
-          resolvingFolderCalls={resolvingFolderCalls}
-          folderAccessErrors={folderAccessErrors}
-          answeringQuestionCalls={answeringQuestionCalls}
-          userQuestionErrors={userQuestionErrors}
-          decidingApprovalCalls={decidingApprovalCalls}
-          approvalErrors={approvalErrors}
+          nativeBusy={folderAccess.resolving.size > 0}
+          resolvingFolderCalls={folderAccess.resolving}
+          folderAccessErrors={folderAccess.errors}
+          answeringQuestionCalls={userQuestions.answering}
+          userQuestionErrors={userQuestions.errors}
+          decidingApprovalCalls={approvals.deciding}
+          approvalErrors={approvals.errors}
           busy={busy}
           reasoningActive={reasoningActive}
           scrollRef={scrollRef}
@@ -195,11 +160,11 @@ export function ChatView({
             followsLatestRef.current = followsLatest;
             if (followsLatest) setHasUnreadActivity(false);
           }}
-          onApproval={onApproval}
-          onFolderAccessDecision={onFolderAccessDecision}
-          onFolderAccessCancel={onFolderAccessCancel}
-          onAnswerUserQuestions={onAnswerUserQuestions}
-          onUserQuestionsCancel={onUserQuestionsCancel}
+          onApproval={approvals.decide}
+          onFolderAccessDecision={folderAccess.decide}
+          onFolderAccessCancel={folderAccess.cancel}
+          onAnswerUserQuestions={userQuestions.answer}
+          onUserQuestionsCancel={userQuestions.cancel}
           onSelectPrompt={onSelectPrompt}
           hydrated={hydrated}
         />

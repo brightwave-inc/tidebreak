@@ -1,14 +1,32 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Chat } from "./api";
+import type { ApiClient, Chat } from "./api";
 import { ChatView, type ChatViewProps } from "./ChatView";
 import { useChatSessionStore } from "./ChatSessionStore";
 
+vi.mock("./host", () => ({
+  hasNativeHost: () => false,
+  requestUserAttention: vi.fn().mockResolvedValue(undefined),
+  resolveFolderAccessRequest: vi.fn(),
+}));
+
 const chat = { id: "chat-1", title: "Roadmap", project_id: null } as unknown as Chat;
+
+// The chat pane owns its conversation's request state, so it polls through the
+// client rather than being handed the results.
+const client = {
+  listPendingFolderAccessRequests: vi.fn().mockResolvedValue([]),
+  listPendingUserQuestions: vi.fn().mockResolvedValue([]),
+  decideApproval: vi.fn().mockResolvedValue(undefined),
+  cancel: vi.fn().mockResolvedValue(undefined),
+  answerUserQuestions: vi.fn().mockResolvedValue(undefined),
+} as unknown as ApiClient;
 
 function renderChatView(overrides: Partial<ChatViewProps> = {}) {
   const props: ChatViewProps = {
+    client,
     chat,
     hydrated: true,
     nativeHost: false,
@@ -20,19 +38,6 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
     stopErrorRunIds: new Set(),
     onRetryAgentRuns: vi.fn(),
     onStopSandboxRun: vi.fn(),
-    folderAccessRequests: [],
-    userQuestionRequests: [],
-    resolvingFolderCalls: new Set(),
-    folderAccessErrors: {},
-    answeringQuestionCalls: new Set(),
-    userQuestionErrors: {},
-    decidingApprovalCalls: new Set(),
-    approvalErrors: {},
-    onApproval: vi.fn(),
-    onFolderAccessDecision: vi.fn(),
-    onFolderAccessCancel: vi.fn(),
-    onAnswerUserQuestions: vi.fn(),
-    onUserQuestionsCancel: vi.fn(),
     draft: "",
     composerModelMenu: null,
     attachingSource: false,
@@ -73,6 +78,61 @@ describe("ChatView", () => {
     renderChatView();
     expect(screen.getByText("hello there")).toBeInTheDocument();
     expect(screen.getByText("hi!")).toBeInTheDocument();
+  });
+
+  it("polls for its own conversation's pending approvals and questions", async () => {
+    vi.mocked(client.listPendingUserQuestions).mockResolvedValueOnce([
+      {
+        callId: "call-q",
+        turnId: "turn-1",
+        askedAt: "2026-07-24T00:00:00.000Z",
+        questions: [
+          {
+            id: "q1",
+            header: "Scope",
+            question: "Which quarter?",
+            options: [],
+            allowFreeForm: true,
+          },
+        ],
+      },
+    ]);
+
+    renderChatView();
+
+    expect(await screen.findByText("Which quarter?")).toBeInTheDocument();
+    expect(client.listPendingUserQuestions).toHaveBeenCalledWith("chat-1");
+    expect(client.listPendingFolderAccessRequests).toHaveBeenCalledWith(
+      "chat-1",
+    );
+  });
+
+  it("sends an approval decision through its own client", async () => {
+    useChatSessionStore.getState().update((session) => ({
+      ...session,
+      messages: [
+        {
+          id: "m1",
+          role: "approval",
+          callId: "call-a",
+          summary: "Run a command",
+          canApprove: true,
+          canRemember: false,
+        },
+      ],
+    }));
+    renderChatView();
+
+    await userEvent.click(screen.getAllByRole("option")[0]!);
+
+    await waitFor(() =>
+      expect(client.decideApproval).toHaveBeenCalledWith(
+        "chat-1",
+        "call-a",
+        "approve",
+        false,
+      ),
+    );
   });
 
   it("re-renders as stream events land in the store", () => {
