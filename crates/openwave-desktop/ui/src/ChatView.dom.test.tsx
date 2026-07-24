@@ -4,55 +4,36 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Chat } from "./api";
 import { ChatView, type ChatViewProps } from "./ChatView";
 import { useChatSessionStore } from "./ChatSessionStore";
+import type { ConversationRequests } from "./ConversationRequests";
+import {
+  idleConversationRequests,
+  withConversationRequests,
+} from "./test/conversationRequests";
 
 const chat = { id: "chat-1", title: "Roadmap", project_id: null } as unknown as Chat;
 
-function renderChatView(overrides: Partial<ChatViewProps> = {}) {
+function renderChatView(
+  overrides: Partial<ChatViewProps> = {},
+  requests: ConversationRequests = idleConversationRequests(),
+) {
   const props: ChatViewProps = {
     chat,
     hydrated: true,
     nativeHost: false,
     deletingChat: false,
-    agentRuns: [],
-    agentRunsLoading: false,
-    agentRunsError: null,
-    stoppingRunIds: new Set(),
-    stopErrorRunIds: new Set(),
-    onRetryAgentRuns: vi.fn(),
-    onStopSandboxRun: vi.fn(),
-    folderAccessRequests: [],
-    userQuestionRequests: [],
-    resolvingFolderCalls: new Set(),
-    folderAccessErrors: {},
-    answeringQuestionCalls: new Set(),
-    userQuestionErrors: {},
-    decidingApprovalCalls: new Set(),
-    approvalErrors: {},
-    onApproval: vi.fn(),
-    onFolderAccessDecision: vi.fn(),
-    onFolderAccessCancel: vi.fn(),
-    onAnswerUserQuestions: vi.fn(),
-    onUserQuestionsCancel: vi.fn(),
     draft: "",
     composerModelMenu: null,
     attachingSource: false,
     attachedSourceName: null,
     sourceAttachmentError: null,
-    cancelError: null,
-    cancelPendingTurnId: null,
-    steerError: null,
-    steerStatus: null,
-    steerPendingTurnId: null,
     onDraftChange: vi.fn(),
     onAddSource: vi.fn(async () => {}),
     onDismissAttachedSource: vi.fn(),
     onSelectPrompt: vi.fn(),
     onSend: vi.fn(async () => {}),
-    onSteer: vi.fn(async () => {}),
-    onStop: vi.fn(async () => {}),
     ...overrides,
   };
-  render(<ChatView {...props} />);
+  render(withConversationRequests(<ChatView {...props} />, requests));
   return props;
 }
 

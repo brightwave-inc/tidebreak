@@ -1,16 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type {
-  AgentRun,
-  Chat,
-  PendingFolderAccessRequest,
-  PendingUserQuestions,
-  UserQuestionAnswer,
-} from "./api";
+import type { Chat } from "./api";
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { Composer } from "./Composer";
-import type { FolderAccessDecision } from "./host";
+import { useConversationRequests } from "./ConversationRequests";
 import { MessageList } from "./MessageList";
 import { useTranscriptVisible } from "./TranscriptVisibility";
 import { ArrowDown } from "lucide-react";
@@ -20,104 +14,43 @@ export type ChatViewProps = {
   hydrated: boolean;
   nativeHost: boolean;
   deletingChat: boolean;
-  agentRuns: AgentRun[];
-  agentRunsLoading: boolean;
-  agentRunsError: string | null;
-  stoppingRunIds: Set<string>;
-  stopErrorRunIds: Set<string>;
-  onRetryAgentRuns: () => void;
-  onStopSandboxRun: (runId: string) => void;
-  folderAccessRequests: PendingFolderAccessRequest[];
-  userQuestionRequests: PendingUserQuestions[];
-  resolvingFolderCalls: Set<string>;
-  folderAccessErrors: Record<string, string>;
-  answeringQuestionCalls: Set<string>;
-  userQuestionErrors: Record<string, string>;
-  decidingApprovalCalls: Set<string>;
-  approvalErrors: Record<string, string>;
-  onApproval: (
-    callId: string,
-    decision: "approve" | "reject",
-    remember?: boolean,
-  ) => void;
-  onFolderAccessDecision: (
-    callId: string,
-    decision: FolderAccessDecision,
-  ) => void;
-  onFolderAccessCancel: (callId: string, turnId: string) => void;
-  onAnswerUserQuestions: (
-    callId: string,
-    answers: UserQuestionAnswer[],
-  ) => void;
-  onUserQuestionsCancel: (turnId: string) => void;
   draft: string;
   composerModelMenu: ReactNode;
   attachingSource: boolean;
   attachedSourceName: string | null;
   sourceAttachmentError: string | null;
-  cancelError: string | null;
-  cancelPendingTurnId: string | null;
-  steerError: string | null;
-  steerStatus: string | null;
-  steerPendingTurnId: string | null;
   onDraftChange: (value: string) => void;
   onAddSource: () => Promise<void>;
   onDismissAttachedSource: () => void;
   onSelectPrompt: (prompt: string) => void;
   onSend: () => Promise<void>;
-  onSteer: () => Promise<void>;
-  onStop: () => Promise<void>;
 };
 
 /**
  * The chat pane: agent activity, transcript, and composer, rendered as the
  * body of the chat workspace. Reads the live session (messages, busy, active
- * turn) straight from the session store.
- * Mount with `key={chat.id}` so scroll-follow state resets per conversation.
+ * turn) straight from the session store, and what the conversation is waiting
+ * on from its request context; the caller supplies only the composer's draft.
+ * The conversation-scoped provider above it carries `key={chat.id}`, which is
+ * what resets scroll-follow state per conversation.
  */
 export function ChatView({
   chat,
   hydrated,
   nativeHost,
   deletingChat,
-  agentRuns,
-  agentRunsLoading,
-  agentRunsError,
-  stoppingRunIds,
-  stopErrorRunIds,
-  onRetryAgentRuns,
-  onStopSandboxRun,
-  folderAccessRequests,
-  userQuestionRequests,
-  resolvingFolderCalls,
-  folderAccessErrors,
-  answeringQuestionCalls,
-  userQuestionErrors,
-  decidingApprovalCalls,
-  approvalErrors,
-  onApproval,
-  onFolderAccessDecision,
-  onFolderAccessCancel,
-  onAnswerUserQuestions,
-  onUserQuestionsCancel,
   draft,
   composerModelMenu,
   attachingSource,
   attachedSourceName,
   sourceAttachmentError,
-  cancelError,
-  cancelPendingTurnId,
-  steerError,
-  steerStatus,
-  steerPendingTurnId,
   onDraftChange,
   onAddSource,
   onDismissAttachedSource,
   onSelectPrompt,
   onSend,
-  onSteer,
-  onStop,
 }: ChatViewProps) {
+  const requests = useConversationRequests();
   const transcriptVisible = useTranscriptVisible();
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
@@ -126,6 +59,7 @@ export function ChatView({
     (session) => session.reasoningActive,
   );
 
+  const { folderAccessRequests, userQuestionRequests } = requests;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followsLatestRef = useRef(true);
   const visibleContinuationCallIdsRef = useRef<Set<string>>(new Set());
@@ -165,13 +99,13 @@ export function ChatView({
   return (
     <section className="chat-pane">
       <AgentActivityPanel
-        runs={agentRuns}
-        loading={agentRunsLoading}
-        error={agentRunsError}
-        onRetry={onRetryAgentRuns}
-        stoppingRunIds={stoppingRunIds}
-        stopErrorRunIds={stopErrorRunIds}
-        onStop={onStopSandboxRun}
+        runs={requests.agentRuns}
+        loading={requests.agentRunsLoading}
+        error={requests.agentRunsError}
+        onRetry={requests.refreshAgentRuns}
+        stoppingRunIds={requests.stoppingRunIds}
+        stopErrorRunIds={requests.stopErrorRunIds}
+        onStop={requests.stopSandboxRun}
       />
 
       <div className="message-view">
@@ -180,13 +114,13 @@ export function ChatView({
           folderAccessRequests={folderAccessRequests}
           userQuestionRequests={userQuestionRequests}
           nativeHost={nativeHost}
-          nativeBusy={resolvingFolderCalls.size > 0}
-          resolvingFolderCalls={resolvingFolderCalls}
-          folderAccessErrors={folderAccessErrors}
-          answeringQuestionCalls={answeringQuestionCalls}
-          userQuestionErrors={userQuestionErrors}
-          decidingApprovalCalls={decidingApprovalCalls}
-          approvalErrors={approvalErrors}
+          nativeBusy={requests.resolvingFolderCalls.size > 0}
+          resolvingFolderCalls={requests.resolvingFolderCalls}
+          folderAccessErrors={requests.folderAccessErrors}
+          answeringQuestionCalls={requests.answeringQuestionCalls}
+          userQuestionErrors={requests.userQuestionErrors}
+          decidingApprovalCalls={requests.decidingApprovalCalls}
+          approvalErrors={requests.approvalErrors}
           busy={busy}
           reasoningActive={reasoningActive}
           scrollRef={scrollRef}
@@ -195,11 +129,11 @@ export function ChatView({
             followsLatestRef.current = followsLatest;
             if (followsLatest) setHasUnreadActivity(false);
           }}
-          onApproval={onApproval}
-          onFolderAccessDecision={onFolderAccessDecision}
-          onFolderAccessCancel={onFolderAccessCancel}
-          onAnswerUserQuestions={onAnswerUserQuestions}
-          onUserQuestionsCancel={onUserQuestionsCancel}
+          onApproval={requests.decideApproval}
+          onFolderAccessDecision={requests.decideFolderAccess}
+          onFolderAccessCancel={requests.cancelFolderAccess}
+          onAnswerUserQuestions={requests.answerUserQuestions}
+          onUserQuestionsCancel={requests.cancelUserQuestions}
           onSelectPrompt={onSelectPrompt}
           hydrated={hydrated}
         />
@@ -224,9 +158,9 @@ export function ChatView({
       <Composer
         activeTurnId={activeTurnId}
         busy={busy}
-        cancelError={cancelError}
+        cancelError={requests.cancelError}
         cancelPending={
-          activeTurnId !== null && cancelPendingTurnId === activeTurnId
+          activeTurnId !== null && requests.cancelPendingTurnId === activeTurnId
         }
         disabled={deletingChat}
         draft={draft}
@@ -237,16 +171,21 @@ export function ChatView({
         sourceAttachmentError={sourceAttachmentError}
         onAddSource={onAddSource}
         onDismissAttachedSource={onDismissAttachedSource}
-        onDraftChange={onDraftChange}
+        onDraftChange={(value) => {
+          // Typing supersedes whatever the last steer reported about a draft
+          // that no longer exists.
+          requests.clearSteerFeedback();
+          onDraftChange(value);
+        }}
         onSend={onSend}
-        onSteer={onSteer}
-        onStop={onStop}
+        onSteer={requests.steerActiveTurn}
+        onStop={requests.cancelActiveTurn}
         resetKey={chat.id}
-        steerError={steerError}
+        steerError={requests.steerError}
         steerPending={
-          activeTurnId !== null && steerPendingTurnId === activeTurnId
+          activeTurnId !== null && requests.steerPendingTurnId === activeTurnId
         }
-        steerStatus={steerStatus}
+        steerStatus={requests.steerStatus}
       />
     </section>
   );

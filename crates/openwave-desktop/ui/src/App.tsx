@@ -1,27 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ApiClient,
-  type AgentRun,
   type Chat,
   type ModelInfo,
   type ModelSelectionKey,
-  type PendingFolderAccessRequest,
-  type PendingUserQuestions,
   type ProviderInfo,
   type ReasoningEffort,
   type SequencedEvent,
   type ServerInfo,
-  type UserQuestionAnswer,
 } from "./api";
 import { modelForSelection } from "./ModelSelection";
 import { resolveServerInfo } from "./boot";
-import {
-  hasMacOverlayTitlebar,
-  hasNativeHost,
-  requestUserAttention,
-  resolveFolderAccessRequest,
-  type FolderAccessDecision,
-} from "./host";
+import { hasMacOverlayTitlebar, hasNativeHost } from "./host";
 import { Logomark } from "./Logomark";
 import { useTheme } from "./theme";
 import { SettingsView } from "./SettingsView";
@@ -43,21 +33,13 @@ import {
   type ChatSessionState,
 } from "./ChatSessionReducer";
 import {
-  ActiveTurnSteerFence,
-  canBeginActiveTurnSteer,
-  shouldClearAcceptedSteerDraft,
-} from "./ActiveTurnSteer";
-import {
   loadCurrentTerminalTranscript,
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
-import { agentRunsForChat } from "./AgentActivityPanel";
 import {
-  SandboxAgentStopFence,
-  canStopSandboxAgentRun,
-  reconcileSandboxAgentCancellation,
-  sandboxAgentStopKey,
-} from "./SandboxAgentStop";
+  ConversationRequestsProvider,
+  type ConversationRequestsHandle,
+} from "./ConversationRequests";
 import { prependReplacementChat } from "./ChatDeletion";
 import { useConfirm } from "./components/ConfirmDialog";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
@@ -98,41 +80,6 @@ export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const busy = useChatSessionStore((session) => session.busy);
-  const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
-  const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
-  const [agentRunsChatId, setAgentRunsChatId] = useState<string | null>(null);
-  const [agentRunsLoading, setAgentRunsLoading] = useState(false);
-  const [agentRunsError, setAgentRunsError] = useState<string | null>(null);
-  const [stoppingSandboxRunKeys, setStoppingSandboxRunKeys] = useState<Set<string>>(
-    new Set(),
-  );
-  const [sandboxStopErrorKeys, setSandboxStopErrorKeys] = useState<Set<string>>(
-    new Set(),
-  );
-  const [folderAccessRequests, setFolderAccessRequests] = useState<
-    PendingFolderAccessRequest[]
-  >([]);
-  const [resolvingFolderCalls, setResolvingFolderCalls] = useState<Set<string>>(
-    new Set(),
-  );
-  const [folderAccessErrors, setFolderAccessErrors] = useState<
-    Record<string, string>
-  >({});
-  const [userQuestionRequests, setUserQuestionRequests] = useState<
-    PendingUserQuestions[]
-  >([]);
-  const [answeringQuestionCalls, setAnsweringQuestionCalls] = useState<
-    Set<string>
-  >(new Set());
-  const [userQuestionErrors, setUserQuestionErrors] = useState<
-    Record<string, string>
-  >({});
-  const [decidingApprovalCalls, setDecidingApprovalCalls] = useState<
-    Set<string>
-  >(new Set());
-  const [approvalErrors, setApprovalErrors] = useState<Record<string, string>>(
-    {},
-  );
   const [draft, setDraft] = useState("");
   const [addingSourceChatId, setAddingSourceChatId] = useState<string | null>(
     null,
@@ -145,15 +92,6 @@ export default function App() {
     chatId: string;
     message: string;
   } | null>(null);
-  const [cancelPendingTurnId, setCancelPendingTurnId] = useState<string | null>(
-    null,
-  );
-  const [cancelError, setCancelError] = useState<string | null>(null);
-  const [steerPendingTurnId, setSteerPendingTurnId] = useState<string | null>(
-    null,
-  );
-  const [steerError, setSteerError] = useState<string | null>(null);
-  const [steerStatus, setSteerStatus] = useState<string | null>(null);
   const skipRenameCommitRef = useRef(false);
   const [status, setStatus] = useState("starting…");
   // Owns the selected chat's event socket; chat switches dispose it eagerly
@@ -162,20 +100,19 @@ export default function App() {
   const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
   const chatSelectionRef = useRef(0);
   const terminalHydrationGenerationRef = useRef(0);
-  const refreshFolderAccessRef = useRef<(() => void) | null>(null);
-  const refreshUserQuestionsRef = useRef<(() => void) | null>(null);
-  const refreshAgentRunsRef = useRef<(() => void) | null>(null);
-  const resolvingFolderCallsRef = useRef<Set<string>>(new Set());
-  const answeringQuestionCallsRef = useRef<Set<string>>(new Set());
-  const seenQuestionCallIdsRef = useRef<Set<string>>(new Set());
-  const decidingApprovalCallsRef = useRef<Set<string>>(new Set());
-  const cancelRequestTurnRef = useRef<string | null>(null);
   const draftRef = useRef("");
   const selectedChatIdRef = useRef<string | null>(null);
-  const steerFenceRef = useRef(new ActiveTurnSteerFence());
-  const sandboxStopFenceRef = useRef(new SandboxAgentStopFence());
   const creationInFlightRef = useRef(false);
   const deletionInFlightRef = useRef(false);
+  // The selected conversation's in-flight requests. Mounted per chat, so the
+  // root drives it only where the root still owns the truth: the event socket
+  // reports what a turn is doing, and chat deletion ends everything at once.
+  const requestsRef = useRef<ConversationRequestsHandle | null>(null);
+  const chatSelection = useRef({
+    selection: chatSelectionRef,
+    chatId: selectedChatIdRef,
+    deleting: deletionInFlightRef,
+  }).current;
   const { confirm, dialog: confirmDialog } = useConfirm();
   const { mode: themeMode, cycle: cycleTheme, setMode: setThemeMode } = useTheme();
   const desktopUpdates = useDesktopUpdates();
@@ -196,8 +133,6 @@ export default function App() {
     return () => {
       cancelled = true;
       terminalHydrationGenerationRef.current += 1;
-      steerFenceRef.current.invalidate();
-      sandboxStopFenceRef.current.invalidate();
     };
   }, []);
 
@@ -286,51 +221,6 @@ export default function App() {
   }, [client, chat?.id]);
 
   useEffect(() => {
-    if (!client || !chat) return;
-    let cancelled = false;
-    let requestSeq = 0;
-
-    const refresh = async () => {
-      const seq = ++requestSeq;
-      try {
-        const requests = await client.listPendingUserQuestions(chat.id);
-        if (!cancelled && seq === requestSeq) {
-          const hasNewRequest = requests.some(
-            (request) => !seenQuestionCallIdsRef.current.has(request.callId),
-          );
-          seenQuestionCallIdsRef.current = new Set(
-            requests.map((request) => request.callId),
-          );
-          setUserQuestionRequests(requests);
-          if (hasNewRequest) {
-            void requestUserAttention().catch(() => {
-              // Attention is a best-effort hint. Durable polling is truth.
-            });
-          }
-        }
-      } catch (err) {
-        if (!cancelled && seq === requestSeq) {
-          console.error("failed to refresh pending user questions", err);
-        }
-      }
-    };
-
-    refreshUserQuestionsRef.current = () => void refresh();
-    void refresh();
-    const interval = window.setInterval(() => void refresh(), 10_000);
-    return () => {
-      cancelled = true;
-      requestSeq += 1;
-      window.clearInterval(interval);
-      if (refreshUserQuestionsRef.current) {
-        refreshUserQuestionsRef.current = null;
-      }
-      setUserQuestionRequests([]);
-      seenQuestionCallIdsRef.current = new Set();
-    };
-  }, [client, chat?.id]);
-
-  useEffect(() => {
     if (!client || !chat || hydratedChatId !== chat.id) return;
     const chatId = chat.id;
     const controller = new ChatSessionController({
@@ -350,152 +240,6 @@ export default function App() {
     };
   }, [client, chat?.id, hydratedChatId]);
 
-  useEffect(() => {
-    if (!client || !chat) return;
-    let cancelled = false;
-    let requestSeq = 0;
-
-    const refresh = async () => {
-      const seq = ++requestSeq;
-      try {
-        const runs = await client.listAgentRuns(chat.id);
-        if (!cancelled && seq === requestSeq) {
-          setAgentRuns(runs);
-          setAgentRunsError(null);
-        }
-      } catch (err) {
-        if (!cancelled && seq === requestSeq) {
-          setAgentRunsError(String(err));
-        }
-      } finally {
-        if (!cancelled && seq === requestSeq) {
-          setAgentRunsLoading(false);
-        }
-      }
-    };
-
-    setAgentRuns([]);
-    setAgentRunsChatId(chat.id);
-    setAgentRunsError(null);
-    setAgentRunsLoading(true);
-    refreshAgentRunsRef.current = () => void refresh();
-    void refresh();
-    return () => {
-      cancelled = true;
-      requestSeq += 1;
-      if (refreshAgentRunsRef.current) {
-        refreshAgentRunsRef.current = null;
-      }
-    };
-  }, [client, chat?.id]);
-
-  const visibleAgentRuns = agentRunsForChat(agentRunsChatId, chat?.id ?? null, agentRuns);
-  const visibleStoppingSandboxRunIds = new Set(
-    visibleAgentRuns
-      .filter((run) =>
-        stoppingSandboxRunKeys.has(sandboxAgentStopKey(chat?.id ?? "", run.id)),
-      )
-      .map((run) => run.id),
-  );
-  const visibleSandboxStopErrorRunIds = new Set(
-    visibleAgentRuns
-      .filter((run) =>
-        sandboxStopErrorKeys.has(sandboxAgentStopKey(chat?.id ?? "", run.id)),
-      )
-      .map((run) => run.id),
-  );
-  const hasActiveSandboxRun = visibleAgentRuns.some(
-    (run) =>
-      run.execution === "sandbox" &&
-      ["queued", "running", "cancelling", "waiting", "retry_wait"].includes(
-        run.status,
-      ),
-  );
-
-  useEffect(() => {
-    if (!hasActiveSandboxRun) return;
-    const interval = window.setInterval(
-      () => refreshAgentRunsRef.current?.(),
-      5_000,
-    );
-    return () => window.clearInterval(interval);
-  }, [hasActiveSandboxRun]);
-
-  async function onStopSandboxAgentRun(runId: string) {
-    if (!client || !chat || deletionInFlightRef.current) return;
-    const target = visibleAgentRuns.find((run) => run.id === runId);
-    if (!target || !canStopSandboxAgentRun(target)) return;
-
-    const chatId = chat.id;
-    const request = sandboxStopFenceRef.current.begin(chatId, runId);
-    if (!request) return;
-    const key = sandboxAgentStopKey(chatId, runId);
-    setStoppingSandboxRunKeys((current) => new Set(current).add(key));
-    setSandboxStopErrorKeys((current) => {
-      const next = new Set(current);
-      next.delete(key);
-      return next;
-    });
-
-    try {
-      const cancellation = await client.cancelAgentRun(chatId, runId);
-      if (!sandboxStopFenceRef.current.isCurrent(request, selectedChatIdRef.current)) {
-        return;
-      }
-      setAgentRuns((current) =>
-        reconcileSandboxAgentCancellation(current, cancellation),
-      );
-      refreshAgentRunsRef.current?.();
-    } catch {
-      if (!sandboxStopFenceRef.current.isCurrent(request, selectedChatIdRef.current)) {
-        return;
-      }
-      setSandboxStopErrorKeys((current) => new Set(current).add(key));
-    } finally {
-      if (sandboxStopFenceRef.current.finish(request, selectedChatIdRef.current)) {
-        setStoppingSandboxRunKeys((current) => {
-          const next = new Set(current);
-          next.delete(key);
-          return next;
-        });
-      }
-    }
-  }
-
-  useEffect(() => {
-    if (!client || !chat) return;
-    let cancelled = false;
-    let requestSeq = 0;
-
-    const refresh = async () => {
-      const seq = ++requestSeq;
-      try {
-        const requests = await client.listPendingFolderAccessRequests(chat.id);
-        if (!cancelled && seq === requestSeq) {
-          setFolderAccessRequests(requests);
-        }
-      } catch (err) {
-        if (!cancelled && seq === requestSeq) {
-          console.error("failed to refresh pending folder access", err);
-          setFolderAccessRequests([]);
-        }
-      }
-    };
-
-    refreshFolderAccessRef.current = () => void refresh();
-    void refresh();
-    const interval = window.setInterval(() => void refresh(), 10_000);
-    return () => {
-      cancelled = true;
-      requestSeq += 1;
-      window.clearInterval(interval);
-      if (refreshFolderAccessRef.current) {
-        refreshFolderAccessRef.current = null;
-      }
-      setFolderAccessRequests([]);
-    };
-  }, [client, chat?.id]);
-
   function updateSession(update: (state: ChatSessionState) => ChatSessionState) {
     useChatSessionStore.getState().update(update);
   }
@@ -511,25 +255,19 @@ export default function App() {
   function applySessionEffect(effect: ChatSessionEffect) {
     switch (effect.type) {
       case "refresh_agent_runs":
-        refreshAgentRunsRef.current?.();
+        requestsRef.current?.refreshAgentRuns();
         return;
       case "refresh_folder_access":
-        refreshFolderAccessRef.current?.();
+        requestsRef.current?.refreshFolderAccess();
         return;
       case "refresh_user_questions":
-        refreshUserQuestionsRef.current?.();
+        requestsRef.current?.refreshUserQuestions();
         return;
       case "turn_began":
-        setCancelPendingTurnId(null);
-        setCancelError(null);
-        cancelRequestTurnRef.current = null;
-        if (effect.startsDifferentTurn) clearSteerRequestState();
+        requestsRef.current?.turnBegan(effect.startsDifferentTurn);
         return;
       case "turn_resolved":
-        setCancelPendingTurnId(null);
-        setCancelError(null);
-        cancelRequestTurnRef.current = null;
-        clearSteerRequestState();
+        requestsRef.current?.turnResolved();
         return;
       case "invalidate_terminal_hydration":
         terminalHydrationGenerationRef.current += 1;
@@ -573,28 +311,12 @@ export default function App() {
       busy: false,
       activeTurnId: null,
     }));
-    setCancelPendingTurnId(null);
-    setCancelError(null);
-    cancelRequestTurnRef.current = null;
-    clearSteerRequestState();
+    requestsRef.current?.turnResolved();
   }
 
   function setComposerDraft(nextDraft: string) {
     draftRef.current = nextDraft;
     setDraft(nextDraft);
-  }
-
-  function clearSteerRequestState() {
-    steerFenceRef.current.invalidate();
-    setSteerPendingTurnId(null);
-    setSteerError(null);
-    setSteerStatus(null);
-  }
-
-  function onComposerDraftChange(nextDraft: string) {
-    setComposerDraft(nextDraft);
-    setSteerError(null);
-    setSteerStatus(null);
   }
 
   async function refreshCatalog() {
@@ -629,15 +351,14 @@ export default function App() {
         },
       ],
     }));
-    setCancelPendingTurnId(null);
-    setCancelError(null);
+    requestsRef.current?.turnSubmitted();
     try {
       await client.postMessage(chatId, turnId, content);
       if (chatSelectionRef.current !== selection) return;
       setRecentSource((current) =>
         current?.chatId === chatId ? null : current,
       );
-      refreshAgentRunsRef.current?.();
+      requestsRef.current?.refreshAgentRuns();
     } catch (err) {
       if (chatSelectionRef.current !== selection) return;
       resolveActiveTurn();
@@ -672,110 +393,6 @@ export default function App() {
     }
   }
 
-  async function onSteerActiveTurn() {
-    const admission = {
-      busy,
-      turnId: useChatSessionStore.getState().activeTurnId,
-      cancelRequestTurnId: cancelRequestTurnRef.current,
-      deletionInFlight: deletionInFlightRef.current,
-    };
-    if (
-      !client ||
-      !chat ||
-      !canBeginActiveTurnSteer(admission)
-    ) {
-      return;
-    }
-    const turnId = admission.turnId;
-
-    const request = steerFenceRef.current.begin(
-      {
-        chatId: chat.id,
-        turnId,
-        selection: chatSelectionRef.current,
-      },
-      draftRef.current,
-      () => crypto.randomUUID(),
-    );
-    if (!request) return;
-
-    setSteerPendingTurnId(turnId);
-    setSteerError(null);
-    setSteerStatus("Sending guidance…");
-    setCancelError(null);
-    try {
-      await client.steer(
-        request.chatId,
-        request.turnId,
-        request.steerId,
-        request.content,
-        true,
-      );
-      if (
-        !steerFenceRef.current.canApplyResponse(request, {
-          chatId: selectedChatIdRef.current ?? "",
-          turnId: useChatSessionStore.getState().activeTurnId ?? "",
-          selection: chatSelectionRef.current,
-        })
-      ) {
-        return;
-      }
-
-      steerFenceRef.current.finish(request);
-      setSteerPendingTurnId(null);
-      if (shouldClearAcceptedSteerDraft(request, draftRef.current)) {
-        setComposerDraft("");
-      }
-      setSteerStatus("Guidance sent");
-    } catch (err) {
-      if (
-        !steerFenceRef.current.canApplyResponse(request, {
-          chatId: selectedChatIdRef.current ?? "",
-          turnId: useChatSessionStore.getState().activeTurnId ?? "",
-          selection: chatSelectionRef.current,
-        })
-      ) {
-        return;
-      }
-
-      steerFenceRef.current.fail(request);
-      setSteerPendingTurnId(null);
-      setSteerStatus(null);
-      setSteerError(String(err));
-    }
-  }
-
-  async function onCancelActiveTurn() {
-    const turnId = activeTurnId;
-    if (
-      !client ||
-      !chat ||
-      !busy ||
-      !turnId ||
-      cancelRequestTurnRef.current === turnId
-    ) {
-      return;
-    }
-    const selection = chatSelectionRef.current;
-    const chatId = chat.id;
-
-    cancelRequestTurnRef.current = turnId;
-    setCancelPendingTurnId(turnId);
-    setCancelError(null);
-    try {
-      await client.cancel(chatId, turnId);
-    } catch (err) {
-      if (
-        chatSelectionRef.current === selection &&
-        cancelRequestTurnRef.current === turnId
-      ) {
-        cancelRequestTurnRef.current = null;
-        setCancelPendingTurnId(null);
-        setCancelError(String(err));
-      }
-    }
-  }
-
   async function onNewChat() {
     if (!client || creationInFlightRef.current || deletionInFlightRef.current) return;
     creationInFlightRef.current = true;
@@ -805,25 +422,9 @@ export default function App() {
     controllerRef.current?.dispose();
     controllerRef.current = null;
     useChatSessionStore.getState().reset();
-    setAgentRuns([]);
-    setAgentRunsError(null);
-    setFolderAccessRequests([]);
-    setFolderAccessErrors({});
-    setUserQuestionRequests([]);
-    seenQuestionCallIdsRef.current = new Set();
-    answeringQuestionCallsRef.current = new Set();
-    setAnsweringQuestionCalls(new Set());
-    setUserQuestionErrors({});
-    decidingApprovalCallsRef.current = new Set();
-    setDecidingApprovalCalls(new Set());
-    setApprovalErrors({});
     setComposerDraft("");
     setRecentSource(null);
     setSourceAttachmentError(null);
-    setCancelPendingTurnId(null);
-    setCancelError(null);
-    cancelRequestTurnRef.current = null;
-    clearSteerRequestState();
     activateChat(created);
     chatListActions.prependChat(created);
     chatListActions.setChatsError(null);
@@ -849,10 +450,7 @@ export default function App() {
       // This invalidates callbacks that captured the deleted selection. The
       // ref update also gates sends before the disabled composer renders.
       chatSelectionRef.current += 1;
-      clearSteerRequestState();
-      sandboxStopFenceRef.current.invalidate();
-      setStoppingSandboxRunKeys(new Set());
-      setSandboxStopErrorKeys(new Set());
+      requestsRef.current?.abandonForChatDeletion();
     }
     try {
       await client.deleteChat(target.id);
@@ -883,9 +481,6 @@ export default function App() {
     chatSelectionRef.current += 1;
     terminalHydrationGenerationRef.current += 1;
     selectedChatIdRef.current = next.id;
-    sandboxStopFenceRef.current.invalidate();
-    setStoppingSandboxRunKeys(new Set());
-    setSandboxStopErrorKeys(new Set());
     updateSession((session) => ({
       ...session,
       markerScrubber: new AssistantSourceMarkerStreamScrubber(),
@@ -907,25 +502,9 @@ export default function App() {
     controllerRef.current?.dispose();
     controllerRef.current = null;
     useChatSessionStore.getState().reset();
-    setAgentRuns([]);
-    setAgentRunsError(null);
-    setFolderAccessRequests([]);
-    setFolderAccessErrors({});
-    setUserQuestionRequests([]);
-    seenQuestionCallIdsRef.current = new Set();
-    answeringQuestionCallsRef.current = new Set();
-    setAnsweringQuestionCalls(new Set());
-    setUserQuestionErrors({});
-    decidingApprovalCallsRef.current = new Set();
-    setDecidingApprovalCalls(new Set());
-    setApprovalErrors({});
     setComposerDraft("");
     setRecentSource(null);
     setSourceAttachmentError(null);
-    setCancelPendingTurnId(null);
-    setCancelError(null);
-    cancelRequestTurnRef.current = null;
-    clearSteerRequestState();
     cancelChatRename();
     activateChat(next);
     setStatus(`chat ${next.id.slice(0, 8)}…`);
@@ -995,182 +574,6 @@ export default function App() {
     // after a selection change the ids differ, so this stays fence-safe.
     chatListActions.replaceChat(updated);
     void selection;
-  }
-
-  async function onApproval(
-    callId: string,
-    decision: "approve" | "reject",
-    remember = false,
-  ) {
-    if (!client || !chat) return;
-    if (decidingApprovalCallsRef.current.has(callId)) return;
-    decidingApprovalCallsRef.current.add(callId);
-    setDecidingApprovalCalls((calls) => new Set(calls).add(callId));
-    setApprovalErrors((errors) => {
-      const next = { ...errors };
-      delete next[callId];
-      return next;
-    });
-    try {
-      await client.decideApproval(chat.id, callId, decision, remember);
-      updateSession((session) => ({
-        ...session,
-        messages: session.messages.map((m) =>
-          m.role === "approval" && m.callId === callId
-            ? { ...m, resolved: true }
-            : m,
-        ),
-      }));
-    } catch (err) {
-      setApprovalErrors((errors) => ({
-        ...errors,
-        [callId]: `Could not send your decision: ${String(err)}`,
-      }));
-    } finally {
-      decidingApprovalCallsRef.current.delete(callId);
-      setDecidingApprovalCalls((calls) => {
-        const next = new Set(calls);
-        next.delete(callId);
-        return next;
-      });
-    }
-  }
-
-  async function onFolderAccessDecision(
-    callId: string,
-    decision: FolderAccessDecision,
-  ) {
-    if (!chat || !hasNativeHost()) return;
-    if (resolvingFolderCallsRef.current.size > 0) return;
-    resolvingFolderCallsRef.current.add(callId);
-    setResolvingFolderCalls((calls) => new Set(calls).add(callId));
-    setFolderAccessErrors((errors) => {
-      const next = { ...errors };
-      delete next[callId];
-      return next;
-    });
-    try {
-      await resolveFolderAccessRequest(chat.id, callId, decision);
-    } catch (err) {
-      setFolderAccessErrors((errors) => ({
-        ...errors,
-        [callId]: String(err),
-      }));
-    } finally {
-      resolvingFolderCallsRef.current.delete(callId);
-      setResolvingFolderCalls((calls) => {
-        const next = new Set(calls);
-        next.delete(callId);
-        return next;
-      });
-      refreshFolderAccessRef.current?.();
-    }
-  }
-
-  async function onFolderAccessCancel(callId: string, turnId: string) {
-    if (!client || !chat || resolvingFolderCallsRef.current.size > 0) return;
-    resolvingFolderCallsRef.current.add(callId);
-    setResolvingFolderCalls((calls) => new Set(calls).add(callId));
-    setFolderAccessErrors((errors) => {
-      const next = { ...errors };
-      delete next[callId];
-      return next;
-    });
-    try {
-      await client.cancel(chat.id, turnId);
-    } catch (err) {
-      setFolderAccessErrors((errors) => ({
-        ...errors,
-        [callId]: String(err),
-      }));
-    } finally {
-      resolvingFolderCallsRef.current.delete(callId);
-      setResolvingFolderCalls((calls) => {
-        const next = new Set(calls);
-        next.delete(callId);
-        return next;
-      });
-      refreshFolderAccessRef.current?.();
-    }
-  }
-
-  async function onAnswerUserQuestions(
-    callId: string,
-    answers: UserQuestionAnswer[],
-  ) {
-    if (!client || !chat || answeringQuestionCallsRef.current.has(callId)) {
-      return;
-    }
-    const chatId = chat.id;
-    const selection = chatSelectionRef.current;
-    answeringQuestionCallsRef.current.add(callId);
-    setAnsweringQuestionCalls((calls) => new Set(calls).add(callId));
-    setUserQuestionErrors((errors) => {
-      const next = { ...errors };
-      delete next[callId];
-      return next;
-    });
-    try {
-      await client.answerUserQuestions(chatId, callId, answers);
-    } catch (err) {
-      if (chatSelectionRef.current === selection) {
-        setUserQuestionErrors((errors) => ({
-          ...errors,
-          [callId]: `Could not send your answer: ${String(err)}`,
-        }));
-      }
-    } finally {
-      answeringQuestionCallsRef.current.delete(callId);
-      setAnsweringQuestionCalls((calls) => {
-        const next = new Set(calls);
-        next.delete(callId);
-        return next;
-      });
-      if (chatSelectionRef.current === selection) {
-        refreshUserQuestionsRef.current?.();
-      }
-    }
-  }
-
-  async function onUserQuestionsCancel(turnId: string) {
-    if (!client || !chat) return;
-    const request = userQuestionRequests.find(
-      (candidate) => candidate.turnId === turnId,
-    );
-    if (!request || answeringQuestionCallsRef.current.has(request.callId)) {
-      return;
-    }
-    const chatId = chat.id;
-    const selection = chatSelectionRef.current;
-    answeringQuestionCallsRef.current.add(request.callId);
-    setAnsweringQuestionCalls((calls) =>
-      new Set(calls).add(request.callId),
-    );
-    setUserQuestionErrors((errors) => {
-      const next = { ...errors };
-      delete next[request.callId];
-      return next;
-    });
-    try {
-      await client.cancel(chatId, turnId);
-    } catch (err) {
-      if (chatSelectionRef.current === selection) {
-        setUserQuestionErrors((errors) => ({
-          ...errors,
-          [request.callId]: `Could not cancel the turn: ${String(err)}`,
-        }));
-      }
-    } finally {
-      answeringQuestionCallsRef.current.delete(request.callId);
-      setAnsweringQuestionCalls((calls) => {
-        const next = new Set(calls);
-        next.delete(request.callId);
-        return next;
-      });
-      if (chatSelectionRef.current === selection) {
-        refreshUserQuestionsRef.current?.();
-      }
-    }
   }
 
   async function onRestartForUpdate() {
@@ -1258,108 +661,80 @@ export default function App() {
       />}
 
       <div className="main">
-        {surface.kind === "settings" ? (
-          <SettingsView
-            client={client}
-            models={models}
-            providers={providers}
-            onProvidersChanged={() => void refreshCatalog()}
-            onBack={() => uiActions.selectChatWorkspace(chat.id)}
-            themeMode={themeMode}
-            onThemeChange={setThemeMode}
-            updateState={desktopUpdates.state}
-            onCheckForUpdate={desktopUpdates.check}
-            onRestartForUpdate={onRestartForUpdate}
-          />
-        ) : (
-          <ChatWorkspace
-            chat={chat}
-            status={status}
-            nativeHost={hasNativeHost()}
-            transcript={
-              <ChatView
-                key={chat.id}
-                chat={chat}
-                hydrated={hydratedChatId === chat.id}
-                nativeHost={hasNativeHost()}
-                deletingChat={deletingChatId !== null}
-                agentRuns={visibleAgentRuns}
-                agentRunsLoading={
-                  agentRunsChatId === chat.id ? agentRunsLoading : true
-                }
-                agentRunsError={agentRunsChatId === chat.id ? agentRunsError : null}
-                stoppingRunIds={visibleStoppingSandboxRunIds}
-                stopErrorRunIds={visibleSandboxStopErrorRunIds}
-                onRetryAgentRuns={() => refreshAgentRunsRef.current?.()}
-                onStopSandboxRun={(runId) => void onStopSandboxAgentRun(runId)}
-                folderAccessRequests={folderAccessRequests}
-                userQuestionRequests={userQuestionRequests}
-                resolvingFolderCalls={resolvingFolderCalls}
-                folderAccessErrors={folderAccessErrors}
-                answeringQuestionCalls={answeringQuestionCalls}
-                userQuestionErrors={userQuestionErrors}
-                decidingApprovalCalls={decidingApprovalCalls}
-                approvalErrors={approvalErrors}
-                onApproval={(callId, decision, remember) =>
-                  void onApproval(callId, decision, remember)
-                }
-                onFolderAccessDecision={(callId, decision) =>
-                  void onFolderAccessDecision(callId, decision)
-                }
-                onFolderAccessCancel={(callId, turnId) =>
-                  void onFolderAccessCancel(callId, turnId)
-                }
-                onAnswerUserQuestions={(callId, answers) =>
-                  void onAnswerUserQuestions(callId, answers)
-                }
-                onUserQuestionsCancel={(turnId) =>
-                  void onUserQuestionsCancel(turnId)
-                }
-                draft={draft}
-                attachingSource={addingSourceChatId !== null}
-                attachedSourceName={
-                  recentSource && recentSource.chatId === chat.id
-                    ? recentSource.source.displayName
-                    : null
-                }
-                sourceAttachmentError={
-                  sourceAttachmentError && sourceAttachmentError.chatId === chat.id
-                    ? sourceAttachmentError.message
-                    : null
-                }
-                composerModelMenu={
-                  <>
-                    <ModelMenu
-                      models={models}
-                      value={chat.model}
-                      disabled={deletingChatId !== null}
-                      onChange={onModelChange}
-              />
-                    {modelForSelection(models, chat.model)?.supports_reasoning_effort && (
-                      <ReasoningEffortMenu
-                        value={chat.reasoning_effort}
+        <ConversationRequestsProvider
+          key={chat.id}
+          ref={requestsRef}
+          client={client}
+          chat={chat}
+          selection={chatSelection}
+          draftRef={draftRef}
+          onDraftAccepted={() => setComposerDraft("")}
+        >
+          {surface.kind === "settings" ? (
+            <SettingsView
+              client={client}
+              models={models}
+              providers={providers}
+              onProvidersChanged={() => void refreshCatalog()}
+              onBack={() => uiActions.selectChatWorkspace(chat.id)}
+              themeMode={themeMode}
+              onThemeChange={setThemeMode}
+              updateState={desktopUpdates.state}
+              onCheckForUpdate={desktopUpdates.check}
+              onRestartForUpdate={onRestartForUpdate}
+            />
+          ) : (
+            <ChatWorkspace
+              chat={chat}
+              status={status}
+              nativeHost={hasNativeHost()}
+              transcript={
+                <ChatView
+                  chat={chat}
+                  hydrated={hydratedChatId === chat.id}
+                  nativeHost={hasNativeHost()}
+                  deletingChat={deletingChatId !== null}
+                  draft={draft}
+                  attachingSource={addingSourceChatId !== null}
+                  attachedSourceName={
+                    recentSource && recentSource.chatId === chat.id
+                      ? recentSource.source.displayName
+                      : null
+                  }
+                  sourceAttachmentError={
+                    sourceAttachmentError &&
+                    sourceAttachmentError.chatId === chat.id
+                      ? sourceAttachmentError.message
+                      : null
+                  }
+                  composerModelMenu={
+                    <>
+                      <ModelMenu
+                        models={models}
+                        value={chat.model}
                         disabled={deletingChatId !== null}
-                        onChange={onReasoningEffortChange}
-              />
-                    )}
-                  </>
-                }
-                cancelError={cancelError}
-                cancelPendingTurnId={cancelPendingTurnId}
-                steerError={steerError}
-                steerStatus={steerStatus}
-                steerPendingTurnId={steerPendingTurnId}
-                onDraftChange={onComposerDraftChange}
-                onAddSource={onAddSource}
-                onDismissAttachedSource={() => setRecentSource(null)}
-                onSelectPrompt={setComposerDraft}
-                onSend={onSend}
-                onSteer={onSteerActiveTurn}
-                onStop={onCancelActiveTurn}
-              />
-            }
-          />
-        )}
+                        onChange={onModelChange}
+                      />
+                      {modelForSelection(models, chat.model)
+                        ?.supports_reasoning_effort && (
+                        <ReasoningEffortMenu
+                          value={chat.reasoning_effort}
+                          disabled={deletingChatId !== null}
+                          onChange={onReasoningEffortChange}
+                        />
+                      )}
+                    </>
+                  }
+                  onDraftChange={setComposerDraft}
+                  onAddSource={onAddSource}
+                  onDismissAttachedSource={() => setRecentSource(null)}
+                  onSelectPrompt={setComposerDraft}
+                  onSend={onSend}
+                />
+              }
+            />
+          )}
+        </ConversationRequestsProvider>
       </div>
       </div>
     </div>
