@@ -792,6 +792,82 @@ struct PendingCall {
 
 /// The closed action projection for a pending call, parsed from the arguments
 /// it will run with. Arguments that never parsed cannot describe an action.
+/// How many times one turn may throw a step away for the same reason.
+///
+/// A discarded step costs the model's prose, any sibling call that already
+/// succeeded, and a step from the budget, and it buys a corrective message.
+/// Sending that message a third time is not persuasion, it is spending the rest
+/// of the turn to reach `max_steps_exceeded` by a longer route — so the turn
+/// fails on the reason it actually hit.
+const MAX_REPEATED_STEP_DISCARDS: usize = 2;
+
+/// Why a step was discarded, for the repeat guard and the failure it raises.
+///
+/// These are runtime invariants the model cannot reliably be prompted into
+/// satisfying — providers parallelise tool calls by design — so the count
+/// matters more than the wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepDiscard {
+    ForegroundClientUnavailable,
+    ClientCallWithSiblings,
+    ClientArgumentsNotJson,
+    SandboxSpawnWithSiblings,
+    WaitForAgentsWithSiblings,
+    SensitiveCallWithSiblings,
+}
+
+impl StepDiscard {
+    /// The failure message. Every reason names what kept repeating, because a
+    /// turn that fails on a batch shape is otherwise indistinguishable from one
+    /// that ran out of thinking room.
+    const fn message(self) -> &'static str {
+        match self {
+            Self::ForegroundClientUnavailable => {
+                "the model kept requesting a user continuation this turn cannot claim"
+            }
+            Self::ClientCallWithSiblings => {
+                "the model kept pairing a client-executed tool with sibling tool calls"
+            }
+            Self::ClientArgumentsNotJson => {
+                "the model kept sending client tool arguments that are not valid JSON"
+            }
+            Self::SandboxSpawnWithSiblings => {
+                "the model kept pairing a sandbox delegation with sibling tool calls"
+            }
+            Self::WaitForAgentsWithSiblings => {
+                "the model kept pairing wait_for_agents with sibling tool calls"
+            }
+            Self::SensitiveCallWithSiblings => {
+                "the model kept pairing a tool that needs approval with sibling tool calls"
+            }
+        }
+    }
+}
+
+/// Per-turn tally of discarded steps, keyed by reason.
+#[derive(Debug, Default)]
+struct StepDiscards {
+    seen: Vec<(StepDiscard, usize)>,
+}
+
+impl StepDiscards {
+    /// Record one discard. Returns `true` once this reason has run out of
+    /// retries and the turn should fail on it instead of correcting again.
+    fn record(&mut self, reason: StepDiscard) -> bool {
+        let count = match self.seen.iter_mut().find(|(seen, _)| *seen == reason) {
+            Some((_, count)) => {
+                *count += 1;
+                *count
+            }
+            None => {
+                self.seen.push((reason, 1));
+                1
+            }
+        };
+        count >= MAX_REPEATED_STEP_DISCARDS
+    }
+}
+
 fn call_action_preview(call: &PendingCall) -> Option<ToolActionPreview> {
     serde_json::from_str(&call.args)
         .ok()
@@ -1047,6 +1123,10 @@ impl Agent {
             self.persist(chat.id, turn_id, Role::User, user_input)
                 .await?;
         }
+        // Discarding a step is a correction, not a fix: the invariants below are
+        // runtime constraints a model cannot be prompted into satisfying, so the
+        // same discard can otherwise repeat until the step budget is gone.
+        let mut discards = StepDiscards::default();
         // The provider transcript for this turn: prior stored text + the blocks
         // we build up as the loop runs.
         let mut transcript = self.load_transcript(chat.id).await?;
@@ -1230,6 +1310,13 @@ impl Agent {
                 self.tools.is_foreground_client(&call.name) && !self.agent_orchestration_active()
             });
             if unavailable_foreground_client {
+                if discards.record(StepDiscard::ForegroundClientUnavailable) {
+                    return Ok(self.repeated_discard_failure(
+                        StepDiscard::ForegroundClientUnavailable,
+                        total_usage,
+                        step,
+                    ));
+                }
                 events.send(AgentEvent::StreamInterrupted);
                 transcript.push(ChatMessage::text(
                     Role::User,
@@ -1248,6 +1335,13 @@ impl Agent {
                 // never going to satisfy. Only sibling calls stay forbidden —
                 // the checkpoint can carry one call across the resume.
                 if calls.len() != 1 || client_calls.len() != 1 {
+                    if discards.record(StepDiscard::ClientCallWithSiblings) {
+                        return Ok(self.repeated_discard_failure(
+                            StepDiscard::ClientCallWithSiblings,
+                            total_usage,
+                            step,
+                        ));
+                    }
                     events.send(AgentEvent::StreamInterrupted);
                     transcript.push(ChatMessage {
                         role: Role::User,
@@ -1259,6 +1353,13 @@ impl Agent {
                 }
                 let call = client_calls[0];
                 let Some(arguments) = parse_client_args(&call.args) else {
+                    if discards.record(StepDiscard::ClientArgumentsNotJson) {
+                        return Ok(self.repeated_discard_failure(
+                            StepDiscard::ClientArgumentsNotJson,
+                            total_usage,
+                            step,
+                        ));
+                    }
                     events.send(AgentEvent::StreamInterrupted);
                     transcript.push(ChatMessage {
                         role: Role::User,
@@ -1318,6 +1419,13 @@ impl Agent {
                 .collect::<Vec<_>>();
             if !sandbox_spawns.is_empty() {
                 if calls.len() != 1 || sandbox_spawns.len() != 1 {
+                    if discards.record(StepDiscard::SandboxSpawnWithSiblings) {
+                        return Ok(self.repeated_discard_failure(
+                            StepDiscard::SandboxSpawnWithSiblings,
+                            total_usage,
+                            step,
+                        ));
+                    }
                     events.send(AgentEvent::StreamInterrupted);
                     transcript.push(ChatMessage {
                         role: Role::User,
@@ -1385,6 +1493,13 @@ impl Agent {
                 .collect::<Vec<_>>();
             if !agent_waits.is_empty() {
                 if calls.len() != 1 || agent_waits.len() != 1 {
+                    if discards.record(StepDiscard::WaitForAgentsWithSiblings) {
+                        return Ok(self.repeated_discard_failure(
+                            StepDiscard::WaitForAgentsWithSiblings,
+                            total_usage,
+                            step,
+                        ));
+                    }
                     events.send(AgentEvent::StreamInterrupted);
                     transcript.push(ChatMessage::text(
                         Role::User,
@@ -1452,6 +1567,13 @@ impl Agent {
             // Rejecting prose here used to burn the whole step budget on
             // corrective retries the model never satisfied (#372).
             if !sensitive_calls.is_empty() && (calls.len() != 1 || sensitive_calls.len() != 1) {
+                if discards.record(StepDiscard::SensitiveCallWithSiblings) {
+                    return Ok(self.repeated_discard_failure(
+                        StepDiscard::SensitiveCallWithSiblings,
+                        total_usage,
+                        step,
+                    ));
+                }
                 events.send(AgentEvent::StreamInterrupted);
                 transcript.push(ChatMessage {
                     role: Role::User,
@@ -1726,6 +1848,29 @@ impl Agent {
             usage: total_usage,
             model_steps: self.config.max_steps,
         })
+    }
+
+    /// Fail the turn on a discard reason that has already been corrected once.
+    ///
+    /// Reported as its own kind rather than `max_steps_exceeded`, because the
+    /// turn did not run out of room to think — it kept being handed a batch
+    /// shape the loop refuses, and saying so is the difference between a
+    /// debuggable failure and a mystery.
+    fn repeated_discard_failure(
+        &self,
+        reason: StepDiscard,
+        usage: Usage,
+        step: usize,
+    ) -> AgentTurnOutcome {
+        AgentTurnOutcome::Failed {
+            error: crate::error::AgentErrorInfo {
+                kind: "repeated_step_discard".into(),
+                message: reason.message().into(),
+            },
+            usage,
+            // The discarded step still consumed a provider call.
+            model_steps: step + 1,
+        }
     }
 
     /// Emit the cancellation terminal event and end the turn as a (non-error)
@@ -3838,7 +3983,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claimed_agent_retries_a_client_call_with_siblings_then_preserves_exhausted_usage() {
+    async fn a_batch_shape_the_loop_refuses_twice_fails_on_that_reason() {
         let db = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -3901,19 +4046,56 @@ mod tests {
             .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
             .await
             .unwrap();
-        assert!(matches!(
-            outcome,
-            AgentTurnOutcome::Failed {
-                error,
-                usage: Usage {
-                    input_tokens: 10,
-                    output_tokens: 4,
-                    ..
-                },
-                model_steps: 2,
-            } if error.kind == "max_steps_exceeded"
-        ));
+        // The loop corrects the shape once and fails on the second refusal.
+        // It used to keep correcting until the step budget ran out and then
+        // report `max_steps_exceeded`, which described the symptom rather than
+        // the cause — the model was never going to satisfy a runtime invariant
+        // it cannot see.
+        assert!(
+            matches!(
+                &outcome,
+                AgentTurnOutcome::Failed {
+                    error,
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 4,
+                        ..
+                    },
+                    model_steps: 2,
+                } if error.kind == "repeated_step_discard"
+                    && error.message.contains("sibling tool calls")
+            ),
+            "{outcome:?}"
+        );
         assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_discard_reason_is_corrected_once_before_it_fails_the_turn() {
+        let mut discards = StepDiscards::default();
+        // One correction is worth sending; a second identical one is not.
+        assert!(!discards.record(StepDiscard::ClientCallWithSiblings));
+        assert!(discards.record(StepDiscard::ClientCallWithSiblings));
+
+        // Reasons are counted separately: hitting two different invariants once
+        // each is a model exploring, not a model looping.
+        let mut mixed = StepDiscards::default();
+        assert!(!mixed.record(StepDiscard::SensitiveCallWithSiblings));
+        assert!(!mixed.record(StepDiscard::SandboxSpawnWithSiblings));
+        assert!(!mixed.record(StepDiscard::WaitForAgentsWithSiblings));
+        assert!(mixed.record(StepDiscard::SensitiveCallWithSiblings));
+
+        // Every reason carries its own kind and a message naming what repeated.
+        for reason in [
+            StepDiscard::ForegroundClientUnavailable,
+            StepDiscard::ClientCallWithSiblings,
+            StepDiscard::ClientArgumentsNotJson,
+            StepDiscard::SandboxSpawnWithSiblings,
+            StepDiscard::WaitForAgentsWithSiblings,
+            StepDiscard::SensitiveCallWithSiblings,
+        ] {
+            assert!(reason.message().starts_with("the model kept"));
+        }
     }
 
     /// The model narrates before it acts. Rejecting a client call for carrying
