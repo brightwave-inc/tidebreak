@@ -1,6 +1,8 @@
 import { memo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
+import { ClipboardCopyButton } from "./ClipboardCopyButton";
 import { MarkdownTable } from "./MarkdownTable";
 
 /**
@@ -17,7 +19,36 @@ import { MarkdownTable } from "./MarkdownTable";
  * indentation no longer leaks and the parsed block structure renders cleanly.
  */
 export function preserveLineBreaks(input: string): string {
-  return input.replace(/([^\n])\n(?!\n)/g, "$1  \n");
+  // Fenced code is source text: hard-break spaces would corrupt what the
+  // block renders and what the copy control yields. The `$` alternative keeps
+  // a still-streaming, unclosed fence untouched too.
+  return input
+    .split(/(```[\s\S]*?(?:```|$))/)
+    .map((segment) =>
+      segment.startsWith("```")
+        ? segment
+        : segment.replace(/([^\n])\n(?!\n)/g, "$1  \n"),
+    )
+    .join("");
+}
+
+/**
+ * The raw source of a code block: concatenated text descendants of the hast
+ * node, ignoring the token spans highlighting wraps them in. What the copy
+ * button writes — never the highlighted markup.
+ */
+export function rawCodeText(node: {
+  children?: unknown[];
+  value?: unknown;
+  type?: unknown;
+}): string {
+  if (node.type === "text" && typeof node.value === "string") {
+    return node.value;
+  }
+  if (!Array.isArray(node.children)) return "";
+  return node.children
+    .map((child) => rawCodeText(child as { children?: unknown[] }))
+    .join("");
 }
 
 export function safeMarkdownUrl(url: string | undefined): string | undefined {
@@ -56,8 +87,28 @@ const components: Components = {
       {alt ? `Image omitted: ${alt}` : "Image omitted"}
     </span>
   ),
-  code: ({ children }) => <code>{children}</code>,
-  pre: ({ children }) => <pre>{children}</pre>,
+  // className carries the fence language plus highlight token classes; the
+  // spans rehype-highlight nests inside render through the defaults.
+  code: ({ children, className }) => (
+    <code className={className}>{children}</code>
+  ),
+  pre: ({ children, node }) => {
+    const source = node ? rawCodeText(node) : "";
+    return (
+      <div className="code-block">
+        {source && (
+          <ClipboardCopyButton
+            value={source}
+            label="Copy code"
+            copiedAnnouncement="Code copied"
+            failedAnnouncement="Copy failed"
+            className="code-block-copy"
+          />
+        )}
+        <pre>{children}</pre>
+      </div>
+    );
+  },
   blockquote: ({ children }) => <blockquote>{children}</blockquote>,
   table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
 };
@@ -73,6 +124,9 @@ export const MessageMarkdown = memo(function MessageMarkdown({
     <div className="message-markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        // Highlight only fence-tagged languages; auto-detection on unlabeled
+        // blocks guesses wrong too often to be worth it.
+        rehypePlugins={[[rehypeHighlight, { detect: false }]]}
         components={components}
         skipHtml
         urlTransform={(url) => safeMarkdownUrl(url) ?? ""}

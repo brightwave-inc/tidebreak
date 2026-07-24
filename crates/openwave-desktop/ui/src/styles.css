@@ -1436,6 +1436,81 @@ body {
   font-family: inherit;
 }
 
+/* Code blocks are dark-surfaced in both themes, so one syntax palette serves
+   both. Tokens are emitted by rehype-highlight for fence-tagged languages. */
+.message-markdown pre code .hljs-keyword,
+.message-markdown pre code .hljs-doctag,
+.message-markdown pre code .hljs-template-tag,
+.message-markdown pre code .hljs-type {
+  color: oklch(0.78 0.12 300);
+}
+
+.message-markdown pre code .hljs-string,
+.message-markdown pre code .hljs-regexp,
+.message-markdown pre code .hljs-quote {
+  color: oklch(0.8 0.1 150);
+}
+
+.message-markdown pre code .hljs-comment {
+  color: oklch(0.62 0.01 285);
+  font-style: italic;
+}
+
+.message-markdown pre code .hljs-number,
+.message-markdown pre code .hljs-literal,
+.message-markdown pre code .hljs-symbol,
+.message-markdown pre code .hljs-bullet {
+  color: oklch(0.8 0.11 70);
+}
+
+.message-markdown pre code .hljs-title,
+.message-markdown pre code .hljs-section,
+.message-markdown pre code .hljs-built_in {
+  color: oklch(0.78 0.1 240);
+}
+
+.message-markdown pre code .hljs-attr,
+.message-markdown pre code .hljs-attribute,
+.message-markdown pre code .hljs-variable,
+.message-markdown pre code .hljs-selector-class,
+.message-markdown pre code .hljs-selector-id {
+  color: oklch(0.8 0.09 200);
+}
+
+.message-markdown pre code .hljs-emphasis {
+  font-style: italic;
+}
+
+.message-markdown pre code .hljs-strong {
+  font-weight: 600;
+}
+
+.code-block {
+  position: relative;
+}
+
+.code-block .code-block-copy {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid oklch(0.32 0.01 285);
+  border-radius: 6px;
+  background: var(--code-block-bg);
+  color: var(--code-block-ink);
+  font-size: 0.72rem;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.code-block:hover .code-block-copy,
+.code-block:focus-within .code-block-copy {
+  opacity: 1;
+}
+
 .message-markdown blockquote {
   border-left: 2px solid var(--color-openwave);
   padding-left: 0.75rem;

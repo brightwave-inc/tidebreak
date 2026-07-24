@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MessageMarkdown,
   preserveLineBreaks,
+  rawCodeText,
   safeMarkdownUrl,
 } from "./MessageMarkdown";
 
@@ -74,5 +75,64 @@ describe("MessageMarkdown", () => {
     );
 
     expect(markup.match(/<p>/g)).toHaveLength(2);
+  });
+});
+
+describe("code blocks", () => {
+  const FENCED = "```ts\nconst x: number = 1;\n```";
+
+  it("highlights fence-tagged code and passes token classes through", () => {
+    const markup = renderToStaticMarkup(<MessageMarkdown>{FENCED}</MessageMarkdown>);
+    expect(markup).toContain("hljs-keyword");
+    expect(markup).toContain('class="code-block"');
+  });
+
+  it("leaves unlabeled fences unhighlighted rather than guessing", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>{"```\nplain block\n```"}</MessageMarkdown>,
+    );
+    expect(markup).not.toContain("hljs-keyword");
+    expect(markup).toContain("plain block");
+  });
+
+  it("adds a copy control to blocks but not inline code", () => {
+    const block = renderToStaticMarkup(<MessageMarkdown>{FENCED}</MessageMarkdown>);
+    expect(block).toContain('aria-label="Copy code"');
+    const inline = renderToStaticMarkup(
+      <MessageMarkdown>{"use `inline()` here"}</MessageMarkdown>,
+    );
+    expect(inline).not.toContain('aria-label="Copy code"');
+  });
+
+  it("recovers the raw source from a highlighted tree", () => {
+    expect(
+      rawCodeText({
+        type: "element",
+        children: [
+          { type: "text", value: "const " },
+          {
+            type: "element",
+            children: [{ type: "text", value: "x" }],
+          },
+          { type: "text", value: " = 1;" },
+        ],
+      }),
+    ).toBe("const x = 1;");
+  });
+});
+
+describe("preserveLineBreaks and code fences", () => {
+  it("never injects hard-break spaces into fenced code", () => {
+    const input = "before\n```ts\nline one\nline two\n```\nafter\nend";
+    const output = preserveLineBreaks(input);
+    expect(output).toContain("line one\nline two");
+    expect(output).toContain("before  \n");
+    expect(output).toContain("after  \nend");
+  });
+
+  it("leaves a still-streaming unclosed fence untouched", () => {
+    const output = preserveLineBreaks("intro\n```py\npartial\nstream");
+    expect(output).toContain("partial\nstream");
+    expect(output).toContain("intro  \n");
   });
 });
