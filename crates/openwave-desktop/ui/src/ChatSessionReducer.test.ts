@@ -279,7 +279,7 @@ describe("approvals", () => {
 });
 
 describe("stream_interrupted", () => {
-  it("discards the optimistic candidate but keeps settled work", () => {
+  it("keeps a visible partial as superseded and discards provisional tools", () => {
     const { state } = play([
       TURN,
       { type: "tool_call_started", call_id: "done", name: "search" },
@@ -288,14 +288,39 @@ describe("stream_interrupted", () => {
       { type: "tool_call_started", call_id: "pending", name: "search" },
       { type: "stream_interrupted" },
     ]);
-    // The empty bubble minted at turn start survives (it renders as nothing);
-    // the streamed partial answer and the pending tool card are discarded.
     const roles = state.messages.map((m) => m.role);
-    expect(roles).toEqual(["assistant", "tool"]);
-    expect(state.messages[0]).toMatchObject({ role: "assistant", text: "" });
-    expect(state.messages[1]).toMatchObject({ callId: "done" });
+    expect(roles).toEqual(["assistant", "tool", "assistant"]);
+    expect(state.messages[2]).toMatchObject({
+      text: "partial answer",
+      superseded: true,
+    });
+    expect(state.messages.find((m) => m.role === "tool")).toMatchObject({
+      callId: "done",
+    });
     expect(state.assistantBuffer).toBe("");
     expect(state.provisionalToolCallIds.size).toBe(0);
+  });
+
+  it("streams the replacement into a fresh bubble beneath the superseded one", () => {
+    const { state } = play([
+      TURN,
+      { type: "text_delta", text: "first try" },
+      { type: "stream_interrupted" },
+      { type: "text_delta", text: "second try" },
+    ]);
+    const assistants = state.messages.filter((m) => m.role === "assistant");
+    expect(assistants).toHaveLength(2);
+    expect(assistants[0]).toMatchObject({
+      text: "first try",
+      superseded: true,
+    });
+    expect(assistants[1]).toMatchObject({ text: "second try" });
+    expect(assistants[1]).not.toHaveProperty("superseded", true);
+  });
+
+  it("still drops an empty streaming bubble outright", () => {
+    const { state } = play([TURN, { type: "stream_interrupted" }]);
+    expect(state.messages).toEqual([]);
   });
 });
 
@@ -526,5 +551,37 @@ describe("context truncation notice", () => {
       (m) => m.role === "system" && m.text.includes(NOTICE),
     );
     expect(notices).toHaveLength(2);
+  });
+});
+
+describe("replaying an active turn over a hydrated transcript", () => {
+  it("keeps the superseded partial and steer message in journal order", () => {
+    // Re-entering a chat mid-turn: hydration placed the persisted messages,
+    // then the journal replays the in-flight turn's events from the top.
+    const hydrated = applyTerminalHydration(initialChatSessionState(), {
+      messages: [
+        { id: "u1", role: "user", text: "write about birds" },
+        { id: "steer-1", role: "user", text: "make it volcanos" },
+      ],
+      messageIds: new Set(["u1", "steer-1"]),
+      lastEventSeq: 0,
+    });
+    const { state } = play(
+      [
+        { type: "turn_started", turn_id: "t1" },
+        { type: "text_delta", text: "Birds are great" },
+        { type: "stream_interrupted" },
+        { type: "user_steered", message_id: "steer-1", text: "make it volcanos" },
+        { type: "text_delta", text: "Volcanoes erupt" },
+      ],
+      hydrated,
+    );
+    const order = state.messages.map((m) =>
+      m.role === "assistant" ? `${m.superseded ? "superseded" : "live"}` : m.id,
+    );
+    expect(order).toEqual(["u1", "superseded", "steer-1", "live"]);
+    const assistants = state.messages.filter((m) => m.role === "assistant");
+    expect(assistants[0]).toMatchObject({ text: "Birds are great" });
+    expect(assistants[1]).toMatchObject({ text: "Volcanoes erupt" });
   });
 });
