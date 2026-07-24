@@ -1092,7 +1092,7 @@ export function parseToolResultPreview(
   };
 }
 
-function isRendererToolName(value: unknown): value is RendererToolName {
+export function isRendererToolName(value: unknown): value is RendererToolName {
   return (
     value === "search" ||
     value === "list_sources" ||

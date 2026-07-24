@@ -1,6 +1,11 @@
 import { useId, useState } from "react";
 import { Check, ChevronDown, Clock, Loader2, Terminal, X } from "lucide-react";
-import type { ToolActionPreview, ToolResultPreview } from "./api";
+import {
+  isRendererToolName,
+  type RendererToolName,
+  type ToolActionPreview,
+  type ToolResultPreview,
+} from "./api";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { ToolTone } from "./ToolStatusIcon";
@@ -53,7 +58,15 @@ export type ToolApprovalPresentation = {
 // side channel for an unexpected tool name, arguments, output, file path, or
 // provider diagnostic. The one exception is a tool's own `preview`, a closed
 // per-tool projection built server-side.
-const TOOL_PRESENTATIONS: Record<string, ToolPresentation> = {
+//
+// Keyed by [`RendererToolName`] so a tool added to that union without copy
+// fails to compile instead of silently reading as "Use a tool". `other` is
+// excluded: it is the server's fold for anything unrecognized, and the
+// fallback below is deliberately its wording.
+const TOOL_PRESENTATIONS: Record<
+  Exclude<RendererToolName, "other">,
+  ToolPresentation
+> = {
   search: {
     label: "Search sources",
     active: "Searching sources",
@@ -373,7 +386,10 @@ export function toolCallPresentation(
   name: string,
   status: ToolCallStatus,
 ): ToolCallPresentation & { icon: string } {
-  const tool = TOOL_PRESENTATIONS[name] ?? FALLBACK_TOOL;
+  const tool =
+    isRendererToolName(name) && name !== "other"
+      ? TOOL_PRESENTATIONS[name]
+      : FALLBACK_TOOL;
   const statusPresentationResult = statusPresentation(tool, status);
 
   return {
