@@ -285,27 +285,29 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
             Scope::Root { root_id } | Scope::PathSubtree { root_id, .. } => *root_id,
             Scope::Subject => continue,
         };
-        let root = state
-            .roots
-            .get(&root_id)
-            .ok_or_else(|| invalid_data("grant references an unknown root"))?;
-        if root.owner != grant.subject() {
-            return Err(invalid_data("grant subject does not own its root").into());
+        if !state.roots.contains_key(&root_id) {
+            return Err(invalid_data("grant references an unknown root").into());
         }
     }
     let mut attachment_identities = std::collections::HashSet::new();
     for attachment in &state.attachments {
-        let root = state
-            .roots
-            .get(&attachment.root_id())
-            .ok_or_else(|| invalid_data("attachment references an unknown root"))?;
-        if root.owner.kind() == crate::SubjectKind::Conversation
-            && root.owner.id() != attachment.conversation_id()
-        {
-            return Err(invalid_data(
-                "conversation-owned root is attached to another conversation",
-            )
-            .into());
+        if !state.roots.contains_key(&attachment.root_id()) {
+            return Err(invalid_data("attachment references an unknown root").into());
+        }
+        let has_matching_grant = state.grants.iter().any(|grant| {
+            matches!(
+                grant.scope(),
+                Scope::Root { root_id } | Scope::PathSubtree { root_id, .. }
+                    if *root_id == attachment.root_id()
+            ) && match grant.subject().kind() {
+                crate::SubjectKind::Project => true,
+                crate::SubjectKind::Conversation => {
+                    grant.subject().id() == attachment.conversation_id()
+                }
+            }
+        });
+        if !has_matching_grant {
+            return Err(invalid_data("attachment has no matching subject grant").into());
         }
         if !attachment_identities.insert((attachment.conversation_id(), attachment.root_id())) {
             return Err(invalid_data("duplicate persisted root attachment").into());
@@ -334,9 +336,16 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                 outcome: super::MutationOutcome::Complete(Ok(result)),
             } => {
                 if let Some(root) = state.roots.get(&result.root.root_id) {
-                    if root.owner != request.subject
-                        || root.display_name != result.root.display_name
-                    {
+                    let subject_has_grant = state.grants.iter().any(|grant| {
+                        grant.subject() == request.subject
+                            && matches!(
+                                grant.scope(),
+                                Scope::Root { root_id }
+                                    | Scope::PathSubtree { root_id, .. }
+                                    if *root_id == result.root.root_id
+                            )
+                    });
+                    if root.display_name != result.root.display_name || !subject_has_grant {
                         return Err(invalid_data(
                             "successful register receipt does not match authoritative state",
                         )
@@ -348,10 +357,9 @@ pub(super) fn validate_loaded_state(state: &State) -> Result<(), BrokerError> {
                             record,
                             MutationRecord::Revoke {
                                 request: revoke,
-                                outcome: super::MutationOutcome::Complete(Ok(revoke_result)),
-                            } if revoke_result.revoked
+                            outcome: super::MutationOutcome::Complete(Ok(revoke_result)),
+                        } if revoke_result.revoked
                                 && revoke.root_id == result.root.root_id
-                                && revoke.subject == request.subject
                         )
                     });
                     if !was_revoked {

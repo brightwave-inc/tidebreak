@@ -18,8 +18,9 @@ one folder all conversations work in.
 
 A folder elsewhere on the machine is a **connected root**. It becomes available
 only after the user chooses it through a trusted desktop action, such as a native
-folder picker. The current product resolves that access through the exact
-conversation, and each conversation can contain more than one connected root.
+folder picker. The broker remembers that host approval so the user does not have
+to locate the same folder again, but usable authority is attached through the
+exact conversation. Each conversation can contain more than one connected root.
 
 In practical terms:
 
@@ -27,6 +28,9 @@ In practical terms:
 - Each conversation has its own ordered set of connected folders.
 - A new conversation does not inherit another conversation's roots or fall back
   to a shared workspace.
+- Previously approved roots may be offered by safe display name in another
+  conversation. Attaching one requires a trusted native confirmation, but not
+  another folder picker.
 - The model sees an opaque root identifier, a display name, and root-relative
   paths. It never receives authority by naming an absolute host path.
 - Connecting one folder never grants access to its siblings, the user's whole
@@ -200,9 +204,11 @@ folder picker, resolves the renderer's chat ID against the server's authoritativ
 store, derives the trusted ownership subject from that record, and forwards the
 picker result. Current desktop chats use their conversation subject; dormant
 project-scoped API chats retain their legacy project subject. Re-registering the
-same pinned filesystem object for the same subject reuses the root. A separate
-product attachment change then confirms the exact conversation attachment before
-the renderer sees it as connected.
+same pinned filesystem object reuses the host-approved root. The host can return
+bounded safe summaries of approved roots to the management UI; it never returns
+their paths. Reusing an approved root in another chat requires a native
+confirmation, after which a separate product attachment change confirms the
+exact conversation attachment before the renderer sees it as connected.
 
 The **renderer** presents connected folders and permission choices. It receives
 safe summaries, not the broker's persisted absolute-path registry.
@@ -212,28 +218,32 @@ safe summaries, not the broker's persisted absolute-path registry.
 Broker requests are divided into two typed channels:
 
 1. **Control requests** record trusted user actions: negotiate a protocol
-   version, register a folder returned by the native picker, attach or detach an
-   existing root for one conversation, or revoke access. Only the desktop host
-   or an equivalent explicit local CLI action may send them.
+   version, list safe summaries of host-approved roots, register a folder
+   returned by the native picker, attach or detach an existing root for one
+   conversation, or revoke access. Only the desktop host or an equivalent
+   explicit local CLI action may send them.
 2. **Operation requests** come from agent execution. The current protocol can
    list connected roots, list a directory, and read a file; bounded import,
    writes, and confined commands are later capability slices. Every operation
-   is denied unless a matching grant exists.
+   that can expose a host resource is denied unless a matching grant exists; an
+   unattached conversation may safely receive an empty root list.
 
 Code should expose different controller and operator interfaces so an agent
 executor cannot accidentally call the control channel. The broker still
 validates every request; the type split is defense in depth, not the only check.
 
-Attaching and detaching are exact conversation mutations. Detaching a root from
-one conversation leaves the root, its grant, and every other conversation's
-attachment intact. Revocation is deliberately broader: it forgets the root and
-removes all of its grants and attachments. Both mutation kinds bind a stable
-operation identity to their original request, so an exact retry is idempotent
-and identity reuse with different inputs is rejected. A read-only attachment
-receipt lets a recovering native client distinguish unknown, completed, and
-failed work without starting or replaying the mutation. Attachment changes are
-computed and published in one durable state replacement, so they do not expose
-a recoverable intermediate phase.
+Attaching and detaching are exact conversation mutations. Attaching a
+host-approved root installs only the grant needed by that product subject and
+the attachment for the selected conversation. Detaching a root from one
+conversation leaves the host approval, its grants, and every other
+conversation's attachment intact. Revocation is deliberately broader: it
+forgets the root and removes all of its grants and attachments. Both mutation
+kinds bind a stable operation identity to their original request, so an exact
+retry is idempotent and identity reuse with different inputs is rejected. A
+read-only attachment receipt lets a recovering native client distinguish
+unknown, completed, and failed work without starting or replaying the mutation.
+Attachment changes are computed and published in one durable state replacement,
+so they do not expose a recoverable intermediate phase.
 
 The desktop's manual Disconnect action uses this conversation-only detach; it
 does not invoke global revocation. The connected-folder list is the intersection
