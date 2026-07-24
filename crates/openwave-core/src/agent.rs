@@ -2129,12 +2129,16 @@ impl Agent {
         // Deny-by-default: only approvable kinds are ever covered.
         let bypass_by_standing_grant = matches!(approval_class, ApprovalClass::Sensitive)
             && durable_approval.is_none()
-            && self.standing_grants.covers(
-                chat.id,
-                &call.name,
-                ToolApprovalKind::for_tool_name(&call.name),
-                action.as_ref(),
-            );
+            && serde_json::from_str::<Value>(&call.args).is_ok_and(|arguments| {
+                // The canonical arguments, not `action`: a grant decides
+                // authority and the preview beside it only describes one.
+                self.standing_grants.covers(
+                    chat.id,
+                    &call.name,
+                    ToolApprovalKind::for_tool_name(&call.name),
+                    &arguments,
+                )
+            });
         if matches!(approval_class, ApprovalClass::Sensitive) && !bypass_by_standing_grant {
             let summary = format!("{} requires approval", call.name);
             let kind = durable_approval

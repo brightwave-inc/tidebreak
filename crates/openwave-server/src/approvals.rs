@@ -75,10 +75,12 @@ impl ApprovalBroker {
         // broader grant after the call has already run.
         let scope = match rung {
             None => None,
-            Some(rung) => match grant_scope(rung, current.preview.as_ref()) {
-                Some(scope) => Some(scope),
-                None => return Ok(ResolveApprovalOutcome::GrantNotAvailable),
-            },
+            Some(rung) => {
+                match grant_scope(rung, current.preview.as_ref(), current.action_is_exact) {
+                    Some(scope) => Some(scope),
+                    None => return Ok(ResolveApprovalOutcome::GrantNotAvailable),
+                }
+            }
         };
         let outcome = self
             .store
@@ -126,15 +128,27 @@ pub enum ResolveApprovalOutcome {
 fn grant_scope(
     rung: crate::routes::ApprovalGrantRung,
     action: Option<&openwave_core::ToolActionPreview>,
+    action_is_exact: bool,
 ) -> Option<GrantScope> {
     use crate::routes::ApprovalGrantRung;
     use openwave_core::ToolActionPreview;
+    if matches!(rung, ApprovalGrantRung::WholeTool) {
+        return Some(GrantScope::WholeTool);
+    }
+    // A narrow rung names a command, and the preview it would be named from is
+    // clamped for display. Naming one from a clamped preview would authorize
+    // every other call that clamps to the same text, so an approximate
+    // description is refused rather than turned into standing authority.
+    if !action_is_exact {
+        return None;
+    }
     match (rung, action) {
         (ApprovalGrantRung::WholeTool, _) => Some(GrantScope::WholeTool),
-        (ApprovalGrantRung::ExactCommand, Some(ToolActionPreview::Exec { command, args, .. })) => {
+        (ApprovalGrantRung::ExactCommand, Some(ToolActionPreview::Exec { command, args, cwd })) => {
             Some(GrantScope::ExactCommand {
                 command: command.clone(),
                 args: args.clone(),
+                cwd: cwd.clone(),
             })
         }
         (ApprovalGrantRung::AnyArgsForCommand, Some(ToolActionPreview::Exec { command, .. })) => {
@@ -471,7 +485,7 @@ mod tests {
             request.chat_id,
             &request.tool_name,
             request.kind,
-            None
+            &json!({})
         ));
     }
 
@@ -501,16 +515,13 @@ mod tests {
         );
 
         let grants = broker.standing_grants();
-        let exec = |command: &str, args: &[&str]| openwave_core::ToolActionPreview::Exec {
-            command: command.into(),
-            args: args.iter().map(|arg| (*arg).to_string()).collect(),
-            cwd: ".".into(),
-        };
+        let exec =
+            |command: &str, args: &[&str]| json!({ "command": command, "args": args, "cwd": "." });
         assert!(grants.covers(
             request.chat_id,
             "exec",
             request.kind,
-            Some(&exec("cargo", &["test"])),
+            &exec("cargo", &["test"]),
         ));
         // The grant was built from the arguments the call was parked on, so it
         // cannot stretch to a command the human never saw.
@@ -518,9 +529,9 @@ mod tests {
             request.chat_id,
             "exec",
             request.kind,
-            Some(&exec("cargo", &["publish"])),
+            &exec("cargo", &["publish"]),
         ));
-        assert!(!grants.covers(request.chat_id, "exec", request.kind, None));
+        assert!(!grants.covers(request.chat_id, "exec", request.kind, &json!({})));
     }
 
     #[tokio::test]
@@ -544,9 +555,12 @@ mod tests {
                 .unwrap(),
             ResolveApprovalOutcome::GrantNotAvailable
         );
-        assert!(!broker
-            .standing_grants()
-            .covers(request.chat_id, "exec", request.kind, None));
+        assert!(!broker.standing_grants().covers(
+            request.chat_id,
+            "exec",
+            request.kind,
+            &json!({})
+        ));
     }
 
     #[tokio::test]
@@ -574,7 +588,7 @@ mod tests {
             request.chat_id,
             &request.tool_name,
             request.kind,
-            None
+            &json!({})
         ));
     }
 
