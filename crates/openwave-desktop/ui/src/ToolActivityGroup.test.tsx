@@ -3,68 +3,103 @@ import { describe, expect, it } from "vitest";
 import {
   ToolActivityGroup,
   toolActivityGroupPresentation,
-  type ToolActivity,
 } from "./ToolActivityGroup";
 
-describe("ToolActivityGroup", () => {
-  it("summarizes a small completed phase with semantic allowlisted copy", () => {
+function labelOf(activities: Parameters<typeof toolActivityGroupPresentation>[0]) {
+  return toolActivityGroupPresentation(activities).label;
+}
+
+describe("toolActivityGroupPresentation", () => {
+  it("names the latest thing that happened and counts the rest", () => {
     expect(
-      toolActivityGroupPresentation([
-        { name: "web_search", status: "completed" },
+      labelOf([
+        { name: "search", status: "completed" },
         { name: "read_file", status: "completed" },
-      ]),
-    ).toEqual({
-      phase: "settled",
-      tone: "completed",
-      icon: "✓",
-      label: "Searched the web and read a file",
-    });
-  });
-
-  it("summarizes mixed terminal outcomes without provider details", () => {
-    expect(
-      toolActivityGroupPresentation([
         { name: "web_search", status: "completed" },
-        { name: "write_file", status: "failed" },
-        { name: "list_dir", status: "cancelled" },
       ]),
-    ).toEqual({
-      phase: "settled",
-      tone: "failed",
-      icon: "!",
-      label: "3 tool activities · 1 completed · 1 failed · 1 not run",
-    });
+    ).toBe("Searched the web and 2 other tasks");
   });
 
-  it("keeps an active phase distinct from settled history", () => {
+  it("says only what happened when a phase is one call", () => {
+    expect(labelOf([{ name: "web_search", status: "completed" }])).toBe(
+      "Searched the web",
+    );
+  });
+
+  it("counts a single remaining task in the singular", () => {
     expect(
-      toolActivityGroupPresentation([
+      labelOf([
         { name: "read_file", status: "completed" },
-        { name: "list_dir", status: "running" },
+        { name: "web_search", status: "completed" },
       ]),
-    ).toEqual({
-      phase: "active",
-      tone: "running",
-      icon: "↗",
-      label: "Browsing files",
-    });
+    ).toBe("Searched the web and 1 other task");
   });
 
-  it("uses the dedicated active copy while background agents are pending", () => {
+  it("keeps the whole phase in the present while any part of it is live", () => {
+    // The lead reads as in-progress even though it has settled, so the line
+    // doesn't flicker between tenses as calls finish underneath it.
+    const presentation = toolActivityGroupPresentation([
+      { name: "list_dir", status: "running" },
+      { name: "read_file", status: "completed" },
+    ]);
+
+    expect(presentation.label).toBe("Reading a file and 1 other task");
+    expect(presentation.phase).toBe("active");
+    expect(presentation.inProgress).toBe(true);
+  });
+
+  it("aggregates delegation by count and waiting without one", () => {
     expect(
-      toolActivityGroupPresentation([
+      labelOf([
+        { name: "spawn_sandbox_agent", status: "completed" },
+        { name: "spawn_sandbox_agent", status: "completed" },
+      ]),
+    ).toBe("Delegated 2 tasks");
+
+    // How many agents are being waited on is not what the line is about.
+    expect(
+      labelOf([
         { name: "spawn_sandbox_agent", status: "completed" },
         { name: "wait_for_agents", status: "running" },
       ]),
-    ).toEqual({
-      phase: "active",
-      tone: "running",
-      icon: "↗",
-      label: "Waiting for background agents",
-    });
+    ).toBe("Waiting for background agents and delegating 1 task");
   });
 
-  it("renders a native disclosure with a hidden ordered timeline", () => {
+  it("mixes categories in a readable order", () => {
+    expect(
+      labelOf([
+        { name: "spawn_sandbox_agent", status: "completed" },
+        { name: "read_file", status: "completed" },
+        { name: "search", status: "completed" },
+        { name: "wait_for_agents", status: "completed" },
+        { name: "web_search", status: "completed" },
+      ]),
+    ).toBe(
+      "Searched the web, 2 other tasks, delegated 1 task, and waited for background agents",
+    );
+  });
+
+  it("reports the worst terminal outcome without naming the tools that failed", () => {
+    const presentation = toolActivityGroupPresentation([
+      { name: "web_search", status: "completed" },
+      { name: "write_file", status: "failed" },
+      { name: "list_dir", status: "cancelled" },
+    ]);
+
+    expect(presentation.tone).toBe("failed");
+    expect(presentation.phase).toBe("settled");
+  });
+
+  it("degrades an empty phase without throwing", () => {
+    expect(toolActivityGroupPresentation([])).toMatchObject({
+      tone: "unknown",
+      label: "Tool activity unavailable",
+    });
+  });
+});
+
+describe("ToolActivityGroup", () => {
+  it("collapses the whole phase behind one line", () => {
     const markup = renderToStaticMarkup(
       <ToolActivityGroup
         groupIndex={3}
@@ -77,46 +112,35 @@ describe("ToolActivityGroup", () => {
 
     expect(markup).toContain('aria-expanded="false"');
     expect(markup).toContain('aria-controls="tool-activity-group-3"');
-    expect(markup).toContain(
-      'id="tool-activity-group-3" hidden="" class="tool-activity-group-list" role="list"',
-    );
-    expect(markup.match(/role="listitem"/g)).toHaveLength(2);
-    expect(markup).not.toContain("tool-call-card");
-    expect(markup).not.toContain('aria-live="polite"');
+    expect(markup).toContain("Read a file and 1 other task");
+    // Collapsed means absent, not hidden: nothing to read past.
+    expect(markup).not.toContain('role="listitem"');
   });
 
-  it("uses fixed fallback copy for unknown names and malformed statuses", () => {
+  it("keeps surfaced cards outside the collapsed region", () => {
     const markup = renderToStaticMarkup(
       <ToolActivityGroup
         groupIndex={0}
-        activities={[
-          {
-            id: "private-call-id",
-            name: "private_provider_tool_name",
-            status: "private-provider-diagnostic" as "completed",
-          },
-        ]}
-      />,
+        activities={[{ name: "exec", status: "completed" }]}
+      >
+        <p>a card that must stay reachable</p>
+      </ToolActivityGroup>,
     );
 
-    expect(markup).toContain("1 tool activity · 1 unavailable");
-    expect(markup).toContain("Use a tool");
-    expect(markup).toContain("Status unavailable");
-    expect(markup).not.toContain("private_provider_tool_name");
-    expect(markup).not.toContain("private-provider-diagnostic");
-    expect(markup).not.toContain("private-call-id");
+    expect(markup).toContain("a card that must stay reachable");
   });
 
-  it("does not render a broken disclosure for an invalid activity list", () => {
+  it("degrades a malformed activity list to fixed copy", () => {
     const markup = renderToStaticMarkup(
       <ToolActivityGroup
         groupIndex={0}
-        activities={undefined as unknown as ToolActivity[]}
+        activities={
+          [{ name: "web_search" }, null, "private"] as never
+        }
       />,
     );
 
     expect(markup).toContain("Tool activity unavailable");
-    expect(markup).not.toContain("aria-controls");
-    expect(markup).not.toContain("role=\"list\"");
+    expect(markup).not.toContain("private");
   });
 });

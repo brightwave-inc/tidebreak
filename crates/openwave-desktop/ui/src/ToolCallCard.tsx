@@ -1,10 +1,11 @@
-import { useState } from "react";
-import { ChevronDown, Loader2, Terminal } from "lucide-react";
+import { useId, useState } from "react";
+import { Check, ChevronDown, Clock, Loader2, Terminal, X } from "lucide-react";
 import type { ToolApprovalPreview } from "./api";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { ToolStatusIcon, type ToolTone } from "./ToolStatusIcon";
-import { ToolPreviewBlock, toolPreviewPresentation } from "./ToolPreview";
+import type { ToolTone } from "./ToolStatusIcon";
+import { ScrollableContainer } from "./ScrollableContainer";
+import { toolPreviewPresentation } from "./ToolPreview";
 
 export type ToolCallStatus =
   | "running"
@@ -13,11 +14,11 @@ export type ToolCallStatus =
   | "failed"
   | "cancelled";
 
-type ToolCallCardProps = {
+type ToolCommandCardProps = {
   name: string;
   status: ToolCallStatus;
-  /** The tool's own view of what it is doing, when it projects one. */
-  preview?: ToolApprovalPreview | null;
+  /** The tool's own view of the command, which is what the card is for. */
+  preview: ToolApprovalPreview;
 };
 
 type ToolPresentation = {
@@ -163,27 +164,40 @@ const FALLBACK_TOOL: ToolPresentation = {
 };
 
 /**
- * One tool call in the transcript, as a one-line card that opens onto whatever
- * the tool was willing to show.
+ * The card for a command the agent ran.
  *
- * A command card titles itself with the command it ran, because "Ran a command"
- * is the same sentence whether the agent listed a directory or built the
- * workspace. Every other tool keeps its allowlisted phrase: the renderer has no
- * detail for those, and inventing one would mean reading provider payloads.
+ * The command is the title, in monospace: "Ran a command" is the same sentence
+ * whether the agent listed a directory or rebuilt the workspace, so the only
+ * useful headline is the command itself. It opens while the command is still
+ * running — that is when someone is actually watching — and collapses back to
+ * one line once there is an outcome to read in the badge.
+ *
+ * Only tools that project a preview get a card. Everything else lives in the
+ * activity rail, where a line of text is the whole story the renderer has.
  */
-export function ToolCallCard({ name, status, preview }: ToolCallCardProps) {
+export function ToolCommandCard({ name, status, preview }: ToolCommandCardProps) {
   const presentation = toolCallPresentation(name, status);
-  const command = preview ? toolPreviewPresentation(preview) : null;
-  const [expanded, setExpanded] = useState(false);
-  // A card opens only when the body says something the title didn't. Tools
-  // whose payloads never cross the boundary have nothing to show at all, and a
-  // command run in the default directory is already fully stated by its title.
-  const expandable = command !== null && command.detail !== command.headline;
+  const command = toolPreviewPresentation(preview);
+  const running = presentation.tone === "running";
+  const [expanded, setExpanded] = useState(running);
+  const bodyId = useId();
 
-  const header = (
-    <>
-      <span className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-xs font-medium">
-        {expandable && (
+  return (
+    <section
+      className="bg-background max-w-prose overflow-hidden rounded-lg border"
+      aria-label={`${presentation.label}: ${presentation.statusLabel}`}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <button
+        type="button"
+        className="hover:bg-muted/50 focus-visible:ring-ring flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-hidden"
+        aria-expanded={expanded}
+        aria-controls={bodyId}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-xs font-medium">
           <ChevronDown
             className={cn(
               "size-3.5 shrink-0 transition-transform",
@@ -191,51 +205,16 @@ export function ToolCallCard({ name, status, preview }: ToolCallCardProps) {
             )}
             aria-hidden="true"
           />
-        )}
-        <span className="shrink-0" aria-hidden="true">
-          {command ? (
-            <Terminal size={14} />
-          ) : (
-            <ToolStatusIcon tone={presentation.tone} size={14} />
-          )}
+          <Terminal className="size-3.5 shrink-0" aria-hidden="true" />
+          <span className="truncate font-mono">{command.headline}</span>
         </span>
-        <span className={cn("truncate", command && "font-mono")}>
-          {command ? command.headline : presentation.title}
-        </span>
-      </span>
-      <ToolStatusBadge presentation={presentation} />
-    </>
-  );
-
-  return (
-    <section
-      className={cn(
-        "bg-card text-card-foreground w-[min(100%,38rem)] self-start overflow-hidden rounded-lg border",
-        `is-${presentation.tone}`,
-        presentation.tone === "cancelled" && "opacity-70",
-      )}
-      aria-label={`${presentation.label}: ${presentation.statusLabel}`}
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-    >
-      {expandable ? (
-        <button
-          type="button"
-          className="hover:bg-muted/50 focus-visible:ring-ring flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left transition-colors focus-visible:ring-2 focus-visible:outline-hidden"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((current) => !current)}
-        >
-          {header}
-        </button>
-      ) : (
-        <div className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5">
-          {header}
-        </div>
-      )}
-      {expandable && expanded && preview && (
-        <div className="border-t p-1">
-          <ToolPreviewBlock preview={preview} />
+        <ToolStatusBadge presentation={presentation} />
+      </button>
+      {expanded && (
+        <div id={bodyId} className="border-t p-1">
+          <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
+            {command.detail}
+          </ScrollableContainer>
         </div>
       )}
     </section>
@@ -249,29 +228,37 @@ function ToolStatusBadge({
 }) {
   if (presentation.tone === "running") {
     return (
-      <Badge variant="outline" size="sm" className="shrink-0">
+      <Badge variant="outline" className="shrink-0 gap-1">
         <Loader2 className="size-3 animate-spin" aria-hidden="true" />
-        {presentation.badgeLabel}
+        Running…
       </Badge>
     );
   }
   if (presentation.tone === "completed") {
     return (
-      <Badge variant="success" size="sm" className="shrink-0">
-        {presentation.badgeLabel}
+      <Badge variant="success" className="shrink-0 gap-1">
+        <Check className="size-3" aria-hidden="true" />
+        Done
+      </Badge>
+    );
+  }
+  if (presentation.tone === "waiting_approval") {
+    return (
+      <Badge variant="outline" className="shrink-0 gap-1">
+        <Clock className="size-3" aria-hidden="true" />
+        Waiting for approval
       </Badge>
     );
   }
   return (
     <Badge
       variant="outline"
-      size="sm"
       className={cn(
-        "shrink-0",
-        (presentation.tone === "failed" || presentation.tone === "unknown") &&
-          "text-critical",
+        "text-muted-foreground shrink-0 gap-1",
+        presentation.tone === "failed" && "text-destructive",
       )}
     >
+      <X className="size-3" aria-hidden="true" />
       {presentation.badgeLabel}
     </Badge>
   );

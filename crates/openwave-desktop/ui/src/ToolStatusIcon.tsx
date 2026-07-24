@@ -1,11 +1,4 @@
-import {
-  ArrowUpRight,
-  Check,
-  CircleHelp,
-  Clock,
-  Minus,
-  TriangleAlert,
-} from "lucide-react";
+import { Ban, CircleAlert, Clock, Loader2 } from "lucide-react";
 
 export type ToolTone =
   | "running"
@@ -16,29 +9,31 @@ export type ToolTone =
   | "unknown";
 
 /**
- * Renderer-owned status glyph for tool cards and activity groups. It is derived
- * only from the allowlisted presentation tone, never from a provider-supplied
- * tool name or payload.
+ * Renderer-owned status glyph, derived only from the allowlisted presentation
+ * tone and never from a provider-supplied tool name or payload.
+ *
+ * Success renders nothing on purpose. Most calls succeed, so a checkmark on
+ * each one is a column of noise that makes the rows that did fail harder to
+ * find; the past-tense title already says the work is done.
  */
 export function ToolStatusIcon({
   tone,
-  size = 15,
+  className = "size-4",
 }: {
   tone: ToolTone;
-  size?: number;
+  className?: string;
 }) {
   switch (tone) {
-    case "completed":
-      return <Check size={size} />;
-    case "failed":
-      return <TriangleAlert size={size} />;
-    case "cancelled":
-      return <Minus size={size} />;
-    case "waiting_approval":
-      return <Clock size={size} />;
     case "running":
-      return <ArrowUpRight size={size} />;
-    default:
-      return <CircleHelp size={size} />;
+      return <Loader2 className={`${className} animate-spin`} />;
+    case "waiting_approval":
+      return <Clock className={`text-muted-foreground ${className}`} />;
+    case "completed":
+      return null;
+    case "cancelled":
+      return <Ban className={`text-muted-foreground ${className}`} />;
+    case "failed":
+    case "unknown":
+      return <CircleAlert className={`text-muted-foreground ${className}`} />;
   }
 }

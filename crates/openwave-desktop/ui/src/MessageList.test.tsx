@@ -10,7 +10,6 @@ describe("MessageBubble", () => {
       <MessageBubble
         message={{ id: "user-1", role: "user", text: "Hello **there**" }}
         busy={false}
-        onApproval={noop}
       />,
     );
     const assistant = renderToStaticMarkup(
@@ -22,7 +21,6 @@ describe("MessageBubble", () => {
           sources: [],
         }}
         busy={false}
-        onApproval={noop}
       />,
     );
 
@@ -33,7 +31,7 @@ describe("MessageBubble", () => {
     expect(assistant).not.toContain("bubble");
   });
 
-  it("keeps tool cards and approvals in sequence without a duplicate worker status", () => {
+  it("keeps a phase ahead of the response it precedes, with one worker status", () => {
     const messages: ChatMessage[] = [
       { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "running" },
       {
@@ -65,86 +63,12 @@ describe("MessageBubble", () => {
       />,
     );
 
-    expect(markup.indexOf("Search the web")).toBeLessThan(
-      markup.indexOf("Approval needed"),
-    );
+    // The parked call is represented by its approval card alone: no rail line
+    // repeating the pending action, and no generic worker status either.
     expect(markup).toContain('aria-label="Approval needed"');
     expect(markup).toContain("Yes, allow it once");
-    expect(markup).toContain("Yes, and don&#x27;t ask again in this chat");
+    expect(markup).not.toContain("Searching the web");
     expect(markup).not.toContain("Working");
-    expect(markup).toContain('aria-live="polite"');
-  });
-
-  it("lets the approval card own the slot while its call is parked", () => {
-    const preview = {
-      tool: "exec" as const,
-      command: "cargo",
-      args: ["build"],
-      cwd: ".",
-    };
-    const tool = {
-      id: "tool-1",
-      role: "tool",
-      callId: "call-1",
-      name: "exec",
-      preview,
-    } as const;
-    const card = {
-      id: "approval-1",
-      role: "approval",
-      callId: "call-1",
-      summary: "Run this command?",
-      preview,
-      canApprove: true,
-      canRemember: true,
-    } as const;
-    const markup = renderToStaticMarkup(
-      <MessageList
-        messages={[{ ...tool, status: "waiting_approval" }, card]}
-        folderAccessRequests={[]}
-        nativeHost={false}
-        nativeBusy={false}
-        resolvingFolderCalls={new Set()}
-        folderAccessErrors={{}}
-        decidingApprovalCalls={new Set()}
-        approvalErrors={{}}
-        busy={false}
-        scrollRef={{ current: null }}
-        onScroll={noop}
-        onApproval={noop}
-        onFolderAccessDecision={noop}
-        onFolderAccessCancel={noop}
-      />,
-    );
-
-    // One copy of the command, on the card that can actually act on it.
-    expect(markup.match(/cargo build/g)).toHaveLength(1);
-    expect(markup).not.toContain("Waiting for approval");
-
-    // Once decided, the tool card comes back to carry the outcome.
-    const decided = renderToStaticMarkup(
-      <MessageList
-        messages={[
-          { ...tool, status: "completed" },
-          { ...card, resolved: true },
-        ]}
-        folderAccessRequests={[]}
-        nativeHost={false}
-        nativeBusy={false}
-        resolvingFolderCalls={new Set()}
-        folderAccessErrors={{}}
-        decidingApprovalCalls={new Set()}
-        approvalErrors={{}}
-        busy={false}
-        scrollRef={{ current: null }}
-        onScroll={noop}
-        onApproval={noop}
-        onFolderAccessDecision={noop}
-        onFolderAccessCancel={noop}
-      />,
-    );
-    expect(decided).toContain("cargo build");
-    expect(decided).toContain(">Done<");
   });
 
   it("replaces an empty active assistant placeholder with one worker status", () => {
@@ -207,37 +131,11 @@ describe("MessageBubble", () => {
     expect(markup).not.toContain("call-1");
   });
 
-  it("does not offer approval for an action without a safe description", () => {
-    const markup = renderToStaticMarkup(
-      <MessageBubble
-        message={{
-          id: "approval-unknown",
-          role: "approval",
-          callId: "call-unknown",
-          summary: "The exact action cannot be safely described.",
-          canApprove: false,
-          canRemember: false,
-        }}
-        busy
-        onApproval={noop}
-      />,
-    );
-
-    expect(markup).toContain("The exact action cannot be safely described.");
-    expect(markup).not.toContain("Yes,");
-    expect(markup).toContain("No, don&#x27;t allow this");
-  });
-
-  it("collapses only contiguous terminal tool activity using safe card copy", () => {
+  it("splits phases at the response between them", () => {
     const messages: ChatMessage[] = [
       { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "completed" },
       { id: "tool-2", role: "tool", callId: "call-2", name: "read_file", status: "failed" },
-      {
-        id: "assistant-1",
-        role: "assistant",
-        text: "Done",
-        sources: [],
-      },
+      { id: "assistant-1", role: "assistant", text: "Done", sources: [] },
       { id: "tool-3", role: "tool", callId: "call-3", name: "list_dir", status: "cancelled" },
     ];
     const markup = renderToStaticMarkup(
@@ -259,22 +157,16 @@ describe("MessageBubble", () => {
       />,
     );
 
-    expect(markup).toContain('class="tool-activity-group is-settled"');
-    expect(markup).toContain('aria-expanded="false"');
     expect(markup).toContain('aria-controls="tool-activity-group-0"');
-    expect(markup).toContain('id="tool-activity-group-0" hidden=""');
-    expect(markup).toContain(
-      "2 tool activities · 1 completed · 1 failed",
-    );
-    expect(markup).toContain("Web search complete");
-    expect(markup).toContain("Tool could not complete");
-    expect(markup.indexOf("Web search complete")).toBeLessThan(
+    expect(markup).toContain('aria-controls="tool-activity-group-1"');
+    expect(markup).toContain("Read a file and 1 other task");
+    expect(markup.indexOf("Read a file and 1 other task")).toBeLessThan(
       markup.indexOf("Done"),
     );
-    expect(markup.indexOf("Done")).toBeLessThan(markup.indexOf("Not run"));
+    expect(markup.indexOf("Done")).toBeLessThan(markup.indexOf("Browse files"));
   });
 
-  it("leaves active and folder-access activity individually visible", () => {
+  it("keeps a live call in the same phase as the settled ones around it", () => {
     const messages: ChatMessage[] = [
       { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "completed" },
       { id: "tool-2", role: "tool", callId: "call-2", name: "list_dir", status: "running" },
@@ -300,9 +192,13 @@ describe("MessageBubble", () => {
       />,
     );
 
-    expect(markup).not.toContain("tool-activity-group");
-    expect(markup).toContain("Browsing files");
-    expect(markup).toContain("Folder access request complete");
+    // One phase, in the present because part of it is still live.
+    expect(markup).toContain('aria-controls="tool-activity-group-0"');
+    expect(markup).not.toContain('aria-controls="tool-activity-group-1"');
+    expect(markup).toContain("Reading a file and 3 other tasks");
+    // The phase label is the running commentary, so it is announced politely
+    // as the agent moves through the phase.
+    expect(markup).toContain('aria-live="polite"');
   });
 
   it("does not expose provider tool names in an activity summary", () => {
@@ -335,9 +231,7 @@ describe("MessageBubble", () => {
       />,
     );
 
-    expect(markup).toContain("Used a tool and searched the web");
-    expect(markup).toContain("Used a tool");
-    expect(markup).toContain("Tool complete");
+    expect(markup).toContain("Searched the web and 1 other task");
     expect(markup).not.toContain("private_server");
     expect(markup).not.toContain("sensitive_path");
   });
@@ -518,91 +412,6 @@ describe("MessageBubble", () => {
   });
 });
 
-describe("approval decision feedback", () => {
-  const approval: ChatMessage = {
-    id: "approval-1",
-    role: "approval",
-    callId: "call-1",
-    summary: "Search a site",
-    canApprove: true,
-    canRemember: true,
-  };
-
-  it("disables the decision buttons while a decision is in flight", () => {
-    const markup = renderToStaticMarkup(
-      <MessageBubble
-        message={approval}
-        busy={false}
-        onApproval={noop}
-        approvalState={{
-          decidingApprovalCalls: new Set(["call-1"]),
-          approvalErrors: {},
-        }}
-      />,
-    );
-
-    expect(markup).toContain('aria-busy="true"');
-    // Every option is untabbable and the submit control is disabled, so no
-    // second decision can be sent while the first is in flight.
-    expect(markup.match(/tabindex="-1"/g)).toHaveLength(3);
-    expect(markup).toContain("disabled=\"\"");
-  });
-
-  it("renders a per-card error and keeps the buttons actionable for retry", () => {
-    const markup = renderToStaticMarkup(
-      <MessageBubble
-        message={approval}
-        busy={false}
-        onApproval={noop}
-        approvalState={{
-          decidingApprovalCalls: new Set(),
-          approvalErrors: {
-            "call-1": "Could not send your decision: Error: 500: boom",
-          },
-        }}
-      />,
-    );
-
-    expect(markup).toContain('role="alert"');
-    expect(markup).toContain("Could not send your decision");
-    expect(markup).not.toContain('disabled=""');
-  });
-
-  it("hides the error once the approval is resolved", () => {
-    const markup = renderToStaticMarkup(
-      <MessageBubble
-        message={{ ...approval, resolved: true }}
-        busy={false}
-        onApproval={noop}
-        approvalState={{
-          decidingApprovalCalls: new Set(),
-          approvalErrors: { "call-1": "Could not send your decision: nope" },
-        }}
-      />,
-    );
-
-    expect(markup).not.toContain('role="alert"');
-    expect(markup).not.toContain("Could not send your decision");
-  });
-
-  it("shows no error for a card whose call has none", () => {
-    const markup = renderToStaticMarkup(
-      <MessageBubble
-        message={approval}
-        busy={false}
-        onApproval={noop}
-        approvalState={{
-          decidingApprovalCalls: new Set(["other-call"]),
-          approvalErrors: { "other-call": "Could not send your decision: x" },
-        }}
-      />,
-    );
-
-    expect(markup).not.toContain('role="alert"');
-    expect(markup).not.toContain('disabled=""');
-  });
-});
-
 describe("superseded responses", () => {
   it("renders a superseded bubble dimmed with an accessible label", () => {
     const markup = renderToStaticMarkup(
@@ -615,7 +424,6 @@ describe("superseded responses", () => {
           superseded: true,
         }}
         busy={false}
-        onApproval={noop}
       />,
     );
     expect(markup).toContain("message-superseded");
