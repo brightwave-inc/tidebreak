@@ -7,18 +7,15 @@ import type {
   UserQuestionAnswer,
 } from "./api";
 import { AgentActivityPanel } from "./AgentActivityPanel";
-import { ChatTabs } from "./ChatTabs";
 import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
-import { useUiStore } from "./UiStore";
 import { Composer } from "./Composer";
 import type { FolderAccessDecision } from "./host";
 import { MessageList } from "./MessageList";
-import { ArrowDown, Settings } from "lucide-react";
+import { ArrowDown } from "lucide-react";
 
 export type ChatViewProps = {
   chat: Chat;
-  status: string;
   hydrated: boolean;
   nativeHost: boolean;
   deletingChat: boolean;
@@ -72,13 +69,13 @@ export type ChatViewProps = {
 };
 
 /**
- * The chat pane: header, agent activity, transcript, and composer. Reads the
- * live session (messages, busy, active turn) straight from the session store.
+ * The chat pane: agent activity, transcript, and composer, rendered as the
+ * body of the chat workspace. Reads the live session (messages, busy, active
+ * turn) straight from the session store.
  * Mount with `key={chat.id}` so scroll-follow state resets per conversation.
  */
 export function ChatView({
   chat,
-  status,
   hydrated,
   nativeHost,
   deletingChat,
@@ -120,7 +117,6 @@ export function ChatView({
   onSteer,
   onStop,
 }: ChatViewProps) {
-  const showSettings = useUiStore((state) => state.showSettings);
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
@@ -164,28 +160,6 @@ export function ChatView({
 
   return (
     <section className="chat-pane">
-      <header className="conversation-header">
-        <div className="conversation-title-row">
-          <h1>{chat.title?.trim() || "New chat"}</h1>
-        </div>
-        {nativeHost && <ChatTabs />}
-        <div className="conversation-header-actions">
-          <div className="mobile-settings-actions">
-            <button
-              type="button"
-              className="btn"
-              aria-label="Settings"
-              onClick={showSettings}
-            >
-              <Settings size={14} />
-            </button>
-          </div>
-          <span className="status" title={status}>
-            {status}
-          </span>
-        </div>
-      </header>
-
       <AgentActivityPanel
         runs={agentRuns}
         loading={agentRunsLoading}

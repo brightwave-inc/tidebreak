@@ -10,7 +10,6 @@ const chat = { id: "chat-1", title: "Roadmap", project_id: null } as unknown as 
 function renderChatView(overrides: Partial<ChatViewProps> = {}) {
   const props: ChatViewProps = {
     chat,
-    status: "chat chat-1 · live",
     hydrated: true,
     nativeHost: false,
     deletingChat: false,
@@ -93,13 +92,5 @@ describe("ChatView", () => {
         );
     });
     expect(screen.getByText("streamed answer")).toBeInTheDocument();
-  });
-
-  it("shows the chat title and connection status", () => {
-    renderChatView();
-    expect(
-      screen.getByRole("heading", { name: "Roadmap" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("chat chat-1 · live")).toBeInTheDocument();
   });
 });

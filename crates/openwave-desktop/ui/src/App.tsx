@@ -30,8 +30,6 @@ import { ChatSessionController } from "./ChatSessionController";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { useChatListStore } from "./ChatListStore";
 import { useUiStore } from "./UiStore";
-import { DocumentsView } from "./DocumentsView";
-import { DeliverablesView } from "./DeliverablesView";
 import {
   importLibraryDocument,
   type ImportedDocument,
@@ -65,7 +63,7 @@ import { useConfirm } from "./components/ConfirmDialog";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useDesktopUpdates } from "./updates";
 import { ChatView } from "./ChatView";
-import { FoldersView } from "./FoldersView";
+import { ChatWorkspace } from "./ChatWorkspace";
 import { Sidebar } from "./Sidebar";
 
 let msgSeq = 0;
@@ -1258,13 +1256,7 @@ export default function App() {
       />}
 
       <div className="main">
-        {primaryView === "documents" ? (
-          <DocumentsView chatId={chat.id} />
-        ) : primaryView === "deliverables" ? (
-          <DeliverablesView chatId={chat.id} />
-        ) : primaryView === "folders" ? (
-          <FoldersView chat={chat} />
-        ) : primaryView === "settings" ? (
+        {primaryView === "settings" ? (
           <SettingsView
             client={client}
             models={models}
@@ -1278,87 +1270,93 @@ export default function App() {
             onRestartForUpdate={onRestartForUpdate}
           />
         ) : (
-          <ChatView
-          key={chat.id}
-          chat={chat}
-          status={status}
-          hydrated={hydratedChatId === chat.id}
-          nativeHost={hasNativeHost()}
-          deletingChat={deletingChatId !== null}
-          agentRuns={visibleAgentRuns}
-          agentRunsLoading={
-            agentRunsChatId === chat.id ? agentRunsLoading : true
-          }
-          agentRunsError={agentRunsChatId === chat.id ? agentRunsError : null}
-          stoppingRunIds={visibleStoppingSandboxRunIds}
-          stopErrorRunIds={visibleSandboxStopErrorRunIds}
-          onRetryAgentRuns={() => refreshAgentRunsRef.current?.()}
-          onStopSandboxRun={(runId) => void onStopSandboxAgentRun(runId)}
-          folderAccessRequests={folderAccessRequests}
-          userQuestionRequests={userQuestionRequests}
-          resolvingFolderCalls={resolvingFolderCalls}
-          folderAccessErrors={folderAccessErrors}
-          answeringQuestionCalls={answeringQuestionCalls}
-          userQuestionErrors={userQuestionErrors}
-          decidingApprovalCalls={decidingApprovalCalls}
-          approvalErrors={approvalErrors}
-          onApproval={(callId, decision, remember) =>
-            void onApproval(callId, decision, remember)
-          }
-          onFolderAccessDecision={(callId, decision) =>
-            void onFolderAccessDecision(callId, decision)
-          }
-          onFolderAccessCancel={(callId, turnId) =>
-            void onFolderAccessCancel(callId, turnId)
-          }
-          onAnswerUserQuestions={(callId, answers) =>
-            void onAnswerUserQuestions(callId, answers)
-          }
-          onUserQuestionsCancel={(turnId) =>
-            void onUserQuestionsCancel(turnId)
-          }
-          draft={draft}
-          attachingSource={addingSourceChatId !== null}
-          attachedSourceName={
-            recentSource && recentSource.chatId === chat.id
-              ? recentSource.source.displayName
-              : null
-          }
-          sourceAttachmentError={
-            sourceAttachmentError && sourceAttachmentError.chatId === chat.id
-              ? sourceAttachmentError.message
-              : null
-          }
-          composerModelMenu={
-            <>
-              <ModelMenu
-                models={models}
-                value={chat.model}
-                disabled={deletingChatId !== null}
-                onChange={onModelChange}
+          <ChatWorkspace
+            chat={chat}
+            status={status}
+            nativeHost={hasNativeHost()}
+            transcript={
+              <ChatView
+                key={chat.id}
+                chat={chat}
+                hydrated={hydratedChatId === chat.id}
+                nativeHost={hasNativeHost()}
+                deletingChat={deletingChatId !== null}
+                agentRuns={visibleAgentRuns}
+                agentRunsLoading={
+                  agentRunsChatId === chat.id ? agentRunsLoading : true
+                }
+                agentRunsError={agentRunsChatId === chat.id ? agentRunsError : null}
+                stoppingRunIds={visibleStoppingSandboxRunIds}
+                stopErrorRunIds={visibleSandboxStopErrorRunIds}
+                onRetryAgentRuns={() => refreshAgentRunsRef.current?.()}
+                onStopSandboxRun={(runId) => void onStopSandboxAgentRun(runId)}
+                folderAccessRequests={folderAccessRequests}
+                userQuestionRequests={userQuestionRequests}
+                resolvingFolderCalls={resolvingFolderCalls}
+                folderAccessErrors={folderAccessErrors}
+                answeringQuestionCalls={answeringQuestionCalls}
+                userQuestionErrors={userQuestionErrors}
+                decidingApprovalCalls={decidingApprovalCalls}
+                approvalErrors={approvalErrors}
+                onApproval={(callId, decision, remember) =>
+                  void onApproval(callId, decision, remember)
+                }
+                onFolderAccessDecision={(callId, decision) =>
+                  void onFolderAccessDecision(callId, decision)
+                }
+                onFolderAccessCancel={(callId, turnId) =>
+                  void onFolderAccessCancel(callId, turnId)
+                }
+                onAnswerUserQuestions={(callId, answers) =>
+                  void onAnswerUserQuestions(callId, answers)
+                }
+                onUserQuestionsCancel={(turnId) =>
+                  void onUserQuestionsCancel(turnId)
+                }
+                draft={draft}
+                attachingSource={addingSourceChatId !== null}
+                attachedSourceName={
+                  recentSource && recentSource.chatId === chat.id
+                    ? recentSource.source.displayName
+                    : null
+                }
+                sourceAttachmentError={
+                  sourceAttachmentError && sourceAttachmentError.chatId === chat.id
+                    ? sourceAttachmentError.message
+                    : null
+                }
+                composerModelMenu={
+                  <>
+                    <ModelMenu
+                      models={models}
+                      value={chat.model}
+                      disabled={deletingChatId !== null}
+                      onChange={onModelChange}
               />
-              {modelForSelection(models, chat.model)?.supports_reasoning_effort && (
-                <ReasoningEffortMenu
-                  value={chat.reasoning_effort}
-                  disabled={deletingChatId !== null}
-                  onChange={onReasoningEffortChange}
-                />
-              )}
-            </>
-          }
-          cancelError={cancelError}
-          cancelPendingTurnId={cancelPendingTurnId}
-          steerError={steerError}
-          steerStatus={steerStatus}
-          steerPendingTurnId={steerPendingTurnId}
-          onDraftChange={onComposerDraftChange}
-          onAddSource={onAddSource}
-          onDismissAttachedSource={() => setRecentSource(null)}
-          onSelectPrompt={setComposerDraft}
-          onSend={onSend}
-          onSteer={onSteerActiveTurn}
-          onStop={onCancelActiveTurn}
-        />
+                    {modelForSelection(models, chat.model)?.supports_reasoning_effort && (
+                      <ReasoningEffortMenu
+                        value={chat.reasoning_effort}
+                        disabled={deletingChatId !== null}
+                        onChange={onReasoningEffortChange}
+              />
+                    )}
+                  </>
+                }
+                cancelError={cancelError}
+                cancelPendingTurnId={cancelPendingTurnId}
+                steerError={steerError}
+                steerStatus={steerStatus}
+                steerPendingTurnId={steerPendingTurnId}
+                onDraftChange={onComposerDraftChange}
+                onAddSource={onAddSource}
+                onDismissAttachedSource={() => setRecentSource(null)}
+                onSelectPrompt={setComposerDraft}
+                onSend={onSend}
+                onSteer={onSteerActiveTurn}
+                onStop={onCancelActiveTurn}
+              />
+            }
+          />
         )}
       </div>
       </div>
