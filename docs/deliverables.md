@@ -42,13 +42,50 @@ destinations, and preserve the permissions of an existing regular destination.
 Neither the model nor renderer receives the scratch path, the selected export
 path, bearer credentials, or native-executor credentials.
 
+## The durable output record
+
+The filename-keyed catalog above cannot express version history: writing a
+filename twice replaces the earlier bytes and there is nothing left to recover.
+The product store therefore owns an output record whose identity is an opaque
+`OutputId`, with the filename demoted to display metadata.
+
+- An output has an opaque id, an owning conversation, a display filename, a
+  fixed media type, a current revision, and a revision count.
+- A revision has its own opaque id, a one-based ordinal, an exact byte length,
+  a SHA-256 digest, and the turn that produced it. Revision rows are
+  insert-only.
+- Updating an output appends a revision and republishes the current one. The
+  replaced revision keeps its own id and stays readable, so an update can no
+  longer destroy the bytes it supersedes.
+- Revision bytes live at `outputs/<output id>/<revision id>` under the exact
+  conversation's private scratch. The path is derived only from durable
+  identity, so a display filename can never steer where bytes are written, and
+  a revision file is written once and never replaced.
+- History is bounded at 100 revisions per output. Reaching the bound refuses
+  the write rather than discarding the oldest revision, because silently
+  dropping history would reintroduce the loss the record exists to prevent.
+- Deleting an output is a soft delete: it leaves the catalog but keeps its
+  revisions until the conversation itself is deleted. Deleting the conversation
+  cascades the records away, and the existing private-scratch cleanup removes
+  the bytes with the rest of the chat directory.
+
+Every mutation is keyed by a caller-minted identity. Reusing an identity with
+identical content returns the original record, so an ambiguous store response
+can be retried without creating a second output or a second revision; reusing
+one with different content is rejected.
+
+This layer is the foundation the model-facing and native surfaces move onto. It
+is not yet wired to `create_deliverable`, which still writes a filename into
+`artifacts/`. Files already in `artifacts/` predate the record and are not
+adopted into it: they stay on disk and remain listed by the current catalog
+until that surface moves to the record.
+
 ## Deliberate limits
 
-This baseline derives its durable catalog from the files themselves rather than
-adding artifact database rows. An export is a synchronous user action, so it is
-not automatically retried and does not yet have a durable export receipt.
-Deleting outputs, binary formats, Office document generation, transcript-inline
-artifact cards, version history, and writing directly into connected folders
-remain later slices. Those additions should preserve the same rule: the model
-names a logical output, while a person or narrowly scoped capability chooses
-where host data is written.
+An export is a synchronous user action, so it is not automatically retried and
+does not yet have a durable export receipt. Binary formats, Office document
+generation, transcript-inline artifact cards, per-revision source references,
+and writing directly into connected folders remain later slices. Those
+additions should preserve the same rule: the model names a logical output,
+while a person or narrowly scoped capability chooses where host data is
+written.

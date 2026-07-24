@@ -20,11 +20,12 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ToolApproval};
+use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{
-    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, ProjectId, RootAttachmentChangeId,
-    TurnId, TurnSteerId,
+    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, OutputId, OutputRevisionId, ProjectId,
+    RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 use crate::model::{
     AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult, AgentRunWaitSetCandidate,
@@ -865,6 +866,12 @@ fn document_storage_unavailable<T>() -> Result<T> {
     ))
 }
 
+fn output_storage_unavailable<T>() -> Result<T> {
+    Err(AgentError::Store(
+        "output storage is not implemented by this Store".into(),
+    ))
+}
+
 fn turn_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "durable turn storage is not implemented by this Store".into(),
@@ -1372,6 +1379,61 @@ pub trait Store: Send + Sync {
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
     ) -> Result<bool>;
+
+    /// Create a conversation output together with its first revision.
+    ///
+    /// The caller has already written the revision's bytes to conversation
+    /// private scratch under [`crate::deliverable::output_revision_relative_path`]
+    /// and supplies their exact length and digest. Reusing `request.id` with
+    /// identical content returns the original record so an ambiguous store
+    /// response can be retried; reusing it with different content is rejected.
+    async fn create_output(&self, _request: &CreateOutput) -> Result<OutputRecord> {
+        output_storage_unavailable()
+    }
+
+    /// Append an immutable revision and publish it as the output's current one.
+    ///
+    /// The previous revision is retained and stays addressable by its own id,
+    /// so an update can never destroy the bytes it replaced. Reusing
+    /// `revision.id` with identical content is an exact retry.
+    async fn append_output_revision(
+        &self,
+        _output_id: OutputId,
+        _revision: &NewOutputRevision,
+    ) -> Result<OutputRecord> {
+        output_storage_unavailable()
+    }
+
+    /// Fetch one output by opaque id, including a soft-deleted one.
+    async fn get_output(&self, _id: OutputId) -> Result<Option<OutputRecord>> {
+        output_storage_unavailable()
+    }
+
+    /// List a conversation's live outputs, most recently updated first.
+    async fn list_outputs(&self, _chat_id: ChatId, _limit: u64) -> Result<Vec<OutputRecord>> {
+        output_storage_unavailable()
+    }
+
+    /// List one output's revisions, newest first.
+    async fn list_output_revisions(&self, _output_id: OutputId) -> Result<Vec<OutputRevision>> {
+        output_storage_unavailable()
+    }
+
+    /// Fetch one revision by opaque id.
+    async fn get_output_revision(&self, _id: OutputRevisionId) -> Result<Option<OutputRevision>> {
+        output_storage_unavailable()
+    }
+
+    /// Soft-delete an output, hiding it from the catalog while retaining its
+    /// revisions. Returns `false` only when the output does not exist; deleting
+    /// an already-deleted output is the same durable outcome, not a conflict.
+    async fn delete_output(
+        &self,
+        _id: OutputId,
+        _deleted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        output_storage_unavailable()
+    }
 
     /// Atomically begin one exact broker-backed attachment change.
     ///

@@ -26,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddChatReasoningEffort),
             Box::new(AddDocumentChatScope),
             Box::new(AddUserQuestions),
+            Box::new(AddConversationOutputs),
         ]
     }
 }
@@ -271,6 +272,143 @@ impl MigrationTrait for AddUserQuestions {
             .await?;
         manager
             .drop_table(Table::drop().table(UserQuestionRequest::Table).to_owned())
+            .await
+    }
+}
+
+/// Gives conversation outputs a durable record with an opaque identity and an
+/// append-only revision history.
+///
+/// Before this, an output was a filename in private scratch and an update
+/// replaced the previous bytes in place. Existing loose files stay on disk but
+/// are no longer a catalog: the record is authoritative from here on.
+struct AddConversationOutputs;
+
+impl MigrationName for AddConversationOutputs {
+    fn name(&self) -> &str {
+        "m20260724_000013_add_conversation_outputs"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddConversationOutputs {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(Output::Table)
+                    .col(ColumnDef::new(Output::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Output::ChatId).uuid().not_null())
+                    .col(ColumnDef::new(Output::Filename).text().not_null())
+                    .col(ColumnDef::new(Output::MediaType).text().not_null())
+                    .col(ColumnDef::new(Output::CurrentRevisionId).uuid().not_null())
+                    .col(ColumnDef::new(Output::RevisionCount).integer().not_null())
+                    .col(
+                        ColumnDef::new(Output::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Output::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(Output::DeletedAt).timestamp_with_time_zone())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_output_chat")
+                            .from_tbl(Output::Table)
+                            .from_col(Output::ChatId)
+                            .to_tbl(Chat::Table)
+                            .to_col(Chat::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(
+                        Expr::col(Output::RevisionCount)
+                            .between(1, crate::deliverable::MAX_OUTPUT_REVISIONS as i32),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_output_chat_created")
+                    .table(Output::Table)
+                    .col(Output::ChatId)
+                    .col(Output::CreatedAt)
+                    .col(Output::Id)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(OutputRevision::Table)
+                    .col(
+                        ColumnDef::new(OutputRevision::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(OutputRevision::OutputId).uuid().not_null())
+                    .col(ColumnDef::new(OutputRevision::Ordinal).integer().not_null())
+                    .col(
+                        ColumnDef::new(OutputRevision::ByteLen)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OutputRevision::Sha256)
+                            .binary_len(32)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(OutputRevision::TurnId).uuid())
+                    .col(
+                        ColumnDef::new(OutputRevision::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_output_revision_output")
+                            .from_tbl(OutputRevision::Table)
+                            .from_col(OutputRevision::OutputId)
+                            .to_tbl(Output::Table)
+                            .to_col(Output::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(
+                        Expr::col(OutputRevision::Ordinal)
+                            .between(1, crate::deliverable::MAX_OUTPUT_REVISIONS as i32),
+                    )
+                    .check(Expr::col(OutputRevision::ByteLen).gte(0))
+                    .check(
+                        Expr::col(OutputRevision::ByteLen)
+                            .lte(crate::deliverable::MAX_DELIVERABLE_BYTES as i64),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_output_revision_ordinal")
+                    .table(OutputRevision::Table)
+                    .col(OutputRevision::OutputId)
+                    .col(OutputRevision::Ordinal)
+                    .unique()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(OutputRevision::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Output::Table).to_owned())
             .await
     }
 }
@@ -5353,6 +5491,32 @@ enum AssistantCitation {
     TurnId,
     EvidenceCallId,
     EvidenceRank,
+}
+
+#[derive(DeriveIden)]
+enum Output {
+    Table,
+    Id,
+    ChatId,
+    Filename,
+    MediaType,
+    CurrentRevisionId,
+    RevisionCount,
+    CreatedAt,
+    UpdatedAt,
+    DeletedAt,
+}
+
+#[derive(DeriveIden)]
+enum OutputRevision {
+    Table,
+    Id,
+    OutputId,
+    Ordinal,
+    ByteLen,
+    Sha256,
+    TurnId,
+    CreatedAt,
 }
 
 #[derive(DeriveIden)]

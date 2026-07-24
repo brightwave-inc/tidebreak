@@ -94,15 +94,16 @@ pub use config::{Config, Profile};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use db::DbStore;
 pub use deliverable::{
-    deliverable_media_type, validate_deliverable_name, DELIVERABLES_DIRECTORY,
-    MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
+    deliverable_media_type, output_revision_relative_path, validate_deliverable_name, CreateOutput,
+    NewOutputRevision, OutputRecord, OutputRevision, DELIVERABLES_DIRECTORY, MAX_DELIVERABLE_BYTES,
+    MAX_DELIVERABLE_NAME_CHARS, MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
 };
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{
     AgentRunId, AssistantCitationId, CallId, ChatId, ChunkId, DocumentId, DocumentJobId,
-    HostRootId, HostRootIdError, MessageId, ProjectId, RootAttachmentChangeId,
-    RootAttachmentChangeIdError, StepId, TurnId, TurnSteerId,
+    HostRootId, HostRootIdError, MessageId, OutputId, OutputRevisionId, ProjectId,
+    RootAttachmentChangeId, RootAttachmentChangeIdError, StepId, TurnId, TurnSteerId,
 };
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;

@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 mod agent_run;
 mod delegated_file_read;
 mod multi_agent_wait;
+mod output;
 mod parent_terminal_guard;
 mod root_attachment;
 mod sandbox_spawn_checkpoint;
@@ -5220,6 +5221,43 @@ async fn m0011_preserves_legacy_documents_as_conversationless() {
         row.try_get::<String>("", "name")
             .is_ok_and(|name| name == "chat_id")
     }));
+}
+
+#[tokio::test]
+async fn m0013_adds_outputs_to_an_existing_conversation_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("output-upgrade.db").display()
+    );
+    let conn = Database::connect(&url).await.unwrap();
+    conn.execute_unprepared("PRAGMA foreign_keys=ON;")
+        .await
+        .unwrap();
+    migration::Migrator::up(&conn, Some(12)).await.unwrap();
+    let store = DbStore { conn: conn.clone() };
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    migration::Migrator::up(&conn, None).await.unwrap();
+
+    // The conversation survives, and it can now own outputs.
+    assert_eq!(store.get_chat(chat.id).await.unwrap().as_ref(), Some(&chat));
+    assert!(store.list_outputs(chat.id, 10).await.unwrap().is_empty());
+    let request = crate::deliverable::CreateOutput {
+        id: crate::id::OutputId::new(),
+        chat_id: chat.id,
+        filename: "brief.md".into(),
+        revision: crate::deliverable::NewOutputRevision {
+            id: crate::id::OutputRevisionId::new(),
+            byte_len: 7,
+            sha256: [3; 32],
+            turn_id: None,
+            created_at: DateTime::<Utc>::from_timestamp(1_710_000_000, 0).unwrap(),
+        },
+    };
+    let created = store.create_output(&request).await.unwrap();
+    assert_eq!(store.list_outputs(chat.id, 10).await.unwrap(), [created]);
 }
 
 #[tokio::test]

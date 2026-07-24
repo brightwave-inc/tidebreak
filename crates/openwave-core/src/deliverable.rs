@@ -1,11 +1,119 @@
 //! Closed contract for user-visible files created in conversation-private scratch.
+//!
+//! An output is a conversation-owned record with an opaque [`OutputId`] and an
+//! ordered history of immutable revisions. The record is authoritative: the
+//! filename is display metadata, not identity, so re-creating the same
+//! filename adds a revision instead of destroying the previous bytes.
 
-/// Private-scratch directory reserved for user-visible outputs.
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+
+use crate::id::{ChatId, OutputId, OutputRevisionId, TurnId};
+
+/// Private-scratch directory holding the pre-record output files.
+///
+/// Files written here predate durable output records and are no longer part of
+/// the catalog. [`OUTPUTS_DIRECTORY`] holds every recorded revision.
 pub const DELIVERABLES_DIRECTORY: &str = "artifacts";
+/// Private-scratch directory holding immutable revision bytes.
+pub const OUTPUTS_DIRECTORY: &str = "outputs";
 /// Largest text artifact the foreground agent may create.
 pub const MAX_DELIVERABLE_BYTES: usize = 512 * 1024;
 /// Largest filename accepted by the model-facing and native boundaries.
 pub const MAX_DELIVERABLE_NAME_CHARS: usize = 120;
+/// Largest number of revisions one output retains.
+///
+/// Reaching the bound is a product decision rather than a storage failure: the
+/// store refuses a further revision so no caller can silently lose history.
+pub const MAX_OUTPUT_REVISIONS: u32 = 100;
+
+/// Private-scratch location of one immutable revision's bytes.
+///
+/// Revision files are written once and never replaced, so the path is derived
+/// entirely from durable identity. Callers resolve it below the exact chat's
+/// private scratch directory; it is never returned to a model or renderer.
+#[must_use]
+pub fn output_revision_relative_path(
+    output_id: OutputId,
+    revision_id: OutputRevisionId,
+) -> PathBuf {
+    PathBuf::from(OUTPUTS_DIRECTORY)
+        .join(output_id.to_string())
+        .join(revision_id.to_string())
+}
+
+/// One conversation-owned output and its current revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputRecord {
+    /// Durable opaque identity, stable across every revision.
+    pub id: OutputId,
+    /// Conversation that exclusively owns this output.
+    pub chat_id: ChatId,
+    /// Display filename. Not identity, and not unique within a chat.
+    pub filename: String,
+    /// Fixed media type derived from `filename` when the output was created.
+    pub media_type: String,
+    /// Revision currently presented as the output's content.
+    pub current_revision: OutputRevisionId,
+    /// Number of retained revisions, always at least one.
+    pub revision_count: u32,
+    /// Creation time of the first revision.
+    pub created_at: DateTime<Utc>,
+    /// Creation time of the current revision.
+    pub updated_at: DateTime<Utc>,
+    /// Set when the user deleted the output. Revisions are retained until the
+    /// conversation itself is deleted so a deletion stays recoverable.
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// One immutable revision of an output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputRevision {
+    /// Durable identity, also the private-scratch filename of its bytes.
+    pub id: OutputRevisionId,
+    /// Output this revision belongs to.
+    pub output_id: OutputId,
+    /// One-based position in the output's revision history.
+    pub ordinal: u32,
+    /// Exact byte length of the revision's content.
+    pub byte_len: u64,
+    /// SHA-256 of the revision's content, used to recognize an exact retry.
+    pub sha256: [u8; 32],
+    /// Turn that produced the revision, when it came from an agent turn.
+    pub turn_id: Option<TurnId>,
+    /// Host-stamped creation time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Content-identifying fields of a revision the caller has already written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewOutputRevision {
+    /// Caller-minted identity. Reusing it with the same content is an exact
+    /// retry; reusing it with different content is rejected.
+    pub id: OutputRevisionId,
+    /// Exact byte length of the content already written to private scratch.
+    pub byte_len: u64,
+    /// SHA-256 of that content.
+    pub sha256: [u8; 32],
+    /// Turn that produced the revision, when it came from an agent turn.
+    pub turn_id: Option<TurnId>,
+    /// Host-stamped creation time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Request to create an output together with its first revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateOutput {
+    /// Caller-minted identity, so an ambiguous store response can be retried.
+    pub id: OutputId,
+    /// Conversation that will own the output.
+    pub chat_id: ChatId,
+    /// Display filename, validated by [`validate_deliverable_name`].
+    pub filename: String,
+    /// The output's first revision.
+    pub revision: NewOutputRevision,
+}
 
 /// Validate one portable, renderer-safe deliverable filename.
 ///
@@ -84,6 +192,33 @@ mod tests {
         ] {
             assert!(validate_deliverable_name(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn revision_paths_are_derived_only_from_durable_identity() {
+        let output_id = OutputId::new();
+        let revision_id = OutputRevisionId::new();
+        let path = output_revision_relative_path(output_id, revision_id);
+
+        assert_eq!(
+            path,
+            PathBuf::from(OUTPUTS_DIRECTORY)
+                .join(output_id.to_string())
+                .join(revision_id.to_string())
+        );
+        assert!(path.is_relative());
+        // A revision path carries no filename, so a display name can never
+        // steer where bytes are written or read.
+        assert_eq!(
+            path,
+            output_revision_relative_path(output_id, revision_id),
+            "the same identity always resolves to the same path"
+        );
+        assert_ne!(
+            path,
+            output_revision_relative_path(output_id, OutputRevisionId::new()),
+            "each revision owns a distinct, write-once path"
+        );
     }
 
     #[test]

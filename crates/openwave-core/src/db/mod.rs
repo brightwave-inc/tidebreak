@@ -17,13 +17,14 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ToolApproval};
+use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
 use crate::id::MessageId;
 use crate::id::{
-    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, HostRootId, ProjectId,
-    RootAttachmentChangeId, TurnId, TurnSteerId,
+    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, HostRootId, OutputId, OutputRevisionId,
+    ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 #[cfg(test)]
 use crate::model::Role;
@@ -1810,6 +1811,38 @@ impl Store for DbStore {
         id: ChatId,
     ) -> Result<Option<crate::storage::ChatTranscriptSnapshot>> {
         ops::conversation::get_chat_transcript(self, id).await
+    }
+
+    async fn create_output(&self, request: &CreateOutput) -> Result<OutputRecord> {
+        ops::output::create_output(self, request).await
+    }
+
+    async fn append_output_revision(
+        &self,
+        output_id: OutputId,
+        revision: &NewOutputRevision,
+    ) -> Result<OutputRecord> {
+        ops::output::append_output_revision(self, output_id, revision).await
+    }
+
+    async fn get_output(&self, id: OutputId) -> Result<Option<OutputRecord>> {
+        ops::output::get_output(self, id).await
+    }
+
+    async fn list_outputs(&self, chat_id: ChatId, limit: u64) -> Result<Vec<OutputRecord>> {
+        ops::output::list_outputs(self, chat_id, limit).await
+    }
+
+    async fn list_output_revisions(&self, output_id: OutputId) -> Result<Vec<OutputRevision>> {
+        ops::output::list_output_revisions(self, output_id).await
+    }
+
+    async fn get_output_revision(&self, id: OutputRevisionId) -> Result<Option<OutputRevision>> {
+        ops::output::get_output_revision(self, id).await
+    }
+
+    async fn delete_output(&self, id: OutputId, deleted_at: chrono::DateTime<Utc>) -> Result<bool> {
+        ops::output::delete_output(self, id, deleted_at).await
     }
 
     async fn begin_root_attachment_change(

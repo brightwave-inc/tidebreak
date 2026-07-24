@@ -1070,6 +1070,78 @@ pub mod setting {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod output {
+    use sea_orm::entity::prelude::*;
+
+    // `current_revision_id` and `revision_count` are maintained in the same
+    // transaction that inserts a revision. They are deliberately not a foreign
+    // key: `output_revision` already references `output`, and closing the cycle
+    // would order the two inserts against each other for no added safety.
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "output")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub chat_id: Uuid,
+        pub filename: String,
+        pub media_type: String,
+        pub current_revision_id: Uuid,
+        pub revision_count: i32,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+        pub deleted_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod output_revision {
+    use sea_orm::entity::prelude::*;
+
+    // Rows are insert-only. The bytes live in conversation-private scratch
+    // under the revision id, so a revision row and its content are both
+    // write-once and can never disagree.
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "output_revision")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub output_id: Uuid,
+        pub ordinal: i32,
+        pub byte_len: i64,
+        pub sha256: Vec<u8>,
+        pub turn_id: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter)]
+    pub enum Relation {
+        Output,
+    }
+
+    impl RelationTrait for Relation {
+        fn def(&self) -> RelationDef {
+            match self {
+                Self::Output => Entity::belongs_to(super::output::Entity)
+                    .from(Column::OutputId)
+                    .to(super::output::Column::Id)
+                    .into(),
+            }
+        }
+    }
+
+    impl Related<super::output::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Output.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod event {
     use sea_orm::entity::prelude::*;
 
