@@ -153,4 +153,29 @@ describe("useToolApprovals", () => {
 
     expect(result.current.errors).toEqual({});
   });
+
+  it("does not carry a decision error into the next conversation", async () => {
+    // The pane is keyed today, so this hook is replaced rather than reused.
+    // Switching in place is what a caller without that key would do, and the
+    // previous conversation's error must not follow the reader across.
+    const decision = deferred<void>();
+    const client = stubClient({ decideApproval: vi.fn(() => decision.promise) });
+    seedApprovalCard("call-1");
+    const { result, rerender } = renderHook(
+      ({ chatId }) => useToolApprovals(client, chatId),
+      { initialProps: { chatId: "chat-1" } },
+    );
+
+    act(() => result.current.decide("call-1", "approve"));
+    await act(async () => {
+      decision.reject(new Error("gone"));
+      await decision.promise.catch(() => {});
+    });
+    expect(result.current.errors).not.toEqual({});
+
+    rerender({ chatId: "chat-2" });
+
+    expect(result.current.errors).toEqual({});
+    expect(result.current.deciding.size).toBe(0);
+  });
 });

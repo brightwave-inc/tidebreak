@@ -113,6 +113,18 @@ export function useTurnControls(
     clearSteerRequestState();
   }, [chatId, deletingChatId]);
 
+  // The pane is keyed on the conversation, so this hook is normally replaced
+  // rather than reused. Reset anyway: nothing held here belongs to a different
+  // conversation, and leaving the keying to do it makes removing that key a
+  // silent bug rather than a loud one.
+  useEffect(
+    () => () => {
+      clearSteerRequestState();
+      clearCancelRequestState();
+    },
+    [chatId],
+  );
+
   /**
    * Whether a steer reply may still be applied. The current chat is named only
    * while this conversation is genuinely open — a chat being deleted keeps its

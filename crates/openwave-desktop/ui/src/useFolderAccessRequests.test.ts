@@ -181,4 +181,29 @@ describe("useFolderAccessRequests", () => {
     });
     expect(second.result.current.resolving.size).toBe(0);
   });
+
+  it("does not carry a decision error into the next conversation", async () => {
+    const client = stubClient({
+      listPendingFolderAccessRequests: vi.fn().mockResolvedValue([
+        request("call-1"),
+      ]),
+    });
+    vi.mocked(host.resolveFolderAccessRequest).mockRejectedValue(
+      new Error("no such folder"),
+    );
+    const { result, rerender } = renderHook(
+      ({ chatId }) => useFolderAccessRequests(client, chatId),
+      { initialProps: { chatId: "chat-1" } },
+    );
+    await waitFor(() => expect(result.current.requests).toHaveLength(1));
+
+    await act(async () => {
+      result.current.decide("call-1", "allow");
+    });
+    await waitFor(() => expect(result.current.errors).not.toEqual({}));
+
+    rerender({ chatId: "chat-2" });
+
+    expect(result.current.errors).toEqual({});
+  });
 });

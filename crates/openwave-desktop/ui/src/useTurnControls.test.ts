@@ -413,4 +413,21 @@ describe("useTurnControls turn lifecycle", () => {
       expect(result.current.steerStatus).toBeNull();
     }
   });
+
+  it("does not carry turn-control state into the next conversation", async () => {
+    const client = stubClient({
+      cancel: vi.fn().mockRejectedValue(new Error("gone")),
+    });
+    const { result, rerender } = mount(client);
+    act(() => runTurn());
+
+    await act(async () => result.current.cancel());
+    expect(result.current.cancelError).not.toBeNull();
+
+    rerender({ id: "chat-2" });
+
+    expect(result.current.cancelError).toBeNull();
+    expect(result.current.cancelPendingTurnId).toBeNull();
+    expect(result.current.steerStatus).toBeNull();
+  });
 });
