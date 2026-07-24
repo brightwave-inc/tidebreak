@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Chat } from "./api";
 import { ChatWorkspace } from "./ChatWorkspace";
+import { useTranscriptVisible } from "./TranscriptVisibility";
 import { useUiStore } from "./UiStore";
 
 vi.mock("./documents", () => ({
@@ -39,13 +40,20 @@ const chat = {
   project_id: null,
 } as unknown as Chat;
 
-function renderWorkspace(nativeHost = true) {
+function TranscriptProbe() {
+  return (
+    <div data-testid="transcript" data-visible={String(useTranscriptVisible())} />
+  );
+}
+
+function renderWorkspace(nativeHost = true, hidden = false) {
   return render(
     <ChatWorkspace
       chat={chat}
       status="chat chat-1 · live"
       nativeHost={nativeHost}
-      transcript={<div data-testid="transcript" />}
+      hidden={hidden}
+      transcript={<TranscriptProbe />}
     />,
   );
 }
@@ -170,5 +178,26 @@ describe("ChatWorkspace", () => {
     expect(
       screen.queryByRole("heading", { name: "Sources" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("stays mounted but off screen behind a global surface", () => {
+    // Settings replaces the pane. Unmounting the conversation with it would
+    // take its pollers along, so a question asked while the reader is in
+    // Settings would go unannounced until they navigated back.
+    const { container } = renderWorkspace(true, true);
+
+    expect(screen.getByTestId("transcript")).toBeInTheDocument();
+    expect(container.querySelector(".chat-workspace")).toHaveAttribute("hidden");
+  });
+
+  it("tells a hidden transcript it is off screen", () => {
+    // Scrolling an element with no layout does nothing, so a transcript that
+    // believes it is visible would leave a following reader mid-history.
+    renderWorkspace(true, true);
+
+    expect(screen.getByTestId("transcript")).toHaveAttribute(
+      "data-visible",
+      "false",
+    );
   });
 });

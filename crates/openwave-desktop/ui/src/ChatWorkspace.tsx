@@ -20,6 +20,12 @@ export type ChatWorkspaceProps = {
   nativeHost: boolean;
   /** The transcript surface, supplied by the owner that holds session state. */
   transcript: ReactNode;
+  /**
+   * Off screen behind a global surface like Settings. The conversation stays
+   * mounted so it keeps streaming and polling, and so returning to it costs
+   * neither its scroll position nor a pending prompt.
+   */
+  hidden?: boolean;
 };
 
 /**
@@ -30,13 +36,15 @@ export type ChatWorkspaceProps = {
  * The transcript stays mounted while a surface is open. That is the point of
  * the arrangement — a conversation's own sources should be readable without
  * leaving the conversation, and detail can only move out of the transcript if
- * there is somewhere beside it to put it.
+ * there is somewhere beside it to put it. The same holds one level up: the
+ * whole workspace stays mounted behind a global surface rather than unmounting.
  */
 export function ChatWorkspace({
   chat,
   status,
   nativeHost,
   transcript,
+  hidden = false,
 }: ChatWorkspaceProps) {
   const selected = useUiStore((state) => state.surface);
   const expanded = useUiStore((state) => state.expanded);
@@ -55,7 +63,7 @@ export function ChatWorkspace({
   const panelOpen = opensBesideTranscript(surface.kind);
 
   return (
-    <div className="chat-workspace">
+    <div className="chat-workspace" hidden={hidden}>
       <header className="conversation-header">
         <div className="conversation-title-row">
           <h1>{chat.title?.trim() || "New chat"}</h1>
@@ -117,7 +125,7 @@ export function ChatWorkspace({
               : undefined
           }
         >
-          <TranscriptVisibilityProvider value={slots.showTranscript}>
+          <TranscriptVisibilityProvider value={!hidden && slots.showTranscript}>
             {transcript}
           </TranscriptVisibilityProvider>
         </div>

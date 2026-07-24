@@ -586,6 +586,10 @@ body {
   overflow: hidden;
 }
 
+.chat-workspace[hidden] {
+  display: none;
+}
+
 /* Each surface scrolls inside its own slot; the header above stays put. */
 .workspace-body {
   display: flex;

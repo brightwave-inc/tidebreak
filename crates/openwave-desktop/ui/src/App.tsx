@@ -946,7 +946,7 @@ export default function App() {
       />}
 
       <div className="main">
-        {surface.kind === "settings" ? (
+        {surface.kind === "settings" && (
           <SettingsView
             client={client}
             models={models}
@@ -959,73 +959,79 @@ export default function App() {
             onCheckForUpdate={desktopUpdates.check}
             onRestartForUpdate={onRestartForUpdate}
           />
-        ) : (
-          <ChatWorkspace
-            chat={chat}
-            status={status}
-            nativeHost={hasNativeHost()}
-            transcript={
-              <ChatView
-                key={chat.id}
-                client={client}
-                chat={chat}
-                hydrated={hydratedChatId === chat.id}
-                nativeHost={hasNativeHost()}
-                deletingChat={deletingChatId !== null}
-                agentRuns={visibleAgentRuns}
-                agentRunsLoading={
-                  agentRunsChatId === chat.id ? agentRunsLoading : true
-                }
-                agentRunsError={agentRunsChatId === chat.id ? agentRunsError : null}
-                stoppingRunIds={visibleStoppingSandboxRunIds}
-                stopErrorRunIds={visibleSandboxStopErrorRunIds}
-                onRetryAgentRuns={() => refreshAgentRunsRef.current?.()}
-                onStopSandboxRun={(runId) => void onStopSandboxAgentRun(runId)}
-                draft={draft}
-                attachingSource={addingSourceChatId !== null}
-                attachedSourceName={
-                  recentSource && recentSource.chatId === chat.id
-                    ? recentSource.source.displayName
-                    : null
-                }
-                sourceAttachmentError={
-                  sourceAttachmentError && sourceAttachmentError.chatId === chat.id
-                    ? sourceAttachmentError.message
-                    : null
-                }
-                composerModelMenu={
-                  <>
-                    <ModelMenu
-                      models={models}
-                      value={chat.model}
-                      disabled={deletingChatId !== null}
-                      onChange={onModelChange}
-              />
-                    {modelForSelection(models, chat.model)?.supports_reasoning_effort && (
-                      <ReasoningEffortMenu
-                        value={chat.reasoning_effort}
-                        disabled={deletingChatId !== null}
-                        onChange={onReasoningEffortChange}
-              />
-                    )}
-                  </>
-                }
-                cancelError={cancelError}
-                cancelPendingTurnId={cancelPendingTurnId}
-                steerError={steerError}
-                steerStatus={steerStatus}
-                steerPendingTurnId={steerPendingTurnId}
-                onDraftChange={onComposerDraftChange}
-                onAddSource={onAddSource}
-                onDismissAttachedSource={() => setRecentSource(null)}
-                onSelectPrompt={setComposerDraft}
-                onSend={onSend}
-                onSteer={onSteerActiveTurn}
-                onStop={onCancelActiveTurn}
-              />
-            }
-          />
         )}
+        {/*
+          Kept mounted behind Settings, not swapped out for it. The pollers for
+          this conversation's pending prompts live in the pane, and a reader who
+          steps into Settings should still be told when the agent asks them
+          something.
+        */}
+        <ChatWorkspace
+          chat={chat}
+          status={status}
+          nativeHost={hasNativeHost()}
+          hidden={surface.kind === "settings"}
+          transcript={
+            <ChatView
+              key={chat.id}
+              client={client}
+              chat={chat}
+              hydrated={hydratedChatId === chat.id}
+              nativeHost={hasNativeHost()}
+              deletingChat={deletingChatId !== null}
+              agentRuns={visibleAgentRuns}
+              agentRunsLoading={
+                agentRunsChatId === chat.id ? agentRunsLoading : true
+              }
+              agentRunsError={agentRunsChatId === chat.id ? agentRunsError : null}
+              stoppingRunIds={visibleStoppingSandboxRunIds}
+              stopErrorRunIds={visibleSandboxStopErrorRunIds}
+              onRetryAgentRuns={() => refreshAgentRunsRef.current?.()}
+              onStopSandboxRun={(runId) => void onStopSandboxAgentRun(runId)}
+              draft={draft}
+              attachingSource={addingSourceChatId !== null}
+              attachedSourceName={
+                recentSource && recentSource.chatId === chat.id
+                  ? recentSource.source.displayName
+                  : null
+              }
+              sourceAttachmentError={
+                sourceAttachmentError && sourceAttachmentError.chatId === chat.id
+                  ? sourceAttachmentError.message
+                  : null
+              }
+              composerModelMenu={
+                <>
+                  <ModelMenu
+                    models={models}
+                    value={chat.model}
+                    disabled={deletingChatId !== null}
+                    onChange={onModelChange}
+            />
+                  {modelForSelection(models, chat.model)?.supports_reasoning_effort && (
+                    <ReasoningEffortMenu
+                      value={chat.reasoning_effort}
+                      disabled={deletingChatId !== null}
+                      onChange={onReasoningEffortChange}
+            />
+                  )}
+                </>
+              }
+              cancelError={cancelError}
+              cancelPendingTurnId={cancelPendingTurnId}
+              steerError={steerError}
+              steerStatus={steerStatus}
+              steerPendingTurnId={steerPendingTurnId}
+              onDraftChange={onComposerDraftChange}
+              onAddSource={onAddSource}
+              onDismissAttachedSource={() => setRecentSource(null)}
+              onSelectPrompt={setComposerDraft}
+              onSend={onSend}
+              onSteer={onSteerActiveTurn}
+              onStop={onCancelActiveTurn}
+          />
+          }
+        />
       </div>
       </div>
     </div>
