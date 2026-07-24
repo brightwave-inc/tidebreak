@@ -42,6 +42,7 @@ const HISTORY_TOOL_NAMES: Record<ChatToolActivity["title"], string> = {
   "Ask a question": "ask_user_questions",
   "Delegate a task": "spawn_sandbox_agent",
   "Wait for background agents": "wait_for_agents",
+  "Run a command": "exec",
   "Use a tool": "historical_unknown_tool",
 };
 

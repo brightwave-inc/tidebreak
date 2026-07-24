@@ -272,11 +272,15 @@ provider identifiers, executor leases, and raw failures remain server-side.
 New tools are invisible to the renderer until they receive their own safe
 activity projection.
 
-The desktop Agent activity panel turns that projection into foreground and
-background status rows. It offers Stop only for sandbox states that can still
-be cancelled, binds each request to the exact chat and run, and keeps a pending
-or retryable error state until polling confirms the durable transition. The
-panel never receives a worker lease or direct scheduler control.
+No desktop surface consumes that projection today. An activity panel used to
+render it as foreground and background status rows with a Stop control for
+cancellable sandbox states, but it restated what the transcript already showed
+and was removed. The projection, the run routes, and the cancellation route all
+remain, so a future surface can render them without rebuilding the server side.
+Whatever renders it next must keep the same posture: bind every request to the
+exact chat and run, hold a pending or retryable error state until polling
+confirms the durable transition, and never receive a worker lease or direct
+scheduler control.
 
 ## Reliability contract
 

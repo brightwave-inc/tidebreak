@@ -702,15 +702,17 @@ The current UI is a workspace-style conversation shell, not the complete
 product. It reopens durable chats and supports conversation create/list/switch/
 rename/delete, transcript hydration, Markdown messages, live and historical
 tool-call rendering, reconnectable streaming, provider and web-search setup,
-model selection, a foreground-turn stop control, approval prompts, native
-connected-folder pick/list/revoke, and a dedicated foreground/background agent
-activity panel. That panel renders safe lifecycle and activity status and can
-stop an eligible sandbox task through its exact run identity. The foreground
-stop control sends cancellation for the exact active turn, prevents duplicate
-requests, and stays in a pending state until an authoritative terminal event
-arrives; neither control treats a request as a locally completed cancellation.
-That surface reads a redacted durable snapshot and is only an observer: worker
-leases, delegated inputs, and scheduler control remain server-private.
+model selection, a foreground-turn stop control, approval prompts, and native
+connected-folder pick/list/revoke. The foreground stop control sends
+cancellation for the exact active turn, prevents duplicate requests, and stays
+in a pending state until an authoritative terminal event arrives; it never
+treats a request as a locally completed cancellation.
+
+Background agent runs currently have no renderer surface. The server projects a
+redacted, observer-only snapshot of them (see
+[`docs/agent-runs.md`](agent-runs.md)), but nothing renders it, and there is no
+way to stop a sandbox run from the UI. Worker leases, delegated inputs, and
+scheduler control remain server-private regardless.
 OpenWave's operational scratch stays in private app storage; user-selected paths
 cross only the native host-to-broker control boundary, while the renderer sees
 opaque folder summaries. Chats store only ordered opaque root IDs and attachment
@@ -867,8 +869,7 @@ and ownership, atomic client-wait checkpoints, terminal turn commits,
 cancellation, reconnectable event stream, durable foreground/sandbox agent-run
 leases and result delivery, bounded non-blocking child admission, ordered
 multi-child waits, the foreground terminal guard, Markdown and tool-call
-transcript rendering, the agent activity/status-and-stop surface, and
-fail-closed provider routing. The first native Outputs loop also closes the path
+transcript rendering, and fail-closed provider routing. The first native Outputs loop also closes the path
 from a bounded conversation-private text file to an explicit user-selected
 export.
 
