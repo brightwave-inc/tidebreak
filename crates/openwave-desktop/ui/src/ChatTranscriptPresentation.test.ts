@@ -15,7 +15,6 @@ const transcript: ChatTranscript = {
       citations: [
         {
           id: "citation-private-id",
-          message_id: "assistant-durable",
           ordinal: 1,
           excerpt: "Bounded source excerpt",
           heading: null,
@@ -122,17 +121,25 @@ describe("terminal transcript presentation", () => {
     expect(wait).toHaveBeenCalledTimes(1);
   });
 
-  it("does not carry nested citations across message ownership", () => {
+  // Citation ownership is settled server-side: `get_chat_transcript` groups by
+  // message id and nests the result, so the wire carries no `message_id` for
+  // the renderer to re-check. The renderer's job is to carry through exactly
+  // what it was given — an earlier client-side ownership filter compared
+  // against a field that is never serialized and dropped every citation.
+  it("presents every citation the server nested under the message", () => {
     const presented = presentChatTranscript({
       ...transcript,
       messages: [
         {
           ...transcript.messages[0],
           citations: [
+            transcript.messages[0].citations![0],
             {
-              ...transcript.messages[0].citations![0],
-              message_id: "a-different-message",
-              excerpt: "cross-message private excerpt",
+              id: "citation-second",
+              ordinal: 2,
+              excerpt: "Second bounded excerpt",
+              heading: "Heading",
+              pages: [4],
             },
           ],
         },
@@ -145,11 +152,23 @@ describe("terminal transcript presentation", () => {
         role: "assistant",
         text: "Clean durable answer",
         createdAt: "2026-07-19T10:00:00Z",
-        sources: [],
+        sources: [
+          {
+            id: "citation-private-id",
+            ordinal: 1,
+            excerpt: "Bounded source excerpt",
+            heading: null,
+            pages: [],
+          },
+          {
+            id: "citation-second",
+            ordinal: 2,
+            excerpt: "Second bounded excerpt",
+            heading: "Heading",
+            pages: [4],
+          },
+        ],
       },
     ]);
-    expect(JSON.stringify(presented?.messages)).not.toContain(
-      "cross-message private excerpt",
-    );
   });
 });

@@ -140,7 +140,11 @@ describe("hydrateTranscriptHistory", () => {
     ]);
   });
 
-  it("attaches sources only to their exact owning assistant message", () => {
+  // The payload here matches the wire exactly: the server groups citations by
+  // message and nests them, so `message_id` is skipped during serialization.
+  // The previous fixture invented that field, which made this suite pass while
+  // production dropped every historical citation.
+  it("keeps the sources the server nested under each assistant message", () => {
     const entries = hydrateTranscriptHistory(
       [
         {
@@ -151,19 +155,10 @@ describe("hydrateTranscriptHistory", () => {
           citations: [
             {
               id: "citation-1",
-              message_id: "assistant-1",
               ordinal: 1,
               excerpt: "safe excerpt",
               heading: "Safe heading",
               pages: [2],
-            },
-            {
-              id: "citation-crossed",
-              message_id: "assistant-2",
-              ordinal: 2,
-              excerpt: "must not cross messages",
-              heading: null,
-              pages: [],
             },
           ],
         },
@@ -183,7 +178,6 @@ describe("hydrateTranscriptHistory", () => {
       sources: [{ id: "citation-1", excerpt: "safe excerpt" }],
     });
     expect(entries[1]).toMatchObject({ id: "assistant-2", sources: [] });
-    expect(JSON.stringify(entries)).not.toContain("must not cross messages");
   });
 
   it("treats citations omitted from a partial response as an empty source list", () => {

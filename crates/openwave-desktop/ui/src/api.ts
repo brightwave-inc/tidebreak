@@ -15,7 +15,8 @@ export type ProviderInfo = {
   kind: ProviderKind;
   enabled: boolean;
   has_credential: boolean;
-  base_url: string | null;
+  /** Absent, not null, when unset — the server skips serializing `None`. */
+  base_url?: string;
   models: CustomModelConfig[];
 };
 
@@ -146,10 +147,14 @@ export type ChatMessage = {
   citations?: ChatMessageCitation[];
 };
 
-/** A bounded, renderer-safe evidence snapshot owned by one assistant message. */
+/**
+ * A bounded, renderer-safe evidence snapshot owned by one assistant message.
+ *
+ * Ownership is positional: the server nests each citation under its message and
+ * deliberately skips `message_id` on the wire. Do not reintroduce it.
+ */
 export type ChatMessageCitation = {
   id: string;
-  message_id: string;
   ordinal: number;
   excerpt: string;
   heading: string | null;
