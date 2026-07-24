@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Chat } from "./api";
 import {
   connectApprovedFolder,
@@ -22,27 +22,38 @@ export function FoldersView({ chat }: { chat: Chat }) {
   const [approvedFolders, setApprovedFolders] = useState<ConnectedFolder[]>([]);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const refreshGeneration = useRef(0);
   const connectedIds = new Set(folders.map((folder) => folder.rootId));
   const availableFolders = approvedFolders.filter(
     (folder) => !connectedIds.has(folder.rootId),
   );
 
   async function refresh() {
+    const generation = ++refreshGeneration.current;
     setError(null);
     try {
       const [connected, approved] = await Promise.all([
         listConnectedFolders(chat),
         listApprovedFolders(),
       ]);
+      if (generation !== refreshGeneration.current) return;
       setFolders(connected);
       setApprovedFolders(approved);
     } catch (err) {
+      if (generation !== refreshGeneration.current) return;
       setError(String(err));
     }
   }
 
   useEffect(() => {
+    setFolders([]);
+    setApprovedFolders([]);
+    setWorking(false);
+    setError(null);
     void refresh();
+    return () => {
+      refreshGeneration.current += 1;
+    };
   }, [chat.id, chat.project_id]);
 
   async function addFolder() {

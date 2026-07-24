@@ -98,6 +98,10 @@ fn mutate_attachment(
         subject,
         conversation_id,
         root_id,
+        consent_method: match mutation {
+            RootAttachmentMutationKind::Attach => Some(ConsentMethod::PermissionDialog),
+            RootAttachmentMutationKind::Detach => None,
+        },
     };
     let control = match mutation {
         RootAttachmentMutationKind::Attach => ControlRequest::AttachRoot(request),
@@ -176,6 +180,102 @@ fn list_approved(controller: &Controller) -> Vec<RootSummary> {
     roots
 }
 
+fn revoke(
+    controller: &Controller,
+    operation_id: OperationId,
+    subject: GrantSubject,
+    root_id: RootId,
+) -> RevokeRootResult {
+    let result = unwrap_response(controller.handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::RevokeRoot(RevokeRootRequest {
+            operation_id,
+            subject,
+            root_id,
+        }),
+    }))
+    .unwrap();
+    let ControlResult::RevokeRoot(result) = result else {
+        panic!("unexpected control result")
+    };
+    result
+}
+
+fn install_legacy_alias(
+    broker: &Broker,
+    source_root_id: RootId,
+    alias_root_id: RootId,
+    subject: GrantSubject,
+    conversation_id: Uuid,
+    selected_path: PathBuf,
+    operation_id: OperationId,
+) {
+    let consent = ConsentRecord::new(ConsentMethod::FolderPicker, Utc::now());
+    let mut state = broker.shared.state.lock().unwrap();
+    let source = state.roots.get(&source_root_id).unwrap().clone();
+    let display_name = source.display_name.clone();
+    assert!(state
+        .roots
+        .insert(
+            alias_root_id,
+            RegisteredRoot {
+                owner: subject,
+                display_name: display_name.clone(),
+                root: source.root,
+            },
+        )
+        .is_none());
+    state.grants.push(
+        Grant::from_consent(
+            GrantId::new(),
+            subject,
+            Capability::ListRoots,
+            Scope::Subject,
+            consent.clone(),
+        )
+        .unwrap(),
+    );
+    state.grants.push(
+        Grant::from_consent(
+            GrantId::new(),
+            subject,
+            Capability::ReadFiles,
+            Scope::Root {
+                root_id: alias_root_id,
+            },
+            consent,
+        )
+        .unwrap(),
+    );
+    state
+        .attachments
+        .push(RootAttachment::new(conversation_id, alias_root_id).unwrap());
+    assert!(state
+        .mutations
+        .insert(
+            operation_id,
+            MutationRecord::Register {
+                request: RegisterFingerprint {
+                    subject,
+                    conversation_id,
+                    path: selected_path,
+                    consent_method: ConsentMethod::FolderPicker,
+                },
+                outcome: MutationOutcome::Complete(Ok(RegisterRootResult {
+                    root: RootSummary {
+                        root_id: alias_root_id,
+                        display_name,
+                    },
+                })),
+            },
+        )
+        .is_none());
+    if let Some(state_file) = broker.shared.state_file.as_ref() {
+        state_file.save(&state).unwrap();
+    }
+}
+
 fn unwrap_response<T>(envelope: ResponseEnvelope<T>) -> Result<T, ErrorResponse> {
     match envelope.response {
         Response::Ok(result) => Ok(result),
@@ -233,15 +333,65 @@ fn approved_roots_can_be_explicitly_attached_to_another_standalone_conversation(
 
     let second_conversation = Uuid::new_v4();
     let second_subject = GrantSubject::conversation(second_conversation).unwrap();
+    let attach_id = OperationId::new();
     mutate_attachment(
         &broker.controller(),
-        OperationId::new(),
+        attach_id,
         second_subject,
         second_conversation,
         root_id,
         RootAttachmentMutationKind::Attach,
     )
     .unwrap();
+    assert!(broker
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .grants
+        .iter()
+        .any(|grant| {
+            grant.subject() == second_subject
+                && grant.capability() == Capability::ReadFiles
+                && matches!(grant.scope(), Scope::Root { root_id: granted } if *granted == root_id)
+                && grant.consent().method() == ConsentMethod::PermissionDialog
+        }));
+    let conflicting_consent = broker.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::AttachRoot(RootAttachmentMutationRequest {
+            operation_id: attach_id,
+            subject: second_subject,
+            conversation_id: second_conversation,
+            root_id,
+            consent_method: Some(ConsentMethod::OperatorConfig),
+        }),
+    });
+    assert!(matches!(
+        conflicting_consent.response,
+        Response::Error(ErrorResponse {
+            code: ErrorCode::OperationIdConflict,
+            ..
+        })
+    ));
+    let missing_consent = broker.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::AttachRoot(RootAttachmentMutationRequest {
+            operation_id: attach_id,
+            subject: second_subject,
+            conversation_id: second_conversation,
+            root_id,
+            consent_method: None,
+        }),
+    });
+    assert!(matches!(
+        missing_consent.response,
+        Response::Error(ErrorResponse {
+            code: ErrorCode::OperationIdConflict,
+            ..
+        })
+    ));
     let second_context = ExecutionContext::standalone(second_conversation).unwrap();
     assert_eq!(
         operate(
@@ -359,6 +509,182 @@ fn choosing_the_same_approved_folder_again_reuses_its_host_identity() {
         .unwrap(),
         OperationResult::ListRoots {
             roots: vec![first.root]
+        }
+    );
+}
+
+#[test]
+fn legacy_physical_aliases_are_hidden_and_reused_deterministically_after_restart() {
+    let (temp, broker, path, state_dir) = durable_setup();
+    let first_conversation = Uuid::new_v4();
+    let first_subject = GrantSubject::conversation(first_conversation).unwrap();
+    let first = register(
+        &broker.controller(),
+        first_subject,
+        first_conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+    let alias_root_id = RootId::from_uuid(Uuid::from_u128(1)).unwrap();
+    let alias_conversation = Uuid::new_v4();
+    let alias_subject = GrantSubject::conversation(alias_conversation).unwrap();
+    install_legacy_alias(
+        &broker,
+        first.root.root_id,
+        alias_root_id,
+        alias_subject,
+        alias_conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+    assert!(list_approved(&broker.controller()).is_empty());
+    drop(broker);
+
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    assert!(list_approved(&broker.controller()).is_empty());
+
+    let first_again = register(
+        &broker.controller(),
+        first_subject,
+        first_conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+    assert_eq!(first_again.root.root_id, first.root.root_id);
+
+    let new_conversation = Uuid::new_v4();
+    let new_subject = GrantSubject::conversation(new_conversation).unwrap();
+    let new_registration = register(
+        &broker.controller(),
+        new_subject,
+        new_conversation,
+        path,
+        OperationId::new(),
+    );
+    assert_eq!(new_registration.root.root_id, alias_root_id);
+}
+
+#[test]
+fn legacy_physical_aliases_block_global_revoke_and_remain_valid_after_restart() {
+    let (temp, broker, path, state_dir) = durable_setup();
+    let first_conversation = Uuid::new_v4();
+    let first_subject = GrantSubject::conversation(first_conversation).unwrap();
+    let first = register(
+        &broker.controller(),
+        first_subject,
+        first_conversation,
+        path.clone(),
+        OperationId::new(),
+    );
+    let alias_root_id = RootId::from_uuid(Uuid::from_u128(1)).unwrap();
+    let alias_conversation = Uuid::new_v4();
+    let alias_subject = GrantSubject::conversation(alias_conversation).unwrap();
+    install_legacy_alias(
+        &broker,
+        first.root.root_id,
+        alias_root_id,
+        alias_subject,
+        alias_conversation,
+        path,
+        OperationId::new(),
+    );
+
+    let revoke_id = OperationId::new();
+    assert_eq!(
+        revoke(
+            &broker.controller(),
+            revoke_id,
+            alias_subject,
+            alias_root_id,
+        ),
+        RevokeRootResult { revoked: false }
+    );
+    assert!(operate(
+        &broker.operator(),
+        ExecutionContext::standalone(first_conversation).unwrap(),
+        OperationRequest::ReadFile(PathRequest {
+            root_id: first.root.root_id,
+            path: RelativePath::parse("note.txt").unwrap(),
+        }),
+    )
+    .is_ok());
+    assert!(operate(
+        &broker.operator(),
+        ExecutionContext::standalone(alias_conversation).unwrap(),
+        OperationRequest::ReadFile(PathRequest {
+            root_id: alias_root_id,
+            path: RelativePath::parse("note.txt").unwrap(),
+        }),
+    )
+    .is_ok());
+    drop(broker);
+
+    let broker = Broker::open(test_policy(&temp), &state_dir).unwrap();
+    assert_eq!(
+        revoke(
+            &broker.controller(),
+            revoke_id,
+            alias_subject,
+            alias_root_id,
+        ),
+        RevokeRootResult { revoked: false }
+    );
+    assert!(operate(
+        &broker.operator(),
+        ExecutionContext::standalone(alias_conversation).unwrap(),
+        OperationRequest::ReadFile(PathRequest {
+            root_id: alias_root_id,
+            path: RelativePath::parse("note.txt").unwrap(),
+        }),
+    )
+    .is_ok());
+}
+
+#[test]
+fn basename_collisions_are_not_offered_as_approved_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_path = temp.path().join("home/first/Documents");
+    let second_path = temp.path().join("home/second/Documents");
+    let unique_path = temp.path().join("home/third/Reports");
+    for path in [&first_path, &second_path, &unique_path] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let broker = Broker::new(test_policy(&temp));
+    let first_conversation = Uuid::new_v4();
+    let first = register(
+        &broker.controller(),
+        GrantSubject::conversation(first_conversation).unwrap(),
+        first_conversation,
+        first_path,
+        OperationId::new(),
+    );
+    let second_conversation = Uuid::new_v4();
+    register(
+        &broker.controller(),
+        GrantSubject::conversation(second_conversation).unwrap(),
+        second_conversation,
+        second_path,
+        OperationId::new(),
+    );
+    let unique_conversation = Uuid::new_v4();
+    let unique = register(
+        &broker.controller(),
+        GrantSubject::conversation(unique_conversation).unwrap(),
+        unique_conversation,
+        unique_path,
+        OperationId::new(),
+    );
+
+    assert_eq!(list_approved(&broker.controller()), vec![unique.root]);
+    assert_eq!(
+        operate(
+            &broker.operator(),
+            ExecutionContext::standalone(first_conversation).unwrap(),
+            OperationRequest::ListRoots,
+        )
+        .unwrap(),
+        OperationResult::ListRoots {
+            roots: vec![first.root],
         }
     );
 }
@@ -1940,6 +2266,7 @@ fn persisted_attachments_must_be_unique_and_match_subject_grants() {
                 conversation_id: conversation,
                 root_id,
                 mutation: RootAttachmentMutationKind::Detach,
+                consent_method: None,
             },
             outcome: MutationOutcome::Pending,
         },
@@ -1956,10 +2283,26 @@ fn persisted_attachment_ledger_rejects_unknown_nested_fields() {
             conversation_id,
             root_id: RootId::new(),
             mutation: RootAttachmentMutationKind::Attach,
+            consent_method: Some(ConsentMethod::PermissionDialog),
         },
         outcome: MutationOutcome::Pending,
     };
     let mut encoded = serde_json::to_value(record).unwrap();
+    let mut legacy = encoded.clone();
+    legacy["Attachment"]["request"]
+        .as_object_mut()
+        .unwrap()
+        .remove("consent_method");
+    assert!(matches!(
+        serde_json::from_value::<MutationRecord>(legacy).unwrap(),
+        MutationRecord::Attachment {
+            request: AttachmentFingerprint {
+                consent_method: None,
+                ..
+            },
+            ..
+        }
+    ));
     encoded["Attachment"]["request"]["unexpected"] = serde_json::Value::Bool(true);
     assert!(serde_json::from_value::<MutationRecord>(encoded).is_err());
 }

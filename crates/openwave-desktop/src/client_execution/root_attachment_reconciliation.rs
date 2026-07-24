@@ -627,6 +627,10 @@ async fn dispatch_mutation(
         subject: context.subject,
         conversation_id: context.chat_id,
         root_id,
+        consent_method: match action {
+            RootAttachmentChangeAction::Attach => Some(ConsentMethod::PermissionDialog),
+            RootAttachmentChangeAction::Detach => None,
+        },
     };
     let control = match action {
         RootAttachmentChangeAction::Attach => ControlRequest::AttachRoot(request),

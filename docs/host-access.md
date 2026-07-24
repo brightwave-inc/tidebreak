@@ -31,6 +31,9 @@ In practical terms:
 - Previously approved roots may be offered by safe display name in another
   conversation. Attaching one requires a trusted native confirmation, but not
   another folder picker.
+- If multiple approved roots have the same safe display name, none of those
+  ambiguous roots are offered for reuse; the user must identify one through
+  the native picker.
 - The model sees an opaque root identifier, a display name, and root-relative
   paths. It never receives authority by naming an absolute host path.
 - Connecting one folder never grants access to its siblings, the user's whole
@@ -206,9 +209,12 @@ picker result. Current desktop chats use their conversation subject; dormant
 project-scoped API chats retain their legacy project subject. Re-registering the
 same pinned filesystem object reuses the host-approved root. The host can return
 bounded safe summaries of approved roots to the management UI; it never returns
-their paths. Reusing an approved root in another chat requires a native
-confirmation, after which a separate product attachment change confirms the
-exact conversation attachment before the renderer sees it as connected.
+their paths. Roots whose safe display names collide are omitted so a native
+confirmation never asks the user to distinguish two folders with the same
+label; those folders remain available through the picker. Reusing an approved
+root in another chat requires a native confirmation, after which a separate
+product attachment change confirms the exact conversation attachment before
+the renderer sees it as connected.
 
 The **renderer** presents connected folders and permission choices. It receives
 safe summaries, not the broker's persisted absolute-path registry.
@@ -238,12 +244,21 @@ the attachment for the selected conversation. Detaching a root from one
 conversation leaves the host approval, its grants, and every other
 conversation's attachment intact. Revocation is deliberately broader: it
 forgets the root and removes all of its grants and attachments. Both mutation
-kinds bind a stable operation identity to their original request, so an exact
-retry is idempotent and identity reuse with different inputs is rejected. A
-read-only attachment receipt lets a recovering native client distinguish
-unknown, completed, and failed work without starting or replaying the mutation.
-Attachment changes are computed and published in one durable state replacement,
-so they do not expose a recoverable intermediate phase.
+kinds bind a stable operation identity to their original request, including the
+trusted consent method for an attach, so an exact retry is idempotent and
+identity reuse with different inputs is rejected. The broker stamps new
+subject grants with that current attachment consent instead of copying another
+subject's earlier consent record. A read-only attachment receipt lets a
+recovering native client distinguish unknown, completed, and failed work
+without starting or replaying the mutation. Attachment changes are computed and
+published in one durable state replacement, so they do not expose a recoverable
+intermediate phase.
+
+Legacy version-2 state may contain multiple product root IDs for one pinned
+filesystem object. Those IDs remain valid so existing product projections and
+receipts do not break. Registration selects among them deterministically, and
+global revocation reports no change while an equivalent alias remains instead
+of claiming the physical approval was removed.
 
 The desktop's manual Disconnect action uses this conversation-only detach; it
 does not invoke global revocation. The connected-folder list is the intersection
