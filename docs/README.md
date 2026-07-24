@@ -11,6 +11,8 @@ Project documentation, versioned alongside the code.
 - [Agent runs and sandboxed background work](agent-runs.md) — the shared
   foreground/background loop, depth-one agent hierarchy, durable waits, and
   bounded sandbox scheduling plan.
+- [Foreground agent operating prompt](agent-operating-prompt.md) — deterministic
+  capability composition, trust boundaries, versioning, and extension rules.
 - [Tool architecture and roadmap](tools.md) — the current tool surface,
   foreground/sandbox split, provider boundaries, and web-search plan.
 - [Web search configuration](web-search.md) — the local host-owned Exa/Tavily

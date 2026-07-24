@@ -362,6 +362,13 @@ impl TurnWorker {
                 turn.id
             )));
         }
+        if let Some(prompt) = self.agent_config.system_prompt.as_deref() {
+            eprintln!(
+                "openwave: turn {} operating_prompt={}",
+                turn.id,
+                crate::foreground_prompt::identity(prompt)
+            );
+        }
         let mut total_model_steps = turn.model_steps;
         let consumed_steps = usize::try_from(total_model_steps).map_err(|_| {
             AgentError::msg(format!(

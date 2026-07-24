@@ -39,6 +39,13 @@ stored chat context, reauthorizes with the broker, and persists the exact
 model-facing result before resolving the parked turn. Requesting access and
 using an approved root remain separate operations.
 
+Normal foreground turns also receive a
+[host-owned operating prompt](agent-operating-prompt.md). It composes fixed
+behavior sections from the exact tool surface advertised to the turn, so source,
+folder, output, execution, delegation, and external-tool guidance disappears
+when its capability is absent. Tool metadata and runtime host state are never
+interpolated into that prompt.
+
 Source access is tiered rather than search-only. `list_sources` discovers the
 conversation's exact corpus without loading content. `read_source` reads one
 bounded Unicode-character range as soon as parser output exists—even while the

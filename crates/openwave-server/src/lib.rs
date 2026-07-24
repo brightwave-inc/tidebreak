@@ -26,6 +26,7 @@ mod document_worker;
 mod error;
 mod event_projection;
 mod extract;
+mod foreground_prompt;
 mod mcp_config;
 mod model_registry;
 mod provider;
@@ -482,7 +483,7 @@ async fn bind_inner(
     ));
     let foreground_web_search =
         Box::new(web_search::foreground_tool(store.clone(), secrets.clone()));
-    let (retrieval, mut tools, agent_config) = agent_deps(
+    let (retrieval, mut tools, mut agent_config) = agent_deps(
         embedder,
         vector_store,
         code_execution,
@@ -490,6 +491,7 @@ async fn bind_inner(
         store.clone(),
     );
     mcp_servers.mount(&mut tools).await?;
+    finalize_foreground_agent_config(&tools, &mut agent_config);
     let tools = Arc::new(tools);
     let state = match client_executor_id {
         Some(client_executor_id) => AppState::new_with_client_executor_id(
@@ -662,6 +664,17 @@ fn agent_deps(
         ..AgentConfig::default()
     };
     (retrieval, tools, agent_config)
+}
+
+/// Finalize the foreground prompt only after every boot-time tool is mounted.
+///
+/// The registry is immutable after this point today. A future dynamically
+/// swappable registry must run the same composition against the immutable tool
+/// snapshot selected for each turn, rather than retaining this startup value.
+fn finalize_foreground_agent_config(tools: &ToolRegistry, agent_config: &mut AgentConfig) {
+    agent_config.system_prompt = Some(foreground_prompt::compose(
+        &tools.specs_for_foreground(true),
+    ));
 }
 
 /// The embeddings model used when an OpenAI credential is configured. Its native
