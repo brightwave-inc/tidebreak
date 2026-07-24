@@ -131,6 +131,14 @@ the maintained draft and its proposed version automatic.
    complete immutable prefix, a new dispatch validates and reuses those bytes,
    skips both desktop builds, and resumes only mutable metadata publication,
    CDN invalidation, and smoke testing.
+8. A final job downloads both notarized disk images back from the CDN, checks
+   them against the immutable manifest digests, and attaches them to the GitHub
+   Release as `OpenWave-macos-apple-silicon.dmg` and `OpenWave-macos-intel.dmg`
+   with `.sha256` sidecars. It holds no signing or AWS credentials. The names
+   omit the version so that
+   `https://github.com/brightwave-inc/openwave/releases/latest/download/<name>`
+   stays a permanent download link for the README; the release page and the
+   app's own version string identify which build it is.
 
 Publishing the native draft is the only release boundary. Merging ordinary PRs
 updates the draft but never builds or ships a desktop version. A published
