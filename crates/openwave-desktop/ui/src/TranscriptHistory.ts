@@ -31,6 +31,7 @@ const HISTORY_TOOL_NAMES: Record<ChatToolActivity["title"], string> = {
   "Read a file": "read_file",
   "Browse files": "list_dir",
   "Update a file": "write_file",
+  "Create an output": "create_deliverable",
   "Request folder access": "request_folder_access",
   "Connect a folder": "connect_folder",
   "Check connected folders": "list_connected_folders",

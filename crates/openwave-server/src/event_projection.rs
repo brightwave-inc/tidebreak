@@ -78,6 +78,7 @@ pub(crate) enum RendererToolName {
     ReadFile,
     ListDir,
     WriteFile,
+    CreateDeliverable,
     RequestFolderAccess,
     ConnectFolder,
     ListConnectedFolders,
@@ -107,6 +108,7 @@ impl From<&str> for RendererToolName {
             "read_file" => Self::ReadFile,
             "list_dir" => Self::ListDir,
             "write_file" => Self::WriteFile,
+            "create_deliverable" => Self::CreateDeliverable,
             "request_folder_access" => Self::RequestFolderAccess,
             "connect_folder" => Self::ConnectFolder,
             "list_connected_folders" => Self::ListConnectedFolders,
@@ -272,6 +274,10 @@ mod tests {
         assert_eq!(
             RendererToolName::from(crate::source_tools::READ_SOURCE_TOOL),
             RendererToolName::ReadSource
+        );
+        assert_eq!(
+            RendererToolName::from("create_deliverable"),
+            RendererToolName::CreateDeliverable
         );
     }
 

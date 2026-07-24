@@ -76,13 +76,19 @@ Pre-alpha, built in the open. The current product is conversation-first: each
 chat is its own workspace, with exact conversation-scoped sources and retrieval
 rather than a shared fallback corpus. Sources can be added from the composer,
 read directly after parsing, or searched semantically at corpus scale, with
-grounded citations in each path. The stack includes local file tools,
-multi-provider model routing, a turn engine with live journaled WebSocket events,
-a workspace-style desktop conversation shell, a bounded foreground/sandbox
-agent-run foundation, and durable asynchronous source ingestion/retrieval with
-grounded citations — all behind `openwave serve`. Project records and APIs remain
-dormant for compatibility and future design work, but Projects are not surfaced
-in the desktop and are not required to start working.
+grounded citations in each path. Foreground agents can also create bounded text
+deliverables that remain private to the conversation until the user previews
+and explicitly exports them from the native Outputs view. The stack includes
+local file tools, multi-provider model routing, a turn engine with live
+journaled WebSocket events, a workspace-style desktop conversation shell, a
+bounded foreground/sandbox agent-run foundation, and durable asynchronous
+source ingestion/retrieval with grounded citations — all behind `openwave serve`.
+Project records and APIs remain dormant for compatibility and future design
+work, but Projects are not surfaced in the desktop and are not required to
+start working.
+
+See [`docs/deliverables.md`](docs/deliverables.md) for the generated-output and
+native export boundary.
 
 Connectors, richer document parsers, indexed-search MCP wiring, and MCP
 configuration UI remain in development. Expect rapid change and rough edges —

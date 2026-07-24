@@ -59,7 +59,7 @@ use openwave_core::{
     list_connected_folders_tool_spec, list_folder_tool_spec, read_connected_file_tool_spec,
     request_folder_access_tool_spec, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments,
-    validate_request_folder_access_arguments, AgentConfig, AgentError, Config,
+    validate_request_folder_access_arguments, AgentConfig, AgentError, Config, CreateDeliverable,
     KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool,
     ToolRegistry, WriteFile,
 };
@@ -631,6 +631,7 @@ fn agent_deps(
         .with(Box::new(ReadFile))
         .with(Box::new(ListDir))
         .with(Box::new(WriteFile))
+        .with(Box::new(CreateDeliverable))
         .with(Box::new(ExecTool::new(code_execution)))
         .with(search)
         .with(Box::new(source_tools::ListSourcesTool::new(

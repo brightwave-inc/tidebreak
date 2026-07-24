@@ -16,6 +16,7 @@ use openwave_core::Config;
 
 mod broker;
 mod client_execution;
+mod deliverables;
 mod documents;
 mod host_access;
 mod updater;
@@ -149,6 +150,9 @@ pub fn run() {
             documents::import_library_document,
             documents::list_library_documents,
             documents::search_library_documents,
+            deliverables::list_deliverables,
+            deliverables::read_deliverable,
+            deliverables::export_deliverable,
             client_execution::resolve_folder_access_request,
             host_access::connect_folder,
             host_access::list_connected_folders,

@@ -25,6 +25,7 @@ import { useChatSessionStore } from "./ChatSessionStore";
 import { useChatListStore } from "./ChatListStore";
 import { useUiStore } from "./UiStore";
 import { DocumentsView } from "./DocumentsView";
+import { DeliverablesView } from "./DeliverablesView";
 import {
   importLibraryDocument,
   type ImportedDocument,
@@ -1077,6 +1078,11 @@ export default function App() {
       >
         {primaryView === "documents" ? (
           <DocumentsView chatId={chat.id} onBack={() => uiActions.showChat({ keepPanels: true })} />
+        ) : primaryView === "deliverables" ? (
+          <DeliverablesView
+            chatId={chat.id}
+            onBack={() => uiActions.showChat({ keepPanels: true })}
+          />
         ) : primaryView === "settings" ? (
           <SettingsView
             client={client}

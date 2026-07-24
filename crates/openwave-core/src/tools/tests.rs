@@ -3,7 +3,7 @@ use std::path::Path;
 use serde_json::json;
 
 use super::private_scratch::{read_utf8_file, write_utf8_file, MAX_READ_FILE_BYTES};
-use super::{ListDir, ReadFile, WriteFile};
+use super::{CreateDeliverable, ListDir, ReadFile, WriteFile};
 use crate::id::ChatId;
 use crate::tool::{Tool, ToolCtx};
 
@@ -24,10 +24,77 @@ async fn every_file_tool_fails_closed_without_private_scratch() {
         .execute(&ctx, json!({"path": "note.txt", "content": "nope"}))
         .await
         .unwrap();
+    let deliverable = CreateDeliverable
+        .execute(&ctx, json!({"filename": "brief.md", "content": "nope"}))
+        .await
+        .unwrap();
 
     assert!(read.is_error);
     assert!(list.is_error);
     assert!(write.is_error);
+    assert!(deliverable.is_error);
+}
+
+#[tokio::test]
+async fn deliverables_are_isolated_in_their_closed_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(dir.path());
+    let spec = CreateDeliverable.spec();
+    assert_eq!(
+        spec.input_schema["properties"]["filename"]["maxLength"],
+        crate::MAX_DELIVERABLE_NAME_CHARS
+    );
+    assert_eq!(
+        spec.input_schema["properties"]["content"]["maxLength"],
+        crate::MAX_DELIVERABLE_BYTES
+    );
+    assert_eq!(spec.input_schema["additionalProperties"], false);
+
+    let output = CreateDeliverable
+        .execute(
+            &ctx,
+            json!({"filename": "Research brief.md", "content": "# Findings\n\nGrounded."}),
+        )
+        .await
+        .unwrap();
+    assert!(!output.is_error, "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("artifacts/Research brief.md")).unwrap(),
+        "# Findings\n\nGrounded."
+    );
+    assert!(output.content.contains("Outputs"));
+
+    for arguments in [
+        json!({"filename": "../escape.md", "content": "nope"}),
+        json!({"filename": "opaque.pdf", "content": "nope"}),
+        json!({"filename": "empty.txt", "content": ""}),
+        json!({"filename": "extra.txt", "content": "x", "path": "outside"}),
+    ] {
+        assert!(
+            CreateDeliverable
+                .execute(&ctx, arguments)
+                .await
+                .unwrap()
+                .is_error
+        );
+    }
+}
+
+#[tokio::test]
+async fn deliverable_size_is_bounded_before_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = CreateDeliverable
+        .execute(
+            &ctx(dir.path()),
+            json!({
+                "filename": "oversized.txt",
+                "content": "x".repeat(crate::MAX_DELIVERABLE_BYTES + 1)
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(output.is_error);
+    assert!(!dir.path().join("artifacts/oversized.txt").exists());
 }
 
 #[tokio::test]

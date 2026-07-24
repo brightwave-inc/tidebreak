@@ -122,6 +122,7 @@ export type ChatToolActivity = {
     | "Read a file"
     | "Browse files"
     | "Update a file"
+    | "Create an output"
     | "Request folder access"
     | "Connect a folder"
     | "Check connected folders"
@@ -225,6 +226,7 @@ export type RendererToolName =
   | "read_file"
   | "list_dir"
   | "write_file"
+  | "create_deliverable"
   | "request_folder_access"
   | "connect_folder"
   | "list_connected_folders"
@@ -740,6 +742,7 @@ function isRendererToolName(value: unknown): value is RendererToolName {
     value === "read_file" ||
     value === "list_dir" ||
     value === "write_file" ||
+    value === "create_deliverable" ||
     value === "request_folder_access" ||
     value === "connect_folder" ||
     value === "list_connected_folders" ||

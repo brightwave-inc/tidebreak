@@ -6327,6 +6327,10 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_orchestration()
         "file tools still present"
     );
     assert!(
+        names.iter().any(|n| n == "create_deliverable"),
+        "deliverable tool registered"
+    );
+    assert!(
         names
             .iter()
             .any(|n| n == openwave_code_execution::EXEC_TOOL_NAME),
@@ -8254,9 +8258,12 @@ async fn patch_chat_sets_and_clears_a_trimmed_title() {
 
 #[tokio::test]
 async fn delete_chat_removes_a_quiesced_conversation_and_reports_safe_conflicts() {
-    let (router, token, store, _dir) = test_app().await;
+    let (router, token, store, dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
+    let chat_scratch = dir.path().join("scratch").join(chat.id.to_string());
+    std::fs::create_dir_all(chat_scratch.join("artifacts")).unwrap();
+    std::fs::write(chat_scratch.join("artifacts/brief.md"), "private").unwrap();
 
     let deleted = router
         .clone()
@@ -8272,6 +8279,7 @@ async fn delete_chat_removes_a_quiesced_conversation_and_reports_safe_conflicts(
         .unwrap();
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     assert!(store.get_chat(chat.id).await.unwrap().is_none());
+    assert!(!chat_scratch.exists());
 
     let missing = router
         .clone()
@@ -8286,6 +8294,37 @@ async fn delete_chat_removes_a_quiesced_conversation_and_reports_safe_conflicts(
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let linked = make_chat(&router, &bearer).await;
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.txt"), "keep").unwrap();
+        symlink(
+            outside.path(),
+            dir.path().join("scratch").join(linked.id.to_string()),
+        )
+        .unwrap();
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/chats/{}", linked.id))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("keep.txt")).unwrap(),
+            "keep"
+        );
+    }
 
     let active = make_chat(&router, &bearer).await;
     store
