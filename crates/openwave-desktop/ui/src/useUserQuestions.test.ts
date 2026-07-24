@@ -2,6 +2,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "./api";
+import { useChatListStore } from "./ChatListStore";
 import { useUserQuestions } from "./useUserQuestions";
 import { useRefreshSignals } from "./RefreshSignals";
 import * as host from "./host";
@@ -14,6 +15,18 @@ function pending(callId: string, turnId = "turn-1") {
   return { callId, turnId, questions: [] };
 }
 
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  promise.catch(() => {});
+  return { promise, resolve, reject };
+}
+
 function stubClient(overrides: Record<string, unknown> = {}) {
   return {
     listPendingUserQuestions: vi.fn().mockResolvedValue([]),
@@ -23,7 +36,10 @@ function stubClient(overrides: Record<string, unknown> = {}) {
   } as unknown as ApiClient;
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  useChatListStore.getState().setDeletingChatId(null);
+});
 
 describe("useUserQuestions", () => {
   it("asks for attention only when a request is new", async () => {
@@ -111,6 +127,27 @@ describe("useUserQuestions", () => {
     rerender({ chatId: "chat-2" });
     await act(async () => {
       reject?.(new Error("network went away"));
+    });
+
+    expect(result.current.errors).toEqual({});
+  });
+
+  it("drops a failed answer once its chat is being deleted", async () => {
+    const answer = deferred<void>();
+    const client = stubClient({
+      listPendingUserQuestions: vi.fn().mockResolvedValue([pending("call-1")]),
+      answerUserQuestions: vi.fn(() => answer.promise),
+    });
+    const { result } = renderHook(() => useUserQuestions(client, "chat-1"));
+    await waitFor(() => expect(result.current.requests).toHaveLength(1));
+
+    act(() => result.current.answer("call-1", []));
+    // The reader deletes the chat before the answer settles. Its id still
+    // matches the pane, which is why a plain id comparison misses this.
+    act(() => useChatListStore.getState().setDeletingChatId("chat-1"));
+    await act(async () => {
+      answer.reject(new Error("gone"));
+      await answer.promise.catch(() => {});
     });
 
     expect(result.current.errors).toEqual({});

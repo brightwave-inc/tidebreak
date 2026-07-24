@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import type { ApiClient } from "./api";
 import { useChatSessionStore } from "./ChatSessionStore";
+import { useOpenConversation } from "./OpenConversation";
 
 export type ToolApprovals = {
   deciding: Set<string>;
@@ -27,6 +28,7 @@ export function useToolApprovals(
   const [deciding, setDeciding] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
   const decidingRef = useRef<Set<string>>(new Set());
+  const stillOpen = useOpenConversation(chatId);
 
   async function send(
     callId: string,
@@ -34,6 +36,7 @@ export function useToolApprovals(
     remember: boolean,
   ) {
     if (!client || !chatId || decidingRef.current.has(callId)) return;
+    const startedChatId = chatId;
     decidingRef.current.add(callId);
     setDeciding((calls) => new Set(calls).add(callId));
     setErrors((current) => {
@@ -42,7 +45,7 @@ export function useToolApprovals(
       return next;
     });
     try {
-      await client.decideApproval(chatId, callId, decision, remember);
+      await client.decideApproval(startedChatId, callId, decision, remember);
       useChatSessionStore.getState().update((session) => ({
         ...session,
         messages: session.messages.map((message) =>
@@ -52,10 +55,14 @@ export function useToolApprovals(
         ),
       }));
     } catch (err) {
-      setErrors((current) => ({
-        ...current,
-        [callId]: `Could not send your decision: ${String(err)}`,
-      }));
+      // A decision that fails against a chat on its way out has nowhere to be
+      // read; the conversation it belonged to is going with it.
+      if (stillOpen(startedChatId)) {
+        setErrors((current) => ({
+          ...current,
+          [callId]: `Could not send your decision: ${String(err)}`,
+        }));
+      }
     } finally {
       decidingRef.current.delete(callId);
       setDeciding((calls) => {
