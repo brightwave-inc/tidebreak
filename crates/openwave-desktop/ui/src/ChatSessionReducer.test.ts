@@ -553,3 +553,35 @@ describe("context truncation notice", () => {
     expect(notices).toHaveLength(2);
   });
 });
+
+describe("replaying an active turn over a hydrated transcript", () => {
+  it("keeps the superseded partial and steer message in journal order", () => {
+    // Re-entering a chat mid-turn: hydration placed the persisted messages,
+    // then the journal replays the in-flight turn's events from the top.
+    const hydrated = applyTerminalHydration(initialChatSessionState(), {
+      messages: [
+        { id: "u1", role: "user", text: "write about birds" },
+        { id: "steer-1", role: "user", text: "make it volcanos" },
+      ],
+      messageIds: new Set(["u1", "steer-1"]),
+      lastEventSeq: 0,
+    });
+    const { state } = play(
+      [
+        { type: "turn_started", turn_id: "t1" },
+        { type: "text_delta", text: "Birds are great" },
+        { type: "stream_interrupted" },
+        { type: "user_steered", message_id: "steer-1", text: "make it volcanos" },
+        { type: "text_delta", text: "Volcanoes erupt" },
+      ],
+      hydrated,
+    );
+    const order = state.messages.map((m) =>
+      m.role === "assistant" ? `${m.superseded ? "superseded" : "live"}` : m.id,
+    );
+    expect(order).toEqual(["u1", "superseded", "steer-1", "live"]);
+    const assistants = state.messages.filter((m) => m.role === "assistant");
+    expect(assistants[0]).toMatchObject({ text: "Birds are great" });
+    expect(assistants[1]).toMatchObject({ text: "Volcanoes erupt" });
+  });
+});

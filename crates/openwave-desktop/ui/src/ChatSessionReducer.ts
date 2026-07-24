@@ -279,7 +279,19 @@ export function reduceChatSessionEvent(
 
     case "user_steered": {
       if (state.hydratedMessageIds.has(event.message_id)) {
-        return { state, effects };
+        // Replay after hydration: the transcript already holds this message,
+        // but hydration placed it before any replayed stream content. Journal
+        // order is the true order, so move it to its replay position.
+        const index = state.messages.findIndex(
+          (message) => message.id === event.message_id,
+        );
+        if (index < 0 || index === state.messages.length - 1) {
+          return { state, effects };
+        }
+        const messages = [...state.messages];
+        const [moved] = messages.splice(index, 1);
+        messages.push(moved);
+        return { state: { ...state, messages }, effects };
       }
       const hydratedMessageIds = new Set(state.hydratedMessageIds);
       hydratedMessageIds.add(event.message_id);
