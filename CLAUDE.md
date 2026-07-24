@@ -15,8 +15,10 @@ React/TypeScript under `crates/openwave-desktop/ui`.
   on. Small and reviewable beats big and sprawling.
 - **Branch off `main`; PR back into `main`.** Never commit straight to `main`.
 - **Track substantial work on the board first.** For anything beyond a small fix,
-  open (or pick up) an issue and put it on the project board before starting — see
-  below. This keeps collaborators and separate agent sessions aligned on status.
+  open (or pick up) an issue, put it on the project board, and move it to
+  *In progress* **before you start editing** — see below. Several agent sessions
+  run in parallel against this repo and the board is how they avoid each other;
+  an issue claimed after the work is done has already failed at its job.
 - **Only commit or push when asked.** Don't merge your own PRs unless the request
   was explicitly to merge; default to opening the PR for review.
 
@@ -25,11 +27,24 @@ React/TypeScript under `crates/openwave-desktop/ui`.
 Work is tracked on a repo-scoped GitHub **Project** so the team and separate
 agent sessions can see where things stand without reading commit logs.
 
+- **Claim before you build, not after.** Assign yourself and move the issue to
+  *In progress* **before the first edit**. Sessions run in parallel and cannot
+  see each other's working trees, so the board is the only place a claim is
+  visible. Claiming at the end of the work is worth nothing: the failure it
+  prevents is a second session starting the same issue an hour ago.
+- **Check for existing work before you start.** Read the issue's board status and
+  `gh pr list` together. Either can be stale on its own — an unclaimed issue with
+  an open PR against it is taken.
+- **A closed issue is not proof the work is done.** Check whether the merged PR
+  covered the whole scope, and open a follow-up issue for whatever it left.
+- **If you find your slice already merged by someone else, don't force yours
+  through.** The version that landed first has the floor; rebasing a competing
+  design over it reverts reviewed work. Salvage the difference — extra coverage,
+  bugs you found — into follow-up issues, and say so when you close yours.
 - **One issue per slice.** Reference it from the PR with `Closes #N` so the merge
   auto-closes the issue and advances its board status.
-- **Keep status current.** Move an issue to *In progress* when you pick it up. A
-  stale board misleads the team — treat updating it as part of the change, not an
-  afterthought.
+- **Keep status current.** A stale board misleads the team — treat updating it as
+  part of the change, not an afterthought.
 - Managing the board (not issues) needs the `project` OAuth scope on the `gh`
   token; `gh auth refresh -s project` grants it.
 
