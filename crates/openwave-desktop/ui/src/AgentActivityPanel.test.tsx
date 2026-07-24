@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentRun } from "./api";
-import { AgentActivityPanel, agentRunsForChat } from "./AgentActivityPanel";
+import { AgentActivityPanel } from "./AgentActivityPanel";
 
 function run(overrides: Partial<AgentRun>): AgentRun {
   return {
@@ -26,14 +26,6 @@ const noStops = {
 };
 
 describe("AgentActivityPanel", () => {
-  it("shows snapshots only for the conversation that owns them", () => {
-    const runs = [run({ id: "chat-a-run" })];
-
-    expect(agentRunsForChat("chat-a", "chat-a", runs)).toBe(runs);
-    expect(agentRunsForChat("chat-a", "chat-b", runs)).toEqual([]);
-    expect(agentRunsForChat(null, "chat-a", runs)).toEqual([]);
-  });
-
   it("groups live and recent background work with a focused live region", () => {
     const markup = renderToStaticMarkup(
       <AgentActivityPanel

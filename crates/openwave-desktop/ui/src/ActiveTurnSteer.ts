@@ -1,9 +1,21 @@
 export const MAX_STEER_CHARACTERS = 65_536;
 
+/**
+ * The conversation and turn a piece of guidance was aimed at.
+ *
+ * This used to carry the root's conversation-selection counter as a third
+ * discriminator, from when one fence spanned every chat. The fence now belongs
+ * to the hook that owns a single conversation's turn controls, and the counter
+ * no longer distinguishes anything the chat id does not: a chat *switch* is
+ * either an unmount, which takes the fence with it, or a new `chatId`, which
+ * the id comparison below already rejects; a chat *deletion* leaves the doomed
+ * conversation mounted under its own id, and is handled by invalidating the
+ * fence and by refusing to name a chat that is on its way out as the current
+ * target. See [useTurnControls].
+ */
 export type ActiveTurnTarget = {
   chatId: string;
   turnId: string;
-  selection: number;
 };
 
 export type ActiveTurnSteerRequest = ActiveTurnTarget & {
@@ -30,11 +42,7 @@ function sameTarget(
   left: ActiveTurnTarget,
   right: ActiveTurnTarget,
 ): boolean {
-  return (
-    left.chatId === right.chatId &&
-    left.turnId === right.turnId &&
-    left.selection === right.selection
-  );
+  return left.chatId === right.chatId && left.turnId === right.turnId;
 }
 
 export class ActiveTurnSteerFence {

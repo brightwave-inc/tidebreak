@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ApiClient,
-  type AgentRun,
   type Chat,
   type ModelInfo,
   type ModelSelectionKey,
@@ -20,6 +19,7 @@ import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import { ChatSessionController } from "./ChatSessionController";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { useRefreshSignals } from "./RefreshSignals";
+import { useTurnLifecycle } from "./TurnLifecycleSignals";
 import { useChatListStore } from "./ChatListStore";
 import { useUiStore } from "./UiStore";
 import {
@@ -35,21 +35,9 @@ import {
   type ChatSessionState,
 } from "./ChatSessionReducer";
 import {
-  ActiveTurnSteerFence,
-  canBeginActiveTurnSteer,
-  shouldClearAcceptedSteerDraft,
-} from "./ActiveTurnSteer";
-import {
   loadCurrentTerminalTranscript,
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
-import { agentRunsForChat } from "./AgentActivityPanel";
-import {
-  SandboxAgentStopFence,
-  canStopSandboxAgentRun,
-  reconcileSandboxAgentCancellation,
-  sandboxAgentStopKey,
-} from "./SandboxAgentStop";
 import { prependReplacementChat } from "./ChatDeletion";
 import { useConfirm } from "./components/ConfirmDialog";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
@@ -75,6 +63,7 @@ const sessionDeps = {
 const chatListActions = useChatListStore.getState();
 const uiActions = useUiStore.getState();
 const { signal: signalRefresh } = useRefreshSignals.getState();
+const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
 
 export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
@@ -91,17 +80,6 @@ export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const busy = useChatSessionStore((session) => session.busy);
-  const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
-  const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
-  const [agentRunsChatId, setAgentRunsChatId] = useState<string | null>(null);
-  const [agentRunsLoading, setAgentRunsLoading] = useState(false);
-  const [agentRunsError, setAgentRunsError] = useState<string | null>(null);
-  const [stoppingSandboxRunKeys, setStoppingSandboxRunKeys] = useState<Set<string>>(
-    new Set(),
-  );
-  const [sandboxStopErrorKeys, setSandboxStopErrorKeys] = useState<Set<string>>(
-    new Set(),
-  );
   const [draft, setDraft] = useState("");
   const [addingSourceChatId, setAddingSourceChatId] = useState<string | null>(
     null,
@@ -114,15 +92,6 @@ export default function App() {
     chatId: string;
     message: string;
   } | null>(null);
-  const [cancelPendingTurnId, setCancelPendingTurnId] = useState<string | null>(
-    null,
-  );
-  const [cancelError, setCancelError] = useState<string | null>(null);
-  const [steerPendingTurnId, setSteerPendingTurnId] = useState<string | null>(
-    null,
-  );
-  const [steerError, setSteerError] = useState<string | null>(null);
-  const [steerStatus, setSteerStatus] = useState<string | null>(null);
   const skipRenameCommitRef = useRef(false);
   const [status, setStatus] = useState("starting…");
   // Owns the selected chat's event socket; chat switches dispose it eagerly
@@ -131,12 +100,8 @@ export default function App() {
   const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
   const chatSelectionRef = useRef(0);
   const terminalHydrationGenerationRef = useRef(0);
-  const refreshAgentRunsRef = useRef<(() => void) | null>(null);
-  const cancelRequestTurnRef = useRef<string | null>(null);
   const draftRef = useRef("");
   const selectedChatIdRef = useRef<string | null>(null);
-  const steerFenceRef = useRef(new ActiveTurnSteerFence());
-  const sandboxStopFenceRef = useRef(new SandboxAgentStopFence());
   const creationInFlightRef = useRef(false);
   const deletionInFlightRef = useRef(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
@@ -159,8 +124,6 @@ export default function App() {
     return () => {
       cancelled = true;
       terminalHydrationGenerationRef.current += 1;
-      steerFenceRef.current.invalidate();
-      sandboxStopFenceRef.current.invalidate();
     };
   }, []);
 
@@ -268,118 +231,6 @@ export default function App() {
     };
   }, [client, chat?.id, hydratedChatId]);
 
-  useEffect(() => {
-    if (!client || !chat) return;
-    let cancelled = false;
-    let requestSeq = 0;
-
-    const refresh = async () => {
-      const seq = ++requestSeq;
-      try {
-        const runs = await client.listAgentRuns(chat.id);
-        if (!cancelled && seq === requestSeq) {
-          setAgentRuns(runs);
-          setAgentRunsError(null);
-        }
-      } catch (err) {
-        if (!cancelled && seq === requestSeq) {
-          setAgentRunsError(String(err));
-        }
-      } finally {
-        if (!cancelled && seq === requestSeq) {
-          setAgentRunsLoading(false);
-        }
-      }
-    };
-
-    setAgentRuns([]);
-    setAgentRunsChatId(chat.id);
-    setAgentRunsError(null);
-    setAgentRunsLoading(true);
-    refreshAgentRunsRef.current = () => void refresh();
-    void refresh();
-    return () => {
-      cancelled = true;
-      requestSeq += 1;
-      if (refreshAgentRunsRef.current) {
-        refreshAgentRunsRef.current = null;
-      }
-    };
-  }, [client, chat?.id]);
-
-  const visibleAgentRuns = agentRunsForChat(agentRunsChatId, chat?.id ?? null, agentRuns);
-  const visibleStoppingSandboxRunIds = new Set(
-    visibleAgentRuns
-      .filter((run) =>
-        stoppingSandboxRunKeys.has(sandboxAgentStopKey(chat?.id ?? "", run.id)),
-      )
-      .map((run) => run.id),
-  );
-  const visibleSandboxStopErrorRunIds = new Set(
-    visibleAgentRuns
-      .filter((run) =>
-        sandboxStopErrorKeys.has(sandboxAgentStopKey(chat?.id ?? "", run.id)),
-      )
-      .map((run) => run.id),
-  );
-  const hasActiveSandboxRun = visibleAgentRuns.some(
-    (run) =>
-      run.execution === "sandbox" &&
-      ["queued", "running", "cancelling", "waiting", "retry_wait"].includes(
-        run.status,
-      ),
-  );
-
-  useEffect(() => {
-    if (!hasActiveSandboxRun) return;
-    const interval = window.setInterval(
-      () => refreshAgentRunsRef.current?.(),
-      5_000,
-    );
-    return () => window.clearInterval(interval);
-  }, [hasActiveSandboxRun]);
-
-  async function onStopSandboxAgentRun(runId: string) {
-    if (!client || !chat || deletionInFlightRef.current) return;
-    const target = visibleAgentRuns.find((run) => run.id === runId);
-    if (!target || !canStopSandboxAgentRun(target)) return;
-
-    const chatId = chat.id;
-    const request = sandboxStopFenceRef.current.begin(chatId, runId);
-    if (!request) return;
-    const key = sandboxAgentStopKey(chatId, runId);
-    setStoppingSandboxRunKeys((current) => new Set(current).add(key));
-    setSandboxStopErrorKeys((current) => {
-      const next = new Set(current);
-      next.delete(key);
-      return next;
-    });
-
-    try {
-      const cancellation = await client.cancelAgentRun(chatId, runId);
-      if (!sandboxStopFenceRef.current.isCurrent(request, selectedChatIdRef.current)) {
-        return;
-      }
-      setAgentRuns((current) =>
-        reconcileSandboxAgentCancellation(current, cancellation),
-      );
-      refreshAgentRunsRef.current?.();
-    } catch {
-      if (!sandboxStopFenceRef.current.isCurrent(request, selectedChatIdRef.current)) {
-        return;
-      }
-      setSandboxStopErrorKeys((current) => new Set(current).add(key));
-    } finally {
-      if (sandboxStopFenceRef.current.finish(request, selectedChatIdRef.current)) {
-        setStoppingSandboxRunKeys((current) => {
-          const next = new Set(current);
-          next.delete(key);
-          return next;
-        });
-      }
-    }
-  }
-
   function updateSession(update: (state: ChatSessionState) => ChatSessionState) {
     useChatSessionStore.getState().update(update);
   }
@@ -395,7 +246,7 @@ export default function App() {
   function applySessionEffect(effect: ChatSessionEffect) {
     switch (effect.type) {
       case "refresh_agent_runs":
-        refreshAgentRunsRef.current?.();
+        signalRefresh("agentRuns");
         return;
       case "refresh_folder_access":
         signalRefresh("folderAccess");
@@ -404,16 +255,12 @@ export default function App() {
         signalRefresh("userQuestions");
         return;
       case "turn_began":
-        setCancelPendingTurnId(null);
-        setCancelError(null);
-        cancelRequestTurnRef.current = null;
-        if (effect.startsDifferentTurn) clearSteerRequestState();
+        signalTurnLifecycle(
+          effect.startsDifferentTurn ? "began" : "began_same_turn",
+        );
         return;
       case "turn_resolved":
-        setCancelPendingTurnId(null);
-        setCancelError(null);
-        cancelRequestTurnRef.current = null;
-        clearSteerRequestState();
+        signalTurnLifecycle("resolved");
         return;
       case "invalidate_terminal_hydration":
         terminalHydrationGenerationRef.current += 1;
@@ -457,28 +304,12 @@ export default function App() {
       busy: false,
       activeTurnId: null,
     }));
-    setCancelPendingTurnId(null);
-    setCancelError(null);
-    cancelRequestTurnRef.current = null;
-    clearSteerRequestState();
+    signalTurnLifecycle("resolved");
   }
 
   function setComposerDraft(nextDraft: string) {
     draftRef.current = nextDraft;
     setDraft(nextDraft);
-  }
-
-  function clearSteerRequestState() {
-    steerFenceRef.current.invalidate();
-    setSteerPendingTurnId(null);
-    setSteerError(null);
-    setSteerStatus(null);
-  }
-
-  function onComposerDraftChange(nextDraft: string) {
-    setComposerDraft(nextDraft);
-    setSteerError(null);
-    setSteerStatus(null);
   }
 
   async function refreshCatalog() {
@@ -513,15 +344,14 @@ export default function App() {
         },
       ],
     }));
-    setCancelPendingTurnId(null);
-    setCancelError(null);
+    signalTurnLifecycle("submitted");
     try {
       await client.postMessage(chatId, turnId, content);
       if (chatSelectionRef.current !== selection) return;
       setRecentSource((current) =>
         current?.chatId === chatId ? null : current,
       );
-      refreshAgentRunsRef.current?.();
+      signalRefresh("agentRuns");
     } catch (err) {
       if (chatSelectionRef.current !== selection) return;
       resolveActiveTurn();
@@ -556,110 +386,6 @@ export default function App() {
     }
   }
 
-  async function onSteerActiveTurn() {
-    const admission = {
-      busy,
-      turnId: useChatSessionStore.getState().activeTurnId,
-      cancelRequestTurnId: cancelRequestTurnRef.current,
-      deletionInFlight: deletionInFlightRef.current,
-    };
-    if (
-      !client ||
-      !chat ||
-      !canBeginActiveTurnSteer(admission)
-    ) {
-      return;
-    }
-    const turnId = admission.turnId;
-
-    const request = steerFenceRef.current.begin(
-      {
-        chatId: chat.id,
-        turnId,
-        selection: chatSelectionRef.current,
-      },
-      draftRef.current,
-      () => crypto.randomUUID(),
-    );
-    if (!request) return;
-
-    setSteerPendingTurnId(turnId);
-    setSteerError(null);
-    setSteerStatus("Sending guidance…");
-    setCancelError(null);
-    try {
-      await client.steer(
-        request.chatId,
-        request.turnId,
-        request.steerId,
-        request.content,
-        true,
-      );
-      if (
-        !steerFenceRef.current.canApplyResponse(request, {
-          chatId: selectedChatIdRef.current ?? "",
-          turnId: useChatSessionStore.getState().activeTurnId ?? "",
-          selection: chatSelectionRef.current,
-        })
-      ) {
-        return;
-      }
-
-      steerFenceRef.current.finish(request);
-      setSteerPendingTurnId(null);
-      if (shouldClearAcceptedSteerDraft(request, draftRef.current)) {
-        setComposerDraft("");
-      }
-      setSteerStatus("Guidance sent");
-    } catch (err) {
-      if (
-        !steerFenceRef.current.canApplyResponse(request, {
-          chatId: selectedChatIdRef.current ?? "",
-          turnId: useChatSessionStore.getState().activeTurnId ?? "",
-          selection: chatSelectionRef.current,
-        })
-      ) {
-        return;
-      }
-
-      steerFenceRef.current.fail(request);
-      setSteerPendingTurnId(null);
-      setSteerStatus(null);
-      setSteerError(String(err));
-    }
-  }
-
-  async function onCancelActiveTurn() {
-    const turnId = activeTurnId;
-    if (
-      !client ||
-      !chat ||
-      !busy ||
-      !turnId ||
-      cancelRequestTurnRef.current === turnId
-    ) {
-      return;
-    }
-    const selection = chatSelectionRef.current;
-    const chatId = chat.id;
-
-    cancelRequestTurnRef.current = turnId;
-    setCancelPendingTurnId(turnId);
-    setCancelError(null);
-    try {
-      await client.cancel(chatId, turnId);
-    } catch (err) {
-      if (
-        chatSelectionRef.current === selection &&
-        cancelRequestTurnRef.current === turnId
-      ) {
-        cancelRequestTurnRef.current = null;
-        setCancelPendingTurnId(null);
-        setCancelError(String(err));
-      }
-    }
-  }
-
   async function onNewChat() {
     if (!client || creationInFlightRef.current || deletionInFlightRef.current) return;
     creationInFlightRef.current = true;
@@ -689,15 +415,9 @@ export default function App() {
     controllerRef.current?.dispose();
     controllerRef.current = null;
     useChatSessionStore.getState().reset();
-    setAgentRuns([]);
-    setAgentRunsError(null);
     setComposerDraft("");
     setRecentSource(null);
     setSourceAttachmentError(null);
-    setCancelPendingTurnId(null);
-    setCancelError(null);
-    cancelRequestTurnRef.current = null;
-    clearSteerRequestState();
     activateChat(created);
     chatListActions.prependChat(created);
     chatListActions.setChatsError(null);
@@ -721,12 +441,9 @@ export default function App() {
     const deletingSelectedChat = chat?.id === target.id;
     if (deletingSelectedChat) {
       // This invalidates callbacks that captured the deleted selection. The
-      // ref update also gates sends before the disabled composer renders.
+      // ref update also gates sends before the disabled composer renders. The
+      // chat pane retires its own in-flight work off the deleting chat id.
       chatSelectionRef.current += 1;
-      clearSteerRequestState();
-      sandboxStopFenceRef.current.invalidate();
-      setStoppingSandboxRunKeys(new Set());
-      setSandboxStopErrorKeys(new Set());
     }
     try {
       await client.deleteChat(target.id);
@@ -752,14 +469,17 @@ export default function App() {
     }
   }
 
+  /**
+   * Opens `next` as the selected conversation. Everything scoped to a single
+   * conversation — its agent runs, its pending requests, its turn controls —
+   * lives in the chat pane, which is keyed on the chat id, so this remounts it
+   * with nothing carried over from the chat being left behind.
+   */
   function activateChat(next: Chat) {
     uiActions.selectChatWorkspace(next.id);
     chatSelectionRef.current += 1;
     terminalHydrationGenerationRef.current += 1;
     selectedChatIdRef.current = next.id;
-    sandboxStopFenceRef.current.invalidate();
-    setStoppingSandboxRunKeys(new Set());
-    setSandboxStopErrorKeys(new Set());
     updateSession((session) => ({
       ...session,
       markerScrubber: new AssistantSourceMarkerStreamScrubber(),
@@ -781,15 +501,9 @@ export default function App() {
     controllerRef.current?.dispose();
     controllerRef.current = null;
     useChatSessionStore.getState().reset();
-    setAgentRuns([]);
-    setAgentRunsError(null);
     setComposerDraft("");
     setRecentSource(null);
     setSourceAttachmentError(null);
-    setCancelPendingTurnId(null);
-    setCancelError(null);
-    cancelRequestTurnRef.current = null;
-    clearSteerRequestState();
     cancelChatRename();
     activateChat(next);
     setStatus(`chat ${next.id.slice(0, 8)}…`);
@@ -979,16 +693,8 @@ export default function App() {
               hydrated={hydratedChatId === chat.id}
               nativeHost={hasNativeHost()}
               deletingChat={deletingChatId !== null}
-              agentRuns={visibleAgentRuns}
-              agentRunsLoading={
-                agentRunsChatId === chat.id ? agentRunsLoading : true
-              }
-              agentRunsError={agentRunsChatId === chat.id ? agentRunsError : null}
-              stoppingRunIds={visibleStoppingSandboxRunIds}
-              stopErrorRunIds={visibleSandboxStopErrorRunIds}
-              onRetryAgentRuns={() => refreshAgentRunsRef.current?.()}
-              onStopSandboxRun={(runId) => void onStopSandboxAgentRun(runId)}
               draft={draft}
+              draftRef={draftRef}
               attachingSource={addingSourceChatId !== null}
               attachedSourceName={
                 recentSource && recentSource.chatId === chat.id
@@ -1017,18 +723,11 @@ export default function App() {
                   )}
                 </>
               }
-              cancelError={cancelError}
-              cancelPendingTurnId={cancelPendingTurnId}
-              steerError={steerError}
-              steerStatus={steerStatus}
-              steerPendingTurnId={steerPendingTurnId}
-              onDraftChange={onComposerDraftChange}
+              onDraftChange={setComposerDraft}
               onAddSource={onAddSource}
               onDismissAttachedSource={() => setRecentSource(null)}
               onSelectPrompt={setComposerDraft}
               onSend={onSend}
-              onSteer={onSteerActiveTurn}
-              onStop={onCancelActiveTurn}
           />
           }
         />

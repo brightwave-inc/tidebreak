@@ -6,7 +6,7 @@ import {
   shouldClearAcceptedSteerDraft,
 } from "./ActiveTurnSteer";
 
-const target = { chatId: "chat-1", turnId: "turn-1", selection: 4 };
+const target = { chatId: "chat-1", turnId: "turn-1" };
 
 describe("ActiveTurnSteerFence", () => {
   it("rejects steer admission synchronously once cancellation starts", () => {
@@ -83,10 +83,6 @@ describe("ActiveTurnSteerFence", () => {
     expect(
       fence.canApplyResponse(request, { ...target, turnId: "turn-2" }),
     ).toBe(false);
-    expect(
-      fence.canApplyResponse(request, { ...target, selection: 5 }),
-    ).toBe(false);
-
   });
 
   it.each(["terminal event", "chat switch", "unmount"])(
