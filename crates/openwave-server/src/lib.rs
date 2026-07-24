@@ -57,9 +57,10 @@ use openwave_code_execution::ExecTool;
 #[cfg(test)]
 use openwave_core::DbStore;
 use openwave_core::{
-    ask_user_questions_tool_spec, list_connected_folders_tool_spec, list_folder_tool_spec,
-    read_connected_file_tool_spec, request_folder_access_tool_spec,
-    validate_ask_user_questions_arguments, validate_list_connected_folders_arguments,
+    ask_user_questions_tool_spec, import_connected_file_tool_spec,
+    list_connected_folders_tool_spec, list_folder_tool_spec, read_connected_file_tool_spec,
+    request_folder_access_tool_spec, validate_ask_user_questions_arguments,
+    validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
     validate_list_folder_arguments, validate_read_connected_file_arguments,
     validate_request_folder_access_arguments, AgentConfig, AgentError, Config, CreateDeliverable,
     KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool,
@@ -678,6 +679,10 @@ fn agent_deps(
     tools.register_validated_client(
         read_connected_file_tool_spec(),
         validate_read_connected_file_arguments,
+    );
+    tools.register_validated_client(
+        import_connected_file_tool_spec(),
+        validate_import_connected_file_arguments,
     );
     tools.register_validated_foreground_client(
         ask_user_questions_tool_spec(),

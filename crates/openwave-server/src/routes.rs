@@ -959,6 +959,7 @@ pub enum AgentActivityKind {
     ListConnectedFolders,
     ListFolder,
     ReadConnectedFile,
+    ImportConnectedFile,
 }
 
 /// Coarse checkpoint lifecycle suitable for display.
@@ -1015,6 +1016,7 @@ fn foreground_activity(
         "list_connected_folders" => AgentActivityKind::ListConnectedFolders,
         "list_folder" => AgentActivityKind::ListFolder,
         "read_connected_file" => AgentActivityKind::ReadConnectedFile,
+        "import_connected_file" => AgentActivityKind::ImportConnectedFile,
         // Unknown client tools are executor data, not a renderer API contract.
         _ => return None,
     };

@@ -79,12 +79,14 @@ pub use citation::{
     MAX_CITATION_EXCERPT_CHARS, MAX_CITATION_HEADING_CHARS, MAX_CITATION_PAGES,
 };
 pub use client_tools::{
-    list_connected_folders_tool_spec, list_folder_tool_spec, read_connected_file_tool_spec,
-    request_folder_access_tool_spec, sandbox_folder_access_proposal_tool_spec,
+    import_connected_file_tool_spec, list_connected_folders_tool_spec, list_folder_tool_spec,
+    read_connected_file_tool_spec, request_folder_access_tool_spec,
+    sandbox_folder_access_proposal_tool_spec, validate_import_connected_file_arguments,
     validate_list_connected_folders_arguments, validate_list_folder_arguments,
     validate_read_connected_file_arguments, validate_request_folder_access_arguments,
-    ListConnectedFoldersArgs, ListFolderArgs, ReadConnectedFileArgs, RequestFolderAccessArgs,
-    RequestFolderAccessResult, RequestedFolderCapability, RequestedFolderHint,
+    ImportConnectedFileArgs, ImportConnectedFileResult, ListConnectedFoldersArgs, ListFolderArgs,
+    ReadConnectedFileArgs, RequestFolderAccessArgs, RequestFolderAccessResult,
+    RequestedFolderCapability, RequestedFolderHint, IMPORT_CONNECTED_FILE_TOOL,
     LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL, MAX_CONNECTED_FOLDER_PATH_BYTES,
     MAX_FOLDER_ACCESS_REASON_CHARS, READ_CONNECTED_FILE_TOOL, REQUEST_FOLDER_ACCESS_TOOL,
 };

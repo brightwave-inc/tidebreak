@@ -7,7 +7,7 @@ identity.
 
 ## What exists today
 
-The current foreground agent surface contains sixteen tools:
+The current foreground agent surface contains seventeen tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
@@ -24,6 +24,7 @@ The current foreground agent surface contains sixteen tools:
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
 | `list_folder` | List one directory below an attached root | Native client continuation |
 | `read_connected_file` | Read bounded UTF-8 text below an attached root | Native client continuation |
+| `import_connected_file` | Add one file below an attached root to this chat as a source | Native client continuation |
 | `ask_user_questions` | Pause the current turn for one to three bounded user choices | Foreground-only durable user continuation |
 | `spawn_sandbox_agent` | Start one isolated background task and immediately continue | Foreground-only durable checkpoint |
 | `wait_for_agents` | Wait for one to four spawned agents and return their results in request order | Foreground-only durable continuation |
@@ -39,6 +40,19 @@ an opaque root ID and a bounded root-relative path; native code recovers the
 stored chat context, reauthorizes with the broker, and persists the exact
 model-facing result before resolving the parked turn. Requesting access and
 using an approved root remain separate operations.
+
+`import_connected_file` is the one that produces an effect rather than a
+reading. It exists because `read_connected_file` returns bounded UTF-8, so a
+PDF or Office document under an approved root previously had no route into the
+conversation at all — the user had to find the same file again through the
+composer picker. The import moves bytes natively into the conversation-scoped
+ingest API and returns a document id; it never returns the contents, so the
+agent still reads the result through `list_sources` and `read_source` like any
+other source. Media type is decided from the bytes rather than from the path
+the model named, the attachment is rechecked immediately before the source is
+published so a detach that wins the race discards the bytes, and the source
+identity is derived from the exact conversation, root, and path, so importing
+the same file twice recovers one source instead of adding a second.
 
 Normal foreground turns also receive a
 [host-owned operating prompt](agent-operating-prompt.md). It composes fixed

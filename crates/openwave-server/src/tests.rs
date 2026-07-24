@@ -6564,6 +6564,28 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
             .execution(openwave_core::REQUEST_FOLDER_ACCESS_TOOL),
         Some(ToolCallExecution::Client)
     );
+    // Importing a connected file is a native client continuation like the other
+    // folder tools: the server advertises the contract but never executes it,
+    // and a payload the broker would refuse cannot be checkpointed.
+    assert_eq!(
+        surface
+            .tools
+            .execution(openwave_core::IMPORT_CONNECTED_FILE_TOOL),
+        Some(ToolCallExecution::Client)
+    );
+    assert!(surface
+        .tools
+        .get(openwave_core::IMPORT_CONNECTED_FILE_TOOL)
+        .is_none());
+    assert!(foreground.contains(openwave_core::IMPORT_CONNECTED_FILE_TOOL));
+    assert!(surface.tools.client_arguments_are_valid(
+        openwave_core::IMPORT_CONNECTED_FILE_TOOL,
+        &serde_json::json!({ "root_id": uuid::Uuid::new_v4(), "path": "reports/q3.pdf" })
+    ));
+    assert!(!surface.tools.client_arguments_are_valid(
+        openwave_core::IMPORT_CONNECTED_FILE_TOOL,
+        &serde_json::json!({ "root_id": uuid::Uuid::new_v4(), "path": "../secret.pdf" })
+    ));
     assert!(surface
         .tools
         .get(openwave_core::REQUEST_FOLDER_ACCESS_TOOL)

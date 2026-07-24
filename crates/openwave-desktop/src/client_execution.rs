@@ -28,15 +28,16 @@ pub(crate) mod folder_operations;
 mod product_sync;
 mod receipt_store;
 pub(crate) mod root_attachment_reconciliation;
+pub(crate) mod source_import;
 
 pub(crate) use control_plane::ControlPlaneClient;
 use control_plane::ControlPlaneError;
 pub(crate) use receipt_store::ReceiptStore;
 use receipt_store::{
     delegated_file_content_fits_server, DelegatedFileFailureReason, DelegatedFileReadReceipt,
-    DelegatedFileResolution, FolderAccessIntent, FolderAccessReceipt, FolderOperationPhase,
-    FolderOperationReceipt, ManualFolderConnectReceipt, ProductRootAttachmentSync,
-    RegistrationPhase, StoredResolution,
+    DelegatedFileResolution, DispatchRecovery, FolderAccessIntent, FolderAccessReceipt,
+    FolderOperationPhase, FolderOperationReceipt, ManualFolderConnectReceipt,
+    ProductRootAttachmentSync, RegistrationPhase, StoredResolution,
 };
 
 const RECOVERY_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);

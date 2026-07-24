@@ -715,6 +715,8 @@ fn historical_tool_title(name: &str) -> &'static str {
         "request_folder_access" => "Request folder access",
         "connect_folder" => "Connect a folder",
         "list_connected_folders" => "Check connected folders",
+        "list_folder" => "Browse a connected folder",
+        "import_connected_file" => "Add a file as a source",
         crate::ASK_USER_QUESTIONS_TOOL => "Ask a question",
         "spawn_sandbox_agent" => "Delegate a task",
         "wait_for_agents" => "Wait for background agents",

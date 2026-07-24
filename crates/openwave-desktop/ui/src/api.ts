@@ -171,6 +171,8 @@ export type ChatToolActivity = {
     | "Request folder access"
     | "Connect a folder"
     | "Check connected folders"
+    | "Browse a connected folder"
+    | "Add a file as a source"
     | "Ask a question"
     | "Delegate a task"
     | "Wait for background agents"
@@ -227,7 +229,8 @@ export type AgentActivity = {
     | "read_delegated_file"
     | "list_connected_folders"
     | "list_folder"
-    | "read_connected_file";
+    | "read_connected_file"
+    | "import_connected_file";
   status: "waiting" | "running";
 };
 
@@ -280,6 +283,7 @@ export type RendererToolName =
   | "list_connected_folders"
   | "list_folder"
   | "read_connected_file"
+  | "import_connected_file"
   | "spawn_sandbox_agent"
   | "wait_for_agents"
   | "ask_user_questions"
@@ -1038,6 +1042,7 @@ function isRendererToolName(value: unknown): value is RendererToolName {
     value === "list_connected_folders" ||
     value === "list_folder" ||
     value === "read_connected_file" ||
+    value === "import_connected_file" ||
     value === "spawn_sandbox_agent" ||
     value === "wait_for_agents" ||
     value === "ask_user_questions" ||

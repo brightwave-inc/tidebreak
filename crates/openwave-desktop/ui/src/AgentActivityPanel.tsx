@@ -244,6 +244,12 @@ function agentActivityPresentation(
       running: "Reading a file",
       activeStatus: "reading",
     },
+    import_connected_file: {
+      label: "Source",
+      waiting: "Waiting to add a file as a source",
+      running: "Adding a file as a source",
+      activeStatus: "adding",
+    },
   } as const;
   const presentation = presentations[activity.kind as keyof typeof presentations];
   if (

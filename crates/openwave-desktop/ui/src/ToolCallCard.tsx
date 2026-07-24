@@ -124,11 +124,23 @@ const TOOL_PRESENTATIONS: Record<string, ToolPresentation> = {
     complete: "Connected folders checked",
     settled: "Checked connected folders",
   },
+  list_folder: {
+    label: "Browse a connected folder",
+    active: "Browsing a connected folder",
+    complete: "Connected folder browsed",
+    settled: "Browsed a connected folder",
+  },
   read_connected_file: {
     label: "Read a connected file",
     active: "Reading a connected file",
     complete: "Connected file read complete",
     settled: "Read a connected file",
+  },
+  import_connected_file: {
+    label: "Add a file as a source",
+    active: "Adding a file as a source",
+    complete: "File added as a source",
+    settled: "Added a file as a source",
   },
   ask_user_questions: {
     label: "Ask a question",

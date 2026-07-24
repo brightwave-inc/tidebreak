@@ -8,10 +8,11 @@
 use std::collections::HashSet;
 
 use openwave_core::{
-    validate_list_connected_folders_arguments, validate_list_folder_arguments,
-    validate_read_connected_file_arguments, CallId, ListFolderArgs, ReadConnectedFileArgs,
-    ToolCallExecution, ToolCallRecord, ToolCallStatus, LIST_CONNECTED_FOLDERS_TOOL,
-    LIST_FOLDER_TOOL, READ_CONNECTED_FILE_TOOL,
+    validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
+    validate_list_folder_arguments, validate_read_connected_file_arguments, CallId, ListFolderArgs,
+    ReadConnectedFileArgs, ToolCallExecution, ToolCallRecord, ToolCallStatus,
+    IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL,
+    READ_CONNECTED_FILE_TOOL,
 };
 use openwave_host_broker::{
     OperationEnvelope, OperationRequest, OperationResult, PathRequest, RelativePath, RootId,
@@ -22,8 +23,8 @@ use tauri::Manager;
 use crate::host_access::{AuthoritativeContext, HostAccess};
 
 use super::{
-    control_plane, control_plane_error, private_receipt_error, FolderOperationPhase,
-    FolderOperationReceipt, StoredResolution,
+    control_plane, control_plane_error, private_receipt_error, source_import, DispatchRecovery,
+    FolderOperationPhase, FolderOperationReceipt, StoredResolution,
 };
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -57,7 +58,7 @@ async fn recover_once(app: &tauri::AppHandle) -> bool {
         receipts.iter().map(|receipt| receipt.call_id).collect();
     let mut failed = false;
     for receipt in receipts {
-        if let Err(error) = execute_receipt(&state, receipt).await {
+        if let Err(error) = execute_receipt(app, &state, receipt).await {
             eprintln!("openwave-desktop: connected-folder receipt deferred: {error}");
             failed = true;
         }
@@ -86,9 +87,13 @@ async fn recover_once(app: &tauri::AppHandle) -> bool {
             .into_iter()
             .filter(|call| should_discover_call(call, &recovered_call_ids))
         {
-            let receipt =
-                FolderOperationReceipt::new(chat.id, call.id, state.receipts.executor_id());
-            if let Err(error) = execute_receipt(&state, receipt).await {
+            let receipt = FolderOperationReceipt::new(
+                chat.id,
+                call.id,
+                state.receipts.executor_id(),
+                dispatch_recovery(&call.name),
+            );
+            if let Err(error) = execute_receipt(app, &state, receipt).await {
                 eprintln!("openwave-desktop: connected-folder execution deferred: {error}");
                 failed = true;
             }
@@ -102,6 +107,7 @@ fn should_discover_call(call: &ToolCallRecord, recovered_call_ids: &HashSet<Call
 }
 
 async fn execute_receipt(
+    app: &tauri::AppHandle,
     state: &HostAccess,
     mut receipt: FolderOperationReceipt,
 ) -> Result<(), String> {
@@ -158,7 +164,7 @@ async fn execute_receipt(
         .receipts
         .save_operation(&receipt)
         .map_err(private_receipt_error)?;
-    let resolution = execute_operation(state, context, &claim.call).await;
+    let resolution = execute_operation(app, state, context, &claim.call).await;
     receipt.resolution = Some(resolution);
     state
         .receipts
@@ -172,8 +178,23 @@ async fn execute_receipt(
     .await
 }
 
+/// Whether an interrupted dispatch must be terminalized instead of retried.
+///
+/// A read has no durable outcome to reconcile against, so recovery closes it
+/// out. An import derives its source identity from the exact request, so
+/// running it again converges on the same single source.
 fn dispatch_is_ambiguous(receipt: &FolderOperationReceipt) -> bool {
-    receipt.phase == FolderOperationPhase::DispatchStarted && receipt.resolution.is_none()
+    receipt.phase == FolderOperationPhase::DispatchStarted
+        && receipt.resolution.is_none()
+        && receipt.recovery == DispatchRecovery::Terminalize
+}
+
+/// Recovery policy for one connected-folder tool.
+fn dispatch_recovery(name: &str) -> DispatchRecovery {
+    match name {
+        IMPORT_CONNECTED_FILE_TOOL => DispatchRecovery::Retry,
+        _ => DispatchRecovery::Terminalize,
+    }
 }
 
 async fn terminalize_interrupted_dispatch(
@@ -199,6 +220,12 @@ async fn terminalize_interrupted_dispatch(
 /// lease token instead of issuing another ambiguous read. The server accepts
 /// that token through its expired-claim resolution path only after the lease is
 /// actually expired.
+///
+/// This holds even for an operation whose [`DispatchRecovery`] permits a retry.
+/// Once the lease is gone another executor may own the call, so running it again
+/// here would race that owner. An import terminalized this way is still only one
+/// model retry away from the same single source, because its identity is derived
+/// from the request rather than from this attempt.
 async fn recover_after_claim_conflict(
     state: &HostAccess,
     receipt: &mut FolderOperationReceipt,
@@ -228,10 +255,17 @@ async fn recover_after_claim_conflict(
 }
 
 async fn execute_operation(
+    app: &tauri::AppHandle,
     state: &HostAccess,
     context: AuthoritativeContext,
     call: &ToolCallRecord,
 ) -> StoredResolution {
+    if call.name == IMPORT_CONNECTED_FILE_TOOL {
+        let Ok(request) = source_import::parse(call) else {
+            return unavailable("invalid_request", "The folder request was not available.");
+        };
+        return source_import::execute(state, app, context, &request).await;
+    }
     let request = match broker_request(call) {
         Ok(request) => request,
         Err(()) => return unavailable("invalid_request", "The folder request was not available."),
@@ -398,6 +432,7 @@ fn is_connected_folder_call(call: &ToolCallRecord) -> bool {
         LIST_CONNECTED_FOLDERS_TOOL => validate_list_connected_folders_arguments(&call.arguments),
         LIST_FOLDER_TOOL => validate_list_folder_arguments(&call.arguments),
         READ_CONNECTED_FILE_TOOL => validate_read_connected_file_arguments(&call.arguments),
+        IMPORT_CONNECTED_FILE_TOOL => validate_import_connected_file_arguments(&call.arguments),
         _ => false,
     }
 }
@@ -488,9 +523,76 @@ mod tests {
     }
 
     #[test]
+    fn only_an_idempotent_operation_may_be_retried_after_an_interruption() {
+        // A read discloses bytes the broker keeps no receipt for, so a second
+        // attempt has nothing to reconcile against.
+        for read_only in [
+            LIST_CONNECTED_FOLDERS_TOOL,
+            LIST_FOLDER_TOOL,
+            READ_CONNECTED_FILE_TOOL,
+        ] {
+            assert_eq!(dispatch_recovery(read_only), DispatchRecovery::Terminalize);
+        }
+        // An import derives its source identity from the exact request, so
+        // repeating it recovers the one source instead of adding another.
+        assert_eq!(
+            dispatch_recovery(IMPORT_CONNECTED_FILE_TOOL),
+            DispatchRecovery::Retry
+        );
+
+        let mut import = FolderOperationReceipt::new(
+            ChatId::new(),
+            CallId::new(),
+            uuid::Uuid::new_v4(),
+            DispatchRecovery::Retry,
+        );
+        import.phase = FolderOperationPhase::DispatchStarted;
+        assert!(!dispatch_is_ambiguous(&import));
+        // The retry only applies while this executor still holds the lease. A
+        // resolution already exists once the work finished, and recovery then
+        // republishes it rather than running the operation a second time.
+        import.resolution = Some(interrupted_resolution());
+        assert!(!dispatch_is_ambiguous(&import));
+    }
+
+    #[test]
+    fn the_executor_accepts_imports_under_the_same_path_rules_as_reads() {
+        let call = ToolCallRecord {
+            id: CallId::new(),
+            chat_id: ChatId::new(),
+            turn_id: openwave_core::TurnId::new(),
+            provider_id: "tool-1".into(),
+            name: IMPORT_CONNECTED_FILE_TOOL.into(),
+            arguments: serde_json::json!({
+                "root_id": uuid::Uuid::new_v4(),
+                "path": "reports/q3.pdf"
+            }),
+            execution: ToolCallExecution::Client,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+        assert!(is_connected_folder_call(&call));
+        let mut traversal = call.clone();
+        traversal.arguments["path"] = serde_json::json!("../secret.pdf");
+        assert!(!is_connected_folder_call(&traversal));
+        // An import is never routed through the plain read dispatch table.
+        assert!(broker_request(&call).is_err());
+    }
+
+    #[test]
     fn dispatch_started_receipt_is_terminalized_even_with_a_live_lease() {
-        let mut receipt =
-            FolderOperationReceipt::new(ChatId::new(), CallId::new(), uuid::Uuid::new_v4());
+        let mut receipt = FolderOperationReceipt::new(
+            ChatId::new(),
+            CallId::new(),
+            uuid::Uuid::new_v4(),
+            DispatchRecovery::Terminalize,
+        );
         assert_eq!(receipt.phase, FolderOperationPhase::NotStarted);
         assert!(!dispatch_is_ambiguous(&receipt));
         receipt.phase = FolderOperationPhase::DispatchStarted;
