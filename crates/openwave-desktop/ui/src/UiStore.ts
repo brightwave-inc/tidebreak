@@ -1,11 +1,5 @@
 import { create } from "zustand";
-
-export type PrimaryView =
-  | "chat"
-  | "documents"
-  | "deliverables"
-  | "folders"
-  | "settings";
+import { CHAT_SURFACE, normalizeSurface, type Surface } from "./Surface";
 
 const SIDEBAR_COLLAPSED_KEY = "openwave.sidebar-collapsed";
 
@@ -26,16 +20,20 @@ function storeSidebarCollapsed(collapsed: boolean): void {
 }
 
 /**
- * App-level view state: which primary surface is showing. Actions are named
- * for intent so call sites read as navigation, not state plumbing. The
- * chat-scoped surfaces (documents, deliverables, folders) are reached from the
- * per-chat tab control; settings is global.
+ * App-level view state: which surface the workspace is showing, and where in
+ * it. Actions are named for intent so call sites read as navigation, not state
+ * plumbing. The chat-scoped surfaces (documents, deliverables, folders) are
+ * reached from the per-chat tab control; settings is global.
  */
 export type UiStore = {
-  primaryView: PrimaryView;
+  surface: Surface;
+  openSurface: (surface: Surface) => void;
   showChat: () => void;
-  showDocuments: () => void;
-  showDeliverables: () => void;
+  showDocuments: (target?: {
+    documentId?: string;
+    citationId?: string;
+  }) => void;
+  showDeliverables: (target?: { filename?: string }) => void;
   showFolders: () => void;
   showSettings: () => void;
   sidebarCollapsed: boolean;
@@ -44,12 +42,26 @@ export type UiStore = {
 
 export function createUiStore() {
   return create<UiStore>()((set) => ({
-    primaryView: "chat",
-    showChat: () => set({ primaryView: "chat" }),
-    showDocuments: () => set({ primaryView: "documents" }),
-    showDeliverables: () => set({ primaryView: "deliverables" }),
-    showFolders: () => set({ primaryView: "folders" }),
-    showSettings: () => set({ primaryView: "settings" }),
+    surface: CHAT_SURFACE,
+    openSurface: (surface) => set({ surface: normalizeSurface(surface) }),
+    showChat: () => set({ surface: CHAT_SURFACE }),
+    showDocuments: (target) =>
+      set({
+        surface: normalizeSurface({
+          kind: "documents",
+          itemId: target?.documentId,
+          anchor: target?.citationId,
+        }),
+      }),
+    showDeliverables: (target) =>
+      set({
+        surface: normalizeSurface({
+          kind: "deliverables",
+          itemId: target?.filename,
+        }),
+      }),
+    showFolders: () => set({ surface: { kind: "folders" } }),
+    showSettings: () => set({ surface: { kind: "settings" } }),
     sidebarCollapsed: readStoredSidebarCollapsed(),
     toggleSidebar: () =>
       set((state) => {

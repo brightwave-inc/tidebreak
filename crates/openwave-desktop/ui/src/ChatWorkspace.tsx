@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Settings } from "lucide-react";
 import type { Chat } from "./api";
 import { ChatTabs, requiresNativeHost } from "./ChatTabs";
+import { CHAT_SURFACE } from "./Surface";
 import { DeliverablesView } from "./DeliverablesView";
 import { DocumentsView } from "./DocumentsView";
 import { FoldersView } from "./FoldersView";
@@ -27,12 +28,12 @@ export function ChatWorkspace({
   nativeHost,
   transcript,
 }: ChatWorkspaceProps) {
-  const selected = useUiStore((state) => state.primaryView);
+  const selected = useUiStore((state) => state.surface);
   const showSettings = useUiStore((state) => state.showSettings);
   // A surface the host cannot serve is offered as disabled in the switcher, so
   // reaching one here means the host went away underneath the selection.
-  const primaryView =
-    !nativeHost && requiresNativeHost(selected) ? "chat" : selected;
+  const surface =
+    !nativeHost && requiresNativeHost(selected.kind) ? CHAT_SURFACE : selected;
 
   return (
     <div className="chat-workspace">
@@ -59,11 +60,11 @@ export function ChatWorkspace({
       </header>
 
       <div className="workspace-body">
-        {primaryView === "documents" ? (
+        {surface.kind === "documents" ? (
           <DocumentsView chatId={chat.id} />
-        ) : primaryView === "deliverables" ? (
-          <DeliverablesView chatId={chat.id} />
-        ) : primaryView === "folders" ? (
+        ) : surface.kind === "deliverables" ? (
+          <DeliverablesView chatId={chat.id} initialFilename={surface.itemId} />
+        ) : surface.kind === "folders" ? (
           <FoldersView chat={chat} />
         ) : (
           transcript

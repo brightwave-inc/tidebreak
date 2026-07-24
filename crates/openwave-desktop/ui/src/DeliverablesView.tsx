@@ -23,9 +23,12 @@ const defaultApis: DeliverableApis = {
 
 export function DeliverablesView({
   chatId,
+  initialFilename,
   apis = defaultApis,
 }: {
   chatId: string;
+  /** Output to preview on arrival; ignored when this chat has no such file. */
+  initialFilename?: string;
   apis?: DeliverableApis;
 }) {
   const [catalog, setCatalog] = useState<DeliverablesCatalog>({
@@ -46,6 +49,7 @@ export function DeliverablesView({
   const [previewVersion, setPreviewVersion] = useState(0);
   const catalogGenerationRef = useRef(0);
   const previewGenerationRef = useRef(0);
+  const pendingFilenameRef = useRef<string | null>(initialFilename ?? null);
 
   async function refresh(showLoading = false) {
     const generation = ++catalogGenerationRef.current;
@@ -54,11 +58,21 @@ export function DeliverablesView({
     try {
       const next = await apis.list(chatId);
       if (generation !== catalogGenerationRef.current) return;
+      // Steer the first catalog that arrives, then step aside: a later refresh
+      // or a choice from the list must not snap back to where the caller
+      // pointed. Resolving here rather than after the fact means an output the
+      // chat does not own never gets read.
+      const target = pendingFilenameRef.current;
+      pendingFilenameRef.current = null;
+      const owns = (filename: string | null | undefined) =>
+        !!filename && next.deliverables.some((item) => item.filename === filename);
       setCatalog(next);
       setSelected((current) =>
-        current && next.deliverables.some((item) => item.filename === current)
-          ? current
-          : (next.deliverables[0]?.filename ?? null),
+        owns(target)
+          ? target
+          : owns(current)
+            ? current
+            : (next.deliverables[0]?.filename ?? null),
       );
       setPreviewVersion((current) => current + 1);
     } catch (caught) {
@@ -82,6 +96,18 @@ export function DeliverablesView({
       previewGenerationRef.current += 1;
     };
   }, [chatId, apis]);
+
+  // Being pointed somewhere new while the surface is already open resolves
+  // against the catalog in hand, and otherwise waits for the next one.
+  useEffect(() => {
+    if (!initialFilename) return;
+    if (catalog.deliverables.some((item) => item.filename === initialFilename)) {
+      pendingFilenameRef.current = null;
+      setSelected(initialFilename);
+    } else {
+      pendingFilenameRef.current = initialFilename;
+    }
+  }, [initialFilename]);
 
   useEffect(() => {
     if (!selected) {

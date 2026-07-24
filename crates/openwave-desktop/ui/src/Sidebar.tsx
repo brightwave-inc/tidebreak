@@ -69,7 +69,7 @@ export function Sidebar({
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const setRenameDraft = useChatListStore((state) => state.setRenameDraft);
-  const primaryView = useUiStore((state) => state.primaryView);
+  const surface = useUiStore((state) => state.surface);
   const showSettings = useUiStore((state) => state.showSettings);
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
   return (
@@ -129,7 +129,7 @@ export function Sidebar({
         <div className="conversation-list" aria-label="Chats">
           {chats.map((item) => {
             const chatTitle = item.title?.trim() || "New chat";
-            const isActive = primaryView === "chat" && item.id === activeChatId;
+            const isActive = surface.kind === "chat" && item.id === activeChatId;
             const mutating = deletingChatId !== null || creatingChat;
 
             if (renamingChatId === item.id) {
@@ -222,7 +222,7 @@ export function Sidebar({
         )}
         <button
           type="button"
-          className={`sidebar-action${primaryView === "settings" ? " is-active" : ""}`}
+          className={`sidebar-action${surface.kind === "settings" ? " is-active" : ""}`}
           onClick={showSettings}
         >
           <Settings size={16} />

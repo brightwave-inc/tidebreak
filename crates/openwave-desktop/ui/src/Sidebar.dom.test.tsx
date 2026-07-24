@@ -24,7 +24,7 @@ function seedStores(overrides: Partial<ChatListStore> = {}) {
     savingTitle: false,
     ...overrides,
   });
-  useUiStore.setState({ primaryView: "chat" });
+  useUiStore.getState().showChat();
 }
 
 function renderSidebar(overrides: Partial<SidebarProps> = {}) {
@@ -110,7 +110,7 @@ describe("Sidebar", () => {
     const user = userEvent.setup();
     renderSidebar();
     await user.click(screen.getByText("Settings"));
-    expect(useUiStore.getState().primaryView).toBe("settings");
+    expect(useUiStore.getState().surface).toEqual({ kind: "settings" });
   });
 
   it("shows update affordances only when an update is ready", () => {
