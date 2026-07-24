@@ -764,6 +764,16 @@ impl DocumentRecord {
             revision_token: self.revision_token,
         }
     }
+
+    /// Whether this revision contributed text a search can match.
+    ///
+    /// Empty canonical text means the parser ran and found nothing to index —
+    /// an image without OCR, or a format whose parser is not installed. The
+    /// bytes are still retained, so a later reprocess can change this answer.
+    #[must_use]
+    pub fn is_searchable(&self) -> bool {
+        self.processing_status == DocumentProcessingStatus::Ready && !self.canonical_text.is_empty()
+    }
 }
 
 /// One durable semantic processing stage bound to an exact document revision.
@@ -945,6 +955,15 @@ pub struct DocumentSummaryRecord {
     pub content_revision: i64,
     /// Processing lifecycle of the current authoritative revision.
     pub processing_status: DocumentProcessingStatus,
+    /// Whether the current revision contributed text a search can match.
+    ///
+    /// Processing that finishes is not the same as processing that found
+    /// something. A scanned image, or a format whose parser is not installed on
+    /// this host, produces a document that is durably stored and citable by
+    /// name but that no query will ever return. Keeping this separate from
+    /// [`DocumentProcessingStatus::Ready`] stops that outcome from being
+    /// presented as a fully usable source.
+    pub searchable: bool,
     /// Revision currently represented in the retrieval index, if any.
     pub indexed_revision: Option<i64>,
     /// Chunker/embedder fingerprint for the indexed revision.

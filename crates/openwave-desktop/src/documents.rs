@@ -41,6 +41,7 @@ struct CatalogDocument {
     title: Option<String>,
     media_type: String,
     processing_status: DocumentProcessingStatus,
+    searchable: bool,
     updated_at: String,
 }
 
@@ -51,6 +52,7 @@ pub(crate) struct LibraryDocument {
     title: Option<String>,
     media_type: String,
     processing_status: DocumentProcessingStatus,
+    searchable: bool,
     updated_at: String,
 }
 
@@ -70,6 +72,7 @@ impl From<CatalogDocument> for LibraryDocument {
                 .and_then(|title| is_safe_renderer_text(&title, 255, false).then_some(title)),
             media_type: document.media_type,
             processing_status: document.processing_status,
+            searchable: document.searchable,
             updated_at: document.updated_at,
         }
     }
@@ -606,6 +609,7 @@ mod tests {
             title: Some("notes.md".to_owned()),
             media_type: "text/markdown".to_owned(),
             processing_status: DocumentProcessingStatus::Ready,
+            searchable: true,
             updated_at: "2026-07-18T00:00:00Z".to_owned(),
         });
         let json = serde_json::to_value(document).unwrap();
@@ -621,6 +625,7 @@ mod tests {
                 "documentId",
                 "mediaType",
                 "processingStatus",
+                "searchable",
                 "title",
                 "updatedAt"
             ]

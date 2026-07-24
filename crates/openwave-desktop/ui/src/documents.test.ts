@@ -17,6 +17,7 @@ describe("document library renderer projections", () => {
             title: "notes.md",
             mediaType: "text/markdown",
             processingStatus: "processing",
+            searchable: false,
             updatedAt: "2026-07-18T12:00:00Z",
           },
         ],
@@ -46,6 +47,40 @@ describe("document library renderer projections", () => {
     ).toBe(unicodeName);
   });
 
+  it("keeps searchability distinct from having finished processing", () => {
+    const stored = parseLibraryCatalog({
+      documents: [
+        {
+          documentId,
+          title: "scan.pdf",
+          mediaType: "application/pdf",
+          processingStatus: "ready",
+          searchable: false,
+          updatedAt: "2026-07-18T12:00:00Z",
+        },
+      ],
+      truncated: false,
+    }).documents[0];
+    expect(stored?.processingStatus).toBe("ready");
+    expect(stored?.searchable).toBe(false);
+
+    // Omitting the flag must not silently read as searchable.
+    expect(() =>
+      parseLibraryCatalog({
+        documents: [
+          {
+            documentId,
+            title: "scan.pdf",
+            mediaType: "application/pdf",
+            processingStatus: "ready",
+            updatedAt: "2026-07-18T12:00:00Z",
+          },
+        ],
+        truncated: false,
+      }),
+    ).toThrow("Invalid document library response");
+  });
+
   it("rejects catalog fields that could reveal native or indexing details", () => {
     for (const field of [
       "uri",
@@ -64,6 +99,7 @@ describe("document library renderer projections", () => {
               title: "notes.md",
               mediaType: "text/markdown",
               processingStatus: "ready",
+              searchable: true,
               updatedAt: "2026-07-18T12:00:00Z",
               [field]: "private",
             },
