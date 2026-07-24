@@ -4,14 +4,6 @@ import { canStopSandboxAgentRun } from "./SandboxAgentStop";
 
 const MAX_RECENT_TERMINAL_SANDBOX_RUNS = 2;
 
-export function agentRunsForChat(
-  ownerChatId: string | null,
-  selectedChatId: string | null,
-  runs: AgentRun[],
-): AgentRun[] {
-  return ownerChatId !== null && ownerChatId === selectedChatId ? runs : [];
-}
-
 export function AgentActivityPanel({
   runs,
   loading,

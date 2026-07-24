@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useRef, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, Chat } from "./api";
 import { ChatView, type ChatViewProps } from "./ChatView";
@@ -19,10 +20,45 @@ const chat = { id: "chat-1", title: "Roadmap", project_id: null } as unknown as 
 const client = {
   listPendingFolderAccessRequests: vi.fn().mockResolvedValue([]),
   listPendingUserQuestions: vi.fn().mockResolvedValue([]),
+  listAgentRuns: vi.fn().mockResolvedValue([]),
   decideApproval: vi.fn().mockResolvedValue(undefined),
   cancel: vi.fn().mockResolvedValue(undefined),
+  steer: vi.fn().mockResolvedValue(undefined),
   answerUserQuestions: vi.fn().mockResolvedValue(undefined),
 } as unknown as ApiClient;
+
+/**
+ * The pane with the draft wired up the way the root wires it: state for
+ * rendering, a ref for reading it at the moment guidance is sent.
+ */
+function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
+  const [draft, setDraft] = useState("");
+  const draftRef = useRef("");
+  return (
+    <ChatView
+      client={client}
+      chat={chat}
+      hydrated
+      nativeHost={false}
+      deletingChat={false}
+      draft={draft}
+      draftRef={draftRef}
+      composerModelMenu={null}
+      attachingSource={false}
+      attachedSourceName={null}
+      sourceAttachmentError={null}
+      onDraftChange={(value) => {
+        draftRef.current = value;
+        setDraft(value);
+      }}
+      onAddSource={vi.fn(async () => {})}
+      onDismissAttachedSource={vi.fn()}
+      onSelectPrompt={vi.fn()}
+      onSend={vi.fn(async () => {})}
+      {...overrides}
+    />
+  );
+}
 
 function renderChatView(overrides: Partial<ChatViewProps> = {}) {
   const props: ChatViewProps = {
@@ -31,30 +67,17 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
     hydrated: true,
     nativeHost: false,
     deletingChat: false,
-    agentRuns: [],
-    agentRunsLoading: false,
-    agentRunsError: null,
-    stoppingRunIds: new Set(),
-    stopErrorRunIds: new Set(),
-    onRetryAgentRuns: vi.fn(),
-    onStopSandboxRun: vi.fn(),
     draft: "",
+    draftRef: { current: "" },
     composerModelMenu: null,
     attachingSource: false,
     attachedSourceName: null,
     sourceAttachmentError: null,
-    cancelError: null,
-    cancelPendingTurnId: null,
-    steerError: null,
-    steerStatus: null,
-    steerPendingTurnId: null,
     onDraftChange: vi.fn(),
     onAddSource: vi.fn(async () => {}),
     onDismissAttachedSource: vi.fn(),
     onSelectPrompt: vi.fn(),
     onSend: vi.fn(async () => {}),
-    onSteer: vi.fn(async () => {}),
-    onStop: vi.fn(async () => {}),
     ...overrides,
   };
   render(<ChatView {...props} />);
@@ -152,5 +175,54 @@ describe("ChatView", () => {
         );
     });
     expect(screen.getByText("streamed answer")).toBeInTheDocument();
+  });
+
+  it("leaves the sent-guidance notice standing when it clears the draft", async () => {
+    useChatSessionStore.getState().update((session) => ({
+      ...session,
+      busy: true,
+      activeTurnId: "turn-1",
+    }));
+    render(<DraftingChatView />);
+
+    const message = screen.getByLabelText("Message");
+    await userEvent.type(message, "go left");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Redirect active response" }),
+    );
+
+    // Accepting guidance empties the composer. That clearing must not read as
+    // the reader retyping, or the notice they were just given disappears.
+    expect(await screen.findByText("Guidance sent")).toBeInTheDocument();
+    expect(message).toHaveValue("");
+
+    await userEvent.type(message, "n");
+
+    await waitFor(() =>
+      expect(screen.queryByText("Guidance sent")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("retires the redirect failure the reader is answering by retyping", async () => {
+    vi.mocked(client.steer).mockRejectedValueOnce(new Error("steer rejected"));
+    useChatSessionStore.getState().update((session) => ({
+      ...session,
+      busy: true,
+      activeTurnId: "turn-1",
+    }));
+    render(<DraftingChatView />);
+
+    const message = screen.getByLabelText("Message");
+    await userEvent.type(message, "go left");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Redirect active response" }),
+    );
+    expect(await screen.findByText(/steer rejected/)).toBeInTheDocument();
+
+    await userEvent.type(message, " now");
+
+    await waitFor(() =>
+      expect(screen.queryByText(/steer rejected/)).not.toBeInTheDocument(),
+    );
   });
 });

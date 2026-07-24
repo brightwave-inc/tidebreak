@@ -1,13 +1,21 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { AgentRun, ApiClient, Chat } from "./api";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import type { ApiClient, Chat } from "./api";
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { Composer } from "./Composer";
 import { MessageList } from "./MessageList";
 import { useTranscriptVisible } from "./TranscriptVisibility";
+import { useAgentRuns } from "./useAgentRuns";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useToolApprovals } from "./useToolApprovals";
+import { useTurnControls } from "./useTurnControls";
 import { useUserQuestions } from "./useUserQuestions";
 import { ArrowDown } from "lucide-react";
 
@@ -17,36 +25,25 @@ export type ChatViewProps = {
   hydrated: boolean;
   nativeHost: boolean;
   deletingChat: boolean;
-  agentRuns: AgentRun[];
-  agentRunsLoading: boolean;
-  agentRunsError: string | null;
-  stoppingRunIds: Set<string>;
-  stopErrorRunIds: Set<string>;
-  onRetryAgentRuns: () => void;
-  onStopSandboxRun: (runId: string) => void;
   draft: string;
+  /** The same draft, readable synchronously — see [useTurnControls]. */
+  draftRef: RefObject<string>;
   composerModelMenu: ReactNode;
   attachingSource: boolean;
   attachedSourceName: string | null;
   sourceAttachmentError: string | null;
-  cancelError: string | null;
-  cancelPendingTurnId: string | null;
-  steerError: string | null;
-  steerStatus: string | null;
-  steerPendingTurnId: string | null;
   onDraftChange: (value: string) => void;
   onAddSource: () => Promise<void>;
   onDismissAttachedSource: () => void;
   onSelectPrompt: (prompt: string) => void;
   onSend: () => Promise<void>;
-  onSteer: () => Promise<void>;
-  onStop: () => Promise<void>;
 };
 
 /**
  * The chat pane: agent activity, transcript, and composer, rendered as the
  * body of the chat workspace. Reads the live session (messages, busy, active
- * turn) straight from the session store.
+ * turn) straight from the session store, and owns this conversation's pending
+ * requests, agent runs, and turn controls.
  * Mount with `key={chat.id}` so scroll-follow state resets per conversation.
  */
 export function ChatView({
@@ -55,35 +52,26 @@ export function ChatView({
   hydrated,
   nativeHost,
   deletingChat,
-  agentRuns,
-  agentRunsLoading,
-  agentRunsError,
-  stoppingRunIds,
-  stopErrorRunIds,
-  onRetryAgentRuns,
-  onStopSandboxRun,
   draft,
+  draftRef,
   composerModelMenu,
   attachingSource,
   attachedSourceName,
   sourceAttachmentError,
-  cancelError,
-  cancelPendingTurnId,
-  steerError,
-  steerStatus,
-  steerPendingTurnId,
   onDraftChange,
   onAddSource,
   onDismissAttachedSource,
   onSelectPrompt,
   onSend,
-  onSteer,
-  onStop,
 }: ChatViewProps) {
   const transcriptVisible = useTranscriptVisible();
   const folderAccess = useFolderAccessRequests(client, chat.id);
   const userQuestions = useUserQuestions(client, chat.id);
   const approvals = useToolApprovals(client, chat.id);
+  const agentRuns = useAgentRuns(client, chat.id);
+  const turnControls = useTurnControls(client, chat.id, draftRef, () =>
+    onDraftChange(""),
+  );
   const messages = useChatSessionStore((session) => session.messages);
   const busy = useChatSessionStore((session) => session.busy);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
@@ -130,13 +118,13 @@ export function ChatView({
   return (
     <section className="chat-pane">
       <AgentActivityPanel
-        runs={agentRuns}
-        loading={agentRunsLoading}
-        error={agentRunsError}
-        onRetry={onRetryAgentRuns}
-        stoppingRunIds={stoppingRunIds}
-        stopErrorRunIds={stopErrorRunIds}
-        onStop={onStopSandboxRun}
+        runs={agentRuns.runs}
+        loading={agentRuns.loading}
+        error={agentRuns.error}
+        onRetry={agentRuns.refresh}
+        stoppingRunIds={agentRuns.stoppingRunIds}
+        stopErrorRunIds={agentRuns.stopErrorRunIds}
+        onStop={agentRuns.stop}
       />
 
       <div className="message-view">
@@ -189,9 +177,10 @@ export function ChatView({
       <Composer
         activeTurnId={activeTurnId}
         busy={busy}
-        cancelError={cancelError}
+        cancelError={turnControls.cancelError}
         cancelPending={
-          activeTurnId !== null && cancelPendingTurnId === activeTurnId
+          activeTurnId !== null &&
+          turnControls.cancelPendingTurnId === activeTurnId
         }
         disabled={deletingChat}
         draft={draft}
@@ -202,16 +191,23 @@ export function ChatView({
         sourceAttachmentError={sourceAttachmentError}
         onAddSource={onAddSource}
         onDismissAttachedSource={onDismissAttachedSource}
-        onDraftChange={onDraftChange}
+        // Typing retires the verdict on the last piece of guidance. Accepted
+        // guidance clears the draft through the raw callback instead, so
+        // "Guidance sent" survives the clearing it caused.
+        onDraftChange={(value) => {
+          turnControls.clearSteerFeedback();
+          onDraftChange(value);
+        }}
         onSend={onSend}
-        onSteer={onSteer}
-        onStop={onStop}
+        onSteer={turnControls.steer}
+        onStop={turnControls.cancel}
         resetKey={chat.id}
-        steerError={steerError}
+        steerError={turnControls.steerError}
         steerPending={
-          activeTurnId !== null && steerPendingTurnId === activeTurnId
+          activeTurnId !== null &&
+          turnControls.steerPendingTurnId === activeTurnId
         }
-        steerStatus={steerStatus}
+        steerStatus={turnControls.steerStatus}
       />
     </section>
   );
