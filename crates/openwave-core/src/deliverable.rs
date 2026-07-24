@@ -11,12 +11,21 @@ use chrono::{DateTime, Utc};
 
 use crate::id::{ChatId, OutputId, OutputRevisionId, TurnId};
 
-/// Private-scratch directory holding the pre-record output files.
+/// Private-scratch directory holding the output files in use today.
 ///
-/// Files written here predate durable output records and are no longer part of
-/// the catalog. [`OUTPUTS_DIRECTORY`] holds every recorded revision.
+/// This is what `create_deliverable` writes and what the desktop Outputs view
+/// reads, so it is the only catalog the shipped product has. Identity here is
+/// the filename, and rewriting a file destroys the bytes it replaced.
+///
+/// The durable record layer below is the intended replacement and nothing
+/// writes it yet; see [`OUTPUTS_DIRECTORY`].
 pub const DELIVERABLES_DIRECTORY: &str = "artifacts";
 /// Private-scratch directory holding immutable revision bytes.
+///
+/// Paired with the `output` and `output_revision` tables. The store layer is
+/// complete and has no callers outside this crate: the cutover from
+/// [`DELIVERABLES_DIRECTORY`] is a separate slice. Anything reasoning about
+/// what a user can actually see today should look there, not here.
 pub const OUTPUTS_DIRECTORY: &str = "outputs";
 /// Largest text artifact the foreground agent may create.
 pub const MAX_DELIVERABLE_BYTES: usize = 512 * 1024;
