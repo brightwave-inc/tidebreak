@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useChatListStore } from "./ChatListStore";
 
 /**
@@ -14,13 +14,29 @@ import { useChatListStore } from "./ChatListStore";
  * Returns a stable predicate that reads current truth when it is called, so a
  * handler can capture it before an await and still ask an up-to-date question
  * afterwards.
+ *
+ * The predicate also has to answer for a hook that is already gone. Its inputs
+ * are only written while rendering, so without the unmount cleanup below it
+ * would keep reporting the last conversation it saw as open forever — which is
+ * the opposite of what an unmounted hook means, and would make it disagree with
+ * the self-resets the hooks using it perform on the same event.
  */
 export function useOpenConversation(
   chatId: string | null,
 ): (startedChatId: string) => boolean {
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
-  const current = useRef({ chatId, deletingChatId });
+  const current = useRef<{ chatId: string | null; deletingChatId: string | null }>({
+    chatId,
+    deletingChatId,
+  });
   current.current = { chatId, deletingChatId };
+
+  useEffect(
+    () => () => {
+      current.current = { chatId: null, deletingChatId: null };
+    },
+    [],
+  );
 
   return useRef(
     (startedChatId: string) =>
