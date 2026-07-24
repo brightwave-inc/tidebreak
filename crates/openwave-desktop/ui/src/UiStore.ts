@@ -7,6 +7,24 @@ export type PrimaryView =
   | "folders"
   | "settings";
 
+const SIDEBAR_COLLAPSED_KEY = "openwave.sidebar-collapsed";
+
+function readStoredSidebarCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function storeSidebarCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed));
+  } catch {
+    // Preference persistence is best-effort.
+  }
+}
+
 /**
  * App-level view state: which primary surface is showing. Actions are named
  * for intent so call sites read as navigation, not state plumbing. The
@@ -20,6 +38,8 @@ export type UiStore = {
   showDeliverables: () => void;
   showFolders: () => void;
   showSettings: () => void;
+  sidebarCollapsed: boolean;
+  toggleSidebar: () => void;
 };
 
 export function createUiStore() {
@@ -30,6 +50,13 @@ export function createUiStore() {
     showDeliverables: () => set({ primaryView: "deliverables" }),
     showFolders: () => set({ primaryView: "folders" }),
     showSettings: () => set({ primaryView: "settings" }),
+    sidebarCollapsed: readStoredSidebarCollapsed(),
+    toggleSidebar: () =>
+      set((state) => {
+        const sidebarCollapsed = !state.sidebarCollapsed;
+        storeSidebarCollapsed(sidebarCollapsed);
+        return { sidebarCollapsed };
+      }),
   }));
 }
 

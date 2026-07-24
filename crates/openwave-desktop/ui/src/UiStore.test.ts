@@ -22,3 +22,14 @@ describe("UiStore", () => {
     expect(store.getState().primaryView).toBe("chat");
   });
 });
+
+describe("sidebar collapse", () => {
+  it("toggles and reports the collapsed state", () => {
+    const store = createUiStore();
+    expect(store.getState().sidebarCollapsed).toBe(false);
+    store.getState().toggleSidebar();
+    expect(store.getState().sidebarCollapsed).toBe(true);
+    store.getState().toggleSidebar();
+    expect(store.getState().sidebarCollapsed).toBe(false);
+  });
+});

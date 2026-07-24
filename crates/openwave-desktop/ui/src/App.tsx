@@ -14,6 +14,7 @@ import {
 import { modelForSelection } from "./ModelSelection";
 import { resolveServerInfo } from "./boot";
 import {
+  hasMacOverlayTitlebar,
   hasNativeHost,
   resolveFolderAccessRequest,
   type FolderAccessDecision,
@@ -58,6 +59,7 @@ import {
 } from "./SandboxAgentStop";
 import { prependReplacementChat } from "./ChatDeletion";
 import { useConfirm } from "./components/ConfirmDialog";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useDesktopUpdates } from "./updates";
 import { ChatView } from "./ChatView";
 import { FoldersView } from "./FoldersView";
@@ -91,6 +93,7 @@ export default function App() {
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
   const primaryView = useUiStore((state) => state.primaryView);
+  const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const busy = useChatSessionStore((session) => session.busy);
@@ -1054,9 +1057,41 @@ export default function App() {
 
 
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell${hasMacOverlayTitlebar() ? " with-titlebar" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
+    >
       {confirmDialog}
-      <Sidebar
+      {hasMacOverlayTitlebar() && (
+        <div className="titlebar" data-tauri-drag-region>
+          <button
+            type="button"
+            className="titlebar-panel-toggle"
+            aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+            title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+            onClick={() => useUiStore.getState().toggleSidebar()}
+          >
+            {sidebarCollapsed ? (
+              <PanelLeftOpen size={15} />
+            ) : (
+              <PanelLeftClose size={15} />
+            )}
+          </button>
+        </div>
+      )}
+      <div className="app-body">
+      {!hasMacOverlayTitlebar() && sidebarCollapsed && (
+        <button
+          type="button"
+          className="sidebar-expand"
+          aria-label="Show sidebar"
+          title="Show sidebar"
+          onClick={() => useUiStore.getState().toggleSidebar()}
+        >
+          <PanelLeftOpen size={15} />
+        </button>
+      )}
+      {!sidebarCollapsed && <Sidebar
+        collapseControl={!hasMacOverlayTitlebar()}
         themeMode={themeMode}
         updateReady={desktopUpdates.state.status === "ready"}
         updateVersion={desktopUpdates.state.version ?? null}
@@ -1068,7 +1103,7 @@ export default function App() {
         onCancelRename={cancelChatRename}
         onDeleteChat={(target) => void onDeleteChat(target)}
         onRestartForUpdate={() => void onRestartForUpdate()}
-      />
+      />}
 
       <div className="main">
         {primaryView === "documents" ? (
@@ -1164,6 +1199,7 @@ export default function App() {
           onStop={onCancelActiveTurn}
         />
         )}
+      </div>
       </div>
     </div>
   );

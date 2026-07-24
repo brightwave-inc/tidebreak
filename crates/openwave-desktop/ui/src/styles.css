@@ -3070,3 +3070,83 @@ body {
   scrollbar-color: var(--muted-foreground) transparent;
   scrollbar-width: thin;
 }
+
+/* ---------- Sidebar collapse ---------- */
+
+.sidebar-expand {
+  position: absolute;
+  top: 0.6rem;
+  left: 0.6rem;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--muted-foreground);
+}
+
+.sidebar-expand:hover {
+  color: var(--ink);
+}
+
+.app-shell {
+  position: relative;
+}
+
+/* With the sidebar collapsed the main surface reaches the window's left
+   edge; restore the same gutter the other sides get. */
+.app-shell.sidebar-collapsed .main {
+  margin-left: 0.5rem;
+}
+
+/* macOS overlay titlebar: one strip carries the traffic lights, panel
+   toggle, brand, and theme control, and drags the window. */
+.app-shell.with-titlebar {
+  flex-direction: column;
+}
+
+.titlebar {
+  flex: 0 0 52px;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding-left: 84px;
+  padding-right: 0.6rem;
+}
+
+/* The strip already provides top breathing room; keep the sidebar header
+   tight beneath it. */
+.app-shell.with-titlebar .sidebar {
+  padding-top: 0;
+}
+
+.app-shell.with-titlebar .sidebar-brand {
+  margin-bottom: 0.4rem;
+}
+
+.titlebar-panel-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  margin-top: -10px;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+}
+
+.titlebar-panel-toggle:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+
+.app-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}

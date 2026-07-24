@@ -50,3 +50,12 @@ export function resolveFolderAccessRequest(
     request: { chatId, callId, decision },
   });
 }
+
+/**
+ * The native macOS window uses an overlay titlebar (traffic lights over app
+ * chrome), so the app renders its own drag strip with controls beside them.
+ * Windows/Linux keep standard decorations; the browser has its own chrome.
+ */
+export function hasMacOverlayTitlebar(): boolean {
+  return hasNativeHost() && navigator.userAgent.includes("Mac OS");
+}
