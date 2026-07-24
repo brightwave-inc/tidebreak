@@ -13,7 +13,7 @@ import type { FolderAccessDecision } from "./host";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { MessageFooter } from "./MessageFooter";
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
-import { ToolCallCard, type ToolCallStatus } from "./ToolCallCard";
+import { ToolCommandCard, type ToolCallStatus } from "./ToolCallCard";
 import { ToolActivityGroup } from "./ToolActivityGroup";
 import { WelcomeState } from "./WelcomeState";
 import { UserQuestionsCard } from "./UserQuestionsCard";
@@ -181,19 +181,13 @@ export function MessageList({
   );
 }
 
-function isGroupableTerminalTool(
-  message: ChatMessage,
-): message is Extract<ChatMessage, { role: "tool" }> {
-  // Folder access is an authority boundary. It stays separate even when its
-  // corresponding tool event is terminal, so it cannot be mistaken for a
-  // passive historical activity item.
-  return (
-    message.role === "tool" &&
-    message.name !== "request_folder_access" &&
-    (message.status === "completed" ||
-      message.status === "failed" ||
-      message.status === "cancelled")
-  );
+type ToolMessage = Extract<ChatMessage, { role: "tool" }>;
+type ApprovalMessage = Extract<ChatMessage, { role: "approval" }>;
+
+/** Whether this message belongs to an activity phase rather than to the conversation. */
+function isActivityMessage(message: ChatMessage | undefined): boolean {
+  if (message === undefined) return false;
+  return message.role === "tool" || message.role === "approval";
 }
 
 export function groupMessageItems(
@@ -209,34 +203,17 @@ export function groupMessageItems(
     approvalErrors: Record<string, string>;
   },
 ) {
-  // While a call is parked, its approval card already names the action and
-  // carries the controls. Showing the tool card beside it says the same thing
-  // twice and puts a second, inert copy of the command on screen.
-  const parkedOnApproval = new Set(
-    messages.flatMap((message) =>
-      message.role === "approval" && !message.resolved ? [message.callId] : [],
-    ),
-  );
-  const visible = messages.filter(
-    (message) =>
-      !(
-        message.role === "tool" &&
-        message.status === "waiting_approval" &&
-        parkedOnApproval.has(message.callId)
-      ),
-  );
-
   const items: ReactNode[] = [];
   let index = 0;
   let groupIndex = 0;
   let streamingAssistantId: string | undefined;
   if (busy) {
     for (
-      let messageIndex = visible.length - 1;
+      let messageIndex = messages.length - 1;
       messageIndex >= 0;
       messageIndex -= 1
     ) {
-      const candidate = visible[messageIndex];
+      const candidate = messages[messageIndex];
       if (candidate?.role === "assistant" && !candidate.superseded) {
         streamingAssistantId = candidate.id;
         break;
@@ -247,59 +224,114 @@ export function groupMessageItems(
     }
   }
 
-  while (index < visible.length) {
-    const message = visible[index];
+  while (index < messages.length) {
+    const message = messages[index];
 
-    if (!isGroupableTerminalTool(message)) {
+    if (!isActivityMessage(message)) {
       items.push(
         <MessageBubble
           key={message.id}
           message={message}
           busy={message.id === streamingAssistantId}
-          onApproval={onApproval}
-          approvalState={approvalState}
         />,
       );
       index += 1;
       continue;
     }
 
-    const activities = [message];
-    index += 1;
-    while (index < visible.length) {
-      const nextMessage = visible[index];
-      if (!isGroupableTerminalTool(nextMessage)) {
-        break;
-      }
-
-      activities.push(nextMessage);
+    // One phase per contiguous run of activity, however long. A phase that
+    // splits at every assistant sentence is not a phase.
+    const phase: ChatMessage[] = [];
+    while (index < messages.length && isActivityMessage(messages[index])) {
+      phase.push(messages[index]!);
       index += 1;
     }
 
-    if (activities.length === 1) {
-      items.push(
-        <MessageBubble
-          key={message.id}
-          message={message}
-          busy={message.id === streamingAssistantId}
-          onApproval={onApproval}
-          approvalState={approvalState}
-        />,
-      );
-      continue;
-    }
+    const tools = phase.filter((entry): entry is ToolMessage => entry.role === "tool");
+    const approvals = phase.filter(
+      (entry): entry is ApprovalMessage => entry.role === "approval",
+    );
+    // A call parked on approval is represented by its approval card, so the
+    // rail would otherwise announce the same pending action twice.
+    const parked = new Set(
+      approvals.filter((entry) => !entry.resolved).map((entry) => entry.callId),
+    );
 
+    const cards = surfacedCards(
+      tools,
+      approvals,
+      parked,
+      onApproval,
+      approvalState,
+    );
     items.push(
       <ToolActivityGroup
         key={`tool-activity-group-${groupIndex}`}
-        activities={activities}
+        activities={tools.filter((tool) => !parked.has(tool.callId))}
         groupIndex={groupIndex}
-      />,
+      >
+        {cards.length > 0 ? cards : undefined}
+      </ToolActivityGroup>,
     );
     groupIndex += 1;
   }
 
   return items;
+}
+
+/**
+ * The cards that hang below a phase, always visible.
+ *
+ * A call earns one by having something a line of text can't carry: a command to
+ * read, or a decision to make. Anything a card would show that the rail already
+ * says stays in the rail.
+ */
+function surfacedCards(
+  tools: ToolMessage[],
+  approvals: ApprovalMessage[],
+  parked: Set<string>,
+  onApproval: (
+    callId: string,
+    decision: "approve" | "reject",
+    remember?: boolean,
+  ) => void,
+  approvalState?: {
+    decidingApprovalCalls: Set<string>;
+    approvalErrors: Record<string, string>;
+  },
+): ReactNode[] {
+  const cards: ReactNode[] = [];
+  for (const approval of approvals) {
+    if (approval.resolved) continue;
+    cards.push(
+      <ApprovalCard
+        key={approval.id}
+        callId={approval.callId}
+        summary={approval.summary}
+        preview={approval.preview ?? null}
+        canApprove={approval.canApprove}
+        canRemember={approval.canRemember}
+        deciding={
+          approvalState?.decidingApprovalCalls.has(approval.callId) ?? false
+        }
+        error={approvalState?.approvalErrors[approval.callId]}
+        onDecide={onApproval}
+      />,
+    );
+  }
+  for (const tool of tools) {
+    // The approval card already shows this command and owns the decision.
+    if (!tool.preview || parked.has(tool.callId)) continue;
+    cards.push(
+      <ToolCommandCard
+        key={tool.id}
+        name={tool.name}
+        status={tool.status}
+        preview={tool.preview}
+      />,
+    );
+  }
+  return cards;
 }
 
 /**
@@ -309,63 +341,17 @@ export function groupMessageItems(
  */
 export const MessageBubble = memo(MessageBubbleImpl);
 
+/**
+ * One conversational turn. Tool calls and approvals are not turns — they belong
+ * to an activity phase, which owns both the rail and the cards below it.
+ */
 function MessageBubbleImpl({
   message,
   busy,
-  onApproval,
-  approvalState,
 }: {
   message: ChatMessage;
   busy: boolean;
-  onApproval: (
-    callId: string,
-    decision: "approve" | "reject",
-    remember?: boolean,
-  ) => void;
-  approvalState?: {
-    decidingApprovalCalls: Set<string>;
-    approvalErrors: Record<string, string>;
-  };
 }) {
-  if (message.role === "tool") {
-    return (
-      <ToolCallCard
-        name={message.name}
-        status={message.status}
-        preview={message.preview}
-      />
-    );
-  }
-
-  if (message.role === "approval") {
-    const deciding =
-      approvalState?.decidingApprovalCalls.has(message.callId) ?? false;
-    // A decided card keeps its question so the transcript still records what
-    // was asked, but drops the controls that would imply it is still open.
-    if (message.resolved) {
-      return (
-        <section
-          className="bg-card text-muted-foreground w-[min(100%,38rem)] self-start rounded-lg border p-4 text-sm"
-          aria-label="Approval needed"
-        >
-          {message.summary}
-        </section>
-      );
-    }
-    return (
-      <ApprovalCard
-        callId={message.callId}
-        summary={message.summary}
-        preview={message.preview ?? null}
-        canApprove={message.canApprove}
-        canRemember={message.canRemember}
-        deciding={deciding}
-        error={approvalState?.approvalErrors[message.callId]}
-        onDecide={onApproval}
-      />
-    );
-  }
-
   if (message.role === "assistant") {
     if (!message.text && message.sources.length === 0) return null;
 
@@ -409,14 +395,18 @@ function MessageBubbleImpl({
     );
   }
 
-  return (
-    <div
-      className={`message-notice is-${message.role}`}
-      role={message.role === "error" ? "alert" : "status"}
-    >
-      {message.text}
-    </div>
-  );
+  if (message.role === "system" || message.role === "error") {
+    return (
+      <div
+        className={`message-notice is-${message.role}`}
+        role={message.role === "error" ? "alert" : "status"}
+      >
+        {message.text}
+      </div>
+    );
+  }
+
+  return null;
 }
 
 /**

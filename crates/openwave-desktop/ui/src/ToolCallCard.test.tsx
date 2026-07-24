@@ -1,7 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
-  ToolCallCard,
+  ToolCommandCard,
+  toolCallPresentation,
   toolApprovalPresentation,
 } from "./ToolCallCard";
 
@@ -12,135 +13,120 @@ function visibleText(markup: string): string {
   return markup.replace(/<[^>]*>/g, "");
 }
 
-describe("ToolCallCard", () => {
-  it("uses an allowlisted presentation and a polite live status", () => {
-    const markup = renderToStaticMarkup(
-      <ToolCallCard name="web_search" status="running" />,
-    );
+const preview = {
+  tool: "exec" as const,
+  command: "cargo",
+  args: ["test", "--workspace"],
+  cwd: "checkout",
+};
 
-    expect(markup).toContain("Search the web");
-    expect(markup).toContain("Searching the web");
-    expect(markup).toContain('role="status"');
-    expect(markup).toContain('aria-live="polite"');
-    expect(markup).toContain('aria-atomic="true"');
+describe("toolCallPresentation", () => {
+  it("names a tool in the tense its status calls for", () => {
+    expect(toolCallPresentation("web_search", "running").title).toBe(
+      "Searching the web",
+    );
+    expect(toolCallPresentation("web_search", "completed").title).toBe(
+      "Searched the web",
+    );
+    // A failure keeps the untensed phrase: the tool did not do the thing, so
+    // naming it in the past would overstate what happened.
+    expect(toolCallPresentation("web_search", "failed").title).toBe(
+      "Search the web",
+    );
+    expect(toolCallPresentation("web_search", "cancelled").title).toBe(
+      "Search the web",
+    );
   });
 
   it("does not expose an unknown tool name", () => {
-    const markup = renderToStaticMarkup(
-      <ToolCallCard
-        name="mcp__private_server__read_a_sensitive_path"
-        status="completed"
-      />,
+    const presentation = toolCallPresentation(
+      "mcp__private_server__read_a_sensitive_path",
+      "completed",
     );
 
-    expect(markup).toContain("Use a tool");
-    expect(markup).toContain("Tool complete");
-    expect(markup).not.toContain("private_server");
-    expect(markup).not.toContain("sensitive_path");
-  });
-
-  it("renders the fixed local-search presentation", () => {
-    const markup = renderToStaticMarkup(
-      <ToolCallCard name="search" status="completed" />,
-    );
-
-    expect(markup).toContain("Search sources");
-    expect(markup).toContain("Source search complete");
+    expect(presentation.title).toBe("Used a tool");
+    expect(JSON.stringify(presentation)).not.toContain("private_server");
+    expect(JSON.stringify(presentation)).not.toContain("sensitive_path");
   });
 
   it("distinguishes source discovery from direct source reads", () => {
-    const listing = renderToStaticMarkup(
-      <ToolCallCard name="list_sources" status="running" />,
+    expect(toolCallPresentation("list_sources", "running").title).toBe(
+      "Checking sources",
     );
-    const reading = renderToStaticMarkup(
-      <ToolCallCard name="read_source" status="completed" />,
+    expect(toolCallPresentation("read_source", "completed").title).toBe(
+      "Read a source",
     );
-
-    expect(listing).toContain("Checking sources");
-    expect(reading).toContain("Read a source");
-    expect(reading).toContain("Source read complete");
-  });
-
-  it("renders a fixed user-visible output presentation", () => {
-    const active = renderToStaticMarkup(
-      <ToolCallCard name="create_deliverable" status="running" />,
-    );
-    const complete = renderToStaticMarkup(
-      <ToolCallCard name="create_deliverable" status="completed" />,
-    );
-
-    expect(active).toContain("Creating an output");
-    expect(complete).toContain("Output ready");
-    expect(visibleText(complete)).not.toContain("artifacts/");
-  });
-
-  it("renders a fixed delegated-file presentation without resource details", () => {
-    const markup = renderToStaticMarkup(
-      <ToolCallCard name="read_delegated_file" status="running" />,
-    );
-
-    expect(markup).toContain("Read a delegated file");
-    expect(markup).toContain("Reading a delegated file");
-    expect(visibleText(markup)).not.toContain("path");
-    expect(visibleText(markup)).not.toContain("root");
   });
 
   it("distinguishes delegation from waiting for the child results", () => {
-    const delegated = renderToStaticMarkup(
-      <ToolCallCard name="spawn_sandbox_agent" status="completed" />,
+    expect(toolCallPresentation("spawn_sandbox_agent", "completed").title).toBe(
+      "Task delegated",
     );
-    const waiting = renderToStaticMarkup(
-      <ToolCallCard name="wait_for_agents" status="running" />,
+    expect(toolCallPresentation("wait_for_agents", "running").title).toBe(
+      "Waiting for background agents",
     );
-    const finished = renderToStaticMarkup(
-      <ToolCallCard name="wait_for_agents" status="completed" />,
-    );
-
-    expect(delegated).toContain("Task delegated");
-    expect(delegated).not.toContain("task complete");
-    expect(waiting).toContain("Waiting for background agents");
-    expect(finished).toContain("Background agents finished");
   });
 
-  it("uses fixed copy while waiting for a structured answer", () => {
-    const waiting = renderToStaticMarkup(
-      <ToolCallCard name="ask_user_questions" status="running" />,
-    );
-    const answered = renderToStaticMarkup(
-      <ToolCallCard name="ask_user_questions" status="completed" />,
+  it("degrades an unknown runtime status without using it as copy", () => {
+    const presentation = toolCallPresentation(
+      "web_search",
+      "private-provider-diagnostic" as "completed",
     );
 
-    expect(waiting).toContain("Waiting for your answer");
-    expect(answered).toContain("Answer received");
+    expect(presentation.tone).toBe("unknown");
+    expect(presentation.badgeLabel).toBe("Status unavailable");
+    expect(JSON.stringify(presentation)).not.toContain(
+      "private-provider-diagnostic",
+    );
   });
+});
 
-  it("uses fixed terminal failure copy for background-agent waits", () => {
-    const failed = renderToStaticMarkup(
-      <ToolCallCard name="wait_for_agents" status="failed" />,
-    );
-    const cancelled = renderToStaticMarkup(
-      <ToolCallCard name="wait_for_agents" status="cancelled" />,
-    );
-
-    expect(failed).toContain("Tool could not complete");
-    expect(cancelled).toContain("Not run");
-  });
-
-  it("degrades an unknown runtime status without using it as copy or a class", () => {
+describe("ToolCommandCard", () => {
+  it("titles itself with the command instead of a generic phrase", () => {
     const markup = renderToStaticMarkup(
-      <ToolCallCard
-        name="web_search"
-        status={"private-provider-diagnostic" as "completed"}
-      />,
+      <ToolCommandCard name="exec" status="completed" preview={preview} />,
     );
 
-    expect(markup).toContain("Status unavailable");
-    expect(markup).toContain("is-unknown");
-    expect(markup).not.toContain("private-provider-diagnostic");
+    expect(visibleText(markup)).toContain("cargo test --workspace");
+    expect(visibleText(markup)).not.toContain("Ran a command");
+    // The allowlisted phrase still names the card for assistive technology.
+    expect(markup).toContain('aria-label="Run a command: Command complete"');
   });
 
+  it("opens while the command is running and closes once it has settled", () => {
+    const running = renderToStaticMarkup(
+      <ToolCommandCard name="exec" status="running" preview={preview} />,
+    );
+    const done = renderToStaticMarkup(
+      <ToolCommandCard name="exec" status="completed" preview={preview} />,
+    );
+
+    expect(running).toContain('aria-expanded="true"');
+    expect(visibleText(running)).toContain("# working directory: checkout");
+    expect(done).toContain('aria-expanded="false"');
+  });
+
+  it("carries the outcome in a badge rather than a second line of prose", () => {
+    for (const [status, badge] of [
+      ["running", "Running…"],
+      ["waiting_approval", "Waiting for approval"],
+      ["completed", "Done"],
+      ["failed", "Failed"],
+      ["cancelled", "Not run"],
+    ] as const) {
+      const markup = renderToStaticMarkup(
+        <ToolCommandCard name="exec" status={status} preview={preview} />,
+      );
+      expect(visibleText(markup)).toContain(badge);
+    }
+  });
+});
+
+describe("toolApprovalPresentation", () => {
   it("allows approval only for a fixed action description", () => {
-    expect(toolApprovalPresentation("search_may_share_query_and_excerpts")).toEqual({
+    expect(
+      toolApprovalPresentation("search_may_share_query_and_excerpts"),
+    ).toEqual({
       summary:
         "Allow search to send your query and potentially matching document excerpts to configured AI services outside OpenWave?",
       canApprove: true,
@@ -152,9 +138,7 @@ describe("ToolCallCard", () => {
       canApprove: true,
       canRemember: true,
     });
-    expect(
-      toolApprovalPresentation("exec_may_run_networked_command"),
-    ).toEqual({
+    expect(toolApprovalPresentation("exec_may_run_networked_command")).toEqual({
       summary:
         "Allow OpenWave to run a command that leaves the chat workspace and may reach the network?",
       canApprove: true,
@@ -171,53 +155,5 @@ describe("ToolCallCard", () => {
       canApprove: false,
       canRemember: false,
     });
-  });
-});
-
-describe("command cards", () => {
-  const preview = {
-    tool: "exec" as const,
-    command: "cargo",
-    args: ["test", "--workspace"],
-    cwd: "checkout",
-  };
-
-  it("titles itself with the command instead of a generic phrase", () => {
-    const markup = renderToStaticMarkup(
-      <ToolCallCard name="exec" status="completed" preview={preview} />,
-    );
-
-    expect(visibleText(markup)).toContain("cargo test --workspace");
-    expect(visibleText(markup)).not.toContain("Ran a command");
-    // The allowlisted phrase still names the card for assistive technology.
-    expect(markup).toContain('aria-label="Run a command: Command complete"');
-  });
-
-  it("opens onto the command only when there is a command to open onto", () => {
-    const withCommand = renderToStaticMarkup(
-      <ToolCallCard name="exec" status="running" preview={preview} />,
-    );
-    const withoutCommand = renderToStaticMarkup(
-      <ToolCallCard name="exec" status="running" />,
-    );
-
-    expect(withCommand).toContain('aria-expanded="false"');
-    expect(withoutCommand).not.toContain("aria-expanded");
-    expect(visibleText(withoutCommand)).toContain("Running a command");
-  });
-
-  it("carries the status in a badge rather than a second line of prose", () => {
-    for (const [status, badge] of [
-      ["running", "Running…"],
-      ["waiting_approval", "Waiting for approval"],
-      ["completed", "Done"],
-      ["failed", "Failed"],
-      ["cancelled", "Not run"],
-    ] as const) {
-      const markup = renderToStaticMarkup(
-        <ToolCallCard name="exec" status={status} preview={preview} />,
-      );
-      expect(visibleText(markup)).toContain(badge);
-    }
   });
 });

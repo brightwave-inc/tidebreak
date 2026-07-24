@@ -2,16 +2,25 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MessageBubble, type ChatMessage } from "./MessageList";
+import { ApprovalCard } from "./ApprovalCard";
+import { MessageBubble, MessageList, type ChatMessage } from "./MessageList";
 
-const approval: ChatMessage = {
-  id: "approval-1",
-  role: "approval",
-  callId: "call-1",
-  summary: "Search a site",
-  canApprove: true,
-  canRemember: true,
-};
+const noop = () => undefined;
+
+function card(overrides: Partial<Parameters<typeof ApprovalCard>[0]> = {}) {
+  return (
+    <ApprovalCard
+      callId="call-1"
+      summary="Search a site"
+      preview={null}
+      canApprove
+      canRemember
+      deciding={false}
+      onDecide={noop}
+      {...overrides}
+    />
+  );
+}
 
 const ONCE = "1.Yes, allow it once";
 const REMEMBER = "2.Yes, and don't ask again in this chat";
@@ -21,10 +30,8 @@ afterEach(cleanup);
 describe("approval card interactions", () => {
   it("propagates each decision with its remember flag", async () => {
     const user = userEvent.setup();
-    const onApproval = vi.fn();
-    render(
-      <MessageBubble message={approval} busy={false} onApproval={onApproval} />,
-    );
+    const onDecide = vi.fn();
+    render(card({ onDecide }));
 
     const options = screen.getAllByRole("option");
     expect(options.map((option) => option.textContent)).toEqual([
@@ -34,95 +41,89 @@ describe("approval card interactions", () => {
     ]);
 
     await user.click(options[0]!);
-    expect(onApproval).toHaveBeenLastCalledWith("call-1", "approve", false);
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", false);
 
     await user.click(options[1]!);
-    expect(onApproval).toHaveBeenLastCalledWith("call-1", "approve", true);
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", true);
 
     await user.click(options[2]!);
-    expect(onApproval).toHaveBeenLastCalledWith("call-1", "reject", false);
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", false);
   });
 
   it("starts on the narrowest grant so a stray Enter cannot widen scope", () => {
-    render(
-      <MessageBubble message={approval} busy={false} onApproval={vi.fn()} />,
-    );
+    render(card());
 
     const options = screen.getAllByRole("option");
     expect(options[0]).toHaveAttribute("aria-selected", "true");
     expect(options[0]?.textContent).toBe(ONCE);
   });
 
+  it("arms its keyboard shortcuts without needing a click first", () => {
+    render(card());
+
+    expect(document.activeElement).toBe(screen.getAllByRole("option")[0]);
+  });
+
+  it("leaves focus alone when the user is typing elsewhere", () => {
+    const composer = document.createElement("textarea");
+    document.body.append(composer);
+    composer.focus();
+
+    render(card());
+
+    expect(document.activeElement).toBe(composer);
+    composer.remove();
+  });
+
   it("submits the highlighted option from the keyboard", async () => {
     const user = userEvent.setup();
-    const onApproval = vi.fn();
-    render(
-      <MessageBubble message={approval} busy={false} onApproval={onApproval} />,
-    );
+    const onDecide = vi.fn();
+    render(card({ onDecide }));
 
-    const options = screen.getAllByRole("option");
-    options[0]!.focus();
     await user.keyboard("{ArrowDown}{Enter}");
-    expect(onApproval).toHaveBeenLastCalledWith("call-1", "approve", true);
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", true);
 
     await user.keyboard("3{Enter}");
-    expect(onApproval).toHaveBeenLastCalledWith("call-1", "reject", false);
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", false);
+  });
+
+  it("wraps around the ends of the list", async () => {
+    const user = userEvent.setup();
+    const onDecide = vi.fn();
+    render(card({ onDecide }));
+
+    await user.keyboard("{ArrowUp}{Enter}");
+    expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", false);
   });
 
   it("blocks every decision while one is in flight", async () => {
     const user = userEvent.setup();
-    const onApproval = vi.fn();
-    render(
-      <MessageBubble
-        message={approval}
-        busy={false}
-        onApproval={onApproval}
-        approvalState={{
-          decidingApprovalCalls: new Set(["call-1"]),
-          approvalErrors: {},
-        }}
-      />,
-    );
+    const onDecide = vi.fn();
+    render(card({ onDecide, deciding: true }));
 
     for (const option of screen.getAllByRole("option")) {
       await user.click(option);
     }
     expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
-    expect(onApproval).not.toHaveBeenCalled();
+    expect(onDecide).not.toHaveBeenCalled();
   });
 
   it("announces a failed decision and stays actionable for retry", async () => {
     const user = userEvent.setup();
-    const onApproval = vi.fn();
+    const onDecide = vi.fn();
     render(
-      <MessageBubble
-        message={approval}
-        busy={false}
-        onApproval={onApproval}
-        approvalState={{
-          decidingApprovalCalls: new Set(),
-          approvalErrors: {
-            "call-1": "Could not send your decision: Error: 500",
-          },
-        }}
-      />,
+      card({ onDecide, error: "Could not send your decision: Error: 500" }),
     );
 
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Could not send your decision",
     );
     await user.click(screen.getAllByRole("option")[0]!);
-    expect(onApproval).toHaveBeenCalledWith("call-1", "approve", false);
+    expect(onDecide).toHaveBeenCalledWith("call-1", "approve", false);
   });
 
   it("offers only rejection when the action kind is not approvable", () => {
-    render(
-      <MessageBubble
-        message={{ ...approval, canApprove: false }}
-        busy={false}
-        onApproval={() => undefined}
-      />,
-    );
+    render(card({ canApprove: false }));
 
     expect(
       screen.getAllByRole("option").map((option) => option.textContent),
@@ -130,49 +131,143 @@ describe("approval card interactions", () => {
   });
 
   it("offers one-shot approval but no remembered grant for MCP", () => {
-    render(
-      <MessageBubble
-        message={{ ...approval, canRemember: false }}
-        busy={false}
-        onApproval={() => undefined}
-      />,
-    );
+    render(card({ canRemember: false }));
 
     expect(
       screen.getAllByRole("option").map((option) => option.textContent),
     ).toEqual([ONCE, "2.No, don't allow this"]);
   });
 
-  it("shows the command an exec approval is granting", () => {
+  it("asks about the command rather than about commands in general", () => {
     render(
-      <MessageBubble
-        message={{
-          ...approval,
-          summary:
-            "Allow OpenWave to run a command that leaves the chat workspace and may reach the network?",
-          preview: {
-            tool: "exec",
-            command: "cargo",
-            args: ["test", "--workspace"],
-            cwd: "checkout",
-          },
-        }}
-        busy={false}
-        onApproval={() => undefined}
-      />,
+      card({
+        summary:
+          "Allow OpenWave to run a command that leaves the chat workspace and may reach the network?",
+        preview: {
+          tool: "exec",
+          command: "cargo",
+          args: ["test", "--workspace"],
+          cwd: "checkout",
+        },
+      }),
     );
 
+    expect(
+      screen.getByRole("heading", { name: "Run this command?" }),
+    ).toBeInTheDocument();
     expect(screen.getByText(/cargo test --workspace/)).toBeInTheDocument();
     expect(
       screen.getByText(/# working directory: checkout/),
     ).toBeInTheDocument();
+    // The class-of-egress sentence becomes the subheading, not the ask.
+    expect(screen.getByText(/may reach the network/)).toBeInTheDocument();
+    expect(screen.getAllByRole("option")[0]).toHaveTextContent(
+      "Yes, run it once",
+    );
+  });
+});
+
+describe("activity phases", () => {
+  const preview = {
+    tool: "exec" as const,
+    command: "cargo",
+    args: ["build"],
+    cwd: ".",
+  };
+
+  function list(messages: ChatMessage[]) {
+    return render(
+      <MessageList
+        messages={messages}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+  }
+
+  it("keeps a run of calls behind one line and reveals them on demand", async () => {
+    const user = userEvent.setup();
+    list([
+      { id: "t1", role: "tool", callId: "c1", name: "search", status: "completed" },
+      { id: "t2", role: "tool", callId: "c2", name: "read_file", status: "completed" },
+      { id: "t3", role: "tool", callId: "c3", name: "web_search", status: "completed" },
+    ]);
+
+    const trigger = screen.getByRole("button", {
+      name: /Searched the web and 2 other tasks/,
+    });
+    expect(screen.queryByRole("listitem")).not.toBeInTheDocument();
+
+    await user.click(trigger);
+    expect(
+      screen.getAllByRole("listitem").map((row) => row.textContent),
+    ).toEqual(["Searched sources", "Read a file", "Searched the web"]);
+  });
+
+  it("surfaces a command card outside the collapsed region", () => {
+    list([
+      { id: "t1", role: "tool", callId: "c1", name: "search", status: "completed" },
+      {
+        id: "t2",
+        role: "tool",
+        callId: "c2",
+        name: "exec",
+        status: "completed",
+        preview,
+      },
+    ]);
+
+    // Collapsed: the rail lists nothing, but the command is still readable.
+    expect(screen.queryByRole("listitem")).not.toBeInTheDocument();
+    expect(screen.getByText("cargo build")).toBeInTheDocument();
+    expect(screen.getByText("Done")).toBeInTheDocument();
+  });
+
+  it("lets the approval card speak for a call parked on it", () => {
+    list([
+      {
+        id: "t1",
+        role: "tool",
+        callId: "c1",
+        name: "exec",
+        status: "waiting_approval",
+        preview,
+      },
+      {
+        id: "a1",
+        role: "approval",
+        callId: "c1",
+        summary: "Allow OpenWave to run a command?",
+        preview,
+        canApprove: true,
+        canRemember: true,
+      },
+    ]);
+
+    // One copy of the command, on the card that can act on it, and no rail
+    // line announcing the same pending action a second time.
+    expect(screen.getAllByText(/cargo build/)).toHaveLength(1);
+    expect(
+      screen.queryByRole("button", { name: /Running a command/ }),
+    ).toBeNull();
   });
 });
 
 describe("row memoization", () => {
   it("MessageBubble is a memoized component", () => {
-    expect(
-      (MessageBubble as unknown as { $$typeof: symbol }).$$typeof,
-    ).toBe(Symbol.for("react.memo"));
+    expect((MessageBubble as unknown as { $$typeof: symbol }).$$typeof).toBe(
+      Symbol.for("react.memo"),
+    );
   });
 });

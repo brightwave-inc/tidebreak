@@ -3,7 +3,8 @@ import type { KeyboardEvent } from "react";
 import type { ToolApprovalPreview } from "./api";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { ToolPreviewBlock } from "./ToolPreview";
+import { ScrollableContainer } from "./ScrollableContainer";
+import { toolPreviewPresentation } from "./ToolPreview";
 
 export type ApprovalDecision = "approve" | "reject";
 
@@ -27,17 +28,21 @@ type ApprovalCardProps = {
   onDecide: (
     callId: string,
     decision: ApprovalDecision,
-    remember?: boolean,
+    remember: boolean,
   ) => void;
 };
 
 /**
  * The consent panel for a parked tool call.
  *
- * The options are a keyboard-navigable list rather than a row of buttons, and
- * they are ordered narrowest grant first with the decline last. Scope is easy
- * to widen by accident and hard to notice afterwards, so the cheapest keystroke
- * has to be the one that grants the least.
+ * It leads with a short question, because deciding starts with knowing what is
+ * being decided; the longer sentence about what the action can reach explains
+ * rather than asks, so it sits underneath. Below that, the exact action.
+ *
+ * The options are a keyboard-navigable list rather than a row of buttons,
+ * ordered narrowest grant first with the decline last. Scope is easy to widen
+ * by accident and hard to notice afterwards, so the cheapest keystroke has to
+ * be the one that grants the least.
  */
 export function ApprovalCard({
   callId,
@@ -49,14 +54,32 @@ export function ApprovalCard({
   error,
   onDecide,
 }: ApprovalCardProps) {
-  const options = approvalOptions(canApprove, canRemember);
+  const options = approvalOptions(preview, canApprove, canRemember);
   const [highlight, setHighlight] = useState(0);
   const rowRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const hasAutoFocused = useRef(false);
   const safeHighlight = Math.min(highlight, options.length - 1);
+  const ask = approvalAsk(preview, summary);
 
+  // Arm the shortcuts the moment the card appears, so ↑↓ / 1–9 / ↵ work
+  // without a click first. The latch arms before the bail-out so this fires
+  // exactly once: if focus is intentionally elsewhere we leave it there rather
+  // than yanking it back on some later state change.
   useEffect(() => {
-    rowRefs.current = rowRefs.current.slice(0, options.length);
-  }, [options.length]);
+    if (hasAutoFocused.current || deciding) return;
+    hasAutoFocused.current = true;
+    const active = document.activeElement;
+    const focusedElsewhere =
+      active instanceof HTMLElement &&
+      (active.isContentEditable ||
+        active.tagName === "INPUT" ||
+        active.tagName === "TEXTAREA" ||
+        active.closest('[role="listbox"]') !== null);
+    if (focusedElsewhere) return;
+    // preventScroll: the point is to arm the keys, not to drag the transcript
+    // to a card that may have mounted off-screen.
+    rowRefs.current[0]?.focus({ preventScroll: true });
+  }, [deciding]);
 
   const commit = (index: number) => {
     const option = options[index];
@@ -64,13 +87,15 @@ export function ApprovalCard({
     onDecide(callId, option.decision, option.remember);
   };
 
+  const focusRow = (to: number) => {
+    const wrapped = ((to % options.length) + options.length) % options.length;
+    rowRefs.current[wrapped]?.focus();
+  };
+
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>, index: number) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      const delta = event.key === "ArrowDown" ? 1 : -1;
-      const next = (index + delta + options.length) % options.length;
-      setHighlight(next);
-      rowRefs.current[next]?.focus();
+      focusRow(index + (event.key === "ArrowDown" ? 1 : -1));
       return;
     }
     if (event.key === "Enter" || event.key === " ") {
@@ -78,22 +103,32 @@ export function ApprovalCard({
       commit(index);
       return;
     }
-    const digit = Number.parseInt(event.key, 10);
-    if (Number.isInteger(digit) && digit >= 1 && digit <= options.length) {
-      event.preventDefault();
-      setHighlight(digit - 1);
-      rowRefs.current[digit - 1]?.focus();
+    if (/^[1-9]$/.test(event.key)) {
+      const target = Number(event.key) - 1;
+      if (target < options.length) {
+        event.preventDefault();
+        focusRow(target);
+      }
     }
   };
 
   return (
     <section
-      className="bg-card text-card-foreground flex w-[min(100%,38rem)] flex-col gap-3 self-start rounded-lg border p-4"
+      className="bg-background flex max-w-prose flex-col gap-3 rounded-lg border p-4"
       aria-label="Approval needed"
       aria-busy={deciding}
     >
-      <h3 className="text-sm font-medium break-words">{summary}</h3>
-      {preview && <ToolPreviewBlock preview={preview} />}
+      <h3 className="font-medium break-words">{ask.title}</h3>
+      {ask.summaryLine && (
+        <p className="text-muted-foreground text-sm break-words">
+          {ask.summaryLine}
+        </p>
+      )}
+      {preview && (
+        <ScrollableContainer className="bg-muted text-muted-foreground max-h-48 rounded-md p-3 text-xs break-words whitespace-pre-wrap">
+          {toolPreviewPresentation(preview).detail}
+        </ScrollableContainer>
+      )}
       <div
         role="listbox"
         aria-label="What should happen"
@@ -110,9 +145,10 @@ export function ApprovalCard({
             tabIndex={deciding ? -1 : 0}
             onClick={() => commit(index)}
             onFocus={() => setHighlight(index)}
+            onMouseEnter={(event) => event.currentTarget.focus()}
             onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
-              "focus-visible:ring-ring flex cursor-pointer items-baseline gap-2.5 rounded-md px-3 py-2 text-sm outline-hidden focus-visible:ring-2",
+              "focus-visible:ring-ring flex cursor-pointer items-baseline gap-2.5 rounded-md px-3 py-2.5 text-sm outline-hidden focus-visible:ring-2",
               index === safeHighlight ? "bg-muted" : "hover:bg-muted/60",
               deciding && "pointer-events-none opacity-60",
             )}
@@ -133,7 +169,7 @@ export function ApprovalCard({
       </div>
       <div className="flex items-center justify-between gap-2 text-xs">
         <span className="text-muted-foreground">
-          ↑↓ choose · 1–{options.length} jump · ↵ submit
+          ↑↓ choose · 1–{Math.min(options.length, 9)} jump · ↵ submit
         </span>
         <Button
           size="sm"
@@ -153,12 +189,30 @@ export function ApprovalCard({
 }
 
 /**
+ * What the card asks, and what it adds underneath.
+ *
+ * A tool that shows its action gets a short question about *this* action, and
+ * the server's sentence about the class of egress moves to the subheading. A
+ * tool with nothing to show has only that sentence, so it stays the question.
+ */
+export function approvalAsk(
+  preview: ToolApprovalPreview | null,
+  summary: string,
+): { title: string; summaryLine: string | null } {
+  if (preview?.tool === "exec") {
+    return { title: "Run this command?", summaryLine: summary };
+  }
+  return { title: summary, summaryLine: null };
+}
+
+/**
  * Narrowest grant first, decline last.
  *
  * A kind the server will not let the renderer approve offers only the decline,
  * so an unpresentable action can never be waved through from here.
  */
 export function approvalOptions(
+  preview: ToolApprovalPreview | null,
   canApprove: boolean,
   canRemember: boolean,
 ): ApprovalOption[] {
@@ -166,7 +220,10 @@ export function approvalOptions(
   if (canApprove) {
     options.push({
       key: "once",
-      label: "Yes, allow it once",
+      // Named for the act, not the abstraction: "run it once" is what the
+      // person is about to do.
+      label:
+        preview?.tool === "exec" ? "Yes, run it once" : "Yes, allow it once",
       decision: "approve",
       remember: false,
     });

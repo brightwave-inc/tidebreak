@@ -1,4 +1,3 @@
-import { Terminal } from "lucide-react";
 import type { ToolApprovalPreview } from "./api";
 
 /**
@@ -13,7 +12,6 @@ export type ToolPreviewPresentation = {
   headline: string;
   /** Full form, one fact per line, used in a monospace block. */
   detail: string;
-  icon: typeof Terminal;
 };
 
 export function toolPreviewPresentation(
@@ -29,7 +27,7 @@ export function toolPreviewPresentation(
     preview.cwd === "."
       ? headline
       : `${headline}\n# working directory: ${preview.cwd}`;
-  return { headline, detail, icon: Terminal };
+  return { headline, detail };
 }
 
 /**
@@ -41,21 +39,4 @@ function quoteArgument(value: string): string {
   if (value.length === 0) return "''";
   if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
   return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-/** The monospace block both cards use to show an action under review. */
-export function ToolPreviewBlock({
-  preview,
-  className,
-}: {
-  preview: ToolApprovalPreview;
-  className?: string;
-}) {
-  return (
-    <pre
-      className={`bg-muted text-muted-foreground max-h-48 overflow-auto rounded-md p-3 text-xs break-words whitespace-pre-wrap ${className ?? ""}`}
-    >
-      {toolPreviewPresentation(preview).detail}
-    </pre>
-  );
 }
