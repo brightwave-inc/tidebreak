@@ -13,6 +13,9 @@ const approval: ChatMessage = {
   canRemember: true,
 };
 
+const ONCE = "1.Yes, allow it once";
+const REMEMBER = "2.Yes, and don't ask again in this chat";
+
 afterEach(cleanup);
 
 describe("approval card interactions", () => {
@@ -23,16 +26,47 @@ describe("approval card interactions", () => {
       <MessageBubble message={approval} busy={false} onApproval={onApproval} />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Approve once" }));
-    expect(onApproval).toHaveBeenLastCalledWith("call-1", "approve");
+    const options = screen.getAllByRole("option");
+    expect(options.map((option) => option.textContent)).toEqual([
+      ONCE,
+      REMEMBER,
+      "3.No, don't allow this",
+    ]);
 
-    await user.click(
-      screen.getByRole("button", { name: "Allow for this chat" }),
-    );
+    await user.click(options[0]!);
+    expect(onApproval).toHaveBeenLastCalledWith("call-1", "approve", false);
+
+    await user.click(options[1]!);
     expect(onApproval).toHaveBeenLastCalledWith("call-1", "approve", true);
 
-    await user.click(screen.getByRole("button", { name: "Reject" }));
-    expect(onApproval).toHaveBeenLastCalledWith("call-1", "reject");
+    await user.click(options[2]!);
+    expect(onApproval).toHaveBeenLastCalledWith("call-1", "reject", false);
+  });
+
+  it("starts on the narrowest grant so a stray Enter cannot widen scope", () => {
+    render(
+      <MessageBubble message={approval} busy={false} onApproval={vi.fn()} />,
+    );
+
+    const options = screen.getAllByRole("option");
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+    expect(options[0]?.textContent).toBe(ONCE);
+  });
+
+  it("submits the highlighted option from the keyboard", async () => {
+    const user = userEvent.setup();
+    const onApproval = vi.fn();
+    render(
+      <MessageBubble message={approval} busy={false} onApproval={onApproval} />,
+    );
+
+    const options = screen.getAllByRole("option");
+    options[0]!.focus();
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(onApproval).toHaveBeenLastCalledWith("call-1", "approve", true);
+
+    await user.keyboard("3{Enter}");
+    expect(onApproval).toHaveBeenLastCalledWith("call-1", "reject", false);
   });
 
   it("blocks every decision while one is in flight", async () => {
@@ -50,11 +84,10 @@ describe("approval card interactions", () => {
       />,
     );
 
-    for (const name of ["Approve once", "Allow for this chat", "Reject"]) {
-      const button = screen.getByRole("button", { name });
-      expect(button).toBeDisabled();
-      await user.click(button);
+    for (const option of screen.getAllByRole("option")) {
+      await user.click(option);
     }
+    expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
     expect(onApproval).not.toHaveBeenCalled();
   });
 
@@ -78,8 +111,8 @@ describe("approval card interactions", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Could not send your decision",
     );
-    await user.click(screen.getByRole("button", { name: "Approve once" }));
-    expect(onApproval).toHaveBeenCalledWith("call-1", "approve");
+    await user.click(screen.getAllByRole("option")[0]!);
+    expect(onApproval).toHaveBeenCalledWith("call-1", "approve", false);
   });
 
   it("offers only rejection when the action kind is not approvable", () => {
@@ -92,12 +125,8 @@ describe("approval card interactions", () => {
     );
 
     expect(
-      screen.queryByRole("button", { name: "Approve once" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Allow for this chat" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
+      screen.getAllByRole("option").map((option) => option.textContent),
+    ).toEqual(["1.No, don't allow this"]);
   });
 
   it("offers one-shot approval but no remembered grant for MCP", () => {
@@ -110,11 +139,33 @@ describe("approval card interactions", () => {
     );
 
     expect(
-      screen.getByRole("button", { name: "Approve once" }),
-    ).toBeInTheDocument();
+      screen.getAllByRole("option").map((option) => option.textContent),
+    ).toEqual([ONCE, "2.No, don't allow this"]);
+  });
+
+  it("shows the command an exec approval is granting", () => {
+    render(
+      <MessageBubble
+        message={{
+          ...approval,
+          summary:
+            "Allow OpenWave to run a command that leaves the chat workspace and may reach the network?",
+          preview: {
+            tool: "exec",
+            command: "cargo",
+            args: ["test", "--workspace"],
+            cwd: "checkout",
+          },
+        }}
+        busy={false}
+        onApproval={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText(/cargo test --workspace/)).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Allow for this chat" }),
-    ).not.toBeInTheDocument();
+      screen.getByText(/# working directory: checkout/),
+    ).toBeInTheDocument();
   });
 });
 

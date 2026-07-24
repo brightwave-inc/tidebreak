@@ -3,8 +3,10 @@ import type { ReactNode, RefObject, UIEvent } from "react";
 import type {
   PendingFolderAccessRequest,
   PendingUserQuestions,
+  ToolApprovalPreview,
   UserQuestionAnswer,
 } from "./api";
+import { ApprovalCard } from "./ApprovalCard";
 import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
 import { FolderAccessCard } from "./FolderAccessCard";
 import type { FolderAccessDecision } from "./host";
@@ -35,12 +37,15 @@ export type ChatMessage =
       callId: string;
       name: string;
       status: ToolCallStatus;
+      /** The tool's own closed view of what it is doing, when it has one. */
+      preview?: ToolApprovalPreview | null;
     }
   | {
       id: string;
       role: "approval";
       callId: string;
       summary: string;
+      preview?: ToolApprovalPreview | null;
       canApprove: boolean;
       canRemember: boolean;
       resolved?: boolean;
@@ -204,17 +209,34 @@ export function groupMessageItems(
     approvalErrors: Record<string, string>;
   },
 ) {
+  // While a call is parked, its approval card already names the action and
+  // carries the controls. Showing the tool card beside it says the same thing
+  // twice and puts a second, inert copy of the command on screen.
+  const parkedOnApproval = new Set(
+    messages.flatMap((message) =>
+      message.role === "approval" && !message.resolved ? [message.callId] : [],
+    ),
+  );
+  const visible = messages.filter(
+    (message) =>
+      !(
+        message.role === "tool" &&
+        message.status === "waiting_approval" &&
+        parkedOnApproval.has(message.callId)
+      ),
+  );
+
   const items: ReactNode[] = [];
   let index = 0;
   let groupIndex = 0;
   let streamingAssistantId: string | undefined;
   if (busy) {
     for (
-      let messageIndex = messages.length - 1;
+      let messageIndex = visible.length - 1;
       messageIndex >= 0;
       messageIndex -= 1
     ) {
-      const candidate = messages[messageIndex];
+      const candidate = visible[messageIndex];
       if (candidate?.role === "assistant" && !candidate.superseded) {
         streamingAssistantId = candidate.id;
         break;
@@ -225,8 +247,8 @@ export function groupMessageItems(
     }
   }
 
-  while (index < messages.length) {
-    const message = messages[index];
+  while (index < visible.length) {
+    const message = visible[index];
 
     if (!isGroupableTerminalTool(message)) {
       items.push(
@@ -244,8 +266,8 @@ export function groupMessageItems(
 
     const activities = [message];
     index += 1;
-    while (index < messages.length) {
-      const nextMessage = messages[index];
+    while (index < visible.length) {
+      const nextMessage = visible[index];
       if (!isGroupableTerminalTool(nextMessage)) {
         break;
       }
@@ -306,60 +328,41 @@ function MessageBubbleImpl({
   };
 }) {
   if (message.role === "tool") {
-    return <ToolCallCard name={message.name} status={message.status} />;
+    return (
+      <ToolCallCard
+        name={message.name}
+        status={message.status}
+        preview={message.preview}
+      />
+    );
   }
 
   if (message.role === "approval") {
     const deciding =
       approvalState?.decidingApprovalCalls.has(message.callId) ?? false;
-    const error = approvalState?.approvalErrors[message.callId];
+    // A decided card keeps its question so the transcript still records what
+    // was asked, but drops the controls that would imply it is still open.
+    if (message.resolved) {
+      return (
+        <section
+          className="bg-card text-muted-foreground w-[min(100%,38rem)] self-start rounded-lg border p-4 text-sm"
+          aria-label="Approval needed"
+        >
+          {message.summary}
+        </section>
+      );
+    }
     return (
-      <section
-        className="message-approval"
-        aria-label="Approval needed"
-        aria-busy={deciding}
-      >
-        <p>Approval needed: {message.summary}</p>
-        {!message.resolved && (
-          <div className="approval">
-            {message.canApprove && (
-              <>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={deciding}
-                  onClick={() => onApproval(message.callId, "approve")}
-                >
-                  Approve once
-                </button>
-                {message.canRemember && (
-                  <button
-                    type="button"
-                    className="btn"
-                    disabled={deciding}
-                    onClick={() => onApproval(message.callId, "approve", true)}
-                  >
-                    Allow for this chat
-                  </button>
-                )}
-              </>
-            )}
-            <button
-              type="button"
-              className="btn"
-              disabled={deciding}
-              onClick={() => onApproval(message.callId, "reject")}
-            >
-              Reject
-            </button>
-          </div>
-        )}
-        {!message.resolved && error && (
-          <p className="approval-error" role="alert">
-            {error}
-          </p>
-        )}
-      </section>
+      <ApprovalCard
+        callId={message.callId}
+        summary={message.summary}
+        preview={message.preview ?? null}
+        canApprove={message.canApprove}
+        canRemember={message.canRemember}
+        deciding={deciding}
+        error={approvalState?.approvalErrors[message.callId]}
+        onDecide={onApproval}
+      />
     );
   }
 

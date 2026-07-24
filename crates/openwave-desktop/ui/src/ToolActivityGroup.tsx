@@ -85,7 +85,7 @@ export function ToolActivityGroup({
                 <ToolStatusIcon tone={presentation.tone} size={12} />
               </span>
               <span className="tool-activity-timeline-copy">
-                <strong>{presentation.label}</strong>
+                <strong>{presentation.title}</strong>
                 <span>{presentation.statusLabel}</span>
               </span>
             </div>

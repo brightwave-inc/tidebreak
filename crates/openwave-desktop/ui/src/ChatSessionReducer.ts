@@ -1,4 +1,5 @@
 import type { SequencedEvent } from "./api";
+import { parseToolApprovalPreview } from "./api";
 import { shouldRefreshAgentRunsAfterToolEvent } from "./AgentRunRefresh";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import type { ChatMessage } from "./MessageList";
@@ -241,6 +242,10 @@ export function reduceChatSessionEvent(
             callId: event.call_id,
             action: event.action,
             approval: event.approval,
+            // Validated here rather than trusted: the socket frame is the one
+            // place a preview arrives without having gone through the HTTP
+            // recovery parser.
+            preview: parseToolApprovalPreview(event.preview),
             canApprove: approval.canApprove,
             canRemember: approval.canRemember,
           }),

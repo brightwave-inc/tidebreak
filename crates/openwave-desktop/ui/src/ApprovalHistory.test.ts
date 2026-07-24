@@ -24,6 +24,7 @@ describe("reconcilePendingApprovalCards", () => {
         callId: "call-search",
         name: "search",
         status: "waiting_approval",
+        preview: null,
       },
       {
         id: "approval-call-search",
@@ -31,6 +32,7 @@ describe("reconcilePendingApprovalCards", () => {
         callId: "call-search",
         summary:
           "Allow search to send your query and potentially matching document excerpts to configured AI services outside OpenWave?",
+        preview: null,
         canApprove: true,
         canRemember: true,
       },
