@@ -13,6 +13,12 @@
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0">
   <img src="https://img.shields.io/badge/status-pre--alpha-orange.svg" alt="Status: pre-alpha">
   <img src="https://img.shields.io/badge/built%20with-Rust-dea584.svg?logo=rust&logoColor=white" alt="Built with Rust">
+  <a href="https://github.com/brightwave-inc/openwave/releases/latest"><img src="https://img.shields.io/github/v/release/brightwave-inc/openwave?label=release&color=informational" alt="Latest release"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/brightwave-inc/openwave/releases/latest/download/OpenWave-macos-apple-silicon.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Download for macOS, Apple Silicon"></a>
+  <a href="https://github.com/brightwave-inc/openwave/releases/latest/download/OpenWave-macos-intel.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Intel-555555.svg?logo=apple&logoColor=white" alt="Download for macOS, Intel"></a>
 </p>
 
 ---
@@ -22,6 +28,24 @@
 > slice at a time. Interfaces, schema, and crate layout change frequently, and
 > it isn't ready for real-world use yet. Star the repo to follow along — and
 > expect rough edges.
+
+## Download
+
+The desktop app ships for macOS, signed and notarized. The two links above
+always resolve to the newest release; the
+[releases page](https://github.com/brightwave-inc/openwave/releases) has the
+notes and earlier versions. An installed build keeps itself current — it checks
+for a newer signed release in the background and asks before restarting.
+
+Each download has a `.sha256` sidecar on the same release if you want to verify
+it:
+
+```sh
+shasum -a 256 -c OpenWave-macos-apple-silicon.dmg.sha256
+```
+
+There are no Windows or Linux builds yet; on those platforms, build from source
+as described under [Building](#building).
 
 ## Where this comes from
 

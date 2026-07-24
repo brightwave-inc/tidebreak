@@ -326,6 +326,31 @@ test("an existing immutable release resumes without rebuilding or overwriting", 
   );
 });
 
+test("GitHub release downloads are copied from the hosted release", () => {
+  const release = workflows["release.yml"];
+  const attachJob = workflowJob(release, "attach_downloads");
+
+  assert.match(attachJob, /needs: \[validate, publish\]/);
+  assert.match(attachJob, /contents: write/);
+  assert.doesNotMatch(attachJob, /^    environment:/m);
+  assert.doesNotMatch(attachJob, /secrets\./);
+  assert.doesNotMatch(attachJob, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_S3/);
+
+  // Assets must be the CDN's own bytes, verified against the immutable
+  // manifest, rather than a second copy built alongside the hosted release.
+  assert.match(attachJob, /releases\/v\$OPENWAVE_VERSION\/manifest\.json/);
+  assert.match(attachJob, /sha256sum --check --strict/);
+  assert.match(attachJob, /OpenWave-macos-apple-silicon\.dmg/);
+  assert.match(attachJob, /OpenWave-macos-intel\.dmg/);
+  assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
+
+  assert.match(
+    readFileSync(new URL("../README.md", import.meta.url), "utf8"),
+    /releases\/latest\/download\/OpenWave-macos-apple-silicon\.dmg/,
+    "the README download link must match the published asset name",
+  );
+});
+
 test("the updater private key is isolated from compilation", () => {
   const release = workflows["release.yml"];
   const buildStep = release.match(

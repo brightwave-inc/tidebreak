@@ -918,3 +918,57 @@ jobs:
             [[ -n "$url" ]] || continue
             curl --fail --silent --show-error --head "$url" >/dev/null
           done
+
+  attach_downloads:
+    name: attach GitHub release downloads
+    needs: [validate, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      OPENWAVE_VERSION: ${{ needs.validate.outputs.version }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      RELEASE_BASE_URL: https://downloads.brightwave.io/openwave
+    steps:
+      # The hosted release is the only source of artifact bytes. Re-downloading
+      # it here keeps the GitHub assets a verified copy of what the CDN serves,
+      # and works the same whether this run built the release or resumed one.
+      - name: Download the published disk images
+        run: |
+          mkdir -p downloads
+          manifest="$RUNNER_TEMP/manifest.json"
+          curl --fail --silent --show-error \
+            "$RELEASE_BASE_URL/releases/v$OPENWAVE_VERSION/manifest.json" \
+            --output "$manifest"
+
+          while IFS=$'\t' read -r arch url digest; do
+            case "$arch" in
+              aarch64) name="OpenWave-macos-apple-silicon.dmg" ;;
+              x86_64) name="OpenWave-macos-intel.dmg" ;;
+              *) echo "Unsupported release architecture: $arch" >&2; exit 1 ;;
+            esac
+            curl --fail --silent --show-error --location "$url" \
+              --output "downloads/$name"
+            printf '%s  %s\n' "$digest" "$name" > "downloads/$name.sha256"
+            (cd downloads && sha256sum --check --strict "$name.sha256")
+          done < <(jq -r \
+            '.artifacts[]
+             | select(.platform == "macos" and .format == "dmg")
+             | [.arch, .url, .sha256] | @tsv' \
+            "$manifest")
+
+          dmg_count="$(find downloads -name '*.dmg' -type f | wc -l)"
+          (( dmg_count == 2 )) || {
+            echo "Expected both macOS disk images, found $dmg_count." >&2
+            exit 1
+          }
+
+      # Version-free asset names give the README permanent one-click download
+      # links through GitHub's /releases/latest/download/ redirect.
+      - name: Attach the disk images to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release upload "$RELEASE_TAG" downloads/*
+          --repo "$GITHUB_REPOSITORY"
+          --clobber
