@@ -164,7 +164,15 @@ pub async fn list_pending_client_executions_raw(
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<ToolCallRecord>>, ServerError> {
     ensure_chat(&state, id).await?;
-    Ok(Json(state.store.list_pending_client_tool_calls(id).await?))
+    Ok(Json(
+        state
+            .store
+            .list_pending_client_tool_calls(id)
+            .await?
+            .into_iter()
+            .filter(|call| call.name != openwave_core::ASK_USER_QUESTIONS_TOOL)
+            .collect(),
+    ))
 }
 
 fn renderer_folder_access_request(call: ToolCallRecord) -> Option<PendingFolderAccessRequest> {

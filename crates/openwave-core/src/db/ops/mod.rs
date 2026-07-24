@@ -15,6 +15,7 @@ pub(in crate::db) mod document;
 pub(in crate::db) mod root_attachment;
 pub(in crate::db) mod sandbox_tool;
 pub(in crate::db) mod turn;
+pub(in crate::db) mod user_question;
 
 /// Acquire the shared cross-backend write lock for one chat row.
 ///

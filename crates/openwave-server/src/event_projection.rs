@@ -36,6 +36,10 @@ pub(crate) enum RendererAgentEvent {
     ToolCallArgsDelta {
         call_id: CallId,
     },
+    UserQuestionsAsked {
+        call_id: CallId,
+        turn_id: TurnId,
+    },
     ApprovalRequired {
         call_id: CallId,
         action: RendererToolName,
@@ -86,6 +90,7 @@ pub(crate) enum RendererToolName {
     ReadConnectedFile,
     SpawnSandboxAgent,
     WaitForAgents,
+    AskUserQuestions,
     Exec,
     Other,
 }
@@ -116,6 +121,7 @@ impl From<&str> for RendererToolName {
             "read_connected_file" => Self::ReadConnectedFile,
             "spawn_sandbox_agent" => Self::SpawnSandboxAgent,
             "wait_for_agents" => Self::WaitForAgents,
+            openwave_core::ASK_USER_QUESTIONS_TOOL => Self::AskUserQuestions,
             "exec" => Self::Exec,
             _ => Self::Other,
         }
@@ -137,6 +143,12 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
             },
             AgentEvent::ToolCallArgsDelta { call_id, .. } => {
                 RendererAgentEvent::ToolCallArgsDelta { call_id: *call_id }
+            }
+            AgentEvent::UserQuestionsAsked { call_id, turn_id } => {
+                RendererAgentEvent::UserQuestionsAsked {
+                    call_id: *call_id,
+                    turn_id: *turn_id,
+                }
             }
             AgentEvent::ApprovalRequired {
                 call_id,
@@ -266,6 +278,23 @@ mod tests {
     }
 
     #[test]
+    fn question_event_is_only_a_bounded_refresh_hint() {
+        let call_id = CallId::new();
+        let turn_id = TurnId::new();
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 7,
+            event: AgentEvent::UserQuestionsAsked { call_id, turn_id },
+        });
+        assert_eq!(
+            projected.event,
+            RendererAgentEvent::UserQuestionsAsked { call_id, turn_id }
+        );
+        let encoded = serde_json::to_value(projected).unwrap();
+        assert_eq!(encoded["event"]["type"], "user_questions_asked");
+        assert_eq!(encoded["event"].as_object().unwrap().len(), 3);
+    }
+
+    #[test]
     fn source_tools_use_fixed_renderer_names() {
         assert_eq!(
             RendererToolName::from(crate::source_tools::LIST_SOURCES_TOOL),
@@ -384,13 +413,17 @@ mod tests {
     }
 
     #[test]
-    fn background_agent_tools_use_fixed_renderer_names() {
+    fn orchestration_and_continuation_tools_use_fixed_renderer_names() {
         for (name, expected) in [
             ("spawn_sandbox_agent", r#""name":"spawn_sandbox_agent""#),
             ("wait_for_agents", r#""name":"wait_for_agents""#),
             (
                 openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL,
                 r#""name":"read_delegated_file""#,
+            ),
+            (
+                openwave_core::ASK_USER_QUESTIONS_TOOL,
+                r#""name":"ask_user_questions""#,
             ),
         ] {
             let projected = RendererSequencedEvent::from(&SequencedEvent {

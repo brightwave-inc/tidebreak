@@ -153,9 +153,12 @@ async fn request_turn_cancellation_inner(
             .await
             .map_err(store_err)?
             .expect("locked waiting client call exists");
+        let is_foreground_question = call.name == crate::ASK_USER_QUESTIONS_TOOL
+            && call.execution == crate::model::ToolCallExecution::Orchestration.as_str();
         if call.chat_id != turn.chat_id
             || call.turn_id != turn.id
-            || call.execution != crate::model::ToolCallExecution::Client.as_str()
+            || (call.execution != crate::model::ToolCallExecution::Client.as_str()
+                && !is_foreground_question)
             || call.status != crate::model::ToolCallStatus::Pending.as_str()
         {
             return Err(AgentError::Store(format!(
@@ -262,6 +265,12 @@ async fn request_turn_cancellation_inner(
                 now,
             )
             .await?;
+            super::super::super::user_question::close_pending_for_terminal_turn_on(
+                &transaction,
+                id,
+                now,
+            )
+            .await?;
         }
         _ => {}
     }
@@ -313,6 +322,12 @@ async fn request_turn_cancellation_inner(
             transaction.rollback().await.map_err(store_err)?;
             return Ok(None);
         }
+        super::super::super::user_question::cancel_for_call_on(
+            &transaction,
+            crate::CallId(call.id),
+            now,
+        )
+        .await?;
     }
     let update = entities::turn_run::Entity::update_many()
         .col_expr(
@@ -488,6 +503,8 @@ async fn finish_turn_cancellation_inner(
     }
 
     super::super::super::approval::close_pending_for_terminal_turn_on(&transaction, id, now)
+        .await?;
+    super::super::super::user_question::close_pending_for_terminal_turn_on(&transaction, id, now)
         .await?;
 
     let cancelled = entities::turn_run::Entity::update_many()

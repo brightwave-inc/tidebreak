@@ -7,7 +7,7 @@ identity.
 
 ## What exists today
 
-The current foreground agent surface contains fifteen tools:
+The current foreground agent surface contains sixteen tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
@@ -24,6 +24,7 @@ The current foreground agent surface contains fifteen tools:
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
 | `list_folder` | List one directory below an attached root | Native client continuation |
 | `read_connected_file` | Read bounded UTF-8 text below an attached root | Native client continuation |
+| `ask_user_questions` | Pause the current turn for one to three bounded user choices | Foreground-only durable user continuation |
 | `spawn_sandbox_agent` | Start one isolated background task and immediately continue | Foreground-only durable checkpoint |
 | `wait_for_agents` | Wait for one to four spawned agents and return their results in request order | Foreground-only durable continuation |
 
@@ -45,6 +46,13 @@ behavior sections from the exact tool surface advertised to the turn, so source,
 folder, output, execution, delegation, and external-tool guidance disappears
 when its capability is absent. Tool metadata and runtime host state are never
 interpolated into that prompt.
+
+`ask_user_questions` is also foreground-only, but it does not cross the native
+executor boundary. The turn atomically checkpoints a renderer-safe question
+card and waits. An exact answer completes that same tool call and resumes that
+same turn; reload, restart, cancellation, and answer races are storage-backed.
+Sandbox agents never receive the definition. See
+[Durable user questions](user-questions.md).
 
 Source access is tiered rather than search-only. `list_sources` discovers the
 conversation's exact corpus without loading content. `read_source` reads one

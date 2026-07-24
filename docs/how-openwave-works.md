@@ -229,6 +229,11 @@ The built-in server registry currently contains:
   attached to the authoritative chat. The native executor derives that context
   from stored state, persists its bounded result, and never exposes host paths
   or broker diagnostics to the renderer or model.
+- `ask_user_questions`, a foreground-coordinator-only durable continuation for
+  one to three bounded choices. Its renderer-safe card survives reload and
+  restart; an exact answer completes the same tool call and resumes the same
+  turn without creating another chat message. See
+  [Durable user questions](user-questions.md).
 
 Depth-one sandbox agents have a separate, smaller surface and one total tool
 call. Besides web search or a typed folder-access proposal, an embedded-desktop

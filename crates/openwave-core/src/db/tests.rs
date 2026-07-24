@@ -6541,7 +6541,9 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
         .unwrap()
         .unwrap()
     {
-        ParkTurnForClientCallOutcome::Parked { turn, call, wait } => (turn, call, wait),
+        ParkTurnForClientCallOutcome::Parked {
+            turn, call, wait, ..
+        } => (turn, call, wait),
         outcome => panic!("unexpected park outcome: {outcome:?}"),
     };
     assert_eq!(parked_turn.status, TurnRunStatus::WaitingForClient);
@@ -6918,6 +6920,532 @@ async fn park_test_client_wait(
         ParkTurnForClientCallOutcome::Parked { .. }
     ));
     (turn_id, request, parked_at)
+}
+
+async fn park_test_user_questions(
+    store: &DbStore,
+    chat_id: ChatId,
+) -> (TurnId, crate::model::ClientToolCallRequest, DateTime<Utc>) {
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat_id, "gpt-5", "ask me")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected question turn acceptance: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    let request = crate::model::ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id,
+        turn_id,
+        provider_id: "provider-question".into(),
+        name: crate::ASK_USER_QUESTIONS_TOOL.into(),
+        arguments: serde_json::json!({
+            "questions": [
+                {
+                    "id": "target",
+                    "header": "Target",
+                    "question": "Where should I deploy?",
+                    "options": [
+                        {"id": "staging", "label": "Staging", "description": "Deploy for internal verification."},
+                        {"id": "production", "label": "Production", "description": "Deploy to customers."}
+                    ],
+                    "allow_free_form": false
+                },
+                {
+                    "id": "note",
+                    "header": "Note",
+                    "question": "Anything else I should know?",
+                    "allow_free_form": true
+                }
+            ]
+        }),
+    };
+    let parked_at = claimed_at + chrono::Duration::seconds(1);
+    let parked = store
+        .park_turn_for_client_tool_call(
+            turn_id,
+            lease,
+            0,
+            test_checkpoint_progress(),
+            parked_at,
+            &request,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    match parked {
+        ParkTurnForClientCallOutcome::Parked {
+            renderer_event:
+                Some(SequencedEvent {
+                    event:
+                        AgentEvent::UserQuestionsAsked {
+                            call_id,
+                            turn_id: event_turn_id,
+                        },
+                    ..
+                }),
+            ..
+        } => {
+            assert_eq!(call_id, request.id);
+            assert_eq!(event_turn_id, turn_id);
+        }
+        outcome => panic!("unexpected question checkpoint: {outcome:?}"),
+    }
+    (turn_id, request, parked_at)
+}
+
+fn sample_user_answers() -> crate::AnswerUserQuestions {
+    crate::AnswerUserQuestions {
+        answers: vec![
+            crate::UserQuestionAnswer {
+                question_id: "target".into(),
+                option_id: Some("staging".into()),
+                free_form: None,
+            },
+            crate::UserQuestionAnswer {
+                question_id: "note".into(),
+                option_id: None,
+                free_form: Some("Keep the rollout reversible.".into()),
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn user_questions_survive_reconnect_and_answer_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("questions.db").display()
+    );
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request, parked_at) = park_test_user_questions(&store, chat.id).await;
+    drop(store);
+
+    let restarted = DbStore::connect(&url).await.unwrap();
+    let pending = restarted
+        .list_pending_user_questions(chat.id)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].call_id, request.id);
+    assert_eq!(pending[0].turn_id, turn_id);
+    assert_eq!(
+        pending[0]
+            .questions
+            .iter()
+            .map(|question| question.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["target", "note"]
+    );
+    assert!(matches!(
+        restarted
+            .claim_client_tool_call(
+                request.id,
+                chat.id,
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                parked_at + chrono::Duration::seconds(1),
+                parked_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Unavailable
+    ));
+
+    let answer_request = crate::AnswerUserQuestionsRequest {
+        chat_id: chat.id,
+        call_id: request.id,
+        answers: sample_user_answers(),
+    };
+    let answered_at = parked_at + chrono::Duration::seconds(1);
+    assert!(matches!(
+        restarted
+            .answer_user_questions(&answer_request, answered_at)
+            .await
+            .unwrap(),
+        crate::AnswerUserQuestionsOutcome::Answered(turn)
+            if turn.id == turn_id && turn.status == TurnRunStatus::Resuming
+    ));
+    assert!(restarted
+        .list_pending_user_questions(chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+    let resumed_lease = uuid::Uuid::new_v4();
+    let resumed_at = answered_at + chrono::Duration::seconds(1);
+    let resumed = restarted
+        .claim_turn_run(
+            resumed_lease,
+            resumed_at,
+            resumed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .expect("the exact parked turn must be reclaimable");
+    assert_eq!(resumed.id, turn_id);
+    assert_eq!((resumed.attempt_count, resumed.claim_count), (1, 2));
+    let transcript = restarted
+        .get_chat_transcript(chat.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        transcript
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .count(),
+        1,
+        "answering must not create a second user turn"
+    );
+    assert!(matches!(
+        restarted
+            .answer_user_questions(&answer_request, answered_at)
+            .await
+            .unwrap(),
+        crate::AnswerUserQuestionsOutcome::Existing(turn)
+            if turn.id == turn_id
+    ));
+    let contradictory = crate::AnswerUserQuestionsRequest {
+        answers: crate::AnswerUserQuestions {
+            answers: vec![
+                crate::UserQuestionAnswer {
+                    question_id: "target".into(),
+                    option_id: Some("production".into()),
+                    free_form: None,
+                },
+                crate::UserQuestionAnswer {
+                    question_id: "note".into(),
+                    option_id: None,
+                    free_form: Some("Keep the rollout reversible.".into()),
+                },
+            ],
+        },
+        ..answer_request
+    };
+    assert_eq!(
+        restarted
+            .answer_user_questions(&contradictory, answered_at)
+            .await
+            .unwrap(),
+        crate::AnswerUserQuestionsOutcome::AnswerConflict
+    );
+    let call = restarted
+        .list_tool_calls(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|call| call.id == request.id)
+        .unwrap();
+    assert_eq!(call.status, ToolCallStatus::Completed);
+    assert_eq!(
+        serde_json::from_str::<crate::AnswerUserQuestions>(
+            call.result.as_deref().expect("answer result")
+        )
+        .unwrap(),
+        sample_user_answers()
+    );
+    assert!(matches!(
+        restarted
+            .request_turn_cancellation(turn_id, resumed_at + chrono::Duration::seconds(1))
+            .await
+            .unwrap()
+            .unwrap(),
+        RequestTurnCancellationOutcome::Requested(_)
+    ));
+    assert!(matches!(
+        restarted
+            .finish_turn_cancellation(
+                turn_id,
+                resumed_lease,
+                resumed_at + chrono::Duration::seconds(2),
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        crate::FinishTurnCancellationOutcome::Cancelled(_)
+    ));
+    assert_eq!(
+        restarted.delete_chat(chat.id).await.unwrap(),
+        crate::DeleteChatOutcome::Deleted
+    );
+}
+
+#[tokio::test]
+async fn user_question_answer_validation_and_cancellation_are_closed() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request, parked_at) = park_test_user_questions(&store, chat.id).await;
+    let invalid = crate::AnswerUserQuestionsRequest {
+        chat_id: chat.id,
+        call_id: request.id,
+        answers: crate::AnswerUserQuestions {
+            answers: vec![crate::UserQuestionAnswer {
+                question_id: "target".into(),
+                option_id: Some("not-an-option".into()),
+                free_form: None,
+            }],
+        },
+    };
+    assert_eq!(
+        store
+            .answer_user_questions(&invalid, parked_at)
+            .await
+            .unwrap(),
+        crate::AnswerUserQuestionsOutcome::InvalidAnswer
+    );
+    let other_chat = sample_chat();
+    store.create_chat(&other_chat).await.unwrap();
+    assert_eq!(
+        store
+            .answer_user_questions(
+                &crate::AnswerUserQuestionsRequest {
+                    chat_id: other_chat.id,
+                    call_id: request.id,
+                    answers: sample_user_answers(),
+                },
+                parked_at,
+            )
+            .await
+            .unwrap(),
+        crate::AnswerUserQuestionsOutcome::Unavailable
+    );
+    assert!(matches!(
+        store
+            .request_turn_cancellation(turn_id, parked_at + chrono::Duration::seconds(1))
+            .await
+            .unwrap()
+            .unwrap(),
+        RequestTurnCancellationOutcome::Cancelled(turn)
+            if turn.status == TurnRunStatus::Cancelled
+    ));
+    assert!(store
+        .list_pending_user_questions(chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .answer_user_questions(
+                &crate::AnswerUserQuestionsRequest {
+                    chat_id: chat.id,
+                    call_id: request.id,
+                    answers: sample_user_answers(),
+                },
+                parked_at + chrono::Duration::seconds(2),
+            )
+            .await
+            .unwrap(),
+        crate::AnswerUserQuestionsOutcome::Unavailable
+    );
+    assert_eq!(
+        store.delete_chat(chat.id).await.unwrap(),
+        crate::DeleteChatOutcome::Deleted
+    );
+}
+
+#[tokio::test]
+async fn user_question_answer_and_cancel_race_has_one_serial_outcome() {
+    let (_dir, store) = temp_store().await;
+    let store = std::sync::Arc::new(store);
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request, parked_at) = park_test_user_questions(&store, chat.id).await;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let answer_store = store.clone();
+    let answer_barrier = barrier.clone();
+    let answer = tokio::spawn(async move {
+        answer_barrier.wait().await;
+        answer_store
+            .answer_user_questions(
+                &crate::AnswerUserQuestionsRequest {
+                    chat_id: chat.id,
+                    call_id: request.id,
+                    answers: sample_user_answers(),
+                },
+                parked_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap()
+    });
+    let cancel_store = store.clone();
+    let cancel = tokio::spawn(async move {
+        barrier.wait().await;
+        cancel_store
+            .request_turn_cancellation(turn_id, parked_at + chrono::Duration::seconds(1))
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    let answer = answer.await.unwrap();
+    let cancel = cancel.await.unwrap();
+    assert!(matches!(
+        answer,
+        crate::AnswerUserQuestionsOutcome::Answered(_)
+            | crate::AnswerUserQuestionsOutcome::Unavailable
+    ));
+    assert!(matches!(
+        cancel,
+        RequestTurnCancellationOutcome::Requested(_)
+            | RequestTurnCancellationOutcome::Existing(_)
+            | RequestTurnCancellationOutcome::Cancelled(_)
+    ));
+    assert!(store
+        .list_pending_user_questions(chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        TurnRunStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn pending_question_projection_serializes_with_answer() {
+    let (_dir, store) = temp_store().await;
+    let store = std::sync::Arc::new(store);
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (_turn_id, request, parked_at) = park_test_user_questions(&store, chat.id).await;
+    let call_id = request.id;
+    let request_turn_id = request.turn_id;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let list_store = store.clone();
+    let list_barrier = barrier.clone();
+    let list = tokio::spawn(async move {
+        list_barrier.wait().await;
+        list_store.list_pending_user_questions(chat.id).await
+    });
+    let answer_store = store.clone();
+    let answer = tokio::spawn(async move {
+        barrier.wait().await;
+        answer_store
+            .answer_user_questions(
+                &crate::AnswerUserQuestionsRequest {
+                    chat_id: chat.id,
+                    call_id,
+                    answers: sample_user_answers(),
+                },
+                parked_at + chrono::Duration::seconds(1),
+            )
+            .await
+    });
+    let listed = list
+        .await
+        .unwrap()
+        .expect("projection must not observe drift");
+    assert!(
+        listed.is_empty()
+            || (listed.len() == 1
+                && listed[0].call_id == call_id
+                && listed[0].turn_id == request_turn_id)
+    );
+    assert!(matches!(
+        answer.await.unwrap().unwrap(),
+        crate::AnswerUserQuestionsOutcome::Answered(_)
+    ));
+    assert!(store
+        .list_pending_user_questions(chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn user_question_answer_and_worker_claim_race_is_recoverable() {
+    let (_dir, store) = temp_store().await;
+    let store = std::sync::Arc::new(store);
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request, parked_at) = park_test_user_questions(&store, chat.id).await;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let answer_store = store.clone();
+    let answer_barrier = barrier.clone();
+    let answer = tokio::spawn(async move {
+        answer_barrier.wait().await;
+        answer_store
+            .answer_user_questions(
+                &crate::AnswerUserQuestionsRequest {
+                    chat_id: chat.id,
+                    call_id: request.id,
+                    answers: sample_user_answers(),
+                },
+                parked_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap()
+    });
+    let claim_store = store.clone();
+    let first_lease = uuid::Uuid::new_v4();
+    let claim_at = parked_at + chrono::Duration::seconds(2);
+    let claim = tokio::spawn(async move {
+        barrier.wait().await;
+        claim_store
+            .claim_turn_run(
+                first_lease,
+                claim_at,
+                claim_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+    });
+    assert!(matches!(
+        answer.await.unwrap(),
+        crate::AnswerUserQuestionsOutcome::Answered(turn)
+            if turn.id == turn_id && turn.status == TurnRunStatus::Resuming
+    ));
+    let first_claim = claim.await.unwrap();
+    let (claimed, lease) = if let Some(turn) = first_claim.turn {
+        (turn, first_lease)
+    } else {
+        let lease = uuid::Uuid::new_v4();
+        let turn = store
+            .claim_turn_run(
+                lease,
+                claim_at + chrono::Duration::seconds(1),
+                claim_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .turn
+            .expect("answer wake remains durably claimable after an early scan");
+        (turn, lease)
+    };
+    assert_eq!(claimed.id, turn_id);
+    assert_eq!((claimed.attempt_count, claimed.claim_count), (1, 2));
+    let cancel_at = claim_at + chrono::Duration::seconds(2);
+    assert!(matches!(
+        store
+            .request_turn_cancellation(turn_id, cancel_at)
+            .await
+            .unwrap()
+            .unwrap(),
+        RequestTurnCancellationOutcome::Requested(_)
+    ));
+    assert!(matches!(
+        store
+            .finish_turn_cancellation(turn_id, lease, cancel_at + chrono::Duration::seconds(1))
+            .await
+            .unwrap()
+            .unwrap(),
+        crate::FinishTurnCancellationOutcome::Cancelled(_)
+    ));
 }
 
 #[tokio::test]

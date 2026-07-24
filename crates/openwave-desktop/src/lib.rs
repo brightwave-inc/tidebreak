@@ -58,6 +58,18 @@ async fn server_info(state: tauri::State<'_, Arc<AppState>>) -> Result<ServerInf
     Ok(wait_server_info(state.inner()).await?.renderer_info())
 }
 
+/// Best-effort attention hint for a newly parked user question.
+///
+/// Durable server state and renderer recovery remain authoritative; failure to
+/// notify never changes or acknowledges a question.
+#[tauri::command]
+fn request_user_attention(window: tauri::WebviewWindow) {
+    if window.is_focused().unwrap_or(true) {
+        return;
+    }
+    let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
+}
+
 async fn wait_server_info(state: &Arc<AppState>) -> Result<NativeServerInfo, String> {
     let mut rx = state.info_rx.clone();
     loop {
@@ -147,6 +159,7 @@ pub fn run() {
         .manage(updater::UpdateManager::default())
         .invoke_handler(tauri::generate_handler![
             server_info,
+            request_user_attention,
             documents::import_library_document,
             documents::list_library_documents,
             documents::search_library_documents,

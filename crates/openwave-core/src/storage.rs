@@ -37,6 +37,7 @@ use crate::model::{
     TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{StopReason, Usage};
+use crate::{AnswerUserQuestionsRequest, PendingUserQuestions};
 
 /// Largest pending attachment-reconciliation page accepted by [`Store`].
 pub const MAX_PENDING_ROOT_ATTACHMENT_CHANGES: u64 = 256;
@@ -659,6 +660,21 @@ pub enum HeartbeatClientToolCallOutcome {
     LeaseLost,
 }
 
+/// Result of answering one exact durable foreground question request.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnswerUserQuestionsOutcome {
+    /// The exact answers completed the tool call and made the turn resumable.
+    Answered(TurnRun),
+    /// An ambiguous retry recovered the same committed answers.
+    Existing(TurnRun),
+    /// The request already committed different answers.
+    AnswerConflict,
+    /// The answer shape, coverage, or selected option is invalid.
+    InvalidAnswer,
+    /// The request is missing, cancelled, terminal, or scoped to another chat.
+    Unavailable,
+}
+
 /// Result of resolving one tool call under its required authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveToolCallOutcome {
@@ -682,12 +698,17 @@ pub enum ParkTurnForClientCallOutcome {
         turn: TurnRun,
         call: ToolCallRecord,
         wait: TurnClientWait,
+        /// Renderer refresh hint committed in the same transaction, when this
+        /// client continuation has a renderer-owned presentation.
+        renderer_event: Option<SequencedEvent>,
     },
     /// An exact retry recovered the previously committed checkpoint.
     Existing {
         turn: TurnRun,
         call: ToolCallRecord,
         wait: TurnClientWait,
+        /// Exact renderer event recovered after an ambiguous commit response.
+        renderer_event: Option<SequencedEvent>,
     },
     /// The call identity already names a different immutable request.
     IdentityConflict,
@@ -2459,6 +2480,24 @@ pub trait Store: Send + Sync {
 
     /// List unclaimed and claimed client work for authoritative recovery.
     async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>>;
+
+    /// List only validated renderer-safe foreground question cards.
+    async fn list_pending_user_questions(
+        &self,
+        _chat_id: ChatId,
+    ) -> Result<Vec<PendingUserQuestions>> {
+        turn_storage_unavailable()
+    }
+
+    /// Atomically commit exact answers, complete the same tool call, and move
+    /// its blocked turn to the shared resumable state.
+    async fn answer_user_questions(
+        &self,
+        _request: &AnswerUserQuestionsRequest,
+        _answered_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AnswerUserQuestionsOutcome> {
+        turn_storage_unavailable()
+    }
 
     /// List a chat's tool calls in creation order.
     async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>>;

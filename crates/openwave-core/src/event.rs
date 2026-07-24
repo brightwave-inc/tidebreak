@@ -58,6 +58,15 @@ pub enum AgentEvent {
         /// Partial JSON to concatenate.
         fragment: String,
     },
+    /// A validated foreground question continuation committed and released its
+    /// worker. The event is intentionally only a bounded refresh hint; clients
+    /// load presentation data from the renderer-safe pending-question route.
+    UserQuestionsAsked {
+        /// Exact tool call awaiting answers.
+        call_id: CallId,
+        /// Turn that will resume after the exact answer commits.
+        turn_id: TurnId,
+    },
     /// A tool call needs explicit approval before it can run; the turn parks
     /// until an approval decision arrives.
     ApprovalRequired {

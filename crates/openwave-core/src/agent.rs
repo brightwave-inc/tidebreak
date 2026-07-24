@@ -72,6 +72,10 @@ enum RegisteredTool {
         spec: ToolSpec,
         validate_arguments: Option<fn(&Value) -> bool>,
     },
+    ForegroundClient {
+        spec: ToolSpec,
+        validate_arguments: fn(&Value) -> bool,
+    },
     ForegroundOrchestration {
         spec: ToolSpec,
         kind: ForegroundOrchestrationKind,
@@ -123,6 +127,22 @@ impl ToolRegistry {
         );
     }
 
+    /// Register a validated client continuation that is visible only to a
+    /// claimed foreground coordinator, never to sandbox/direct agent surfaces.
+    pub fn register_validated_foreground_client(
+        &mut self,
+        spec: ToolSpec,
+        validate_arguments: fn(&Value) -> bool,
+    ) {
+        self.tools.insert(
+            spec.name.clone(),
+            RegisteredTool::ForegroundClient {
+                spec,
+                validate_arguments,
+            },
+        );
+    }
+
     /// Register the closed foreground-only spawn and ordered-wait contracts.
     ///
     /// A claimed foreground worker must still opt in before either definition
@@ -159,6 +179,7 @@ impl ToolRegistry {
         match self.tools.get(name) {
             Some(RegisteredTool::Server(tool)) => Some(tool.as_ref()),
             Some(RegisteredTool::Client { .. })
+            | Some(RegisteredTool::ForegroundClient { .. })
             | Some(RegisteredTool::ForegroundOrchestration { .. })
             | None => None,
         }
@@ -169,7 +190,9 @@ impl ToolRegistry {
     pub fn execution(&self, name: &str) -> Option<ToolCallExecution> {
         Some(match self.tools.get(name)? {
             RegisteredTool::Server(_) => ToolCallExecution::Server,
-            RegisteredTool::Client { .. } => ToolCallExecution::Client,
+            RegisteredTool::Client { .. } | RegisteredTool::ForegroundClient { .. } => {
+                ToolCallExecution::Client
+            }
             RegisteredTool::ForegroundOrchestration { .. } => return None,
         })
     }
@@ -191,6 +214,10 @@ impl ToolRegistry {
             .filter_map(|tool| match tool {
                 RegisteredTool::Server(tool) => Some(tool.spec()),
                 RegisteredTool::Client { spec, .. } => Some(spec.clone()),
+                RegisteredTool::ForegroundClient { spec, .. } if allow_agent_orchestration => {
+                    Some(spec.clone())
+                }
+                RegisteredTool::ForegroundClient { .. } => None,
                 RegisteredTool::ForegroundOrchestration { spec, .. }
                     if allow_agent_orchestration =>
                 {
@@ -213,10 +240,23 @@ impl ToolRegistry {
                 validate_arguments: None,
                 ..
             }) => true,
+            Some(RegisteredTool::ForegroundClient {
+                validate_arguments, ..
+            }) => validate_arguments(arguments),
             Some(RegisteredTool::Server(_))
             | Some(RegisteredTool::ForegroundOrchestration { .. })
             | None => false,
         }
+    }
+
+    /// Whether `name` is a client continuation restricted to a claimed
+    /// foreground coordinator.
+    #[must_use]
+    pub fn is_foreground_client(&self, name: &str) -> bool {
+        matches!(
+            self.tools.get(name),
+            Some(RegisteredTool::ForegroundClient { .. })
+        )
     }
 
     /// Whether `name` identifies the foreground-only sandbox control tool.
@@ -1147,6 +1187,17 @@ impl Agent {
             };
             let text = &candidate.content;
 
+            let unavailable_foreground_client = calls.iter().any(|call| {
+                self.tools.is_foreground_client(&call.name) && !self.agent_orchestration_active()
+            });
+            if unavailable_foreground_client {
+                events.send(AgentEvent::StreamInterrupted);
+                transcript.push(ChatMessage::text(
+                    Role::User,
+                    "That user continuation is available only from a durably claimed foreground turn. Continue without requesting it.",
+                ));
+                continue;
+            }
             let client_calls = calls
                 .iter()
                 .filter(|call| self.tools.execution(&call.name) == Some(ToolCallExecution::Client))
@@ -3224,6 +3275,95 @@ mod tests {
                 ..
             } if error.kind == "max_steps_exceeded"
         ));
+        assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn user_questions_are_advertised_and_executable_only_in_the_foreground() {
+        let mut registry = ToolRegistry::new();
+        registry.register_validated_foreground_client(
+            crate::ask_user_questions_tool_spec(),
+            crate::validate_ask_user_questions_arguments,
+        );
+
+        assert!(registry.specs().is_empty());
+        assert_eq!(
+            registry
+                .specs_for_foreground(true)
+                .into_iter()
+                .map(|spec| spec.name)
+                .collect::<Vec<_>>(),
+            vec![crate::ASK_USER_QUESTIONS_TOOL]
+        );
+        assert_eq!(
+            registry.execution(crate::ASK_USER_QUESTIONS_TOOL),
+            Some(ToolCallExecution::Client)
+        );
+        assert!(registry.is_foreground_client(crate::ASK_USER_QUESTIONS_TOOL));
+        assert!(registry.client_arguments_are_valid(
+            crate::ASK_USER_QUESTIONS_TOOL,
+            &serde_json::json!({
+                "questions": [{
+                    "id": "target",
+                    "header": "Target",
+                    "question": "Where should I deploy?",
+                    "options": [{
+                        "id": "staging",
+                        "label": "Staging",
+                        "description": "Deploy for verification."
+                    }]
+                }]
+            })
+        ));
+        assert!(!registry.client_arguments_are_valid(
+            crate::ASK_USER_QUESTIONS_TOOL,
+            &serde_json::json!({"questions": []})
+        ));
+
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("foreground-question.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let agent = Agent::new(
+            Arc::new(ClientToolProvider {
+                assistant_text: false,
+                name: crate::ASK_USER_QUESTIONS_TOOL,
+                arguments: r#"{"questions":[{"id":"target","header":"Target","question":"Where should I deploy?","options":[{"id":"staging","label":"Staging","description":"Deploy for verification."}]}]}"#,
+            }),
+            Arc::new(registry),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                max_steps: 1,
+                ..AgentConfig::default()
+            },
+        );
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "deploy", &tx).await.unwrap();
+        drop(tx);
+        let events = rx.collect::<Vec<_>>().await;
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TurnFailed { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::UserQuestionsAsked { .. })));
         assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     }
 
@@ -6571,6 +6711,77 @@ mod tests {
                 vec!["spawn"],
                 vec!["ordinary-after"],
             ]
+        );
+    }
+
+    #[test]
+    fn answered_user_questions_rebuild_as_a_model_facing_tool_result() {
+        let turn = TurnId::new();
+        let chat = ChatId::new();
+        let created_at = DateTime::<Utc>::from_timestamp(1_001, 0).unwrap();
+        let answer = crate::AnswerUserQuestions {
+            answers: vec![crate::UserQuestionAnswer {
+                question_id: "target".into(),
+                option_id: Some("staging".into()),
+                free_form: None,
+            }],
+        };
+        let calls = vec![ToolCallRecord {
+            id: CallId::new(),
+            chat_id: chat,
+            turn_id: turn,
+            provider_id: "question_1".into(),
+            name: crate::ASK_USER_QUESTIONS_TOOL.into(),
+            arguments: serde_json::json!({
+                "questions": [{
+                    "id": "target",
+                    "header": "Target",
+                    "question": "Where should I deploy?",
+                    "options": [{
+                        "id": "staging",
+                        "label": "Staging",
+                        "description": "Deploy for verification."
+                    }]
+                }]
+            }),
+            execution: ToolCallExecution::Orchestration,
+            status: ToolCallStatus::Completed,
+            result: Some(serde_json::to_string(&answer).unwrap()),
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at,
+            resolved_at: Some(created_at),
+        }];
+
+        let rebuilt = rebuild_transcript(&[], &calls);
+        assert_eq!(rebuilt.len(), 2);
+        assert!(matches!(
+            &rebuilt[0],
+            ChatMessage {
+                role: Role::Assistant,
+                content: assistant,
+            } if matches!(
+                &assistant[..],
+                [ContentBlock::ToolUse { id, name, .. }]
+                    if id == "question_1" && name == crate::ASK_USER_QUESTIONS_TOOL
+            )
+        ));
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } = &rebuilt[1].content[0]
+        else {
+            panic!("answer must rebuild as a tool result");
+        };
+        assert_eq!(rebuilt[1].role, Role::User);
+        assert_eq!(tool_use_id, "question_1");
+        assert!(!is_error);
+        assert_eq!(
+            serde_json::from_str::<crate::AnswerUserQuestions>(content).unwrap(),
+            answer
         );
     }
 

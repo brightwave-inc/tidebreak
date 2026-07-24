@@ -469,6 +469,24 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
+    entities::user_question::Entity::delete_many()
+        .filter(
+            entities::user_question::Column::CallId.in_subquery(
+                entities::user_question_request::Entity::find()
+                    .select_only()
+                    .column(entities::user_question_request::Column::CallId)
+                    .filter(entities::user_question_request::Column::ChatId.eq(chat_id.0))
+                    .into_query(),
+            ),
+        )
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    entities::user_question_request::Entity::delete_many()
+        .filter(entities::user_question_request::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
     entities::tool_call::Entity::delete_many()
         .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
         .exec(&transaction)
@@ -697,6 +715,7 @@ fn historical_tool_title(name: &str) -> &'static str {
         "request_folder_access" => "Request folder access",
         "connect_folder" => "Connect a folder",
         "list_connected_folders" => "Check connected folders",
+        crate::ASK_USER_QUESTIONS_TOOL => "Ask a question",
         "spawn_sandbox_agent" => "Delegate a task",
         "wait_for_agents" => "Wait for background agents",
         _ => "Use a tool",
@@ -1133,6 +1152,10 @@ mod historical_tool_title_tests {
         assert_eq!(
             historical_tool_title("create_deliverable"),
             "Create an output"
+        );
+        assert_eq!(
+            historical_tool_title(crate::ASK_USER_QUESTIONS_TOOL),
+            "Ask a question"
         );
     }
 }

@@ -6,16 +6,19 @@ import {
   type ModelInfo,
   type ModelSelectionKey,
   type PendingFolderAccessRequest,
+  type PendingUserQuestions,
   type ProviderInfo,
   type ReasoningEffort,
   type SequencedEvent,
   type ServerInfo,
+  type UserQuestionAnswer,
 } from "./api";
 import { modelForSelection } from "./ModelSelection";
 import { resolveServerInfo } from "./boot";
 import {
   hasMacOverlayTitlebar,
   hasNativeHost,
+  requestUserAttention,
   resolveFolderAccessRequest,
   type FolderAccessDecision,
 } from "./host";
@@ -117,6 +120,15 @@ export default function App() {
   const [folderAccessErrors, setFolderAccessErrors] = useState<
     Record<string, string>
   >({});
+  const [userQuestionRequests, setUserQuestionRequests] = useState<
+    PendingUserQuestions[]
+  >([]);
+  const [answeringQuestionCalls, setAnsweringQuestionCalls] = useState<
+    Set<string>
+  >(new Set());
+  const [userQuestionErrors, setUserQuestionErrors] = useState<
+    Record<string, string>
+  >({});
   const [decidingApprovalCalls, setDecidingApprovalCalls] = useState<
     Set<string>
   >(new Set());
@@ -153,8 +165,11 @@ export default function App() {
   const chatSelectionRef = useRef(0);
   const terminalHydrationGenerationRef = useRef(0);
   const refreshFolderAccessRef = useRef<(() => void) | null>(null);
+  const refreshUserQuestionsRef = useRef<(() => void) | null>(null);
   const refreshAgentRunsRef = useRef<(() => void) | null>(null);
   const resolvingFolderCallsRef = useRef<Set<string>>(new Set());
+  const answeringQuestionCallsRef = useRef<Set<string>>(new Set());
+  const seenQuestionCallIdsRef = useRef<Set<string>>(new Set());
   const decidingApprovalCallsRef = useRef<Set<string>>(new Set());
   const cancelRequestTurnRef = useRef<string | null>(null);
   const draftRef = useRef("");
@@ -269,6 +284,51 @@ export default function App() {
     })();
     return () => {
       cancelled = true;
+    };
+  }, [client, chat?.id]);
+
+  useEffect(() => {
+    if (!client || !chat) return;
+    let cancelled = false;
+    let requestSeq = 0;
+
+    const refresh = async () => {
+      const seq = ++requestSeq;
+      try {
+        const requests = await client.listPendingUserQuestions(chat.id);
+        if (!cancelled && seq === requestSeq) {
+          const hasNewRequest = requests.some(
+            (request) => !seenQuestionCallIdsRef.current.has(request.callId),
+          );
+          seenQuestionCallIdsRef.current = new Set(
+            requests.map((request) => request.callId),
+          );
+          setUserQuestionRequests(requests);
+          if (hasNewRequest) {
+            void requestUserAttention().catch(() => {
+              // Attention is a best-effort hint. Durable polling is truth.
+            });
+          }
+        }
+      } catch (err) {
+        if (!cancelled && seq === requestSeq) {
+          console.error("failed to refresh pending user questions", err);
+        }
+      }
+    };
+
+    refreshUserQuestionsRef.current = () => void refresh();
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), 10_000);
+    return () => {
+      cancelled = true;
+      requestSeq += 1;
+      window.clearInterval(interval);
+      if (refreshUserQuestionsRef.current) {
+        refreshUserQuestionsRef.current = null;
+      }
+      setUserQuestionRequests([]);
+      seenQuestionCallIdsRef.current = new Set();
     };
   }, [client, chat?.id]);
 
@@ -457,6 +517,9 @@ export default function App() {
         return;
       case "refresh_folder_access":
         refreshFolderAccessRef.current?.();
+        return;
+      case "refresh_user_questions":
+        refreshUserQuestionsRef.current?.();
         return;
       case "turn_began":
         setCancelPendingTurnId(null);
@@ -750,6 +813,11 @@ export default function App() {
     setAgentRunsError(null);
     setFolderAccessRequests([]);
     setFolderAccessErrors({});
+    setUserQuestionRequests([]);
+    seenQuestionCallIdsRef.current = new Set();
+    answeringQuestionCallsRef.current = new Set();
+    setAnsweringQuestionCalls(new Set());
+    setUserQuestionErrors({});
     decidingApprovalCallsRef.current = new Set();
     setDecidingApprovalCalls(new Set());
     setApprovalErrors({});
@@ -843,6 +911,11 @@ export default function App() {
     setAgentRunsError(null);
     setFolderAccessRequests([]);
     setFolderAccessErrors({});
+    setUserQuestionRequests([]);
+    seenQuestionCallIdsRef.current = new Set();
+    answeringQuestionCallsRef.current = new Set();
+    setAnsweringQuestionCalls(new Set());
+    setUserQuestionErrors({});
     decidingApprovalCallsRef.current = new Set();
     setDecidingApprovalCalls(new Set());
     setApprovalErrors({});
@@ -1021,6 +1094,85 @@ export default function App() {
     }
   }
 
+  async function onAnswerUserQuestions(
+    callId: string,
+    answers: UserQuestionAnswer[],
+  ) {
+    if (!client || !chat || answeringQuestionCallsRef.current.has(callId)) {
+      return;
+    }
+    const chatId = chat.id;
+    const selection = chatSelectionRef.current;
+    answeringQuestionCallsRef.current.add(callId);
+    setAnsweringQuestionCalls((calls) => new Set(calls).add(callId));
+    setUserQuestionErrors((errors) => {
+      const next = { ...errors };
+      delete next[callId];
+      return next;
+    });
+    try {
+      await client.answerUserQuestions(chatId, callId, answers);
+    } catch (err) {
+      if (chatSelectionRef.current === selection) {
+        setUserQuestionErrors((errors) => ({
+          ...errors,
+          [callId]: `Could not send your answer: ${String(err)}`,
+        }));
+      }
+    } finally {
+      answeringQuestionCallsRef.current.delete(callId);
+      setAnsweringQuestionCalls((calls) => {
+        const next = new Set(calls);
+        next.delete(callId);
+        return next;
+      });
+      if (chatSelectionRef.current === selection) {
+        refreshUserQuestionsRef.current?.();
+      }
+    }
+  }
+
+  async function onUserQuestionsCancel(turnId: string) {
+    if (!client || !chat) return;
+    const request = userQuestionRequests.find(
+      (candidate) => candidate.turnId === turnId,
+    );
+    if (!request || answeringQuestionCallsRef.current.has(request.callId)) {
+      return;
+    }
+    const chatId = chat.id;
+    const selection = chatSelectionRef.current;
+    answeringQuestionCallsRef.current.add(request.callId);
+    setAnsweringQuestionCalls((calls) =>
+      new Set(calls).add(request.callId),
+    );
+    setUserQuestionErrors((errors) => {
+      const next = { ...errors };
+      delete next[request.callId];
+      return next;
+    });
+    try {
+      await client.cancel(chatId, turnId);
+    } catch (err) {
+      if (chatSelectionRef.current === selection) {
+        setUserQuestionErrors((errors) => ({
+          ...errors,
+          [request.callId]: `Could not cancel the turn: ${String(err)}`,
+        }));
+      }
+    } finally {
+      answeringQuestionCallsRef.current.delete(request.callId);
+      setAnsweringQuestionCalls((calls) => {
+        const next = new Set(calls);
+        next.delete(request.callId);
+        return next;
+      });
+      if (chatSelectionRef.current === selection) {
+        refreshUserQuestionsRef.current?.();
+      }
+    }
+  }
+
   async function onRestartForUpdate() {
     const version = desktopUpdates.state.version;
     const confirmed = await confirm({
@@ -1143,8 +1295,11 @@ export default function App() {
           onRetryAgentRuns={() => refreshAgentRunsRef.current?.()}
           onStopSandboxRun={(runId) => void onStopSandboxAgentRun(runId)}
           folderAccessRequests={folderAccessRequests}
+          userQuestionRequests={userQuestionRequests}
           resolvingFolderCalls={resolvingFolderCalls}
           folderAccessErrors={folderAccessErrors}
+          answeringQuestionCalls={answeringQuestionCalls}
+          userQuestionErrors={userQuestionErrors}
           decidingApprovalCalls={decidingApprovalCalls}
           approvalErrors={approvalErrors}
           onApproval={(callId, decision, remember) =>
@@ -1155,6 +1310,12 @@ export default function App() {
           }
           onFolderAccessCancel={(callId, turnId) =>
             void onFolderAccessCancel(callId, turnId)
+          }
+          onAnswerUserQuestions={(callId, answers) =>
+            void onAnswerUserQuestions(callId, answers)
+          }
+          onUserQuestionsCancel={(turnId) =>
+            void onUserQuestionsCancel(turnId)
           }
           draft={draft}
           attachingSource={addingSourceChatId !== null}
