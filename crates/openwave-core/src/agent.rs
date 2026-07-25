@@ -1785,7 +1785,7 @@ impl Agent {
                 };
                 events.send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
-                    output: output.clone(),
+                    output: self.tool_output_for_event(&output),
                     action: call_action_preview(call),
                     result: ToolResultPreview::build(&call.name, output.data.as_ref()),
                 });
@@ -1826,7 +1826,7 @@ impl Agent {
                 }
                 results.push(ContentBlock::ToolResult {
                     tool_use_id: call.provider_id.clone(),
-                    content: output.content,
+                    content: self.tool_result_for_model(&output.content),
                     is_error: output.is_error,
                 });
                 // A cancel that arrived during this tool (including while it was
@@ -2458,12 +2458,36 @@ impl Agent {
                 Err(err) => ToolOutput::error(err.to_string()),
             },
         };
-        if let Some(truncated) =
-            truncate_to_bytes(&output.content, self.config.max_tool_result_bytes)
-        {
+        // Clamped to what the record may hold, not to what the model is fed.
+        // Those are different questions: one is storage, the other is a
+        // context budget. Cutting to the feedback bound here used to destroy
+        // the remainder before it was ever written down.
+        if let Some(truncated) = truncate_to_bytes(
+            &output.content,
+            crate::model::ToolCallRecord::MAX_RESULT_BYTES,
+        ) {
             output.content = truncated;
         }
         output
+    }
+
+    /// The tool result as the model sees it, bounded by the turn's feedback
+    /// budget rather than by what the record holds.
+    fn tool_result_for_model(&self, content: &str) -> String {
+        truncate_to_bytes(content, self.config.max_tool_result_bytes)
+            .unwrap_or_else(|| content.to_owned())
+    }
+
+    /// The completion event's copy of a result.
+    ///
+    /// Bounded like the model's copy, not like the record's: this rides the
+    /// journaled event stream, so it must not grow just because the record is
+    /// now allowed to keep more.
+    fn tool_output_for_event(&self, output: &ToolOutput) -> ToolOutput {
+        ToolOutput {
+            content: self.tool_result_for_model(&output.content),
+            ..output.clone()
+        }
     }
 
     /// Resume persisted server calls accepted by an earlier attempt before
@@ -2561,7 +2585,7 @@ impl Agent {
                 }
                 events.send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
-                    output: output.clone(),
+                    output: self.tool_output_for_event(&output),
                     action: call_action_preview(&call),
                     result: ToolResultPreview::build(&call.name, output.data.as_ref()),
                 });
@@ -2636,7 +2660,7 @@ impl Agent {
             }
             events.send(AgentEvent::ToolCallCompleted {
                 call_id: call.call_id,
-                output: output.clone(),
+                output: self.tool_output_for_event(&output),
                 action: call_action_preview(&call),
                 result: ToolResultPreview::build(&call.name, output.data.as_ref()),
             });
@@ -2751,7 +2775,12 @@ impl Agent {
         let messages = self.store.list_messages(chat_id).await?;
         let tool_calls = self.store.list_tool_calls(chat_id).await?;
         let attachments = self.store.list_message_attachments(chat_id).await?;
-        Ok(rebuild_transcript(&messages, &tool_calls, &attachments))
+        Ok(rebuild_transcript(
+            &messages,
+            &tool_calls,
+            &attachments,
+            self.config.max_tool_result_bytes,
+        ))
     }
 
     /// Fit the transcript to the context budget at the given reduction level.
@@ -2856,6 +2885,7 @@ fn rebuild_transcript(
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     attachments: &[MessageAttachment],
+    max_result_bytes: usize,
 ) -> Vec<ChatMessage> {
     let messages: Vec<&Message> = messages
         .iter()
@@ -2869,7 +2899,7 @@ fn rebuild_transcript(
     for (i, message) in messages.iter().enumerate() {
         // Batches that started before this message are prior tool-only steps.
         while batch_i < batches.len() && batches[batch_i][0].created_at < message.created_at {
-            push_tool_batch(&mut out, &batches[batch_i], None);
+            push_tool_batch(&mut out, &batches[batch_i], None, max_result_bytes);
             batch_i += 1;
         }
 
@@ -2884,12 +2914,12 @@ fn rebuild_transcript(
             if batch_i < batches.len()
                 && next_ts.is_none_or(|end| batches[batch_i][0].created_at < end)
             {
-                push_tool_batch(&mut out, &batches[batch_i], text);
+                push_tool_batch(&mut out, &batches[batch_i], text, max_result_bytes);
                 batch_i += 1;
                 while batch_i < batches.len()
                     && next_ts.is_none_or(|end| batches[batch_i][0].created_at < end)
                 {
-                    push_tool_batch(&mut out, &batches[batch_i], None);
+                    push_tool_batch(&mut out, &batches[batch_i], None, max_result_bytes);
                     batch_i += 1;
                 }
             } else if let Some(text) = text {
@@ -2911,7 +2941,7 @@ fn rebuild_transcript(
                 while batch_i < batches.len()
                     && next_ts.is_none_or(|end| batches[batch_i][0].created_at < end)
                 {
-                    push_tool_batch(&mut out, &batches[batch_i], None);
+                    push_tool_batch(&mut out, &batches[batch_i], None, max_result_bytes);
                     batch_i += 1;
                 }
             }
@@ -2919,7 +2949,7 @@ fn rebuild_transcript(
     }
 
     while batch_i < batches.len() {
-        push_tool_batch(&mut out, &batches[batch_i], None);
+        push_tool_batch(&mut out, &batches[batch_i], None, max_result_bytes);
         batch_i += 1;
     }
 
@@ -2982,7 +3012,12 @@ pub(crate) fn rebuild_transcript_for_test(
     tool_calls: &[ToolCallRecord],
     attachments: &[MessageAttachment],
 ) -> Vec<ChatMessage> {
-    rebuild_transcript(messages, tool_calls, attachments)
+    rebuild_transcript(
+        messages,
+        tool_calls,
+        attachments,
+        AgentConfig::default().max_tool_result_bytes,
+    )
 }
 
 /// Partition calls into per-model-step batches (see [`rebuild_transcript`]).
@@ -3024,6 +3059,7 @@ fn push_tool_batch(
     out: &mut Vec<ChatMessage>,
     batch: &[&ToolCallRecord],
     assistant_text: Option<&str>,
+    max_result_bytes: usize,
 ) {
     let mut blocks: Vec<ContentBlock> = Vec::new();
     if let Some(text) = assistant_text.filter(|t| !t.is_empty()) {
@@ -3051,7 +3087,11 @@ fn push_tool_batch(
                 .as_ref()
                 .map(|content| ContentBlock::ToolResult {
                     tool_use_id: call.provider_id.clone(),
-                    content: content.clone(),
+                    // The record may hold more than a turn can afford to
+                    // re-read, so a resumed transcript is bounded the same way
+                    // a live one is.
+                    content: truncate_to_bytes(content, max_result_bytes)
+                        .unwrap_or_else(|| content.clone()),
                     is_error: call.status != ToolCallStatus::Completed,
                 })
         })
@@ -4107,6 +4147,66 @@ mod tests {
             "{outcome:?}"
         );
         assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
+    }
+
+    /// A large result used to be cut to the feedback budget *before* it was
+    /// written down, so the remainder was destroyed rather than withheld and
+    /// the record's own 512 KiB cap was unreachable. Storage and context budget
+    /// are different questions and now have different bounds.
+    #[test]
+    fn a_large_result_is_kept_whole_in_the_record_and_cut_only_for_the_model() {
+        let feedback = DEFAULT_MAX_TOOL_RESULT_BYTES;
+        let durable = crate::model::ToolCallRecord::MAX_RESULT_BYTES;
+        assert!(
+            durable > feedback,
+            "the record must hold more than one turn feeds"
+        );
+
+        // Bigger than the feedback budget, smaller than the record's cap: this
+        // is the whole class of result that used to lose its tail.
+        let content = "x".repeat(feedback * 2);
+        assert!(content.len() < durable);
+        assert_eq!(truncate_to_bytes(&content, durable), None);
+
+        let for_model = truncate_to_bytes(&content, feedback).expect("exceeds the budget");
+        assert!(for_model.len() < content.len());
+        assert!(for_model.contains("[truncated:"));
+        assert!(for_model.contains(&content.len().to_string()));
+    }
+
+    #[test]
+    fn a_resumed_transcript_is_bounded_like_a_live_one() {
+        // The record may now hold more than a turn can afford to re-read, so
+        // rebuilding has to apply the feedback bound too — otherwise resuming
+        // would feed the model something the original step never did.
+        let oversized = "y".repeat(DEFAULT_MAX_TOOL_RESULT_BYTES * 2);
+        let call = ToolCallRecord {
+            id: CallId::new(),
+            chat_id: ChatId::new(),
+            turn_id: TurnId::new(),
+            provider_id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({}),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Completed,
+            result: Some(oversized.clone()),
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: Utc::now(),
+            resolved_at: Some(Utc::now()),
+        };
+        let rebuilt = rebuild_transcript(&[], &[call], &[], DEFAULT_MAX_TOOL_RESULT_BYTES);
+        let found = rebuilt.iter().find_map(|message| {
+            message.content.iter().find_map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+        });
+        let content = found.expect("the resumed transcript replays the result");
+        assert!(content.len() < oversized.len());
+        assert!(content.contains("[truncated:"));
     }
 
     #[test]
@@ -7208,7 +7308,8 @@ mod tests {
             },
         ];
 
-        let rebuilt = rebuild_transcript(&messages, &[], &attachments);
+        let rebuilt =
+            rebuild_transcript(&messages, &[], &attachments, DEFAULT_MAX_TOOL_RESULT_BYTES);
         assert_eq!(rebuilt.len(), 2);
         assert_eq!(rebuilt[0].role, Role::User);
         assert_eq!(
@@ -7229,7 +7330,10 @@ mod tests {
             }]
         );
         // Reloading the same rows reproduces the identical block sequence.
-        assert_eq!(rebuild_transcript(&messages, &[], &attachments), rebuilt);
+        assert_eq!(
+            rebuild_transcript(&messages, &[], &attachments, DEFAULT_MAX_TOOL_RESULT_BYTES),
+            rebuilt
+        );
     }
 
     #[test]
@@ -7274,7 +7378,7 @@ mod tests {
             created_at: t2,
             resolved_at: Some(DateTime::<Utc>::from_timestamp(1_003, 0).unwrap()),
         }];
-        let rebuilt = rebuild_transcript(&messages, &calls, &[]);
+        let rebuilt = rebuild_transcript(&messages, &calls, &[], DEFAULT_MAX_TOOL_RESULT_BYTES);
         assert_eq!(rebuilt.len(), 3);
         assert_eq!(rebuilt[0].role, Role::User);
         assert!(matches!(
@@ -7389,7 +7493,7 @@ mod tests {
             resolved_at: Some(created_at),
         }];
 
-        let rebuilt = rebuild_transcript(&[], &calls, &[]);
+        let rebuilt = rebuild_transcript(&[], &calls, &[], DEFAULT_MAX_TOOL_RESULT_BYTES);
         assert_eq!(rebuilt.len(), 2);
         assert!(matches!(
             &rebuilt[0],
@@ -7461,7 +7565,7 @@ mod tests {
             created_at: t1,
             resolved_at: Some(t1),
         }];
-        let rebuilt = rebuild_transcript(&messages, &calls, &[]);
+        let rebuilt = rebuild_transcript(&messages, &calls, &[], DEFAULT_MAX_TOOL_RESULT_BYTES);
         assert_eq!(rebuilt.len(), 4);
         assert_eq!(rebuilt[0].role, Role::User);
         assert!(matches!(
@@ -7505,7 +7609,7 @@ mod tests {
                 created_at: DateTime::<Utc>::from_timestamp(3, 0).unwrap(),
             },
         ];
-        let rebuilt = rebuild_transcript(&messages, &[], &[]);
+        let rebuilt = rebuild_transcript(&messages, &[], &[], DEFAULT_MAX_TOOL_RESULT_BYTES);
         assert_eq!(rebuilt.len(), 2);
         assert_eq!(rebuilt[0].role, Role::User);
         assert_eq!(rebuilt[1].role, Role::Assistant);
