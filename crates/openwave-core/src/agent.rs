@@ -59,7 +59,9 @@ use crate::storage::{
     ApplyTurnSteerOutcome, BlobStore, JournaledTurnSteerOutcome, ResolveToolCallOutcome, Store,
     TurnLeaseFence,
 };
-use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
+use crate::tool::{
+    ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec,
+};
 
 /// A name-keyed registry of the tools available to the agent.
 #[derive(Clone, Default)]
@@ -1645,6 +1647,10 @@ impl Agent {
                                 content,
                                 data: None,
                                 is_error: existing.status != ToolCallStatus::Completed,
+                                // Recovered from a durable row, whose category
+                                // is already recorded there; re-deriving one
+                                // here would be a guess.
+                                error_category: None,
                                 private_evidence: Vec::new(),
                             },
                         );
@@ -1766,7 +1772,10 @@ impl Agent {
                 let (output, needs_resolution) = match recovered_results.remove(&call.call_id) {
                     Some(output) => (output, false),
                     None if self.cancel.is_cancelled() => (
-                        ToolOutput::error("turn cancelled before tool execution"),
+                        ToolOutput::failed(
+                            ToolErrorCategory::UserCancelled,
+                            "turn cancelled before tool execution",
+                        ),
                         true,
                     ),
                     None => {
@@ -1784,7 +1793,11 @@ impl Agent {
                     let resolution = if output.is_error {
                         ToolCallResolution::Failed {
                             result: output.content.clone(),
-                            error_code: "tool_error".into(),
+                            error_code: output
+                                .error_category
+                                .unwrap_or(ToolErrorCategory::ToolFailed)
+                                .as_str()
+                                .into(),
                             error_detail: None,
                         }
                     } else {
@@ -2251,7 +2264,10 @@ impl Agent {
         durable_approval: Option<&crate::approval::ToolApproval>,
     ) -> ToolOutput {
         let Some(tool) = self.tools.get(&call.name) else {
-            return ToolOutput::error(format!("unknown tool: {}", call.name));
+            return ToolOutput::failed(
+                ToolErrorCategory::NotFound,
+                format!("unknown tool: {}", call.name),
+            );
         };
         // Policy: ReadOnly/Workspace auto; uncovered Sensitive calls park on the
         // approval gate.
@@ -2324,7 +2340,10 @@ impl Agent {
             let registration = match future::select(registering, self.cancel.cancelled()).await {
                 Either::Left((registration, _)) if !self.cancel.is_cancelled() => registration,
                 Either::Left(_) | Either::Right(((), _)) => {
-                    return ToolOutput::error("turn cancelled while registering approval");
+                    return ToolOutput::failed(
+                        ToolErrorCategory::UserCancelled,
+                        "turn cancelled while registering approval",
+                    );
                 }
             };
             let required = AgentEvent::ApprovalRequired {
@@ -2378,7 +2397,10 @@ impl Agent {
                         call_id: call.call_id,
                         approved: false,
                     });
-                    return ToolOutput::error("turn cancelled while awaiting approval");
+                    return ToolOutput::failed(
+                        ToolErrorCategory::UserCancelled,
+                        "turn cancelled while awaiting approval",
+                    );
                 }
             };
             let approved = matches!(decision, ApprovalDecision::Approve);
@@ -2387,12 +2409,15 @@ impl Agent {
                 approved,
             });
             if let ApprovalDecision::Reject { reason } = decision {
-                return ToolOutput::error(reason);
+                return ToolOutput::failed(ToolErrorCategory::UserDeclined, reason);
             }
             // A cancel that lands after Approve won `select` but before execute
             // (concurrent trip of the token) must not run the Sensitive tool.
             if self.cancel.is_cancelled() {
-                return ToolOutput::error("turn cancelled while awaiting approval");
+                return ToolOutput::failed(
+                    ToolErrorCategory::UserCancelled,
+                    "turn cancelled while awaiting approval",
+                );
             }
         }
         // Cancellation can land after the caller's loop-level fence or while a
@@ -2400,7 +2425,10 @@ impl Agent {
         // before any ReadOnly, Workspace, or approved Sensitive implementation
         // can observe arguments or perform a side effect.
         if self.cancel.is_cancelled() {
-            return ToolOutput::error("turn cancelled before tool execution");
+            return ToolOutput::failed(
+                ToolErrorCategory::UserCancelled,
+                "turn cancelled before tool execution",
+            );
         }
         let ctx = self
             .config
@@ -2417,10 +2445,14 @@ impl Agent {
         // Recheck after the execution arm wins to close a same-tick race.
         let executing = tool.execute(&ctx, parse_args(&call.args));
         let mut output = match future::select(self.cancel.cancelled(), executing).await {
-            Either::Left(((), _)) => ToolOutput::error("turn cancelled during tool execution"),
-            Either::Right((_, _)) if self.cancel.is_cancelled() => {
-                ToolOutput::error("turn cancelled during tool execution")
-            }
+            Either::Left(((), _)) => ToolOutput::failed(
+                ToolErrorCategory::UserCancelled,
+                "turn cancelled during tool execution",
+            ),
+            Either::Right((_, _)) if self.cancel.is_cancelled() => ToolOutput::failed(
+                ToolErrorCategory::UserCancelled,
+                "turn cancelled during tool execution",
+            ),
             Either::Right((result, _)) => match result {
                 Ok(output) => output,
                 Err(err) => ToolOutput::error(err.to_string()),
@@ -2546,7 +2578,10 @@ impl Agent {
             let tool_available = self.tools.get(&call.name).is_some();
             let cancelled_before_run = self.cancel.is_cancelled();
             let output = if cancelled_before_run {
-                ToolOutput::error("turn cancelled before recovered tool execution")
+                ToolOutput::failed(
+                    ToolErrorCategory::UserCancelled,
+                    "turn cancelled before recovered tool execution",
+                )
             } else {
                 self.run_tool(chat, turn_id, &call, events, durable_approval.as_ref())
                     .await
@@ -2554,7 +2589,11 @@ impl Agent {
             let resolution = if output.is_error {
                 ToolCallResolution::Failed {
                     result: output.content.clone(),
-                    error_code: "tool_error".into(),
+                    error_code: output
+                        .error_category
+                        .unwrap_or(ToolErrorCategory::ToolFailed)
+                        .as_str()
+                        .into(),
                     error_detail: None,
                 }
             } else {

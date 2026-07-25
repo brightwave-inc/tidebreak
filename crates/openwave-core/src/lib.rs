@@ -159,7 +159,9 @@ pub use storage::{
     ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, SecretProvider, Store,
     SubmitAgentRunResultOutcome, TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
-pub use tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolScratch, ToolSpec};
+pub use tool::{
+    ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec,
+};
 #[cfg(feature = "tools")]
 pub use tools::{CreateDeliverable, ListDir, ReadFile, WriteFile};
 pub use user_questions::{
