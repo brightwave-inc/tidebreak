@@ -297,12 +297,17 @@ export type RendererToolName =
  * about to do, because consent to an action you cannot see is not consent, and
  * because a result is unreadable without knowing what produced it.
  */
-export type ToolActionPreview = {
-  tool: "exec";
-  command: string;
-  args: string[];
-  cwd: string;
-};
+export type ToolActionPreview =
+  | {
+      tool: "exec";
+      command: string;
+      args: string[];
+      cwd: string;
+    }
+  /** A search of this conversation's own sources. */
+  | { tool: "search"; query: string }
+  /** A public web search, whose query leaves the device. */
+  | { tool: "web_search"; query: string };
 
 /**
  * What a call produced.
@@ -1038,7 +1043,13 @@ export function parseToolActionPreview(
   value: unknown,
 ): ToolActionPreview | null {
   if (value === undefined || value === null) return null;
-  if (!isRecord(value) || value.tool !== "exec") return null;
+  if (!isRecord(value)) return null;
+  if (value.tool === "search" || value.tool === "web_search") {
+    const { query } = value;
+    if (typeof query !== "string" || query.length === 0) return null;
+    return { tool: value.tool, query };
+  }
+  if (value.tool !== "exec") return null;
   const { command, args, cwd } = value;
   if (
     typeof command !== "string" ||

@@ -41,3 +41,22 @@ describe("toolPreviewPresentation", () => {
     ).toBe(`python3 -c 'print('\\''two words'\\'')' '' 'a;rm -rf /'`);
   });
 });
+
+describe("search previews", () => {
+  it("makes the query the headline and says where it goes", () => {
+    // The consent question for a web search is "what leaves this machine",
+    // and the answer is the query.
+    const web = toolPreviewPresentation({
+      tool: "web_search",
+      query: "quarterly filings",
+    });
+    expect(web.headline).toBe("quarterly filings");
+    expect(web.detail).toContain("web search provider");
+
+    const local = toolPreviewPresentation({ tool: "search", query: "revenue" });
+    expect(local.headline).toBe("revenue");
+    // A local search shares nothing outward, and the copy must not imply it does.
+    expect(local.detail).not.toContain("provider");
+    expect(local.detail).toContain("this conversation's sources");
+  });
+});

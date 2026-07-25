@@ -18,6 +18,16 @@ export function toolPreviewPresentation(
   preview: ToolActionPreview,
   result: ToolResultPreview | null = null,
 ): ToolPreviewPresentation {
+  if (preview.tool === "search" || preview.tool === "web_search") {
+    // The query is the whole action. For a web search it is also the thing
+    // that leaves the device, which is what the reader is being asked about.
+    const headline = preview.query;
+    const detail =
+      preview.tool === "web_search"
+        ? `${headline}\n# sent to the configured web search provider`
+        : `${headline}\n# searched against this conversation's sources`;
+    return { headline, detail };
+  }
   const headline = [preview.command, ...preview.args]
     .map(quoteArgument)
     .join(" ");

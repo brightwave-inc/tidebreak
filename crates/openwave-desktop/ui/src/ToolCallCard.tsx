@@ -22,8 +22,14 @@ export type ToolCallStatus =
 type ToolCommandCardProps = {
   name: string;
   status: ToolCallStatus;
-  /** The tool's own view of the command, which is what the card is for. */
-  preview: ToolActionPreview;
+  /**
+   * The tool's own view of the command, which is what the card is for.
+   *
+   * Narrowed to `exec`: this card has tabs and an exit code, which describe a
+   * command and nothing else. A tool whose action is fully said by one line
+   * belongs in the rail, not here.
+   */
+  preview: Extract<ToolActionPreview, { tool: "exec" }>;
   /** What the command produced, once it has produced anything. */
   result: ToolResultPreview | null;
 };

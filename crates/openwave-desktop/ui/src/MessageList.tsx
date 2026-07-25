@@ -333,6 +333,11 @@ function surfacedCards(
     if (entry.role !== "tool") continue;
     // The approval card already shows this command and owns the decision.
     if (!entry.preview || parked.has(entry.callId)) continue;
+    // A card earns its place by carrying something the rail cannot: a command
+    // and its output. A search's query is fully said by the rail line and by
+    // the approval card that asked about it, so it does not get an
+    // exec-shaped card with tabs and an exit code.
+    if (entry.preview.tool !== "exec") continue;
     cards.push(
       <ToolCommandCard
         key={entry.id}
