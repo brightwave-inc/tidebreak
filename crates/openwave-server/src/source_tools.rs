@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    format_source_reference, ApprovalClass, AssistantCitationReference, ByteSpan, ChunkId,
+    format_source_reference, ApprovalClass, AssistantCitationReference, ByteSpan, CallId, ChunkId,
     DocumentId, DocumentProcessingStatus, DocumentScope, Result, RetrievalEvidenceInput,
     RetrievalEvidenceSource, Store, Tool, ToolCtx, ToolOutput, ToolSpec,
 };
@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 pub(crate) const LIST_SOURCES_TOOL: &str = "list_sources";
 pub(crate) const READ_SOURCE_TOOL: &str = "read_source";
+pub(crate) const READ_TOOL_RESULT_TOOL: &str = "read_tool_result";
 
 const MAX_LISTED_SOURCES: u64 = 100;
 const DEFAULT_READ_CHARACTERS: usize = 12_000;
@@ -44,6 +45,31 @@ impl ReadSourceTool {
     pub(crate) fn new(store: Arc<dyn Store>) -> Self {
         Self { store }
     }
+}
+
+/// Read past the point a large tool result was cut for the model.
+///
+/// A result is bounded twice: the record keeps what it may, and one turn is fed
+/// only what it can afford to read. Without this the remainder was reachable by
+/// nobody, which made the cut a dead end rather than a bookmark.
+pub(crate) struct ReadToolResultTool {
+    store: Arc<dyn Store>,
+}
+
+impl ReadToolResultTool {
+    pub(crate) fn new(store: Arc<dyn Store>) -> Self {
+        Self { store }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadToolResultArgs {
+    call_id: Uuid,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default)]
+    max_characters: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,11 +360,121 @@ fn source_window(
     })
 }
 
+#[async_trait]
+impl Tool for ReadToolResultTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: READ_TOOL_RESULT_TOOL.into(),
+            description: "Read more of a tool result that was cut short for length. \
+                          Use the call_id named in a `[truncated: …]` notice, and \
+                          `offset` to continue past what you already read. Only calls \
+                          from this exact conversation are readable."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "call_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "The call_id from the truncation notice."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Zero-based Unicode character offset (default 0)."
+                    },
+                    "max_characters": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_READ_CHARACTERS,
+                        "description": "Maximum Unicode characters to return (default 12000)."
+                    }
+                },
+                "required": ["call_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        // The bytes were already produced in this conversation and already
+        // partly shown; reading further is not a new capability.
+        ApprovalClass::ReadOnly
+    }
+
+    async fn execute(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        let args = match serde_json::from_value::<ReadToolResultArgs>(args) {
+            Ok(args) if !args.call_id.is_nil() => args,
+            _ => return Ok(ToolOutput::error("invalid read_tool_result arguments")),
+        };
+        let max_characters = args.max_characters.unwrap_or(DEFAULT_READ_CHARACTERS);
+        if !(1..=MAX_READ_CHARACTERS).contains(&max_characters) {
+            return Ok(ToolOutput::error(format!(
+                "max_characters must be between 1 and {MAX_READ_CHARACTERS}"
+            )));
+        }
+
+        // Scoped by listing this conversation's calls: a call id from another
+        // chat is simply not found, so the tool cannot reach across chats even
+        // if the model guesses an id.
+        let calls = match self.store.list_tool_calls(ctx.chat_id).await {
+            Ok(calls) => calls,
+            Err(_) => return Ok(ToolOutput::error("could not read that tool result")),
+        };
+        let Some(call) = calls
+            .into_iter()
+            .find(|call| call.id == CallId::from(args.call_id))
+        else {
+            return Ok(ToolOutput::error(
+                "no tool call with that call_id in this conversation",
+            ));
+        };
+        let Some(result) = call.result.filter(|result| !result.is_empty()) else {
+            return Ok(ToolOutput::error("that tool call recorded no result"));
+        };
+
+        let Some(window) = source_window(
+            &result,
+            args.offset,
+            max_characters,
+            RetrievalEvidenceInput::MAX_SNIPPET_BYTES,
+        ) else {
+            return Ok(ToolOutput::error("offset is past the end of the result"));
+        };
+        let remaining = window.total_characters.saturating_sub(window.end_character);
+        let mut content = format!(
+            "Result of {} (characters {}\u{2013}{} of {}):\n{}",
+            historical_safe_name(&call.name),
+            window.start_character,
+            window.end_character,
+            window.total_characters,
+            window.text
+        );
+        if remaining > 0 {
+            content.push_str(&format!(
+                "\n\n[{remaining} characters remain; continue with offset {}]",
+                window.end_character
+            ));
+        }
+        Ok(ToolOutput::text(content))
+    }
+}
+
+/// The tool's own name is model-supplied in principle, so a result header uses
+/// the same closed vocabulary the rest of the renderer boundary does.
+fn historical_safe_name(name: &str) -> &'static str {
+    match crate::event_projection::RendererToolName::from(name) {
+        crate::event_projection::RendererToolName::Other => "a tool",
+        _ => "the tool call",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
     use openwave_core::{
-        Chat, ChatId, DbStore, DocumentUpsert, ReasoningEffort, SourceLocation, SourceRegion, Store,
+        Chat, ChatId, DbStore, DocumentUpsert, ReasoningEffort, SourceLocation, SourceRegion,
+        Store, ToolCallRecord, TurnId,
     };
     use serde_json::json;
     use std::num::NonZeroU32;
@@ -400,6 +536,111 @@ mod tests {
         assert_eq!(window.end_byte, 7);
         assert_eq!(window.total_characters, 4);
         assert!(source_window("short", 5, 1, 8).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_truncated_result_can_be_read_past_the_cut_but_only_in_its_own_chat() {
+        let (_directory, store, chat, _document_id) = source_fixture().await;
+        let other_chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&other_chat).await.unwrap();
+        let turn = TurnId::new();
+        store
+            .accept_turn(turn, chat.id, "gpt-5", "run something long")
+            .await
+            .unwrap();
+        let call_id = CallId::new();
+        let full: String = (0..2_000)
+            .map(|index| char::from(b'a' + (index % 26) as u8))
+            .collect();
+        store
+            .accept_tool_call(&ToolCallRecord {
+                id: call_id,
+                chat_id: chat.id,
+                turn_id: turn,
+                provider_id: "call-1".into(),
+                name: "exec".into(),
+                arguments: json!({ "command": "cargo" }),
+                execution: openwave_core::ToolCallExecution::Server,
+                status: openwave_core::ToolCallStatus::Pending,
+                result: None,
+                error_code: None,
+                error_detail: None,
+                client_executor_id: None,
+                client_lease_expires_at: None,
+                created_at: Utc::now(),
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+        // Resolved through the ordinary path, so the record holds what the real
+        // flow would have written.
+        store
+            .resolve_server_tool_call(
+                call_id,
+                &openwave_core::ToolCallResolution::Completed {
+                    result: full.clone(),
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let tool = ReadToolResultTool::new(store.clone());
+        let context = ToolCtx::without_private_scratch(chat.id, None);
+
+        // A window from the start reports how much is left and where to resume.
+        let head = tool
+            .execute(
+                &context,
+                json!({ "call_id": call_id.0, "max_characters": 500 }),
+            )
+            .await
+            .unwrap();
+        assert!(!head.is_error, "{}", head.content);
+        assert!(head.content.contains(&full[..100]));
+        assert!(head
+            .content
+            .contains("characters remain; continue with offset 500"));
+
+        // And the tail is genuinely reachable, which is the whole point: the cut
+        // is a bookmark rather than a loss.
+        let tail = tool
+            .execute(&context, json!({ "call_id": call_id.0, "offset": 1_900 }))
+            .await
+            .unwrap();
+        assert!(!tail.is_error);
+        assert!(tail.content.contains(&full[1_900..]));
+
+        // Scoping is by construction: another conversation cannot reach this
+        // call even holding its exact id.
+        let intruder = tool
+            .execute(
+                &ToolCtx::without_private_scratch(other_chat.id, None),
+                json!({ "call_id": call_id.0 }),
+            )
+            .await
+            .unwrap();
+        assert!(intruder.is_error);
+        assert!(!intruder.content.contains(&full[..100]));
+
+        // Bad addresses fail as errors the model can act on, not as panics.
+        for arguments in [
+            json!({ "call_id": Uuid::nil() }),
+            json!({ "call_id": Uuid::new_v4() }),
+            json!({ "call_id": call_id.0, "offset": 99_999 }),
+            json!({ "call_id": call_id.0, "max_characters": 0 }),
+        ] {
+            assert!(tool.execute(&context, arguments).await.unwrap().is_error);
+        }
     }
 
     #[test]

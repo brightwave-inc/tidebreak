@@ -674,7 +674,12 @@ fn agent_deps(
         .with(Box::new(source_tools::ListSourcesTool::new(
             source_store.clone(),
         )))
-        .with(Box::new(source_tools::ReadSourceTool::new(source_store)))
+        .with(Box::new(source_tools::ReadSourceTool::new(
+            source_store.clone(),
+        )))
+        .with(Box::new(source_tools::ReadToolResultTool::new(
+            source_store,
+        )))
         .with(web_search);
     tools.register_validated_client(
         request_folder_access_tool_spec(),

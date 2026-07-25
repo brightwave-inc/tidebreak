@@ -13,6 +13,7 @@ const TOOL_NAMES = [
   "search",
   "list_sources",
   "read_source",
+  "read_tool_result",
   "web_search",
   "read_delegated_file",
   "read_file",

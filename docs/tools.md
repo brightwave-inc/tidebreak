@@ -7,7 +7,7 @@ identity.
 
 ## What exists today
 
-The current foreground agent surface contains seventeen tools:
+The current foreground agent surface contains eighteen tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
@@ -19,6 +19,7 @@ The current foreground agent surface contains seventeen tools:
 | `search` | Search sources indexed for this exact conversation | Server, read-only |
 | `list_sources` | List bounded metadata for sources in this exact conversation | Server, read-only |
 | `read_source` | Read a bounded canonical-text range from one source and create citable evidence | Server, read-only |
+| `read_tool_result` | Read past the point a large tool result was cut short for the turn | Server, read-only |
 | `web_search` | Search the public web through the configured Exa or Tavily provider | Server, sensitive approval |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |
