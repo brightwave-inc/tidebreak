@@ -12063,11 +12063,14 @@ async fn foreground_web_search_runs_end_to_end_through_durable_approval() {
     assert_eq!(pending[0]["class"], "sensitive");
     assert_eq!(pending[0]["can_approve"], true);
     assert_eq!(pending[0]["can_remember"], true);
-    // Web search consents to an egress class, not to an inspectable action, so
-    // recovery carries no preview of the query.
-    assert!(pending[0].get("preview").is_none());
+    // Web search consents to sending a query off the device, so recovery has to
+    // carry that query — a card asking about a search it cannot show is asking
+    // about nothing in particular.
+    assert_eq!(pending[0]["preview"]["tool"], "web_search");
+    assert_eq!(pending[0]["preview"]["query"], "OpenWave release");
     let pending_json = pending.to_string();
-    assert!(!pending_json.contains("OpenWave release"));
+    // What came *back* is still private: the query is the action under review,
+    // the results are the answer the model works from.
     assert!(!pending_json.contains("Example.com"));
 
     let decide = router

@@ -403,12 +403,15 @@ mod tests {
                 output: ToolOutput::text("private result").with_data(serde_json::json!({
                     "stdout": "private stream",
                 })),
+                // `write_file` projects neither an action nor a result, so
+                // nothing about it may cross — not the output text, and not
+                // the structured payload beside it.
                 action: ToolActionPreview::build(
-                    "web_search",
-                    &serde_json::json!({ "query": "private query" }),
+                    "write_file",
+                    &serde_json::json!({ "path": "private/path" }),
                 ),
                 result: ToolResultPreview::build(
-                    "web_search",
+                    "write_file",
                     Some(&serde_json::json!({ "stdout": "private stream" })),
                 ),
             },
@@ -425,19 +428,47 @@ mod tests {
             seq: 11,
             event: AgentEvent::ApprovalRequired {
                 call_id: CallId::new(),
+                tool_name: "write_file".into(),
+                class: ApprovalClass::Workspace,
+                kind: ToolApprovalKind::Unsupported,
+                // A tool with no variant projects nothing, so the card has no
+                // action to show and the summary is all that crosses.
+                preview: ToolActionPreview::build(
+                    "write_file",
+                    &serde_json::json!({ "path": "private/path" }),
+                ),
+                summary: "a write".into(),
+            },
+        });
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(!json.contains("preview"));
+        assert!(!json.contains("private"));
+    }
+
+    /// Consent to an action you cannot see is not consent, and for a web search
+    /// the action *is* the query — it is the thing that leaves the device. So
+    /// this one has to cross, while everything else about the call still does
+    /// not.
+    #[test]
+    fn a_web_search_approval_carries_the_query_being_shared() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 11,
+            event: AgentEvent::ApprovalRequired {
+                call_id: CallId::new(),
                 tool_name: "web_search".into(),
                 class: ApprovalClass::Sensitive,
                 kind: ToolApprovalKind::WebSearchMayShareQuery,
                 preview: ToolActionPreview::build(
                     "web_search",
-                    &serde_json::json!({ "query": "private query" }),
+                    &serde_json::json!({ "query": "quarterly filings", "max_results": 5 }),
                 ),
-                summary: "private query".into(),
+                summary: "a web search".into(),
             },
         });
         let json = serde_json::to_string(&projected).unwrap();
-        assert!(!json.contains("preview"));
-        assert!(!json.contains("private query"));
+        assert!(json.contains("quarterly filings"), "{json}");
+        // Only the query. The other arguments are not what consent is about.
+        assert!(!json.contains("max_results"), "{json}");
     }
 
     #[test]

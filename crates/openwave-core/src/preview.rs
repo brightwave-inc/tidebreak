@@ -40,6 +40,12 @@ pub enum ToolActionPreview {
         /// host path.
         cwd: String,
     },
+    /// A search of this conversation's own sources. The query is the whole
+    /// action, and it is what the excerpts returned will be chosen to match.
+    Search { query: String },
+    /// A public web search. The query leaves the device, which is the entire
+    /// reason this call asks first — so the card has to be able to show it.
+    WebSearch { query: String },
 }
 
 impl ToolActionPreview {
@@ -75,6 +81,16 @@ impl ToolActionPreview {
                     .unwrap_or_else(|| ".".into());
                 Some(Self::Exec { command, args, cwd })
             }
+            // Approving a search without seeing its query is not consent to
+            // anything in particular, and for `web_search` that query is the
+            // thing that leaves the machine. Trimmed, because the tool trims
+            // before searching and a card should show what actually goes out.
+            "search" => Some(Self::Search {
+                query: search_query(arguments)?,
+            }),
+            "web_search" => Some(Self::WebSearch {
+                query: search_query(arguments)?,
+            }),
             _ => None,
         }
     }
@@ -127,6 +143,9 @@ impl ToolActionPreview {
                     Some(_) => false,
                 }
             }
+            // Only `exec` has a scope narrower than the whole tool, so no
+            // other action needs to be exactly describable — and claiming it
+            // was would invite a narrow grant with nothing to narrow to.
             _ => false,
         }
     }
@@ -210,6 +229,14 @@ fn stream(value: Option<&Value>) -> String {
 
 /// Bound one single-line preview field, dropping control characters that could
 /// forge card structure. An empty or all-control field is not presentable.
+/// The query a search will actually run, as the card should show it.
+fn search_query(arguments: &Value) -> Option<String> {
+    clamp(
+        arguments.get("query")?.as_str()?.trim(),
+        MAX_ACTION_FIELD_CHARS,
+    )
+}
+
 /// Whether [`clamp`] would return this string unchanged.
 ///
 /// Deliberately mirrors `clamp`'s three lossy steps rather than calling it and
@@ -233,7 +260,67 @@ fn clamp(value: &str, max_chars: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_search_shows_the_query_it_is_asking_permission_for() {
+        // Approving `web_search` used to show nothing about the query, which is
+        // the one thing that actually leaves the machine.
+        assert_eq!(
+            ToolActionPreview::build("web_search", &json!({ "query": "quarterly filings" })),
+            Some(ToolActionPreview::WebSearch {
+                query: "quarterly filings".into()
+            })
+        );
+        assert_eq!(
+            ToolActionPreview::build("search", &json!({ "query": "revenue" })),
+            Some(ToolActionPreview::Search {
+                query: "revenue".into()
+            })
+        );
+        // Trimmed, because the tool trims before searching.
+        assert_eq!(
+            ToolActionPreview::build("web_search", &json!({ "query": "  spaced  " })),
+            Some(ToolActionPreview::WebSearch {
+                query: "spaced".into()
+            })
+        );
+        // Extra arguments are not part of the action under review.
+        assert_eq!(
+            ToolActionPreview::build("search", &json!({ "query": "revenue", "k": 8 })),
+            Some(ToolActionPreview::Search {
+                query: "revenue".into()
+            })
+        );
+        // A query the card cannot show is no preview at all, rather than a card
+        // that describes an empty search.
+        for arguments in [
+            json!({}),
+            json!({ "query": "" }),
+            json!({ "query": "   " }),
+            json!({ "query": 3 }),
+        ] {
+            assert_eq!(ToolActionPreview::build("search", &arguments), None);
+        }
+    }
+
+    #[test]
+    fn only_a_command_is_exactly_describable() {
+        // `exec` is the only action with a scope narrower than the whole tool,
+        // so it is the only one that may claim exactness. A search claiming it
+        // would invite a narrow grant with nothing to narrow to.
+        assert!(ToolActionPreview::describes_exactly(
+            "exec",
+            &json!({ "command": "cargo", "args": ["test"] })
+        ));
+        for tool in ["search", "web_search"] {
+            assert!(!ToolActionPreview::describes_exactly(
+                tool,
+                &json!({ "query": "anything" })
+            ));
+        }
+    }
+
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn exec_action_carries_the_argument_vector_and_defaults_its_directory() {
@@ -253,8 +340,6 @@ mod tests {
     #[test]
     fn only_tools_with_a_variant_project_anything() {
         for (tool, arguments) in [
-            ("search", serde_json::json!({ "query": "private" })),
-            ("web_search", serde_json::json!({ "query": "private" })),
             (
                 "write_file",
                 serde_json::json!({ "path": "/Users/private" }),
@@ -262,6 +347,15 @@ mod tests {
             ("mcp__server__tool", serde_json::json!({ "any": "thing" })),
         ] {
             assert_eq!(ToolActionPreview::build(tool, &arguments), None);
+            assert_eq!(ToolResultPreview::build(tool, Some(&arguments)), None);
+        }
+
+        // The searches project an *action* so their query can be reviewed, and
+        // deliberately no *result*: what a search returned is the answer the
+        // model works from, not something the transcript restates.
+        for tool in ["search", "web_search"] {
+            let arguments = serde_json::json!({ "query": "private" });
+            assert!(ToolActionPreview::build(tool, &arguments).is_some());
             assert_eq!(ToolResultPreview::build(tool, Some(&arguments)), None);
         }
     }
