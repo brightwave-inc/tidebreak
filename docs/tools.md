@@ -55,6 +55,30 @@ published so a detach that wins the race discards the bytes, and the source
 identity is derived from the exact conversation, root, and path, so importing
 the same file twice recovers one source instead of adding a second.
 
+### Keeping the renderer's tool vocabulary honest
+
+A renderer-visible tool name appears in six hand-maintained places: the server's
+`RendererToolName` enum and its `From<&str>` fold, the desktop's matching union
+and runtime guard, its copy table, and its icon table — plus the historical-name
+allowlist in the store. Nothing linked them, and three tools shipped missing an
+entry in one table or another.
+
+The vocabulary is now written down. A Rust test serializes every variant to
+`crates/openwave-desktop/ui/src/renderer-tool-names.json` and fails if the
+checked-in file is stale; regenerate with
+
+```sh
+UPDATE_RENDERER_CONTRACT=1 cargo test -p openwave-server
+```
+
+A renderer test reads that same file and fails if the union, the guard, or the
+copy table has drifted from it. Both lanes run in CI, so the two sides are
+checked against one source rather than against each other's memory.
+
+The check is the guarantee, not the generation — regenerating by hand is fine;
+shipping a stale file is what fails. Adding a tool still means editing each
+table, and #478 tracks generating them outright.
+
 Normal foreground turns also receive a
 [host-owned operating prompt](agent-operating-prompt.md). It composes fixed
 behavior sections from the exact tool surface advertised to the turn, so source,

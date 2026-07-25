@@ -113,6 +113,80 @@ pub(crate) enum RendererToolName {
     Other,
 }
 
+/// The renderer contract lives entirely in the test below, so these exist for
+/// it rather than for the running server.
+#[cfg(test)]
+impl RendererToolName {
+    /// Every name, in declaration order.
+    ///
+    /// This is the renderer contract: the desktop maintains a matching union, a
+    /// runtime guard, a copy table, and an icon table by hand, and nothing
+    /// linked them. Writing the list down lets both sides be checked against
+    /// one source instead of against each other's memory.
+    ///
+    /// Kept complete by [`Self::position`]: a new variant fails to compile
+    /// there, and the test below fails if it is missing here.
+    pub(crate) const ALL: &'static [Self] = &[
+        Self::Search,
+        Self::ListSources,
+        Self::ReadSource,
+        Self::ReadToolResult,
+        Self::WebSearch,
+        Self::ReadDelegatedFile,
+        Self::ReadFile,
+        Self::ListDir,
+        Self::WriteFile,
+        Self::CreateDeliverable,
+        Self::RequestFolderAccess,
+        Self::ConnectFolder,
+        Self::ListConnectedFolders,
+        Self::ListFolder,
+        Self::ReadConnectedFile,
+        Self::ImportConnectedFile,
+        Self::SpawnSandboxAgent,
+        Self::WaitForAgents,
+        Self::AskUserQuestions,
+        Self::Exec,
+        Self::Other,
+    ];
+
+    /// Declaration index. Exists to make [`Self::ALL`] impossible to forget:
+    /// adding a variant without a match arm here does not compile.
+    const fn position(self) -> usize {
+        match self {
+            Self::Search => 0,
+            Self::ListSources => 1,
+            Self::ReadSource => 2,
+            Self::ReadToolResult => 3,
+            Self::WebSearch => 4,
+            Self::ReadDelegatedFile => 5,
+            Self::ReadFile => 6,
+            Self::ListDir => 7,
+            Self::WriteFile => 8,
+            Self::CreateDeliverable => 9,
+            Self::RequestFolderAccess => 10,
+            Self::ConnectFolder => 11,
+            Self::ListConnectedFolders => 12,
+            Self::ListFolder => 13,
+            Self::ReadConnectedFile => 14,
+            Self::ImportConnectedFile => 15,
+            Self::SpawnSandboxAgent => 16,
+            Self::WaitForAgents => 17,
+            Self::AskUserQuestions => 18,
+            Self::Exec => 19,
+            Self::Other => 20,
+        }
+    }
+
+    /// The wire spelling, which is what the renderer actually matches on.
+    fn wire_name(self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .expect("a renderer tool name always serializes as a string")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RendererToolStatus {
@@ -471,6 +545,61 @@ mod tests {
         assert!(json.contains("quarterly filings"), "{json}");
         // Only the query. The other arguments are not what consent is about.
         assert!(!json.contains("max_results"), "{json}");
+    }
+
+    /// Path of the checked-in renderer contract, relative to this crate.
+    const TOOL_NAME_CONTRACT: &str = "../openwave-desktop/ui/src/renderer-tool-names.json";
+
+    /// The desktop maintains four hand-written tables keyed on this vocabulary.
+    /// Nothing linked them, and three tools shipped missing an entry in one or
+    /// another. So write the list down and let both sides check against it.
+    ///
+    /// Regenerate with `UPDATE_RENDERER_CONTRACT=1 cargo test -p openwave-server`.
+    /// The check is the guarantee, not the generation: CI fails on a diff.
+    #[test]
+    fn the_renderer_tool_name_contract_is_written_down_and_current() {
+        // `position` is what makes `ALL` safe to trust: a new variant cannot
+        // compile without an arm there, and this catches forgetting `ALL`.
+        for (index, name) in RendererToolName::ALL.iter().enumerate() {
+            assert_eq!(name.position(), index, "{name:?} is out of order in ALL");
+        }
+        assert_eq!(
+            RendererToolName::ALL.len(),
+            RendererToolName::Other.position() + 1,
+            "ALL is missing a variant"
+        );
+
+        let names: Vec<String> = RendererToolName::ALL
+            .iter()
+            .copied()
+            .map(RendererToolName::wire_name)
+            .collect();
+        assert_eq!(
+            names.iter().collect::<std::collections::HashSet<_>>().len(),
+            names.len(),
+            "two names share a wire spelling"
+        );
+
+        let rendered = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "comment": "Generated from RendererToolName. Regenerate with \
+                            UPDATE_RENDERER_CONTRACT=1 cargo test -p openwave-server.",
+                "tools": names,
+            }))
+            .expect("a list of names always serializes")
+        );
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(TOOL_NAME_CONTRACT);
+        if std::env::var_os("UPDATE_RENDERER_CONTRACT").is_some() {
+            std::fs::write(&path, &rendered).expect("the contract path is writable");
+            return;
+        }
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            existing, rendered,
+            "the renderer tool-name contract is out of date; regenerate with \
+             UPDATE_RENDERER_CONTRACT=1 cargo test -p openwave-server"
+        );
     }
 
     #[test]
