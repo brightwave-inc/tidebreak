@@ -7,6 +7,14 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 export type ToolActivity = {
+  /**
+   * Stable identity for this row.
+   *
+   * Rows were keyed by array index, so filtering or reordering a phase
+   * re-associated React state with the wrong call. Callers pass a transcript
+   * entry id; a row that arrives without one falls back to its position, which
+   * is no worse than before and no better.
+   */
   id?: string;
   name: string;
   status: ToolCallStatus;
@@ -99,7 +107,11 @@ export function ToolActivityGroup({
               activity.status,
             );
             return (
-              <div className="grid gap-1" role="listitem" key={index}>
+              <div
+                className="grid gap-1"
+                role="listitem"
+                key={activity.id ?? `position:${index}`}
+              >
                 <div className="flex items-center gap-1.5 font-medium">
                   {/* Pinned onto the rail, knocking out the border behind it,
                       so the row reads as a stop on the timeline rather than a
@@ -287,6 +299,10 @@ function normalizeActivities(activities: unknown): ToolActivity[] {
     }
     return [
       {
+        // Carried through rather than dropped: it is what keys the row.
+        ...(typeof candidate.id === "string" && candidate.id.length > 0
+          ? { id: candidate.id }
+          : {}),
         name: candidate.name,
         status: candidate.status as ToolCallStatus,
       },
