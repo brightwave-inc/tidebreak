@@ -144,3 +144,34 @@ describe("ToolActivityGroup", () => {
     expect(markup).not.toContain("private");
   });
 });
+
+describe("row identity", () => {
+  it("carries a call id through without disturbing the phase label", () => {
+    // Rows are keyed on the call rather than its position, so a filtered or
+    // reordered phase cannot re-associate React state with the wrong call.
+    // Phases *are* filtered — a parked call is handled by its approval card —
+    // so the index was never a stable key.
+    const withIds = renderToStaticMarkup(
+      <ToolActivityGroup
+        activities={[
+          { id: "call-a", name: "exec", status: "completed" },
+          { id: "call-b", name: "search", status: "running" },
+        ]}
+        groupIndex={0}
+      />,
+    );
+    const withoutIds = renderToStaticMarkup(
+      <ToolActivityGroup
+        activities={[
+          { name: "exec", status: "completed" },
+          { name: "search", status: "running" },
+        ]}
+        groupIndex={0}
+      />,
+    );
+    // Identity is structural: it changes which row owns which state, not what
+    // the phase says. A row with nothing stable still falls back to position.
+    expect(withIds).toBe(withoutIds);
+    expect(withIds).toContain("Searching sources and 1 other task");
+  });
+});
