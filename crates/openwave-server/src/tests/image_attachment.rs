@@ -87,6 +87,56 @@ fn stored_blob_count(data_dir: &std::path::Path) -> usize {
         .count()
 }
 
+type OpenAiRequestCapture =
+    Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<serde_json::Value>>>>;
+
+/// Records the actual payload the configured OpenAI adapter sends, then emits a
+/// minimal successful streaming response. This keeps the capability test local
+/// while exercising the same resolver and adapter path as a desktop turn.
+async fn capture_openai_image_request(
+    axum::extract::State(capture): axum::extract::State<OpenAiRequestCapture>,
+    axum::Json(request): axum::Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    if let Some(sender) = capture.lock().unwrap().take() {
+        let _ = sender.send(request);
+    }
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"The images arrived.\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        ),
+    )
+}
+
+fn one_pixel_jpeg() -> Vec<u8> {
+    let image = image::RgbImage::from_pixel(1, 1, image::Rgb([0, 0, 0]));
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+        .encode_image(&image)
+        .unwrap();
+    bytes
+}
+
+fn spawn_turn_worker_with_image_blobs(state: &AppState) {
+    let worker = crate::turn_worker::TurnWorker::new(
+        state.store.clone(),
+        state.resolver.clone(),
+        state.tools.clone(),
+        state.approvals.clone(),
+        state.events.clone(),
+        state.active_turns.clone(),
+        state.turn_job_wake.clone(),
+        state.agent_run_wake.clone(),
+        state.agent_config.clone(),
+        None,
+        crate::turn_worker::TurnWorkerConfig::default(),
+    )
+    .with_blobs(state.blobs.clone());
+    tokio::spawn(worker.run());
+}
+
 #[tokio::test]
 async fn publishing_returns_opaque_identity_and_bounded_metadata_only() {
     let (router, token, _store, _dir) = test_app().await;
@@ -383,21 +433,28 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
         .unwrap(),
     );
     let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    // A user-registered OpenAI-compatible model: OpenWave cannot know whether
+    // an arbitrary endpoint accepts images, so it remains text-only.
     providers::write_config(
         &*store,
-        providers::ProviderKind::Anthropic,
+        providers::ProviderKind::OpenaiCompatible,
         &providers::ProviderConfig {
             enabled: true,
-            base_url: None,
-            models: Vec::new(),
+            base_url: Some("http://127.0.0.1:1234/v1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "vendor/model".into(),
+                display_name: Some("Vendor Model".into()),
+                context_window: 65_536,
+                max_output_tokens: 8_192,
+            }],
         },
     )
     .await
     .unwrap();
     providers::write_credential(
         &*secrets,
-        providers::ProviderKind::Anthropic,
-        &providers::ProviderCredential::api_key("sk-anthropic"),
+        providers::ProviderKind::OpenaiCompatible,
+        &providers::ProviderCredential::api_key("sk-local"),
     )
     .await
     .unwrap();
@@ -417,7 +474,7 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
         Arc::new(ToolRegistry::new()),
         retrieval,
         AgentConfig {
-            model: "anthropic::claude-opus-4-8".into(),
+            model: "openai_compatible::vendor/model".into(),
             ..AgentConfig::default()
         },
     );
@@ -425,12 +482,10 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
     let router = app(state);
     let chat = make_chat(&router, &bearer).await;
 
-    // The selected model is a real, available, curated one — it simply does not
-    // advertise image input.
-    let policy = providers::resolve_model_policy(&*store, "anthropic::claude-opus-4-8", false)
+    let policy = providers::resolve_model_policy(&*store, "openai_compatible::vendor/model", false)
         .await
         .unwrap()
-        .expect("a curated model resolves");
+        .expect("a registered custom model resolves");
     assert!(!policy
         .input_modalities
         .contains(&crate::model_registry::InputModality::Image));
@@ -462,4 +517,130 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
         send_message(&router, &bearer, chat.id, "what is in this screenshot?").await,
         StatusCode::ACCEPTED
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments() {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let capture: OpenAiRequestCapture = Arc::new(std::sync::Mutex::new(Some(sender)));
+    let provider = axum::Router::new()
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(capture_openai_image_request),
+        )
+        .with_state(capture);
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, provider).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("image-capability.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Openai,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: Some(format!("http://{address}/v1")),
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Openai,
+        &providers::ProviderCredential::api_key("sk-test"),
+    )
+    .await
+    .unwrap();
+    let (retrieval, _search) = build_retrieval(
+        Arc::new(HashEmbedder::default()),
+        Arc::new(InMemoryVectorStore::new(HashEmbedder::DEFAULT_DIMS)),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(resolver::ConfiguredResolver::new(
+            store.clone(),
+            secrets.clone(),
+        )),
+        secrets,
+        Arc::new(ToolRegistry::new()),
+        retrieval,
+        AgentConfig {
+            model: "openai::gpt-5.6-sol".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let bearer = format!("Bearer {}", state.token);
+    spawn_turn_worker_with_image_blobs(&state);
+    let router = app(state);
+    let chat = make_chat(&router, &bearer).await;
+
+    let png = publish_png(&router, &bearer, chat.id, png_header(1, 1)).await;
+    let jpeg = publish_image(&router, &bearer, chat.id, "image/jpeg", one_pixel_jpeg()).await;
+    assert_eq!(jpeg.status(), StatusCode::CREATED);
+    let jpeg: serde_json::Value = json_body(jpeg).await;
+    let jpeg: uuid::Uuid = jpeg["attachment_id"].as_str().unwrap().parse().unwrap();
+
+    assert_eq!(
+        send_message_with_attachments(
+            &router,
+            &bearer,
+            chat.id,
+            TurnId::new(),
+            "Describe these attachments.",
+            &[png, jpeg],
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(events.iter().any(
+        |event| matches!(&event.event, AgentEvent::TextDelta { text } if text == "The images arrived.")
+    ));
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
+    ));
+
+    let request = tokio::time::timeout(std::time::Duration::from_secs(1), receiver)
+        .await
+        .expect("configured provider did not receive the image request")
+        .expect("configured provider request capture was dropped");
+    assert_eq!(request["model"], "gpt-5.6-sol");
+    let content = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "user" && message["content"].is_array())
+        .and_then(|message| message["content"].as_array())
+        .expect("the provider request has the user message parts");
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "Describe these attachments.");
+    for (part, media_type) in content[1..].iter().zip(["image/png", "image/jpeg"]) {
+        assert_eq!(part["type"], "image_url");
+        assert!(
+            part["image_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("data:{media_type};base64,")),
+            "expected {media_type} data URL, got {part}"
+        );
+    }
+    assert_eq!(content.len(), 3);
 }

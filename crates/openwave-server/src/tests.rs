@@ -8959,9 +8959,12 @@ async fn models_catalog_is_served() {
     assert_eq!(opus["key"], "anthropic::claude-opus-4-8");
     assert_eq!(opus["context_window"], 1_000_000);
     assert_eq!(opus["max_output_tokens"], 128_000);
-    assert_eq!(opus["input_modalities"], serde_json::json!(["text"]));
+    assert_eq!(
+        opus["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
     assert!(opus["supports_reasoning"].as_bool().unwrap());
-    assert!(!opus["multimodal"].as_bool().unwrap());
+    assert!(opus["multimodal"].as_bool().unwrap());
     assert!(!opus["available"].as_bool().unwrap());
     // The catalog carries the effort levels the model itself accepts, so a
     // client can offer exactly those and no more.
