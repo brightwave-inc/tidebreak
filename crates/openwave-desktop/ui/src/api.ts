@@ -1,3 +1,7 @@
+import { RENDERER_TOOL_NAMES, type RendererToolName } from "./generated/wire";
+
+export type { RendererToolName };
+
 /** Connection details from the Tauri host (`server_info` command). */
 export type ServerInfo = {
   baseUrl: string;
@@ -266,29 +270,6 @@ export type AgentEvent =
   | { type: "user_steered"; message_id: string; text: string }
   | { type: "context_truncated" }
   | { type: "event_omitted" };
-
-export type RendererToolName =
-  | "search"
-  | "list_sources"
-  | "read_source"
-  | "read_tool_result"
-  | "web_search"
-  | "read_delegated_file"
-  | "read_file"
-  | "list_dir"
-  | "write_file"
-  | "create_deliverable"
-  | "request_folder_access"
-  | "connect_folder"
-  | "list_connected_folders"
-  | "list_folder"
-  | "read_connected_file"
-  | "import_connected_file"
-  | "spawn_sandbox_agent"
-  | "wait_for_agents"
-  | "ask_user_questions"
-  | "exec"
-  | "other";
 
 /**
  * The action a call will take, in a form a human can inspect.
@@ -1094,29 +1075,18 @@ export function parseToolResultPreview(
   };
 }
 
+/**
+ * Whether a provider-supplied string is a tool name the renderer will accept.
+ *
+ * Still an allowlist, and still a closed one — the difference is that the list
+ * is now the server's own enum rather than a copy of it maintained here. The
+ * copy drifted three times: two tools reached the union with no icon, and one
+ * had no historical title, so a command relabelled itself on reload.
+ */
 export function isRendererToolName(value: unknown): value is RendererToolName {
   return (
-    value === "search" ||
-    value === "list_sources" ||
-    value === "read_source" ||
-    value === "web_search" ||
-    value === "read_delegated_file" ||
-    value === "read_file" ||
-    value === "list_dir" ||
-    value === "write_file" ||
-    value === "create_deliverable" ||
-    value === "request_folder_access" ||
-    value === "connect_folder" ||
-    value === "list_connected_folders" ||
-    value === "list_folder" ||
-    value === "read_connected_file" ||
-    value === "read_tool_result" ||
-    value === "import_connected_file" ||
-    value === "spawn_sandbox_agent" ||
-    value === "wait_for_agents" ||
-    value === "ask_user_questions" ||
-    value === "exec" ||
-    value === "other"
+    typeof value === "string" &&
+    (RENDERER_TOOL_NAMES as readonly string[]).includes(value)
   );
 }
 

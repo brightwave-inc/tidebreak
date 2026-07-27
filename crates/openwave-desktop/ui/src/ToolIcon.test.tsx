@@ -2,35 +2,23 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ToolIcon } from "./ToolIcon";
 import { toolCallPresentation, type ToolCallStatus } from "./ToolCallCard";
+import { RENDERER_TOOL_NAMES } from "./generated/wire";
 
 /**
- * Every renderer tool name, in the order the union declares them. The point of
- * listing them here is that the union is the contract: `Record<RendererToolName, _>`
- * makes a missing icon a compile error, and this asserts the runtime half —
- * that each one actually resolves to distinct, non-fallback presentation.
+ * Every renderer tool name that should have presentation of its own, taken from
+ * the generated vocabulary rather than a list kept here.
+ *
+ * `Record<RendererToolName, _>` already makes a missing icon or a missing copy
+ * entry a compile error. This asserts the runtime half — that each name
+ * resolves to real wording and a real glyph rather than the fallback — and
+ * walking the generated list is what keeps a newly added tool from being
+ * checked by neither side.
+ *
+ * `other` is excluded because it is the server's fold for anything
+ * unrecognized, so the generic presentation is its correct answer. The last
+ * test below covers it.
  */
-const TOOL_NAMES = [
-  "search",
-  "list_sources",
-  "read_source",
-  "read_tool_result",
-  "web_search",
-  "read_delegated_file",
-  "read_file",
-  "list_dir",
-  "write_file",
-  "create_deliverable",
-  "request_folder_access",
-  "connect_folder",
-  "list_connected_folders",
-  "list_folder",
-  "read_connected_file",
-  "import_connected_file",
-  "spawn_sandbox_agent",
-  "wait_for_agents",
-  "ask_user_questions",
-  "exec",
-] as const;
+const TOOL_NAMES = RENDERER_TOOL_NAMES.filter((name) => name !== "other");
 
 describe("tool presentation coverage", () => {
   it("gives every allowlisted tool its own copy rather than the fallback", () => {

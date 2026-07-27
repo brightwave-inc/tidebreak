@@ -46,6 +46,7 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 unicode-general-category = { workspace = true }
 chrono = { workspace = true }
+ts-rs = { workspace = true }
 sha2 = { workspace = true }
 cap-std = { workspace = true }
 # Image header inspection only: format sniffing from magic bytes and reading

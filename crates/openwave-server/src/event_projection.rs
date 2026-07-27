@@ -10,6 +10,7 @@ use openwave_core::{
     ToolApprovalKind, ToolResultPreview, TurnId,
 };
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RendererSequencedEvent {
@@ -87,7 +88,12 @@ pub(crate) enum RendererAgentEvent {
 
 /// Tool names are model-controlled. Only names with fixed renderer
 /// presentations cross the boundary; everything else becomes `other`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// This enum is the renderer's tool vocabulary. The desktop's union, its
+/// runtime guard, its copy table, and its icon table all derive from the
+/// TypeScript generated here, so adding a variant cannot leave one of them
+/// behind — see `docs/wire-types.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RendererToolName {
     Search,
@@ -111,80 +117,6 @@ pub(crate) enum RendererToolName {
     AskUserQuestions,
     Exec,
     Other,
-}
-
-/// The renderer contract lives entirely in the test below, so these exist for
-/// it rather than for the running server.
-#[cfg(test)]
-impl RendererToolName {
-    /// Every name, in declaration order.
-    ///
-    /// This is the renderer contract: the desktop maintains a matching union, a
-    /// runtime guard, a copy table, and an icon table by hand, and nothing
-    /// linked them. Writing the list down lets both sides be checked against
-    /// one source instead of against each other's memory.
-    ///
-    /// Kept complete by [`Self::position`]: a new variant fails to compile
-    /// there, and the test below fails if it is missing here.
-    pub(crate) const ALL: &'static [Self] = &[
-        Self::Search,
-        Self::ListSources,
-        Self::ReadSource,
-        Self::ReadToolResult,
-        Self::WebSearch,
-        Self::ReadDelegatedFile,
-        Self::ReadFile,
-        Self::ListDir,
-        Self::WriteFile,
-        Self::CreateDeliverable,
-        Self::RequestFolderAccess,
-        Self::ConnectFolder,
-        Self::ListConnectedFolders,
-        Self::ListFolder,
-        Self::ReadConnectedFile,
-        Self::ImportConnectedFile,
-        Self::SpawnSandboxAgent,
-        Self::WaitForAgents,
-        Self::AskUserQuestions,
-        Self::Exec,
-        Self::Other,
-    ];
-
-    /// Declaration index. Exists to make [`Self::ALL`] impossible to forget:
-    /// adding a variant without a match arm here does not compile.
-    const fn position(self) -> usize {
-        match self {
-            Self::Search => 0,
-            Self::ListSources => 1,
-            Self::ReadSource => 2,
-            Self::ReadToolResult => 3,
-            Self::WebSearch => 4,
-            Self::ReadDelegatedFile => 5,
-            Self::ReadFile => 6,
-            Self::ListDir => 7,
-            Self::WriteFile => 8,
-            Self::CreateDeliverable => 9,
-            Self::RequestFolderAccess => 10,
-            Self::ConnectFolder => 11,
-            Self::ListConnectedFolders => 12,
-            Self::ListFolder => 13,
-            Self::ReadConnectedFile => 14,
-            Self::ImportConnectedFile => 15,
-            Self::SpawnSandboxAgent => 16,
-            Self::WaitForAgents => 17,
-            Self::AskUserQuestions => 18,
-            Self::Exec => 19,
-            Self::Other => 20,
-        }
-    }
-
-    /// The wire spelling, which is what the renderer actually matches on.
-    fn wire_name(self) -> String {
-        serde_json::to_value(self)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .expect("a renderer tool name always serializes as a string")
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,58 +479,124 @@ mod tests {
         assert!(!json.contains("max_results"), "{json}");
     }
 
-    /// Path of the checked-in renderer contract, relative to this crate.
-    const TOOL_NAME_CONTRACT: &str = "../openwave-desktop/ui/src/renderer-tool-names.json";
+    /// Path of the generated renderer bindings, relative to this crate.
+    const GENERATED_BINDINGS: &str = "../openwave-desktop/ui/src/generated/wire.ts";
 
-    /// The desktop maintains four hand-written tables keyed on this vocabulary.
-    /// Nothing linked them, and three tools shipped missing an entry in one or
-    /// another. So write the list down and let both sides check against it.
+    /// Wire spellings of the vocabulary, taken from the generated union rather
+    /// than from a second hand-written list.
     ///
-    /// Regenerate with `UPDATE_RENDERER_CONTRACT=1 cargo test -p openwave-server`.
+    /// `ts-rs` renders a unit-variant enum as a union of string literals, which
+    /// is exactly the shape the desktop needs — but the desktop also needs the
+    /// names at *runtime*, to check a provider-supplied string against the
+    /// allowlist, and TypeScript types are erased. So the union is parsed back
+    /// into the names it is made of, and [`render_bindings`] emits both from the
+    /// one list. The parse is verified by reconstruction, below.
+    fn tool_names_from_union(decl: &str) -> Vec<String> {
+        let body = decl
+            .split_once('=')
+            .expect("a ts-rs type alias always has a right-hand side")
+            .1;
+        body.trim()
+            .trim_end_matches(';')
+            .split('|')
+            .map(|member| member.trim().trim_matches('"').to_owned())
+            .collect()
+    }
+
+    /// The whole generated file, so ordering and header are part of the diff.
+    fn render_bindings() -> String {
+        let cfg = ts_rs::Config::default();
+        let union = RendererToolName::decl(&cfg);
+        let names = tool_names_from_union(&union);
+
+        let listed = names
+            .iter()
+            .map(|name| format!("  \"{name}\",\n"))
+            .collect::<String>();
+        format!(
+            "// Generated from Rust. Do not edit.\n\
+             //\n\
+             // Source: `RendererToolName` in crates/openwave-server/src/event_projection.rs\n\
+             // Regenerate: UPDATE_WIRE_TYPES=1 cargo test -p openwave-server\n\
+             //\n\
+             // The runtime list and the type are emitted together so a tool cannot\n\
+             // exist in one and not the other. See docs/wire-types.md.\n\
+             \n\
+             /**\n\
+             \x20* Every tool name the renderer will accept.\n\
+             \x20*\n\
+             \x20* This is an allowlist, not a display transformation. Tool events come from\n\
+             \x20* providers, so a name outside this set must never reach a card, an icon, or\n\
+             \x20* a copy table. The server folds anything unrecognized to `other`.\n\
+             \x20*/\n\
+             export const RENDERER_TOOL_NAMES = [\n{listed}] as const;\n\
+             \n\
+             export type RendererToolName = (typeof RENDERER_TOOL_NAMES)[number];\n"
+        )
+    }
+
+    /// The desktop keys a union, a runtime guard, a copy table, and an icon
+    /// table on this vocabulary. All four now derive from the file this test
+    /// writes, so a tool cannot reach one and miss another.
+    ///
+    /// Regenerate with `UPDATE_WIRE_TYPES=1 cargo test -p openwave-server`.
     /// The check is the guarantee, not the generation: CI fails on a diff.
     #[test]
-    fn the_renderer_tool_name_contract_is_written_down_and_current() {
-        // `position` is what makes `ALL` safe to trust: a new variant cannot
-        // compile without an arm there, and this catches forgetting `ALL`.
-        for (index, name) in RendererToolName::ALL.iter().enumerate() {
-            assert_eq!(name.position(), index, "{name:?} is out of order in ALL");
-        }
-        assert_eq!(
-            RendererToolName::ALL.len(),
-            RendererToolName::Other.position() + 1,
-            "ALL is missing a variant"
-        );
-
-        let names: Vec<String> = RendererToolName::ALL
-            .iter()
-            .copied()
-            .map(RendererToolName::wire_name)
-            .collect();
-        assert_eq!(
-            names.iter().collect::<std::collections::HashSet<_>>().len(),
-            names.len(),
-            "two names share a wire spelling"
-        );
-
-        let rendered = format!(
-            "{}\n",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "comment": "Generated from RendererToolName. Regenerate with \
-                            UPDATE_RENDERER_CONTRACT=1 cargo test -p openwave-server.",
-                "tools": names,
-            }))
-            .expect("a list of names always serializes")
-        );
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(TOOL_NAME_CONTRACT);
-        if std::env::var_os("UPDATE_RENDERER_CONTRACT").is_some() {
-            std::fs::write(&path, &rendered).expect("the contract path is writable");
+    fn the_generated_renderer_bindings_are_current() {
+        let rendered = render_bindings();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(GENERATED_BINDINGS);
+        if std::env::var_os("UPDATE_WIRE_TYPES").is_some() {
+            std::fs::create_dir_all(path.parent().expect("the bindings path has a parent"))
+                .expect("the bindings directory is creatable");
+            std::fs::write(&path, &rendered).expect("the bindings path is writable");
             return;
         }
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         assert_eq!(
             existing, rendered,
-            "the renderer tool-name contract is out of date; regenerate with \
-             UPDATE_RENDERER_CONTRACT=1 cargo test -p openwave-server"
+            "the generated renderer bindings are out of date; regenerate with \
+             UPDATE_WIRE_TYPES=1 cargo test -p openwave-server"
+        );
+    }
+
+    /// The runtime list is parsed out of the generated union, so the parse has to
+    /// be exact. Rebuilding the union from the parsed names and comparing it to
+    /// what `ts-rs` produced is what makes that safe: a dropped, merged, or
+    /// mis-trimmed member cannot survive the round trip.
+    #[test]
+    fn the_runtime_tool_list_reconstructs_the_generated_union() {
+        let cfg = ts_rs::Config::default();
+        let union = RendererToolName::decl(&cfg);
+        let names = tool_names_from_union(&union);
+
+        let rebuilt = format!(
+            "type RendererToolName = {};",
+            names
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        assert_eq!(
+            rebuilt, union,
+            "the tool-name parse does not reproduce what ts-rs generated"
+        );
+
+        // A duplicate spelling would silently shrink the allowlist.
+        assert_eq!(
+            names.iter().collect::<std::collections::HashSet<_>>().len(),
+            names.len(),
+            "two variants share a wire spelling"
+        );
+        // Guards against the union collapsing to a single `string`, which would
+        // turn the allowlist into a passthrough without failing anything else.
+        assert!(names.len() > 1, "the vocabulary did not render as a union");
+        assert!(
+            names.iter().all(|name| !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')),
+            "a tool name is not a plain snake_case identifier: {names:?}"
         );
     }
 

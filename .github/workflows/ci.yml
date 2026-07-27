@@ -146,6 +146,10 @@ jobs:
             case "$file" in
               *.md|docs/*|assets/*|LICENSE|NOTICE) ;;
               .github/workflows/ci.yml) rust=true; ui=true ;;
+              # Generated from Rust definitions, and a Rust test is what checks
+              # the checked-in copy is current. Editing this by hand has to run
+              # that test, or the staleness check has a bypass.
+              crates/openwave-desktop/ui/src/generated/*) rust=true; ui=true ;;
               crates/openwave-desktop/ui/*) ui=true ;;
               *) rust=true ;;
             esac

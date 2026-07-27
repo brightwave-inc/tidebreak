@@ -27,6 +27,11 @@ thiserror = "=2.0.19"
 uuid = { version = "=1.24.0", features = ["v4", "serde"] }
 unicode-general-category = "=1.1.0"
 chrono = { version = "=0.4.45", features = ["serde"] }
+# Generates the renderer's TypeScript wire types from these serde definitions.
+# `serde-compat` is what makes the output trustworthy: ts-rs reads the same
+# `tag`, `rename_all`, and `skip` attributes serde does, so the generated type
+# describes the bytes that actually go out. See docs/wire-types.md.
+ts-rs = { version = "=12.0.1", features = ["chrono-impl", "uuid-impl"] }
 windows-sys = "=0.61.2"
 sea-orm = { version = "=2.0.0", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
 sea-orm-migration = { version = "=2.0.0", default-features = false, features = ["runtime-tokio-rustls"] }

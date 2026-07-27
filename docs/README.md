@@ -17,6 +17,8 @@ Project documentation, versioned alongside the code.
   clarification with exact wait/resume behavior across reload and restart.
 - [Tool architecture and roadmap](tools.md) — the current tool surface,
   foreground/sandbox split, provider boundaries, and web-search plan.
+- [Wire types](wire-types.md) — generating the desktop's TypeScript from the Rust
+  serde definitions, and what is deliberately still hand-written.
 - [Web search configuration](web-search.md) — the local host-owned Exa/Tavily
   selection boundary and its current no-tool state.
 - [Code execution](code-execution.md) — the provider-neutral `exec` contract,

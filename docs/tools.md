@@ -57,27 +57,17 @@ the same file twice recovers one source instead of adding a second.
 
 ### Keeping the renderer's tool vocabulary honest
 
-A renderer-visible tool name appears in six hand-maintained places: the server's
-`RendererToolName` enum and its `From<&str>` fold, the desktop's matching union
-and runtime guard, its copy table, and its icon table — plus the historical-name
-allowlist in the store. Nothing linked them, and three tools shipped missing an
-entry in one table or another.
+A renderer-visible tool name used to appear in six hand-maintained places, and
+three tools shipped missing an entry in one table or another. The desktop's
+union and its runtime guard are now generated from `RendererToolName`, and its
+copy and icon tables are keyed on the generated union, so a missing entry is a
+compile error. [Wire types](wire-types.md) covers the generator and how to run it.
 
-The vocabulary is now written down. A Rust test serializes every variant to
-`crates/openwave-desktop/ui/src/renderer-tool-names.json` and fails if the
-checked-in file is stale; regenerate with
-
-```sh
-UPDATE_RENDERER_CONTRACT=1 cargo test -p openwave-server
-```
-
-A renderer test reads that same file and fails if the union, the guard, or the
-copy table has drifted from it. Both lanes run in CI, so the two sides are
-checked against one source rather than against each other's memory.
-
-The check is the guarantee, not the generation — regenerating by hand is fine;
-shipping a stale file is what fails. Adding a tool still means editing each
-table, and #478 tracks generating them outright.
+Two places still hold the vocabulary by hand, because both map *tool* names onto
+it rather than restating it: the `From<&str>` fold in `event_projection.rs`, for
+live calls, and `historical_tool_name` in the store, for names read back from the
+journal. Their sets agree today; folding them into the enum is tracked
+separately.
 
 Normal foreground turns also receive a
 [host-owned operating prompt](agent-operating-prompt.md). It composes fixed
