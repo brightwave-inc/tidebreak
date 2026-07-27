@@ -65,3 +65,18 @@ export function resolveFolderAccessRequest(
 export function hasMacOverlayTitlebar(): boolean {
   return hasNativeHost() && navigator.userAgent.includes("Mac OS");
 }
+
+/**
+ * Open a URL in the user's default browser.
+ *
+ * The webview swallows `window.open` and `target="_blank"` (no new-window
+ * handler by design), so anything that must leave the app — the gateway
+ * sign-in page — goes through the shell plugin, whose `open` permission
+ * validates the URL scheme. Returns false outside the native host so callers
+ * can fall back to `window.open` in a plain browser.
+ */
+export async function openExternal(url: string): Promise<boolean> {
+  if (!isTauri()) return false;
+  await invoke("plugin:shell|open", { path: url });
+  return true;
+}

@@ -8,6 +8,7 @@ import {
   PlugZap,
   RefreshCw,
   SquareTerminal,
+  Waypoints,
 } from "lucide-react";
 import type { ApiClient, ModelInfo, ProviderInfo } from "./api";
 import type { ThemeMode } from "./theme";
@@ -18,10 +19,12 @@ import { ModelsPanel } from "./settings/ModelsPanel";
 import { AppearancePanel } from "./settings/AppearancePanel";
 import { CodeExecutionPanel } from "./settings/CodeExecutionPanel";
 import { UpdatesPanel } from "./settings/UpdatesPanel";
+import { GatewayPanel } from "./settings/GatewayPanel";
 import { McpPanel } from "./settings/McpPanel";
 
 type SettingsSectionKey =
   | "providers"
+  | "gateway"
   | "models"
   | "web-search"
   | "code-execution"
@@ -35,6 +38,7 @@ const SECTIONS: {
   icon: ComponentType<{ size?: number }>;
 }[] = [
   { key: "providers", label: "Providers", icon: KeyRound },
+  { key: "gateway", label: "Model Gateway", icon: Waypoints },
   { key: "models", label: "Models", icon: Cpu },
   { key: "web-search", label: "Web search", icon: Globe },
   { key: "code-execution", label: "Code execution", icon: SquareTerminal },
@@ -105,6 +109,9 @@ export function SettingsView({
             client={client}
             onChanged={onProvidersChanged}
           />
+        )}
+        {section === "gateway" && (
+          <GatewayPanel client={client} onChanged={onProvidersChanged} />
         )}
         {section === "models" && (
           <ModelsPanel client={client} models={models} />
