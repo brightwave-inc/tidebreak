@@ -27,6 +27,7 @@ export const PICKER_HOLDERS = {
   confirmApprovedFolder: "confirm-approved-folder",
   importSource: "import-source",
   exportOutput: "export-output",
+  attachImage: "attach-image",
 } as const;
 
 /** What to tell a reader who tried to open a second picker. */

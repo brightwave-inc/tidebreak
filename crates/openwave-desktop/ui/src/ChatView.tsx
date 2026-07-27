@@ -8,7 +8,7 @@ import {
 import type { ApiClient, Chat } from "./api";
 import { followScrollBehavior, isNearBottom, scrollToLatest } from "./ChatScroll";
 import { useChatSessionStore } from "./ChatSessionStore";
-import { Composer } from "./Composer";
+import { Composer, type ComposerImages } from "./Composer";
 import { MessageList } from "./MessageList";
 import { useTranscriptVisible } from "./TranscriptVisibility";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
@@ -27,6 +27,7 @@ export type ChatViewProps = {
   /** The same draft, readable synchronously — see [useTurnControls]. */
   draftRef: RefObject<string>;
   composerModelMenu: ReactNode;
+  composerImages: ComposerImages;
   attachingSource: boolean;
   attachedSourceName: string | null;
   sourceAttachmentError: string | null;
@@ -53,6 +54,7 @@ export function ChatView({
   draft,
   draftRef,
   composerModelMenu,
+  composerImages,
   attachingSource,
   attachedSourceName,
   sourceAttachmentError,
@@ -172,6 +174,7 @@ export function ChatView({
         disabled={deletingChat}
         draft={draft}
         modelMenu={composerModelMenu}
+        images={composerImages}
         canAttachSource={nativeHost}
         attachingSource={attachingSource}
         attachedSourceName={attachedSourceName}

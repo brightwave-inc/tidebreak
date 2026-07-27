@@ -3,12 +3,67 @@ import { describe, expect, it, vi } from "vitest";
 import {
   boundedComposerHeight,
   Composer,
+  imageSendBlocker,
   MAX_COMPOSER_LINES,
   shouldRestoreComposerFocus,
   shouldSubmitComposerKey,
+  type ComposerImages,
 } from "./Composer";
+import {
+  queuedImageAttachment,
+  readyImageAttachment,
+  withUploadFailed,
+  withUploadProgress,
+  withUploadStarted,
+  type ImageAttachment,
+} from "./ImageAttachments";
 
 const noop = async () => undefined;
+
+function images(overrides: Partial<ComposerImages> = {}): ComposerImages {
+  return {
+    items: [],
+    canPick: true,
+    picking: false,
+    error: null,
+    unsupportedModel: null,
+    onPick: vi.fn(),
+    onAttachFiles: vi.fn(),
+    onRemove: vi.fn(),
+    onRetry: vi.fn(),
+    ...overrides,
+  };
+}
+
+function attached(id: string, name: string): ImageAttachment {
+  return queuedImageAttachment(id, {
+    name,
+    byteLen: 1_000,
+    previewUrl: `blob:${id}`,
+  });
+}
+
+function composerWithImages(overrides: Partial<ComposerImages>): string {
+  return renderToStaticMarkup(
+    <Composer
+      activeTurnId={null}
+      busy={false}
+      cancelError={null}
+      cancelPending={false}
+      disabled={false}
+      draft="What is in this?"
+      images={images(overrides)}
+      onDraftChange={vi.fn()}
+      onSend={noop}
+      onSteer={noop}
+      onStop={noop}
+      resetKey="chat-1"
+      steerError={null}
+      steerPending={false}
+      steerStatus={null}
+    />,
+  );
+}
 
 describe("Composer", () => {
   it("submits only an unmodified Enter outside IME composition", () => {
@@ -265,5 +320,123 @@ describe("Composer", () => {
     expect(markup).toContain("brief.pdf");
     expect(markup).toContain("Added to this conversation");
     expect(markup).toContain('aria-label="Dismiss brief.pdf"');
+  });
+
+  it("previews an uploading image from the local file with determinate progress", () => {
+    const uploading = withUploadProgress(
+      withUploadStarted([attached("a", "chart.png")], "a"),
+      "a",
+      250,
+    );
+    const markup = composerWithImages({ items: uploading });
+
+    expect(markup).toContain('src="blob:a"');
+    expect(markup).toContain("chart.png");
+    expect(markup).toContain("Uploading 25%");
+    expect(markup).toContain('<progress class="composer-image-progress"');
+    expect(markup).toContain('max="100"');
+    expect(markup).toContain('value="25"');
+    expect(markup).toContain('aria-label="Uploading chart.png"');
+    // Sending mid-upload would drop the image the reader is waiting for.
+    expect(markup).toContain('aria-label="Send message" disabled=""');
+  });
+
+  it("keeps a failed image on screen with a way to try again", () => {
+    const failed = withUploadFailed(
+      withUploadStarted([attached("a", "chart.png")], "a"),
+      "a",
+      "That image file is damaged",
+    );
+    const markup = composerWithImages({ items: failed });
+
+    expect(markup).toContain("chart.png");
+    expect(markup).toContain("That image file is damaged");
+    expect(markup).toContain("Try again");
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain('aria-label="Send message" disabled=""');
+  });
+
+  it("labels removal per image and never hides it behind a pointer", () => {
+    const markup = composerWithImages({
+      items: [
+        attached("a", "chart.png"),
+        readyImageAttachment("b", {
+          attachmentId: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",
+          fileName: "beach.png",
+          mediaType: "image/png",
+          width: 800,
+          height: 600,
+          byteLen: 2_048,
+        }),
+      ],
+    });
+
+    // A shared label leaves a screen reader with two identical controls.
+    expect(markup).toContain('aria-label="Remove chart.png"');
+    expect(markup).toContain('aria-label="Remove beach.png"');
+    // The picker cannot show pixels the renderer never received, so a picked
+    // image is identified by its name and geometry instead.
+    expect(markup).toContain("beach.png");
+    expect(markup).toContain("800 × 600");
+  });
+
+  it("says which model cannot read the attached image, and blocks the send", () => {
+    const markup = composerWithImages({
+      items: [
+        readyImageAttachment("b", {
+          attachmentId: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",
+          fileName: "beach.png",
+          mediaType: "image/png",
+          width: 800,
+          height: 600,
+          byteLen: 2_048,
+        }),
+      ],
+      unsupportedModel: "Local Model",
+    });
+
+    expect(markup).toContain("Local Model can’t read images.");
+    expect(markup).toContain("Choose a model that");
+    expect(markup).toContain("remove the attached image");
+    expect(markup).toContain('aria-label="Send message" disabled=""');
+  });
+
+  it("offers the picker only where a host can open one", () => {
+    expect(composerWithImages({})).toContain('aria-label="Attach image"');
+    // Drop and paste still work in a browser; only the native picker does not.
+    expect(composerWithImages({ canPick: false })).not.toContain(
+      'aria-label="Attach image"',
+    );
+  });
+
+  it("explains why a turn carrying images is not sendable yet", () => {
+    expect(imageSendBlocker(undefined)).toBeNull();
+    expect(imageSendBlocker(images())).toBeNull();
+    expect(
+      imageSendBlocker(images({ items: [attached("a", "chart.png")] })),
+    ).toBe("Waiting for images to upload");
+    expect(
+      imageSendBlocker(
+        images({
+          items: withUploadFailed([attached("a", "chart.png")], "a", "damaged"),
+        }),
+      ),
+    ).toBe("An image did not upload");
+    const ready = readyImageAttachment("b", {
+      attachmentId: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",
+      fileName: "beach.png",
+      mediaType: "image/png",
+      width: 800,
+      height: 600,
+      byteLen: 2_048,
+    });
+    expect(
+      imageSendBlocker(
+        images({ items: [ready], unsupportedModel: "Local Model" }),
+      ),
+    ).toBe("Local Model cannot read images");
+    expect(imageSendBlocker(images({ items: [ready] }))).toBeNull();
+    // A text-only model is only a problem for a turn that carries an image.
+    expect(imageSendBlocker(images({ unsupportedModel: "Local Model" }))).toBeNull();
   });
 });

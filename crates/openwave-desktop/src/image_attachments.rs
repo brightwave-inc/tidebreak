@@ -39,12 +39,16 @@ pub(crate) struct AttachImageRequest {
 
 /// What the renderer learns about an attached image.
 ///
-/// Identity plus geometry, nothing else. There is no path, no directory, and no
-/// way back to the bytes from here.
+/// Identity, geometry, and the leaf file name the picker returned — nothing
+/// else. There is no directory, no path, and no way back to the bytes from
+/// here. The name is included because it is the one thing the composer cannot
+/// invent for itself: without it every picked image reads as an anonymous tile,
+/// and a reader with three attached cannot tell which one to remove.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AttachedImage {
     attachment_id: String,
+    file_name: String,
     media_type: String,
     width: u32,
     height: u32,
@@ -66,16 +70,39 @@ struct ServerErrorBody {
     kind: String,
 }
 
-impl From<PublishedImageAttachment> for AttachedImage {
-    fn from(published: PublishedImageAttachment) -> Self {
+impl AttachedImage {
+    fn new(published: PublishedImageAttachment, file_name: String) -> Self {
         Self {
             attachment_id: published.attachment_id.to_string(),
+            file_name,
             media_type: published.media_type,
             width: published.width,
             height: published.height,
             byte_len: published.byte_len,
         }
     }
+}
+
+/// The leaf name of the picked file, bounded and safe to render.
+///
+/// Only the last component crosses, so the directories the user browsed through
+/// stay in the host. The character check is the same one the document import
+/// applies: a name is written by whoever wrote the file, and control or
+/// formatting characters in one can reorder or hide the rest of a composer
+/// chip's text.
+fn picked_image_name(path: &Path) -> Result<String, String> {
+    if !path.is_absolute() {
+        return Err("The image picker returned an invalid file".to_owned());
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| {
+            !name.is_empty()
+                && name.chars().count() <= 255
+                && name.chars().all(crate::documents::is_safe_title_char)
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| "The selected image has an invalid name".to_owned())
 }
 
 /// Pick one image from disk and publish it for a conversation.
@@ -99,6 +126,7 @@ pub(crate) async fn attach_chat_image(
     let Some(path) = pick_image(&app).await? else {
         return Ok(None);
     };
+    let file_name = picked_image_name(&path)?;
     let bytes = tauri::async_runtime::spawn_blocking(move || read_selected_image(&path))
         .await
         .map_err(|_| "Could not read the selected image".to_owned())??;
@@ -135,7 +163,7 @@ pub(crate) async fn attach_chat_image(
         .json::<PublishedImageAttachment>()
         .await
         .map_err(|_| "Attaching the image returned an invalid response".to_owned())?;
-    Ok(Some(AttachedImage::from(published)))
+    Ok(Some(AttachedImage::new(published, file_name)))
 }
 
 fn image_attachments_path(chat_id: ChatId) -> String {
@@ -276,14 +304,17 @@ mod tests {
     }
 
     #[test]
-    fn the_renderer_projection_is_identity_and_geometry_only() {
-        let attached = AttachedImage::from(PublishedImageAttachment {
-            attachment_id: Uuid::nil(),
-            media_type: "image/png".to_owned(),
-            width: 800,
-            height: 600,
-            byte_len: 1_024,
-        });
+    fn the_renderer_projection_is_identity_geometry_and_a_leaf_name_only() {
+        let attached = AttachedImage::new(
+            PublishedImageAttachment {
+                attachment_id: Uuid::nil(),
+                media_type: "image/png".to_owned(),
+                width: 800,
+                height: 600,
+                byte_len: 1_024,
+            },
+            "diagram.png".to_owned(),
+        );
         let json = serde_json::to_value(attached).unwrap();
         let mut keys = json
             .as_object()
@@ -294,12 +325,33 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            ["attachmentId", "byteLen", "height", "mediaType", "width"]
+            [
+                "attachmentId",
+                "byteLen",
+                "fileName",
+                "height",
+                "mediaType",
+                "width"
+            ]
         );
         let serialized = json.to_string();
         for forbidden in ["path", "bytes", "data", "base64", "Users", "token"] {
             assert!(!serialized.contains(forbidden), "leaked {forbidden}");
         }
+    }
+
+    #[test]
+    fn the_picked_name_is_a_bounded_leaf_and_never_the_directories_above_it() {
+        assert_eq!(
+            picked_image_name(Path::new("/Users/private/holiday/beach.png")).unwrap(),
+            "beach.png"
+        );
+        // A relative path cannot have come from the picker, and a name carrying
+        // a bidi override could redraw the rest of the chip's text.
+        assert!(picked_image_name(Path::new("beach.png")).is_err());
+        assert!(picked_image_name(Path::new("/Users/private/bad\u{202e}gnp.png")).is_err());
+        let overlong = format!("/Users/private/{}.png", "a".repeat(300));
+        assert!(picked_image_name(Path::new(&overlong)).is_err());
     }
 
     #[test]

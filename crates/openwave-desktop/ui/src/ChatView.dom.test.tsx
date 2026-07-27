@@ -5,6 +5,7 @@ import { useRef, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, Chat } from "./api";
 import { ChatView, type ChatViewProps } from "./ChatView";
+import type { ComposerImages } from "./Composer";
 import { useChatSessionStore } from "./ChatSessionStore";
 import { usePendingPrompts } from "./PendingPrompts";
 
@@ -28,6 +29,20 @@ const client = {
   answerUserQuestions: vi.fn().mockResolvedValue(undefined),
 } as unknown as ApiClient;
 
+function noImages(): ComposerImages {
+  return {
+    items: [],
+    canPick: false,
+    picking: false,
+    error: null,
+    unsupportedModel: null,
+    onPick: vi.fn(),
+    onAttachFiles: vi.fn(),
+    onRemove: vi.fn(),
+    onRetry: vi.fn(),
+  };
+}
+
 /**
  * The pane with the draft wired up the way the root wires it: state for
  * rendering, a ref for reading it at the moment guidance is sent.
@@ -45,6 +60,7 @@ function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
       draft={draft}
       draftRef={draftRef}
       composerModelMenu={null}
+      composerImages={noImages()}
       attachingSource={false}
       attachedSourceName={null}
       sourceAttachmentError={null}
@@ -71,6 +87,7 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
     draft: "",
     draftRef: { current: "" },
     composerModelMenu: null,
+    composerImages: noImages(),
     attachingSource: false,
     attachedSourceName: null,
     sourceAttachmentError: null,
