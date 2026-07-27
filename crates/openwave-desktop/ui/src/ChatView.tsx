@@ -119,6 +119,7 @@ export function ChatView({
       <div className="message-view">
         <MessageList
           messages={messages}
+          chatId={chat.id}
           folderAccessRequests={folderAccess.requests}
           userQuestionRequests={userQuestions.requests}
           nativeHost={nativeHost}

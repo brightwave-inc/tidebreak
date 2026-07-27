@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppWindow, ShieldCheck } from "lucide-react";
 import { useApp } from "./AppContext";
+import { createMcpAppBridge, type McpAppBridge } from "./McpAppBridge";
 
 /**
  * The sandboxed surface for an MCP Apps view.
@@ -11,21 +12,84 @@ import { useApp } from "./AppContext";
  * with the app: `sandbox="allow-scripts"` deliberately omits
  * `allow-same-origin`, so the view runs with an opaque origin — no cookies,
  * no storage, no reach into OpenWave's DOM or its bearer token.
+ *
+ * The card also runs the MCP Apps host bridge: it answers the view's
+ * `ui/initialize`, and once the view reports ready it forwards the call's
+ * input and result — fetched as an opaque envelope the transcript itself
+ * never reads — so an interactive view lights up with real data.
  */
 type ViewState =
   | { kind: "loading" }
   | { kind: "unavailable" }
   | { kind: "ready"; url: string };
 
+const DEFAULT_FRAME_HEIGHT = 384;
+
 export function McpAppCard({
   server,
   resourceUri,
+  chatId,
+  callId,
 }: {
   server: string;
   resourceUri: string;
+  /** When both ids are present the bridge delivers the call's result. */
+  chatId?: string;
+  callId?: string;
 }) {
-  const { client } = useApp();
+  const { client, themeMode } = useApp();
   const [state, setState] = useState<ViewState>({ kind: "loading" });
+  const [frameHeight, setFrameHeight] = useState(DEFAULT_FRAME_HEIGHT);
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const bridgeRef = useRef<McpAppBridge | null>(null);
+
+  const resolveTheme = useCallback(
+    (): "light" | "dark" =>
+      themeMode === "system"
+        ? window.matchMedia?.("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light"
+        : themeMode,
+    [themeMode],
+  );
+  const themeRef = useRef(resolveTheme);
+  themeRef.current = resolveTheme;
+
+  // The bridge listener must exist before the frame's document runs, or the
+  // view's ui/initialize request is lost and it hangs until its timeout.
+  // One bridge per mount: recreating it (e.g. on a theme change) would
+  // destroy the buffered handshake state mid-flight and strand the view
+  // without its data, so the theme is read through a ref instead.
+  useEffect(() => {
+    const bridge = createMcpAppBridge({
+      frame: () => frameRef.current?.contentWindow ?? null,
+      theme: () => themeRef.current(),
+      onHeight: setFrameHeight,
+    });
+    bridgeRef.current = bridge;
+    window.addEventListener("message", bridge.handleMessage);
+    return () => {
+      window.removeEventListener("message", bridge.handleMessage);
+      bridge.dispose();
+      bridgeRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chatId || !callId) return;
+    let cancelled = false;
+    void client
+      .getMcpAppPayload(chatId, callId)
+      .then((payload) => {
+        if (!cancelled) bridgeRef.current?.deliverPayload(payload);
+      })
+      .catch(() => {
+        // Without a payload the view still renders; it just waits for data.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, chatId, callId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,11 +139,13 @@ export function McpAppCard({
         )}
         {state.kind === "ready" && (
           <iframe
+            ref={frameRef}
             title={`MCP App view from ${server}`}
             src={state.url}
             sandbox="allow-scripts"
             referrerPolicy="no-referrer"
-            className="h-96 w-full border-0"
+            className="w-full border-0"
+            style={{ height: frameHeight }}
           />
         )}
       </div>
