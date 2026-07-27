@@ -18,9 +18,25 @@
 export type ApprovalClass = "read_only" | "workspace" | "sensitive";
 
 /**
+ * Opaque renderer identity for one assistant-message citation.
+ */
+export type AssistantCitationId = string;
+
+/**
+ * Renderer-safe historical citation projected from immutable evidence.
+ */
+export type AssistantCitationSnapshot = { id: AssistantCitationId, ordinal: number, excerpt: string, heading: string | null, pages: Array<number>, };
+
+/**
  * Identifies one tool call, stable across its request/approval/result.
  */
 export type CallId = string;
+
+/**
+ * A renderer-safe durable transcript entry. Internal routing and tool state
+ * deliberately remain behind the server boundary.
+ */
+export type ChatMessageSnapshot = { id: MessageId, role: TranscriptRole, content: string, created_at: string, citations: Array<AssistantCitationSnapshot>, };
 
 /**
  * A completed tool invocation with no results, tool identity, provider
@@ -142,6 +158,22 @@ timed_out: boolean,
  * Whether the provider dropped output past its capture limit.
  */
 output_truncated: boolean, stdout: string, stderr: string, };
+
+/**
+ * The roles a visible transcript entry can have.
+ *
+ * Narrower than [`Role`] on purpose. The transcript shows the conversation, not
+ * the model's plumbing, so `System` and `Tool` never appear — and that was
+ * previously guaranteed only by a `matches!` filter at the one call site, while
+ * the snapshot's own type still admitted all four. The renderer mirrored the
+ * narrow version and branched on `assistant` with no third arm, so a `system`
+ * entry reaching it would have rendered as a user message.
+ *
+ * Encoding it here makes the guarantee the type's rather than the caller's, and
+ * makes a new [`Role`] variant a decision in [`Self::for_transcript`] instead of
+ * something that silently appears in the transcript.
+ */
+export type TranscriptRole = "user" | "assistant";
 
 /**
  * Identifies one turn: a single user input through to the final answer.

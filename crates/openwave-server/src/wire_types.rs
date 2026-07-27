@@ -303,6 +303,10 @@ mod tests {
         // vocabulary and the action preview with the live stream, which is why
         // it belongs with them rather than with the rest of the REST surface.
         generate::collect_from::<openwave_core::ChatToolActivitySnapshot>(&cfg, &mut out);
+        // The visible transcript entry. Its role is deliberately narrower than
+        // the stored one, and generating it is what keeps the renderer's
+        // two-arm branch honest.
+        generate::collect_from::<crate::routes::ChatMessageSnapshot>(&cfg, &mut out);
         out
     }
 
@@ -639,6 +643,10 @@ mod tests {
             ("status", "RendererToolStatus"),
             ("approval", "ToolApprovalKind"),
             ("class", "ApprovalClass"),
+            // Four variants in the stored Role, two here. A widened union
+            // renders a system message as a user bubble, and the two-arm
+            // branch that reads it still compiles.
+            ("role", "TranscriptRole"),
         ] {
             assert!(
                 generated.contains(&format!("{field}: {expected}")),

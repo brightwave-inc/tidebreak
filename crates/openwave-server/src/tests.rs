@@ -41,7 +41,7 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
     let message_id = MessageId::new();
     let snapshot = crate::routes::ChatMessageSnapshot {
         id: message_id,
-        role: Role::Assistant,
+        role: crate::routes::TranscriptRole::Assistant,
         content: "answer".into(),
         created_at: chrono::Utc::now(),
         citations: vec![openwave_core::AssistantCitationSnapshot {

@@ -1,12 +1,15 @@
 import {
   RENDERER_TOOL_NAMES,
   type ApprovalClass,
+  type AssistantCitationSnapshot,
+  type ChatMessageSnapshot,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
   type RendererAgentEvent,
   type RendererSequencedEvent,
   type RendererToolName,
   type ToolActionPreview,
+  type TranscriptRole,
   type ToolApprovalKind,
   type ToolResultPreview as WireToolResultPreview,
 } from "./generated/wire";
@@ -14,6 +17,7 @@ import {
 export type {
   ApprovalClass,
   ChatToolActivityStatus,
+  TranscriptRole,
   RendererToolName,
   ToolActionPreview,
 };
@@ -171,19 +175,17 @@ export type Chat = {
   created_at: string;
 };
 
-/** One visible, durable transcript entry in conversation order. */
-export type ChatMessage = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  created_at: string;
-  /**
-   * Deliberately wider than the wire: the server always serializes this, as
-   * `[]` when empty. It is optional here because the transcript is not run
-   * through a validator — it arrives as a parsed cast — so the `?` is what
-   * makes the compiler demand a guard at the one place that reads it. Narrowing
-   * this to match the wire would delete that guard, not earn it.
-   */
+/**
+ * One visible, durable transcript entry in conversation order.
+ *
+ * Generated apart from `citations`, which is deliberately wider than the wire:
+ * the server always serializes it, as `[]` when empty. It is optional here
+ * because the transcript is not run through a validator — it arrives as a parsed
+ * cast — so the `?` is what makes the compiler demand a guard at the one place
+ * that reads it. Narrowing it to match the wire would delete that guard rather
+ * than earn it, so the override is spelled out instead of hidden.
+ */
+export type ChatMessage = Omit<ChatMessageSnapshot, "citations"> & {
   citations?: ChatMessageCitation[];
 };
 
@@ -193,13 +195,7 @@ export type ChatMessage = {
  * Ownership is positional: the server nests each citation under its message and
  * deliberately skips `message_id` on the wire. Do not reintroduce it.
  */
-export type ChatMessageCitation = {
-  id: string;
-  ordinal: number;
-  excerpt: string;
-  heading: string | null;
-  pages: number[];
-};
+export type ChatMessageCitation = AssistantCitationSnapshot;
 
 /**
  * A fixed, terminal tool-card projection with no canonical tool data.

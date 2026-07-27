@@ -731,10 +731,10 @@ pub async fn patch_chat(
 
 /// A renderer-safe durable transcript entry. Internal routing and tool state
 /// deliberately remain behind the server boundary.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 pub struct ChatMessageSnapshot {
     pub id: MessageId,
-    pub role: Role,
+    pub role: TranscriptRole,
     pub content: String,
     pub created_at: chrono::DateTime<Utc>,
     pub citations: Vec<openwave_core::AssistantCitationSnapshot>,
@@ -752,15 +752,50 @@ pub struct ChatTranscript {
     pub last_event_seq: i64,
 }
 
-impl From<StoredMessage> for ChatMessageSnapshot {
-    fn from(message: StoredMessage) -> Self {
-        Self {
+/// The roles a visible transcript entry can have.
+///
+/// Narrower than [`Role`] on purpose. The transcript shows the conversation, not
+/// the model's plumbing, so `System` and `Tool` never appear — and that was
+/// previously guaranteed only by a `matches!` filter at the one call site, while
+/// the snapshot's own type still admitted all four. The renderer mirrored the
+/// narrow version and branched on `assistant` with no third arm, so a `system`
+/// entry reaching it would have rendered as a user message.
+///
+/// Encoding it here makes the guarantee the type's rather than the caller's, and
+/// makes a new [`Role`] variant a decision in [`Self::for_transcript`] instead of
+/// something that silently appears in the transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptRole {
+    User,
+    Assistant,
+}
+
+impl TranscriptRole {
+    /// `None` for roles the transcript does not show.
+    fn for_transcript(role: Role) -> Option<Self> {
+        match role {
+            Role::User => Some(Self::User),
+            Role::Assistant => Some(Self::Assistant),
+            Role::System | Role::Tool => None,
+        }
+    }
+}
+
+impl ChatMessageSnapshot {
+    /// `None` when the message is not part of the visible conversation.
+    ///
+    /// Replaces a separate `matches!` filter followed by an infallible
+    /// conversion: the two could disagree, and only the filter was enforcing the
+    /// narrowing the type claimed.
+    fn for_transcript(message: StoredMessage) -> Option<Self> {
+        Some(Self {
             id: message.id,
-            role: message.role,
+            role: TranscriptRole::for_transcript(message.role)?,
             content: message.content,
             created_at: message.created_at,
             citations: Vec::new(),
-        }
+        })
     }
 }
 
@@ -786,13 +821,12 @@ pub async fn list_chat_messages(
     let messages = transcript
         .messages
         .into_iter()
-        .filter(|message| matches!(message.role, Role::User | Role::Assistant))
-        .map(|message| {
-            let mut snapshot = ChatMessageSnapshot::from(message);
+        .filter_map(|message| {
+            let mut snapshot = ChatMessageSnapshot::for_transcript(message)?;
             snapshot.citations = citations_by_message
                 .remove(&snapshot.id)
                 .unwrap_or_default();
-            snapshot
+            Some(snapshot)
         })
         .collect();
     Ok(Json(ChatTranscript {
