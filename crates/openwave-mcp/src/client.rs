@@ -1,4 +1,5 @@
-//! MCP client support for mounting an external stdio tool server.
+//! MCP client support for mounting an external tool server over stdio or
+//! Streamable HTTP.
 
 use std::collections::HashSet;
 use std::process::Stdio;
@@ -16,6 +17,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+use crate::http::HttpWire;
 use crate::protocol::{Response, RpcError, PROTOCOL_VERSION};
 
 const CLIENT_NAME: &str = "openwave";
@@ -30,7 +32,7 @@ const MAX_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_TOOL_METADATA_BYTES: usize = 512 * 1024;
 const MAX_TOOL_LIST_PAGES: usize = 64;
 const MAX_CURSOR_BYTES: usize = 4 * 1024;
-const MAX_JSON_RPC_FRAME_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_JSON_RPC_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
 /// Default maximum time to wait for one external MCP request.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -87,7 +89,7 @@ impl McpClient {
     {
         Self::connect_session(
             server_name.into(),
-            Session::new(
+            Session::stream(
                 Box::new(BufReader::new(reader)),
                 Box::new(writer),
                 None,
@@ -146,7 +148,7 @@ impl McpClient {
 
         let client = Self::connect_session(
             server_name,
-            Session::new(
+            Session::stream(
                 Box::new(BufReader::new(stdout)),
                 Box::new(stdin),
                 Some(child),
@@ -154,6 +156,43 @@ impl McpClient {
             ),
         )
         .await?;
+        client.session.lock().await.request_timeout = request_timeout;
+        Ok(client)
+    }
+
+    /// Connect to an external Streamable HTTP MCP server.
+    ///
+    /// `bearer_token` is attached as an `Authorization: Bearer` header on every
+    /// request and never appears in errors, logs, or the mounted tool surface.
+    pub async fn connect_http(
+        server_name: impl Into<String>,
+        url: &str,
+        bearer_token: Option<&str>,
+    ) -> Result<Self> {
+        Self::connect_http_with_timeouts(
+            server_name,
+            url,
+            bearer_token,
+            DEFAULT_REQUEST_TIMEOUT,
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Connect over HTTP with a separately bounded initialization timeout, in
+    /// the same shape as [`Self::spawn_with_timeouts`].
+    pub async fn connect_http_with_timeouts(
+        server_name: impl Into<String>,
+        url: &str,
+        bearer_token: Option<&str>,
+        initialization_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self> {
+        let server_name = server_name.into();
+        validate_server_name(&server_name)?;
+        let wire = HttpWire::new(url, bearer_token)?;
+        let client =
+            Self::connect_session(server_name, Session::http(wire, initialization_timeout)).await?;
         client.session.lock().await.request_timeout = request_timeout;
         Ok(client)
     }
@@ -259,30 +298,42 @@ impl McpClient {
 }
 
 struct Session {
-    reader: BoxReader,
-    writer: BoxWriter,
+    wire: Wire,
     next_id: u64,
     request_timeout: Duration,
     tools_list_changed: bool,
-    // Keeping the child owns its lifecycle; `kill_on_drop(true)` handles both a
-    // normal registry teardown and a failed initialization.
-    _child: Option<Child>,
+}
+
+enum Wire {
+    Stream(StreamWire),
+    Http(HttpWire),
 }
 
 impl Session {
-    fn new(
+    fn stream(
         reader: BoxReader,
         writer: BoxWriter,
         child: Option<Child>,
         request_timeout: Duration,
     ) -> Self {
         Self {
-            reader,
-            writer,
+            wire: Wire::Stream(StreamWire {
+                reader,
+                writer,
+                _child: child,
+            }),
             next_id: 1,
             request_timeout,
             tools_list_changed: false,
-            _child: child,
+        }
+    }
+
+    fn http(wire: HttpWire, request_timeout: Duration) -> Self {
+        Self {
+            wire: Wire::Http(wire),
+            next_id: 1,
+            request_timeout,
+            tools_list_changed: false,
         }
     }
 
@@ -302,18 +353,47 @@ impl Session {
             "method": method,
             "params": params
         });
-        timeout(self.request_timeout, self.write_value(&request))
-            .await
-            .map_err(|_| mcp_message(format!("timed out writing {method} request")))??;
-        match timeout(self.request_timeout, self.read_response(id)).await {
+        let request_timeout = self.request_timeout;
+        let Self {
+            wire,
+            tools_list_changed,
+            ..
+        } = self;
+        let outcome = match wire {
+            Wire::Stream(stream) => {
+                timeout(request_timeout, stream.write_value(&request))
+                    .await
+                    .map_err(|_| mcp_message(format!("timed out writing {method} request")))??;
+                timeout(
+                    request_timeout,
+                    stream.read_response(id, tools_list_changed),
+                )
+                .await
+            }
+            Wire::Http(http) => {
+                timeout(
+                    request_timeout,
+                    http.request(id, &request, tools_list_changed),
+                )
+                .await
+            }
+        };
+        match outcome {
             Ok(result) => result,
             Err(_) => {
-                let _ = self
-                    .notify(
-                        "notifications/cancelled",
-                        json!({"requestId": id, "reason": "OpenWave MCP request timed out"}),
-                    )
-                    .await;
+                // Best-effort courtesy: tell the server the request is dead so
+                // it can stop working on it. Failure to deliver changes nothing.
+                let cancelled = json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": id, "reason": "OpenWave MCP request timed out"}
+                });
+                let _ = match &mut self.wire {
+                    Wire::Stream(stream) => {
+                        timeout(request_timeout, stream.write_value(&cancelled)).await
+                    }
+                    Wire::Http(http) => timeout(request_timeout, http.notify(&cancelled)).await,
+                };
                 Err(mcp_message(format!(
                     "external server timed out handling {method}"
                 )))
@@ -327,11 +407,28 @@ impl Session {
             "method": method,
             "params": params
         });
-        timeout(self.request_timeout, self.write_value(&notification))
-            .await
-            .map_err(|_| mcp_message(format!("timed out writing {method} notification")))?
+        match &mut self.wire {
+            Wire::Stream(stream) => {
+                timeout(self.request_timeout, stream.write_value(&notification))
+                    .await
+                    .map_err(|_| mcp_message(format!("timed out writing {method} notification")))?
+            }
+            Wire::Http(http) => timeout(self.request_timeout, http.notify(&notification))
+                .await
+                .map_err(|_| mcp_message(format!("timed out writing {method} notification")))?,
+        }
     }
+}
 
+struct StreamWire {
+    reader: BoxReader,
+    writer: BoxWriter,
+    // Keeping the child owns its lifecycle; `kill_on_drop(true)` handles both a
+    // normal registry teardown and a failed initialization.
+    _child: Option<Child>,
+}
+
+impl StreamWire {
     async fn write_value(&mut self, value: &Value) -> Result<()> {
         let mut encoded = serde_json::to_vec(value)?;
         encoded.push(b'\n');
@@ -345,7 +442,11 @@ impl Session {
             .map_err(|error| mcp_error("could not flush external server request", error))
     }
 
-    async fn read_response(&mut self, expected_id: u64) -> Result<Value> {
+    async fn read_response(
+        &mut self,
+        expected_id: u64,
+        tools_list_changed: &mut bool,
+    ) -> Result<Value> {
         loop {
             let Some(line) = read_bounded_line(&mut self.reader).await? else {
                 return Err(mcp_message("external server closed stdout before replying"));
@@ -355,67 +456,96 @@ impl Session {
             }
             let value: Value = serde_json::from_slice(&line)
                 .map_err(|error| mcp_error("external server returned malformed JSON-RPC", error))?;
-
-            // Server notifications are asynchronous and need no response. Ping
-            // is part of the MCP base protocol in either direction. The client
-            // advertises no other request-producing capabilities, so fail closed
-            // for any other server request.
-            if let Some(method) = value.get("method").and_then(Value::as_str) {
-                if method == "notifications/tools/list_changed" && value.get("id").is_none() {
-                    self.tools_list_changed = true;
+            match classify_incoming(value, expected_id, tools_list_changed)? {
+                Incoming::FinalResult(result) => return Ok(result),
+                Incoming::ServerRequest { id, method } => {
+                    let response = server_request_response(id, &method)?;
+                    self.write_value(&response).await?;
                 }
-                if let Some(id) = value.get("id") {
-                    self.write_server_request_response(id.clone(), method)
-                        .await?;
-                }
-                continue;
+                Incoming::Ignored => {}
             }
-
-            let response: IncomingResponse = serde_json::from_value(value).map_err(|error| {
-                mcp_error(
-                    "external server returned an invalid JSON-RPC response",
-                    error,
-                )
-            })?;
-            if response.jsonrpc != "2.0" {
-                return Err(mcp_message(
-                    "external server response did not use JSON-RPC 2.0",
-                ));
-            }
-            if response.id.as_u64().is_some_and(|id| id < expected_id) {
-                // A server may complete an already-cancelled timed-out request
-                // after the client has moved on. Calls are serialized, so only
-                // an older numeric id can safely be recognized as stale.
-                continue;
-            }
-            if response.id != json!(expected_id) {
-                return Err(mcp_message(format!(
-                    "external server replied with id {} while waiting for {expected_id}",
-                    response.id
-                )));
-            }
-            return match (response.result, response.error) {
-                (Some(result), None) => Ok(result),
-                (None, Some(error)) => Err(mcp_message(format!(
-                    "external server returned JSON-RPC error {}: {}",
-                    error.code, error.message
-                ))),
-                _ => Err(mcp_message(
-                    "external server response must contain exactly one of result or error",
-                )),
-            };
         }
     }
+}
 
-    async fn write_server_request_response(&mut self, id: Value, method: &str) -> Result<()> {
-        let response = if method == "ping" {
-            Response::result(id, json!({}))
-        } else {
-            Response::error(id, RpcError::method_not_found(method))
-        };
-        let value = serde_json::to_value(response)?;
-        self.write_value(&value).await
+/// One classified incoming JSON-RPC message, transport-independent.
+pub(crate) enum Incoming {
+    /// The response matching the in-flight request id.
+    FinalResult(Value),
+    /// A server-initiated request that needs an answer on the write path.
+    ServerRequest { id: Value, method: String },
+    /// A notification or a stale response to an already-abandoned request.
+    Ignored,
+}
+
+/// Classify one message the way the stdio loop always has: notifications latch
+/// `tools/list_changed`, server requests are surfaced for a fail-closed answer,
+/// stale numeric ids are skipped, and anything else must be the response.
+pub(crate) fn classify_incoming(
+    value: Value,
+    expected_id: u64,
+    tools_list_changed: &mut bool,
+) -> Result<Incoming> {
+    // Server notifications are asynchronous and need no response. Ping is part
+    // of the MCP base protocol in either direction. The client advertises no
+    // other request-producing capabilities, so fail closed for any other
+    // server request.
+    if let Some(method) = value.get("method").and_then(Value::as_str) {
+        if method == "notifications/tools/list_changed" && value.get("id").is_none() {
+            *tools_list_changed = true;
+        }
+        if let Some(id) = value.get("id") {
+            return Ok(Incoming::ServerRequest {
+                id: id.clone(),
+                method: method.to_string(),
+            });
+        }
+        return Ok(Incoming::Ignored);
     }
+
+    let response: IncomingResponse = serde_json::from_value(value).map_err(|error| {
+        mcp_error(
+            "external server returned an invalid JSON-RPC response",
+            error,
+        )
+    })?;
+    if response.jsonrpc != "2.0" {
+        return Err(mcp_message(
+            "external server response did not use JSON-RPC 2.0",
+        ));
+    }
+    if response.id.as_u64().is_some_and(|id| id < expected_id) {
+        // A server may complete an already-cancelled timed-out request after
+        // the client has moved on. Calls are serialized, so only an older
+        // numeric id can safely be recognized as stale.
+        return Ok(Incoming::Ignored);
+    }
+    if response.id != json!(expected_id) {
+        return Err(mcp_message(format!(
+            "external server replied with id {} while waiting for {expected_id}",
+            response.id
+        )));
+    }
+    match (response.result, response.error) {
+        (Some(result), None) => Ok(Incoming::FinalResult(result)),
+        (None, Some(error)) => Err(mcp_message(format!(
+            "external server returned JSON-RPC error {}: {}",
+            error.code, error.message
+        ))),
+        _ => Err(mcp_message(
+            "external server response must contain exactly one of result or error",
+        )),
+    }
+}
+
+/// The fail-closed answer to a server-initiated request.
+pub(crate) fn server_request_response(id: Value, method: &str) -> Result<Value> {
+    let response = if method == "ping" {
+        Response::result(id, json!({}))
+    } else {
+        Response::error(id, RpcError::method_not_found(method))
+    };
+    Ok(serde_json::to_value(response)?)
 }
 
 async fn read_bounded_line(reader: &mut BoxReader) -> Result<Option<Vec<u8>>> {
@@ -715,11 +845,11 @@ fn decode_result<T: for<'de> Deserialize<'de>>(method: &str, value: Value) -> Re
     })
 }
 
-fn mcp_message(message: impl Into<String>) -> AgentError {
+pub(crate) fn mcp_message(message: impl Into<String>) -> AgentError {
     AgentError::msg(format!("MCP client error: {}", message.into()))
 }
 
-fn mcp_error(context: impl AsRef<str>, error: impl std::fmt::Display) -> AgentError {
+pub(crate) fn mcp_error(context: impl AsRef<str>, error: impl std::fmt::Display) -> AgentError {
     mcp_message(format!("{}: {error}", context.as_ref()))
 }
 
@@ -1119,5 +1249,229 @@ mod tests {
     fn non_text_content_is_preserved_for_the_model() {
         let block = json!({"type": "resource_link", "uri": "file:///report.pdf"});
         assert_eq!(content_for_model(&block), block.to_string());
+    }
+
+    mod http_transport {
+        use std::net::SocketAddr;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use axum::extract::State;
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::{IntoResponse, Response as AxumResponse};
+        use axum::routing::post;
+        use axum::Router;
+
+        use super::*;
+
+        const TEST_TOKEN: &str = "test-token-abc123";
+        const TEST_SESSION_ID: &str = "session-xyz";
+
+        #[derive(Default)]
+        struct ServerState {
+            requests: AtomicUsize,
+            sse: bool,
+        }
+
+        async fn handler(
+            State(state): State<Arc<ServerState>>,
+            headers: HeaderMap,
+            body: String,
+        ) -> AxumResponse {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            if authorization != format!("Bearer {TEST_TOKEN}") {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            assert!(headers
+                .get("accept")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|accept| accept.contains("application/json")));
+            assert_eq!(
+                headers
+                    .get("mcp-protocol-version")
+                    .and_then(|value| value.to_str().ok()),
+                Some(PROTOCOL_VERSION)
+            );
+            let request: Value = serde_json::from_str(&body).unwrap();
+            let sequence = state.requests.fetch_add(1, Ordering::SeqCst);
+            if sequence > 0 {
+                // Every request after initialize must echo the issued session.
+                assert_eq!(
+                    headers
+                        .get("mcp-session-id")
+                        .and_then(|value| value.to_str().ok()),
+                    Some(TEST_SESSION_ID)
+                );
+            }
+            let Some(id) = request.get("id").cloned() else {
+                return StatusCode::ACCEPTED.into_response();
+            };
+            let result = match request["method"].as_str().unwrap() {
+                "initialize" => json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "http-fixture", "version": "9"}
+                }),
+                "tools/list" => json!({
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Look something up",
+                        "inputSchema": {"type": "object"}
+                    }]
+                }),
+                "tools/call" => json!({
+                    "content": [{"type": "text", "text": "http result"}],
+                    "structuredContent": {"via": "http"},
+                    "isError": false
+                }),
+                "ping" => json!({}),
+                method => panic!("unexpected method: {method}"),
+            };
+            let response = json!({"jsonrpc": "2.0", "id": id, "result": result});
+            if state.sse {
+                let notification =
+                    json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"});
+                let stream_body =
+                    format!("event: message\ndata: {notification}\n\ndata: {response}\n\n");
+                (
+                    [
+                        ("content-type", "text/event-stream"),
+                        ("mcp-session-id", TEST_SESSION_ID),
+                    ],
+                    stream_body,
+                )
+                    .into_response()
+            } else {
+                (
+                    [
+                        ("content-type", "application/json"),
+                        ("mcp-session-id", TEST_SESSION_ID),
+                    ],
+                    response.to_string(),
+                )
+                    .into_response()
+            }
+        }
+
+        async fn serve(state: Arc<ServerState>) -> SocketAddr {
+            let app = Router::new().route("/mcp", post(handler)).with_state(state);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            address
+        }
+
+        #[tokio::test]
+        async fn connects_and_calls_tools_over_json_responses() {
+            let address = serve(Arc::new(ServerState::default())).await;
+            let client = McpClient::connect_http(
+                "gateway",
+                &format!("http://{address}/mcp"),
+                Some(TEST_TOKEN),
+            )
+            .await
+            .unwrap();
+            assert_eq!(client.server_info().name, "http-fixture");
+
+            let mut registry = ToolRegistry::new();
+            client.mount(&mut registry);
+            let output = registry
+                .get("mcp__gateway__lookup")
+                .unwrap()
+                .execute(
+                    &ToolCtx::new_legacy_workspace(
+                        ChatId::new(),
+                        None,
+                        PathBuf::from("unused-by-mcp"),
+                    ),
+                    json!({}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(output.content, "http result");
+            assert_eq!(output.data, Some(json!({"via": "http"})));
+            assert_eq!(
+                client.probe().await.unwrap(),
+                McpProbe::Ready {
+                    tools_list_changed: false
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn reads_event_stream_responses_and_latches_notifications() {
+            let address = serve(Arc::new(ServerState {
+                requests: AtomicUsize::new(0),
+                sse: true,
+            }))
+            .await;
+            let client = McpClient::connect_http(
+                "gateway",
+                &format!("http://{address}/mcp"),
+                Some(TEST_TOKEN),
+            )
+            .await
+            .unwrap();
+            // Every SSE response carried a tools/list_changed notification
+            // ahead of the result; the probe must surface the latch.
+            assert_eq!(
+                client.probe().await.unwrap(),
+                McpProbe::Ready {
+                    tools_list_changed: true
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn rejected_credentials_fail_without_echoing_the_token() {
+            let address = serve(Arc::new(ServerState::default())).await;
+            let error = McpClient::connect_http(
+                "gateway",
+                &format!("http://{address}/mcp"),
+                Some("wrong-token"),
+            )
+            .await
+            .err()
+            .expect("wrong token must fail");
+            let message = error.to_string();
+            assert!(message.contains("rejected the configured credentials"));
+            assert!(!message.contains("wrong-token"));
+        }
+
+        #[tokio::test]
+        async fn an_unreachable_server_fails_with_a_bounded_error() {
+            let error = McpClient::connect_http_with_timeouts(
+                "gateway",
+                "http://127.0.0.1:1/mcp",
+                None,
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            )
+            .await
+            .err()
+            .expect("unreachable server must fail");
+            assert!(error
+                .to_string()
+                .contains("could not reach external server"));
+        }
+
+        #[tokio::test]
+        async fn http_connect_validates_the_namespace_and_url_first() {
+            let error = McpClient::connect_http("bad server", "http://127.0.0.1/mcp", None)
+                .await
+                .err()
+                .expect("invalid name must fail");
+            assert!(error.to_string().contains("ASCII letters"));
+
+            let error = McpClient::connect_http("gateway", "ftp://host/mcp", None)
+                .await
+                .err()
+                .expect("invalid scheme must fail");
+            assert!(error.to_string().contains("http or https"));
+        }
     }
 }

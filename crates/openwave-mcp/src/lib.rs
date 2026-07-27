@@ -14,8 +14,9 @@
 //! transport-agnostic; [`serve_stdio`] runs it over the standard newline-delimited
 //! JSON-RPC stdio transport that MCP clients launch servers with.
 //! [`McpClient`] connects in the other direction: it initializes an external
-//! stdio MCP server, discovers its tools, and mounts namespaced proxies into an
-//! OpenWave [`ToolRegistry`](openwave_core::ToolRegistry).
+//! MCP server — a spawned stdio child or a remote Streamable HTTP endpoint —
+//! discovers its tools, and mounts namespaced proxies into an OpenWave
+//! [`ToolRegistry`](openwave_core::ToolRegistry).
 //!
 //! The protocol layer is hand-rolled ([`protocol`]) rather than pulling a full MCP
 //! SDK — the surface a tool server needs is small, and this keeps the crate light
@@ -43,6 +44,7 @@
 //! MCP tool can reach outside OpenWave's workspace and process boundary.
 
 mod client;
+mod http;
 pub mod protocol;
 mod server;
 mod stdio;
@@ -50,6 +52,7 @@ mod stdio;
 pub use client::{
     McpClient, McpProbe, McpServerInfo, DEFAULT_REQUEST_TIMEOUT, MAX_SERVER_NAME_BYTES,
 };
+pub use http::validate_http_url;
 pub use protocol::PROTOCOL_VERSION;
 pub use server::McpServer;
 pub use stdio::{serve, serve_stdio};
