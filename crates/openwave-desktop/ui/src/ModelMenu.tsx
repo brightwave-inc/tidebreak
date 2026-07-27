@@ -55,11 +55,15 @@ export function ProviderIcon({
   );
 }
 
-/** Compact token count, e.g. 200000 -> "200K", 1000000 -> "1M". */
+/**
+ * Compact token count, e.g. 200000 -> "200K", 1000000 -> "1M".
+ *
+ * Millions truncate rather than round, so a 1,050,000-token window reads as
+ * "1M". A limit that rounds up reads as more headroom than the model has.
+ */
 export function formatContextWindow(tokens: number): string {
   if (tokens >= 1_000_000) {
-    const millions = tokens / 1_000_000;
-    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`;
+    return `${Math.floor(tokens / 100_000) / 10}M`;
   }
   if (tokens >= 1_000) {
     return `${Math.round(tokens / 1_000)}K`;
