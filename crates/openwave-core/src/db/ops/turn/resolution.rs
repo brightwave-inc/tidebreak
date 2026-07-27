@@ -9,7 +9,7 @@ use crate::id::{ChatId, TurnId};
 use crate::model::{
     Message, Role, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteerStatus,
 };
-use crate::provider::{StopReason, Usage};
+use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::storage::{
     CompleteTurnRunOutcome, FinishTurnCancellationOutcome, JournaledTurnOutcome,
     RecordTurnFailureOutcome, RequestTurnCancellationOutcome,
@@ -92,6 +92,37 @@ pub(in crate::db) async fn complete_turn_run_with_citations_and_append_event(
     stop_reason: StopReason,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
     let event = AgentEvent::TurnCompleted { usage, stop_reason };
+    complete_turn_run_inner(
+        store,
+        id,
+        lease_token,
+        expected_steer_revision,
+        now,
+        output,
+        citations,
+        Some(&event),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn complete_refused_turn_run_with_citations_and_append_event(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    expected_steer_revision: i64,
+    now: chrono::DateTime<Utc>,
+    output: &Message,
+    citations: &[crate::AssistantCitationReference],
+    usage: Usage,
+    refusal: RefusalOutcome,
+) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
+    if refusal.partial_output() != !output.content.is_empty() {
+        return Err(AgentError::Store(format!(
+            "turn {id} refusal partial-output metadata does not match its assistant output"
+        )));
+    }
+    let event = AgentEvent::TurnRefused { usage, refusal };
     complete_turn_run_inner(
         store,
         id,
@@ -221,7 +252,9 @@ async fn complete_turn_run_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    if let Some(AgentEvent::TurnCompleted { usage, .. }) = terminal_event {
+    if let Some(AgentEvent::TurnCompleted { usage, .. } | AgentEvent::TurnRefused { usage, .. }) =
+        terminal_event
+    {
         validate_terminal_usage(*usage, super::usage_from_turn_model(&existing)?)?;
     }
     let stale_output = existing.steer_revision != expected_steer_revision;

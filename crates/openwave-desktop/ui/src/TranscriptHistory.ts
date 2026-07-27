@@ -1,5 +1,10 @@
 import { parseToolActionPreview } from "./api";
-import type { ChatMessage, ChatToolActivity, ToolActionPreview } from "./api";
+import type {
+  ChatMessage,
+  ChatToolActivity,
+  RendererRefusal,
+  ToolActionPreview,
+} from "./api";
 import type { AssistantSource } from "./AssistantSources";
 import type { ToolCallStatus } from "./ToolCallCard";
 
@@ -11,6 +16,7 @@ export type HydratedTranscriptEntry =
       text: string;
       sources: AssistantSource[];
       createdAt: string;
+      refusal?: RendererRefusal;
     }
   | {
       id: string;
@@ -49,6 +55,7 @@ export function hydrateTranscriptHistory(
             )
           : [],
       createdAt: message.created_at,
+      refusal: message.refusal,
     })),
     ...toolActivity.map((activity, index) => ({
       // The server deliberately withholds a canonical call id. This identity

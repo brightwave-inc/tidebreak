@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
@@ -16,7 +16,8 @@ use crate::model::{
     ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::{
-    ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome,
+    ChatRefusalSnapshot, ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot,
+    DeleteChatOutcome,
 };
 
 use super::super::{
@@ -641,16 +642,64 @@ pub(in crate::db) async fn get_chat_transcript(
         return Ok(None);
     }
     let messages = list_messages_on(&transaction, chat_id).await?;
+    let refusals = list_terminal_refusals_on(&transaction, chat_id).await?;
     let citations = super::citation::list_snapshots_on(&transaction, chat_id).await?;
     let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id).await?;
     let last_event_seq = terminal_event_cursor_on(&transaction, chat_id).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(ChatTranscriptSnapshot {
         messages,
+        refusals,
         citations,
         tool_activity,
         last_event_seq,
     }))
+}
+
+/// Join refused terminal events to the exact assistant message committed in
+/// the same turn resolution transaction.
+async fn list_terminal_refusals_on<C>(conn: &C, chat_id: ChatId) -> Result<Vec<ChatRefusalSnapshot>>
+where
+    C: ConnectionTrait,
+{
+    let output_by_turn: HashMap<_, _> = entities::turn_run::Entity::find()
+        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Completed.as_str()))
+        .all(conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .filter_map(|turn| {
+            turn.output_message_id
+                .map(|message_id| (turn.id, message_id))
+        })
+        .collect();
+
+    let events = entities::event::Entity::find()
+        .filter(entities::event::Column::ChatId.eq(chat_id.0))
+        .filter(entities::event::Column::Terminal.eq(true))
+        .order_by_asc(entities::event::Column::Seq)
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    let mut refusals = Vec::new();
+    for event in events {
+        let Some(turn_id) = event.turn_id else {
+            continue;
+        };
+        let AgentEvent::TurnRefused { refusal, .. } =
+            serde_json::from_value::<AgentEvent>(event.payload)?
+        else {
+            continue;
+        };
+        if let Some(message_id) = output_by_turn.get(&turn_id) {
+            refusals.push(ChatRefusalSnapshot {
+                message_id: MessageId(*message_id),
+                refusal,
+            });
+        }
+    }
+    Ok(refusals)
 }
 
 /// Read only tool calls whose owning foreground turn has reached a terminal
@@ -868,6 +917,7 @@ pub(in crate::db) async fn append_turn_event(
     if matches!(
         event,
         AgentEvent::TurnCompleted { .. }
+            | AgentEvent::TurnRefused { .. }
             | AgentEvent::TurnFailed { .. }
             | AgentEvent::TurnCancelled { .. }
     ) {
@@ -1011,6 +1061,7 @@ fn is_terminal_event(event: &AgentEvent) -> bool {
     matches!(
         event,
         AgentEvent::TurnCompleted { .. }
+            | AgentEvent::TurnRefused { .. }
             | AgentEvent::TurnFailed { .. }
             | AgentEvent::TurnCancelled { .. }
     )

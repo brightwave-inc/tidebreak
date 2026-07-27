@@ -24,8 +24,8 @@ use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRe
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{
-    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, OutputId, OutputRevisionId, ProjectId,
-    RootAttachmentChangeId, TurnId, TurnSteerId,
+    AgentRunId, CallId, ChatId, DocumentId, DocumentJobId, MessageId, OutputId, OutputRevisionId,
+    ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
 };
 use crate::image::ImageRef;
 use crate::model::{
@@ -38,7 +38,7 @@ use crate::model::{
     TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait,
     TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
-use crate::provider::{StopReason, Usage};
+use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::{AnswerUserQuestionsRequest, PendingUserQuestions};
 
 /// Largest pending attachment-reconciliation page accepted by [`Store`].
@@ -52,12 +52,21 @@ pub const MAX_PENDING_ROOT_ATTACHMENT_CHANGES: u64 = 256;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatTranscriptSnapshot {
     pub messages: Vec<Message>,
+    /// Refusal outcomes keyed to their durably completed assistant message.
+    pub refusals: Vec<ChatRefusalSnapshot>,
     /// Ordered renderer-safe sources keyed to their assistant message.
     pub citations: Vec<crate::AssistantCitationSnapshot>,
     /// A renderer-safe historical projection. It contains fixed titles and
     /// lifecycle timestamps only; canonical tool records never leave storage.
     pub tool_activity: Vec<ChatToolActivitySnapshot>,
     pub last_event_seq: i64,
+}
+
+/// One refused terminal outcome attached to its durable assistant output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatRefusalSnapshot {
+    pub message_id: MessageId,
+    pub refusal: RefusalOutcome,
 }
 
 /// Result of a fail-closed conversation deletion request.
@@ -2144,6 +2153,23 @@ pub trait Store: Send + Sync {
         } else {
             turn_storage_unavailable()
         }
+    }
+
+    /// Complete one claimed turn as a refusal and append that structured
+    /// terminal event atomically with its partial-or-empty assistant output.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_refused_turn_run_with_citations_and_append_event(
+        &self,
+        _id: TurnId,
+        _lease_token: uuid::Uuid,
+        _expected_steer_revision: i64,
+        _now: chrono::DateTime<chrono::Utc>,
+        _output: &Message,
+        _citations: &[crate::AssistantCitationReference],
+        _usage: Usage,
+        _refusal: RefusalOutcome,
+    ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
+        turn_storage_unavailable()
     }
 
     /// Atomically record a failure for one exact live claimed attempt.

@@ -14,7 +14,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use openwave_core::error::{AgentError, Result};
 use openwave_core::provider::{
-    ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason, Usage,
+    ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, RefusalDetails,
+    StopReason, Usage,
 };
 use openwave_core::{ImageAttachments, Role};
 
@@ -156,6 +157,10 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         "messages": messages,
         "stream": true,
     });
+    // Do not opt into Anthropic's server-side fallback beta implicitly. The
+    // normalized request and model registry currently identify exactly one
+    // model, so inventing a fallback here would lose explicit compatibility
+    // policy and make durable model attribution ambiguous.
 
     if let Some(system) = &req.system {
         body["system"] = json!(system);
@@ -368,9 +373,19 @@ fn normalize(data: &Value, state: &mut StreamState) -> Vec<ProviderEvent> {
                 .and_then(|d| d.get("stop_reason"))
                 .and_then(Value::as_str)
             {
-                events.push(ProviderEvent::Stop {
-                    reason: map_stop_reason(reason),
-                });
+                let reason = map_stop_reason(reason);
+                if reason == StopReason::Refusal {
+                    let category = data
+                        .get("delta")
+                        .and_then(|delta| delta.get("stop_details"))
+                        .and_then(|details| details.get("category"))
+                        .and_then(Value::as_str);
+                    events.push(ProviderEvent::Refusal {
+                        details: RefusalDetails::from_category(category),
+                    });
+                } else {
+                    events.push(ProviderEvent::Stop { reason });
+                }
             }
             events
         }
@@ -391,8 +406,9 @@ fn map_stop_reason(reason: &str) -> StopReason {
         "max_tokens" => StopReason::MaxTokens,
         "tool_use" => StopReason::ToolUse,
         "stop_sequence" => StopReason::StopSequence,
-        // "end_turn" and anything we don't yet model (e.g. refusal, pause_turn)
-        // fall back to a clean end.
+        "refusal" => StopReason::Refusal,
+        // "end_turn" and anything we don't yet model (e.g. pause_turn) fall
+        // back to a clean end.
         _ => StopReason::EndTurn,
     }
 }
@@ -431,6 +447,10 @@ mod tests {
         assert_eq!(body["messages"][0]["content"][0]["type"], "text");
         assert_eq!(body["tools"][0]["name"], "read_file");
         assert_eq!(body["temperature"], 0.5);
+        assert!(
+            body.get("fallbacks").is_none(),
+            "fallback models require an explicit registry contract"
+        );
     }
 
     fn reasoning_request(model: &str, effort: Option<ReasoningEffort>) -> ChatRequest {
@@ -588,7 +608,49 @@ mod tests {
     fn maps_stop_reasons() {
         assert_eq!(map_stop_reason("tool_use"), StopReason::ToolUse);
         assert_eq!(map_stop_reason("max_tokens"), StopReason::MaxTokens);
-        assert_eq!(map_stop_reason("refusal"), StopReason::EndTurn);
+        assert_eq!(map_stop_reason("refusal"), StopReason::Refusal);
+        assert_eq!(map_stop_reason("future_reason"), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn refusal_carries_bounded_category_when_present() {
+        let out = run(&[json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": "refusal",
+                "stop_details": {
+                    "type": "refusal",
+                    "category": "cyber"
+                }
+            },
+            "usage": {"output_tokens": 0}
+        })]);
+        assert_eq!(
+            out,
+            vec![
+                ProviderEvent::Usage(Usage::default()),
+                ProviderEvent::Refusal {
+                    details: RefusalDetails::from_category(Some("cyber")),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn refusal_allows_missing_or_null_stop_details() {
+        for delta in [
+            json!({"stop_reason": "refusal"}),
+            json!({"stop_reason": "refusal", "stop_details": null}),
+            json!({"stop_reason": "refusal", "stop_details": {"category": null}}),
+        ] {
+            let out = run(&[json!({"type": "message_delta", "delta": delta})]);
+            assert_eq!(
+                out,
+                vec![ProviderEvent::Refusal {
+                    details: RefusalDetails::default(),
+                }]
+            );
+        }
     }
 
     // ── Image blocks ───────────────────────────────────────────────

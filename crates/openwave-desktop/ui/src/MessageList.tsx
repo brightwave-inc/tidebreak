@@ -36,6 +36,12 @@ export type ChatMessage =
   | { id: string; role: "system"; text: string }
   | {
       id: string;
+      role: "refusal";
+      category: string | null;
+      partialOutput: boolean;
+    }
+  | {
+      id: string;
       role: "tool";
       callId: string;
       name: string;
@@ -423,7 +429,39 @@ function MessageBubbleImpl({
     );
   }
 
+  if (message.role === "refusal") {
+    return (
+      <div className="message-notice is-refusal" role="status">
+        {refusalCopy(message.category, message.partialOutput)}
+      </div>
+    );
+  }
+
   return null;
+}
+
+/** Renderer-owned refusal copy; provider categories remain data, not prose. */
+export function refusalCopy(
+  category: string | null,
+  partialOutput: boolean,
+): string {
+  const reason =
+    (
+      {
+        cyber: "the cyber safety category",
+        bio: "the biological safety category",
+        frontier_llm: "the AI model-development policy category",
+        reasoning_extraction: "the reasoning-extraction policy category",
+        general_harms: "the general safety category",
+      } as Record<string, string>
+    )[category ?? ""] ??
+    (category
+      ? `the ${category.replaceAll("_", " ")} safety category`
+      : "a safety policy");
+  const explanation = `The model declined this response because it matched ${reason}.`;
+  return partialOutput
+    ? `The response above is incomplete. ${explanation}`
+    : explanation;
 }
 
 /**

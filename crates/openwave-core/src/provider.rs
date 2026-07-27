@@ -190,8 +190,94 @@ pub enum StopReason {
     ToolUse,
     /// A stop sequence was produced.
     StopSequence,
+    /// The model declined the request under a safety policy.
+    Refusal,
     /// The caller cancelled the turn.
     Cancelled,
+}
+
+/// Bounded provider-neutral detail for a model refusal.
+///
+/// Providers may add categories over time, so the value stays open rather than
+/// becoming an enum. The constructor admits only a short identifier suitable
+/// for durable events and renderer projection; prose belongs to renderer-owned
+/// copy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RefusalDetails {
+    category: Option<String>,
+}
+
+impl RefusalDetails {
+    /// Maximum UTF-8 bytes retained from a provider category.
+    pub const MAX_CATEGORY_BYTES: usize = 64;
+
+    /// Build details from an optional provider category, dropping malformed or
+    /// overlong values rather than persisting untrusted provider text.
+    #[must_use]
+    pub fn from_category(category: Option<&str>) -> Self {
+        let category = category
+            .filter(|category| {
+                !category.is_empty()
+                    && category.len() <= Self::MAX_CATEGORY_BYTES
+                    && category.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            })
+            .map(str::to_owned);
+        Self { category }
+    }
+
+    /// The provider's bounded policy-category identifier, when present.
+    #[must_use]
+    pub fn category(&self) -> Option<&str> {
+        self.category.as_deref()
+    }
+}
+
+impl<'de> Deserialize<'de> for RefusalDetails {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct SerializedRefusalDetails {
+            #[serde(default)]
+            category: Option<String>,
+        }
+
+        let details = SerializedRefusalDetails::deserialize(deserializer)?;
+        Ok(Self::from_category(details.category.as_deref()))
+    }
+}
+
+/// Durable outcome metadata for a refused completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusalOutcome {
+    details: RefusalDetails,
+    partial_output: bool,
+}
+
+impl RefusalOutcome {
+    /// Build an outcome at the consumer boundary that observed the text stream.
+    #[must_use]
+    pub fn new(details: RefusalDetails, partial_output: bool) -> Self {
+        Self {
+            details,
+            partial_output,
+        }
+    }
+
+    /// The bounded provider category, when one was supplied.
+    #[must_use]
+    pub fn category(&self) -> Option<&str> {
+        self.details.category()
+    }
+
+    /// Whether assistant text arrived before the refusal.
+    #[must_use]
+    pub fn partial_output(&self) -> bool {
+        self.partial_output
+    }
 }
 
 /// A normalized streaming event from a provider. Adapters translate each API's
@@ -233,6 +319,15 @@ pub enum ProviderEvent {
     Stop {
         /// Why it stopped.
         reason: StopReason,
+    },
+    /// The completion stopped because the model refused the request.
+    ///
+    /// This terminal form carries refusal detail atomically. The agent derives
+    /// whether output was partial from text it actually accumulated rather
+    /// than trusting provider metadata.
+    Refusal {
+        /// Bounded provider-neutral refusal detail.
+        details: RefusalDetails,
     },
     /// The stream ended abnormally — a transport error cut it off mid-flight.
     ///
@@ -377,5 +472,31 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(serde_json::from_str::<ProviderEvent>(&json).unwrap(), ev);
+    }
+
+    #[test]
+    fn refusal_categories_are_bounded_identifiers() {
+        assert_eq!(
+            RefusalDetails::from_category(Some("reasoning_extraction")).category(),
+            Some("reasoning_extraction")
+        );
+        assert_eq!(
+            RefusalDetails::from_category(Some("General Harms")).category(),
+            None
+        );
+        assert_eq!(
+            RefusalDetails::from_category(Some(
+                &"x".repeat(RefusalDetails::MAX_CATEGORY_BYTES + 1)
+            ))
+            .category(),
+            None
+        );
+        let decoded: RefusalDetails =
+            serde_json::from_value(serde_json::json!({"category": "NOT SAFE"})).unwrap();
+        assert_eq!(
+            decoded.category(),
+            None,
+            "deserialization must preserve the constructor's bounds"
+        );
     }
 }

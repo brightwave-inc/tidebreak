@@ -144,7 +144,7 @@ export type ChatId = string;
  * A renderer-safe durable transcript entry. Internal routing and tool state
  * deliberately remain behind the server boundary.
  */
-export type ChatMessageSnapshot = { id: MessageId, role: TranscriptRole, content: string, created_at: string, citations: Array<AssistantCitationSnapshot>, };
+export type ChatMessageSnapshot = { id: MessageId, role: TranscriptRole, content: string, created_at: string, citations: Array<AssistantCitationSnapshot>, refusal?: RendererRefusal, };
 
 /**
  * One pathless root in a conversation's exact ordered projection.
@@ -458,7 +458,12 @@ action?: ToolActionPreview,
  * withholding it leaves the transcript asserting that something
  * happened without ever showing what.
  */
-result?: ToolResultPreview, } | { "type": "turn_completed" } | { "type": "turn_failed" } | { "type": "turn_cancelled" } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated" } | { "type": "event_omitted" };
+result?: ToolResultPreview, } | { "type": "turn_completed" } | { "type": "turn_refused", refusal: RendererRefusal, } | { "type": "turn_failed" } | { "type": "turn_cancelled" } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated" } | { "type": "event_omitted" };
+
+/**
+ * Bounded refusal metadata safe to present in the desktop transcript.
+ */
+export type RendererRefusal = { category: string | null, partial_output: boolean, };
 
 export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, };
 

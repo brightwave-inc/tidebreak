@@ -2400,6 +2400,31 @@ impl Store for DbStore {
         .await
     }
 
+    async fn complete_refused_turn_run_with_citations_and_append_event(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
+        now: chrono::DateTime<Utc>,
+        output: &Message,
+        citations: &[crate::AssistantCitationReference],
+        usage: Usage,
+        refusal: crate::RefusalOutcome,
+    ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
+        ops::turn::complete_refused_turn_run_with_citations_and_append_event(
+            self,
+            id,
+            lease_token,
+            expected_steer_revision,
+            now,
+            output,
+            citations,
+            usage,
+            refusal,
+        )
+        .await
+    }
+
     async fn record_turn_run_failure(
         &self,
         id: TurnId,

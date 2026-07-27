@@ -733,6 +733,9 @@ pub struct ChatMessageSnapshot {
     pub content: String,
     pub created_at: chrono::DateTime<Utc>,
     pub citations: Vec<openwave_core::AssistantCitationSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub refusal: Option<crate::event_projection::RendererRefusal>,
 }
 
 /// One visible transcript plus the durable journal watermark that produced it.
@@ -790,6 +793,7 @@ impl ChatMessageSnapshot {
             content: message.content,
             created_at: message.created_at,
             citations: Vec::new(),
+            refusal: None,
         })
     }
 }
@@ -813,6 +817,16 @@ pub async fn list_chat_messages(
             .or_insert_with(Vec::new)
             .push(citation);
     }
+    let mut refusals_by_message = transcript
+        .refusals
+        .into_iter()
+        .map(|snapshot| {
+            (
+                snapshot.message_id,
+                crate::event_projection::RendererRefusal::from(&snapshot.refusal),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let messages = transcript
         .messages
         .into_iter()
@@ -821,6 +835,7 @@ pub async fn list_chat_messages(
             snapshot.citations = citations_by_message
                 .remove(&snapshot.id)
                 .unwrap_or_default();
+            snapshot.refusal = refusals_by_message.remove(&snapshot.id);
             Some(snapshot)
         })
         .collect();
