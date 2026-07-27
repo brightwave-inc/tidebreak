@@ -30,7 +30,116 @@ impl MigratorTrait for Migrator {
             Box::new(AddMessageAttachments),
             Box::new(AddOutputRevisionCitations),
             Box::new(AddContextCheckpoints),
+            Box::new(AddStandingToolGrants),
         ]
+    }
+}
+
+/// Persists chat-scoped standing consent for Sensitive tool calls.
+///
+/// A grant names only the closed preview scope the reviewer selected. The
+/// source call id makes retrying a decision idempotent without permitting a
+/// later retry to widen a one-shot approval after the call has run.
+struct AddStandingToolGrants;
+
+impl MigrationName for AddStandingToolGrants {
+    fn name(&self) -> &str {
+        "m20260727_000017_add_standing_tool_grants"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddStandingToolGrants {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .add_column(ColumnDef::new(ToolCall::ApprovalGrantSourceCallId).uuid())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(StandingToolGrant::Table)
+                    .col(
+                        ColumnDef::new(StandingToolGrant::SourceCallId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(StandingToolGrant::ChatId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(StandingToolGrant::ToolName)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(StandingToolGrant::ApprovalKind)
+                            .string_len(64)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(StandingToolGrant::Scope)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(StandingToolGrant::GrantedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_standing_tool_grant_chat")
+                            .from(StandingToolGrant::Table, StandingToolGrant::ChatId)
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(
+                        Func::char_length(Expr::col(StandingToolGrant::ToolName))
+                            .between(1, crate::model::ToolCallRecord::MAX_LABEL_LEN as i32),
+                    )
+                    .check(
+                        Expr::col(StandingToolGrant::ApprovalKind).is_in([
+                            crate::ToolApprovalKind::SearchMayShareQueryAndExcerpts
+                                .standing_grant_key(),
+                            crate::ToolApprovalKind::WebSearchMayShareQuery.standing_grant_key(),
+                            crate::ToolApprovalKind::ExecMayRunNetworkedCommand
+                                .standing_grant_key(),
+                        ]),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_standing_tool_grant_lookup")
+                    .table(StandingToolGrant::Table)
+                    .col(StandingToolGrant::ChatId)
+                    .col(StandingToolGrant::ToolName)
+                    .col(StandingToolGrant::ApprovalKind)
+                    .col(StandingToolGrant::GrantedAt)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(StandingToolGrant::Table).to_owned())
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(ToolCall::Table)
+                    .drop_column(ToolCall::ApprovalGrantSourceCallId)
+                    .to_owned(),
+            )
+            .await
     }
 }
 
@@ -6365,6 +6474,7 @@ enum ToolCall {
     ApprovalRequestedAt,
     ApprovalDecidedAt,
     ApprovalEventSeq,
+    ApprovalGrantSourceCallId,
     ClientExecutorId,
     ClientLeaseToken,
     ClientLeaseExpiresAt,
@@ -6372,6 +6482,17 @@ enum ToolCall {
     ResolutionTurnLeaseToken,
     CreatedAt,
     ResolvedAt,
+}
+
+#[derive(DeriveIden)]
+enum StandingToolGrant {
+    Table,
+    SourceCallId,
+    ChatId,
+    ToolName,
+    ApprovalKind,
+    Scope,
+    GrantedAt,
 }
 
 #[derive(DeriveIden)]

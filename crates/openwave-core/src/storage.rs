@@ -24,7 +24,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::ops::Range;
 
-use crate::approval::{ApprovalDecision, ApprovalRequest, ToolApproval};
+use crate::approval::{ApprovalDecision, ApprovalRequest, StandingGrant, ToolApproval};
 use crate::deliverable::{
     CreateOutput, NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision,
 };
@@ -645,6 +645,10 @@ pub enum RequestToolApprovalOutcome {
     Requested(ToolApproval),
     /// An exact retry recovered the same pending or decided request.
     Existing(ToolApproval),
+    /// A previously persisted standing grant authorized this exact call. No
+    /// approval card was created, but the automatic authorization is recorded
+    /// on the call for crash recovery and audit.
+    Granted(ToolApproval),
     /// The call exists but its canonical identity differs from the request.
     IdentityConflict,
     /// The call is missing, terminal, or not a server-executed call.
@@ -2495,6 +2499,22 @@ pub trait Store: Send + Sync {
     ) -> Result<DecideToolApprovalOutcome> {
         Err(AgentError::Store(
             "durable tool approval storage is not implemented by this Store".into(),
+        ))
+    }
+
+    /// Decide a pending approval and persist its chosen chat-scoped standing
+    /// grant in the same transaction. A grant can only be added while this
+    /// exact call is pending; a later retry may not widen a one-shot decision.
+    async fn decide_tool_call_approval_with_grant(
+        &self,
+        _chat_id: ChatId,
+        _call_id: CallId,
+        _decision: &ApprovalDecision,
+        _grant: &StandingGrant,
+        _decided_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<DecideToolApprovalOutcome> {
+        Err(AgentError::Store(
+            "durable standing-grant storage is not implemented by this Store".into(),
         ))
     }
 
