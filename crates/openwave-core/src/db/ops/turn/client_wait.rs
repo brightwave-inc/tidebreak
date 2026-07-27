@@ -155,6 +155,7 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         approval_requested_at: Set(None),
         approval_decided_at: Set(None),
         approval_event_seq: Set(None),
+        approval_grant_source_call_id: Set(None),
         client_executor_id: Set(None),
         client_lease_token: Set(None),
         client_lease_expires_at: Set(None),

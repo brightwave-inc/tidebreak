@@ -1019,6 +1019,7 @@ pub mod tool_call {
         pub approval_requested_at: Option<DateTimeUtc>,
         pub approval_decided_at: Option<DateTimeUtc>,
         pub approval_event_seq: Option<i64>,
+        pub approval_grant_source_call_id: Option<Uuid>,
         pub client_executor_id: Option<Uuid>,
         pub client_lease_token: Option<Uuid>,
         pub client_lease_expires_at: Option<DateTimeUtc>,
@@ -1026,6 +1027,28 @@ pub mod tool_call {
         pub resolution_turn_lease_token: Option<Uuid>,
         pub created_at: DateTimeUtc,
         pub resolved_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod standing_tool_grant {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "standing_tool_grant")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source_call_id: Uuid,
+        pub chat_id: Uuid,
+        pub tool_name: String,
+        pub approval_kind: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub scope: Json,
+        pub granted_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

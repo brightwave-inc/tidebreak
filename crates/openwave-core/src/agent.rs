@@ -887,11 +887,9 @@ impl Agent {
         self
     }
 
-    /// Consult `grants` before parking a Sensitive tool call, so a repeated
-    /// in-scope action the user already approved runs without re-prompting.
-    ///
-    /// Deny-by-default: an empty set (the default) makes every Sensitive call
-    /// park on the gate exactly as before.
+    /// Provide explicit non-durable grants for an embedded caller. The
+    /// foreground server intentionally does not call this: user-approved
+    /// grants are persisted and matched by its approval broker transaction.
     #[must_use]
     pub fn with_standing_grants(mut self, grants: Arc<StandingGrants>) -> Self {
         self.standing_grants = grants;
@@ -2320,17 +2318,9 @@ impl Agent {
         // be tested against a different reading of the arguments than the
         // human was shown.
         let action = call_action_preview(call);
-        // Standing grant: a brand-new Sensitive call the user already approved
-        // for this chat runs without re-parking on the gate. A recovered call
-        // (`durable_approval` present) keeps its durable park-and-resume
-        // reconciliation. When `durable_approval` is `None` the request kind is
-        // exactly `for_tool_name`, matching what the park block computes below.
-        // Deny-by-default: only approvable kinds are ever covered.
-        let bypass_by_standing_grant = matches!(approval_class, ApprovalClass::Sensitive)
+        let bypass_by_explicit_grant = matches!(approval_class, ApprovalClass::Sensitive)
             && durable_approval.is_none()
             && serde_json::from_str::<Value>(&call.args).is_ok_and(|arguments| {
-                // The canonical arguments, not `action`: a grant decides
-                // authority and the preview beside it only describes one.
                 self.standing_grants.covers(
                     chat.id,
                     &call.name,
@@ -2338,7 +2328,7 @@ impl Agent {
                     &arguments,
                 )
             });
-        if matches!(approval_class, ApprovalClass::Sensitive) && !bypass_by_standing_grant {
+        if matches!(approval_class, ApprovalClass::Sensitive) && !bypass_by_explicit_grant {
             let summary = format!("{} requires approval", call.name);
             let kind = durable_approval
                 .map(|approval| approval.kind)
@@ -2392,6 +2382,10 @@ impl Agent {
                 preview,
                 summary,
             };
+            let authorized_by_standing_grant = matches!(
+                registration.publication,
+                ApprovalRequiredPublication::StandingGrant
+            );
             match registration.publication {
                 ApprovalRequiredPublication::Ordinary => events.send(required),
                 ApprovalRequiredPublication::Committed {
@@ -2417,6 +2411,7 @@ impl Agent {
                     }
                 }
                 ApprovalRequiredPublication::None => {}
+                ApprovalRequiredPublication::StandingGrant => {}
             }
             let pending = registration.decision;
             // Race the decision against cancellation so a turn parked on approval
@@ -2431,10 +2426,12 @@ impl Agent {
             let decision = match future::select(pending, self.cancel.cancelled()).await {
                 Either::Left((decision, _)) if !self.cancel.is_cancelled() => decision,
                 Either::Left(_) | Either::Right(((), _)) => {
-                    events.send(AgentEvent::ApprovalDecided {
-                        call_id: call.call_id,
-                        approved: false,
-                    });
+                    if !authorized_by_standing_grant {
+                        events.send(AgentEvent::ApprovalDecided {
+                            call_id: call.call_id,
+                            approved: false,
+                        });
+                    }
                     return ToolOutput::failed(
                         ToolErrorCategory::UserCancelled,
                         "turn cancelled while awaiting approval",
@@ -2442,10 +2439,12 @@ impl Agent {
                 }
             };
             let approved = matches!(decision, ApprovalDecision::Approve);
-            events.send(AgentEvent::ApprovalDecided {
-                call_id: call.call_id,
-                approved,
-            });
+            if !authorized_by_standing_grant {
+                events.send(AgentEvent::ApprovalDecided {
+                    call_id: call.call_id,
+                    approved,
+                });
+            }
             if let ApprovalDecision::Reject { reason } = decision {
                 return ToolOutput::failed(ToolErrorCategory::UserDeclined, reason);
             }

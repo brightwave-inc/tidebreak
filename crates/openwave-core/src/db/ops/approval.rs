@@ -5,7 +5,8 @@ use sea_orm::{
 };
 
 use crate::approval::{
-    ApprovalDecision, ApprovalRequest, ToolApproval, ToolApprovalKind, ToolApprovalStatus,
+    ApprovalDecision, ApprovalRequest, GrantScope, StandingGrant, ToolApproval, ToolApprovalKind,
+    ToolApprovalStatus,
 };
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
@@ -20,6 +21,58 @@ use crate::tool::ApprovalClass;
 use super::super::{entities, store_err, DbStore};
 use super::turn::canonical_db_timestamp;
 use super::{acquire_chat_write_lock, acquire_tool_call_write_lock, acquire_turn_write_lock};
+
+/// Return a durable grant that authorizes this exact canonical call.
+///
+/// Stored grants are untrusted input on recovery: a malformed row or one whose
+/// frozen kind no longer matches the tool is ignored, never widened into
+/// consent. The caller holds the chat write lock, so this read and the
+/// subsequent approval transition cannot race a grant write for the same chat.
+async fn matching_standing_grant<C>(
+    conn: &C,
+    chat_id: ChatId,
+    tool_name: &str,
+    kind: ToolApprovalKind,
+    arguments: &serde_json::Value,
+) -> Result<Option<uuid::Uuid>>
+where
+    C: ConnectionTrait,
+{
+    if !kind.is_standing_grantable() {
+        return Ok(None);
+    }
+    let grants = entities::standing_tool_grant::Entity::find()
+        .filter(entities::standing_tool_grant::Column::ChatId.eq(chat_id.0))
+        .filter(entities::standing_tool_grant::Column::ToolName.eq(tool_name))
+        .filter(entities::standing_tool_grant::Column::ApprovalKind.eq(kind.standing_grant_key()))
+        .order_by_desc(entities::standing_tool_grant::Column::GrantedAt)
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    for row in grants {
+        let source_call_id = row.source_call_id;
+        let Some(stored_kind) = ToolApprovalKind::from_standing_grant_key(&row.approval_kind)
+        else {
+            continue;
+        };
+        let Ok(scope) = serde_json::from_value::<GrantScope>(row.scope) else {
+            continue;
+        };
+        let Some(grant) = StandingGrant::scoped(
+            ChatId(row.chat_id),
+            row.tool_name,
+            stored_kind,
+            scope,
+            row.granted_at,
+        ) else {
+            continue;
+        };
+        if grant.covers(chat_id, tool_name, kind, arguments) {
+            return Ok(Some(source_call_id));
+        }
+    }
+    Ok(None)
+}
 
 pub(in crate::db) async fn request_and_append_event(
     store: &DbStore,
@@ -133,6 +186,29 @@ pub(in crate::db) async fn request_and_append_event(
         });
     }
     let requested_at = database_now.max(turn.updated_at).max(call.created_at);
+    if let Some(source_call_id) = matching_standing_grant(
+        &transaction,
+        request.chat_id,
+        &call.name,
+        request.kind,
+        &call.arguments,
+    )
+    .await?
+    {
+        let mut active: entities::tool_call::ActiveModel = call.into();
+        active.approval_status = Set(Some(ToolApprovalStatus::Approved.as_str().into()));
+        active.approval_class = Set(Some(request.class.as_str().into()));
+        active.approval_kind = Set(Some(request.kind.as_str().into()));
+        active.approval_requested_at = Set(Some(requested_at));
+        active.approval_decided_at = Set(Some(requested_at));
+        active.approval_grant_source_call_id = Set(Some(source_call_id));
+        let approval = approval_from_model(&active.update(&transaction).await.map_err(store_err)?)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(JournaledToolApprovalOutcome {
+            outcome: RequestToolApprovalOutcome::Granted(approval),
+            required_event: None,
+        });
+    }
     let seq = super::conversation::append_event_on(
         &transaction,
         request.chat_id,
@@ -310,6 +386,26 @@ pub(in crate::db) async fn request(
         transaction.commit().await.map_err(store_err)?;
         return Ok(RequestToolApprovalOutcome::IdentityConflict);
     }
+    if let Some(source_call_id) = matching_standing_grant(
+        &transaction,
+        request.chat_id,
+        &existing.name,
+        request.kind,
+        &existing.arguments,
+    )
+    .await?
+    {
+        let mut active: entities::tool_call::ActiveModel = existing.into();
+        active.approval_status = Set(Some(ToolApprovalStatus::Approved.as_str().into()));
+        active.approval_class = Set(Some(request.class.as_str().into()));
+        active.approval_kind = Set(Some(request.kind.as_str().into()));
+        active.approval_requested_at = Set(Some(requested_at));
+        active.approval_decided_at = Set(Some(requested_at));
+        active.approval_grant_source_call_id = Set(Some(source_call_id));
+        let approval = approval_from_model(&active.update(&transaction).await.map_err(store_err)?)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(RequestToolApprovalOutcome::Granted(approval));
+    }
     let mut active: entities::tool_call::ActiveModel = existing.into();
     active.approval_status = Set(Some(ToolApprovalStatus::Pending.as_str().into()));
     active.approval_class = Set(Some(request.class.as_str().into()));
@@ -372,10 +468,132 @@ pub(in crate::db) async fn decide(
     active.approval_status = Set(Some(decision.status().as_str().into()));
     active.approval_reason = Set(decision.reason().map(str::to_owned));
     active.approval_decided_at = Set(Some(decided_at));
+    active.approval_grant_source_call_id = Set(None);
     let decided = active.update(&transaction).await.map_err(store_err)?;
     let approval = approval_from_model(&decided)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(DecideToolApprovalOutcome::Decided(approval))
+}
+
+/// Decide a pending approval and create the selected standing grant under the
+/// same chat and call locks. The check that the scope covers this exact
+/// canonical call is repeated here, inside the transaction, so a stale route
+/// read cannot turn a different call or a completed one-shot decision into
+/// standing authority.
+pub(in crate::db) async fn decide_with_grant(
+    store: &DbStore,
+    chat_id: ChatId,
+    call_id: CallId,
+    decision: &ApprovalDecision,
+    grant: &StandingGrant,
+    _decided_at: DateTime<Utc>,
+) -> Result<DecideToolApprovalOutcome> {
+    if !matches!(decision, ApprovalDecision::Approve) {
+        return Err(AgentError::Store(
+            "only an approval may create a standing grant".into(),
+        ));
+    }
+    validate_decision(decision)?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await?
+        || !acquire_tool_call_write_lock(&transaction, call_id).await?
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(DecideToolApprovalOutcome::Unavailable);
+    }
+    let existing = entities::tool_call::Entity::find_by_id(call_id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .expect("locked tool call exists");
+    if existing.chat_id != chat_id.0 || existing.approval_status.is_none() {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(DecideToolApprovalOutcome::Unavailable);
+    }
+    let current = approval_from_model(&existing)?;
+    if current.status != ToolApprovalStatus::Pending {
+        let outcome = if current.status == decision.status()
+            && current.reason.as_deref() == decision.reason()
+            && stored_grant_matches(&transaction, call_id, grant).await?
+        {
+            DecideToolApprovalOutcome::Existing(current)
+        } else {
+            // A matching decision after its original transaction committed is
+            // not permission to add or replace a grant. It might be a stale
+            // UI retry, and accepting it could widen a call already executed.
+            DecideToolApprovalOutcome::DecisionConflict
+        };
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(outcome);
+    }
+    if existing.status != ToolCallStatus::Pending.as_str()
+        || existing.execution != ToolCallExecution::Server.as_str()
+        || !grant.covers(chat_id, &existing.name, current.kind, &existing.arguments)
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(DecideToolApprovalOutcome::Unavailable);
+    }
+    let decided_at = super::agent_run::database_now(&transaction)
+        .await?
+        .max(current.requested_at);
+    insert_standing_grant(&transaction, call_id, grant, decided_at).await?;
+    let mut active: entities::tool_call::ActiveModel = existing.into();
+    active.approval_status = Set(Some(ToolApprovalStatus::Approved.as_str().into()));
+    active.approval_reason = Set(None);
+    active.approval_decided_at = Set(Some(decided_at));
+    active.approval_grant_source_call_id = Set(None);
+    let decided = active.update(&transaction).await.map_err(store_err)?;
+    let approval = approval_from_model(&decided)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(DecideToolApprovalOutcome::Decided(approval))
+}
+
+async fn insert_standing_grant<C>(
+    conn: &C,
+    source_call_id: CallId,
+    grant: &StandingGrant,
+    granted_at: DateTime<Utc>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let scope = serde_json::to_value(grant.scope())
+        .map_err(|error| AgentError::Store(format!("invalid standing grant scope: {error}")))?;
+    entities::standing_tool_grant::Entity::insert(entities::standing_tool_grant::ActiveModel {
+        source_call_id: Set(source_call_id.0),
+        chat_id: Set(grant.chat_id().0),
+        tool_name: Set(grant.tool_name().to_owned()),
+        approval_kind: Set(grant.kind().standing_grant_key().into()),
+        scope: Set(scope),
+        granted_at: Set(granted_at),
+    })
+    .exec_without_returning(conn)
+    .await
+    .map_err(store_err)?;
+    Ok(())
+}
+
+async fn stored_grant_matches<C>(
+    conn: &C,
+    source_call_id: CallId,
+    grant: &StandingGrant,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let Some(stored) = entities::standing_tool_grant::Entity::find_by_id(source_call_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(false);
+    };
+    let scope = serde_json::to_value(grant.scope())
+        .map_err(|error| AgentError::Store(format!("invalid standing grant scope: {error}")))?;
+    Ok(stored.chat_id == grant.chat_id().0
+        && stored.tool_name == grant.tool_name()
+        && stored.approval_kind == grant.kind().standing_grant_key()
+        && stored.scope == scope)
 }
 
 pub(in crate::db) async fn get(store: &DbStore, call_id: CallId) -> Result<Option<ToolApproval>> {
@@ -478,6 +696,12 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
             ))
         }
     };
+    let approved_by_standing_grant = model.approval_grant_source_call_id.is_some();
+    if approved_by_standing_grant && status != ToolApprovalStatus::Approved {
+        return Err(AgentError::Store(
+            "non-approved tool call names a standing grant source".into(),
+        ));
+    }
     Ok(ToolApproval {
         call_id: CallId(model.id),
         chat_id: ChatId(model.chat_id),
@@ -490,6 +714,7 @@ fn approval_from_model(model: &entities::tool_call::Model) -> Result<ToolApprova
         // action from the one that will run.
         preview: ToolActionPreview::build(&model.name, &model.arguments),
         action_is_exact: ToolActionPreview::describes_exactly(&model.name, &model.arguments),
+        approved_by_standing_grant,
         status,
         reason: model.approval_reason.clone(),
         requested_at: model

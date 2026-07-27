@@ -120,6 +120,37 @@ impl ToolApprovalKind {
         }
     }
 
+    /// Stable representation for a standing-grant row.
+    ///
+    /// This is distinct from [`Self::as_str`], whose legacy database spelling
+    /// intentionally folds web search and external MCP into the original
+    /// search vocabulary. A remembered grant freezes the consent semantics it
+    /// was created under, so its durable key must not make that distinction
+    /// depend on the tool name at recovery time.
+    #[must_use]
+    pub const fn standing_grant_key(self) -> &'static str {
+        match self {
+            Self::SearchMayShareQueryAndExcerpts => "search_may_share_query_and_excerpts",
+            Self::WebSearchMayShareQuery => "web_search_may_share_query",
+            Self::ExecMayRunNetworkedCommand => "exec_may_run_networked_command",
+            Self::ExternalMcpMayCallServer => "external_mcp_may_call_server",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    /// Recover the frozen consent semantics stored beside a standing grant.
+    #[must_use]
+    pub fn from_standing_grant_key(value: &str) -> Option<Self> {
+        match value {
+            "search_may_share_query_and_excerpts" => Some(Self::SearchMayShareQueryAndExcerpts),
+            "web_search_may_share_query" => Some(Self::WebSearchMayShareQuery),
+            "exec_may_run_networked_command" => Some(Self::ExecMayRunNetworkedCommand),
+            "external_mcp_may_call_server" => Some(Self::ExternalMcpMayCallServer),
+            "unsupported" => Some(Self::Unsupported),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub const fn is_approvable(self) -> bool {
         matches!(
@@ -174,6 +205,10 @@ pub struct ToolApproval {
     /// than the whole tool may only be built from one that lost nothing. See
     /// [`ToolActionPreview::describes_exactly`].
     pub action_is_exact: bool,
+    /// Whether a durable standing grant, rather than a fresh click, authorized
+    /// this call. The source is retained so crash recovery does not invent an
+    /// approval-card decision for an automatically authorized call.
+    pub approved_by_standing_grant: bool,
     pub status: ToolApprovalStatus,
     pub reason: Option<String>,
     pub requested_at: DateTime<Utc>,
@@ -235,7 +270,8 @@ pub struct StandingGrant {
 /// scope is stated in the grant itself rather than inferred from the tool. The
 /// narrower variants exist because "don't ask me about commands again" is a
 /// much larger thing to agree to than "don't ask me about `cargo` again".
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
 pub enum GrantScope {
     /// Exactly the action the card showed, and nothing else.
     ///
@@ -389,7 +425,7 @@ impl StandingGrant {
 
     /// Whether this grant covers an exact Sensitive call.
     #[must_use]
-    fn covers(
+    pub(crate) fn covers(
         &self,
         chat_id: ChatId,
         tool_name: &str,
@@ -404,26 +440,21 @@ impl StandingGrant {
     }
 }
 
-/// A live, deny-by-default set of standing grants consulted before a Sensitive
-/// tool call parks on the approval gate.
-///
-/// Held behind `Arc` and shared with the agent loop. Interior mutability lets a
-/// later decision path record a grant mid-turn without re-threading the agent;
-/// this slice only seeds and consults the set.
+/// Explicit in-memory grants for isolated, non-durable callers such as the
+/// transport-agnostic MCP server test harness. The foreground server does not
+/// use this type: it resolves grants through [`crate::Store`] while holding the
+/// approval transaction's chat lock.
 #[derive(Debug, Default)]
 pub struct StandingGrants {
     grants: RwLock<Vec<StandingGrant>>,
 }
 
 impl StandingGrants {
-    /// An empty set — nothing is pre-approved.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Seed a fixed set of grants, e.g. recovered from durable state at turn
-    /// start.
     #[must_use]
     pub fn from_grants(grants: Vec<StandingGrant>) -> Self {
         Self {
@@ -431,8 +462,6 @@ impl StandingGrants {
         }
     }
 
-    /// Remember `grant`, ignoring a duplicate so the set never grows unbounded
-    /// on repeated approvals of the same action.
     pub fn record(&self, grant: StandingGrant) {
         let mut grants = self.write();
         if !grants.iter().any(|existing| {
@@ -445,11 +474,6 @@ impl StandingGrants {
         }
     }
 
-    /// Whether a live grant covers this exact Sensitive call.
-    ///
-    /// Takes the canonical arguments, not the display projection of them: see
-    /// [`GrantScope::covers_call`] for why a clamped preview cannot decide
-    /// authority.
     #[must_use]
     pub fn covers(
         &self,
@@ -463,7 +487,6 @@ impl StandingGrants {
             .any(|grant| grant.covers(chat_id, tool_name, kind, arguments))
     }
 
-    /// Drop every grant, e.g. on explicit revocation.
     pub fn clear(&self) {
         self.write().clear();
     }
@@ -541,6 +564,9 @@ pub enum ApprovalRequiredPublication {
     },
     /// Exact recovery found no new requirement to publish.
     None,
+    /// A durable standing grant authorized this exact call. No approval card or
+    /// decision event is emitted because no new human decision was needed.
+    StandingGrant,
 }
 
 /// Durable registration followed by the independently parked decision.

@@ -22,6 +22,9 @@ use openwave_core::{
 pub struct ApprovalBroker {
     store: Arc<dyn Store>,
     wake: Arc<Notify>,
+    /// Test/embedded compatibility mirror. Foreground authorization always
+    /// reads the durable store inside registration, never this process-local
+    /// cache.
     standing_grants: Arc<StandingGrants>,
 }
 
@@ -35,7 +38,8 @@ impl ApprovalBroker {
         }
     }
 
-    /// Live remembered approvals shared with foreground agent loops.
+    /// Compatibility mirror for callers that inspect a decision immediately.
+    /// It is deliberately not wired into foreground agent authorization.
     pub fn standing_grants(&self) -> Arc<StandingGrants> {
         self.standing_grants.clone()
     }
@@ -82,22 +86,41 @@ impl ApprovalBroker {
                 }
             }
         };
-        let outcome = self
-            .store
-            .decide_tool_call_approval(chat_id, call_id, &decision, Utc::now())
-            .await?;
+        let grant = match scope {
+            Some(scope) => match StandingGrant::scoped(
+                current.chat_id,
+                current.tool_name.clone(),
+                current.kind,
+                scope,
+                Utc::now(),
+            ) {
+                Some(grant) => Some(grant),
+                None => return Ok(ResolveApprovalOutcome::GrantNotAvailable),
+            },
+            None => None,
+        };
+        let outcome = match grant.as_ref() {
+            Some(grant) => {
+                self.store
+                    .decide_tool_call_approval_with_grant(
+                        chat_id,
+                        call_id,
+                        &decision,
+                        grant,
+                        Utc::now(),
+                    )
+                    .await?
+            }
+            None => {
+                self.store
+                    .decide_tool_call_approval(chat_id, call_id, &decision, Utc::now())
+                    .await?
+            }
+        };
         match outcome {
             DecideToolApprovalOutcome::Decided(_) | DecideToolApprovalOutcome::Existing(_) => {
-                if let Some(scope) = scope {
-                    if let Some(grant) = StandingGrant::scoped(
-                        current.chat_id,
-                        current.tool_name,
-                        current.kind,
-                        scope,
-                        Utc::now(),
-                    ) {
-                        self.standing_grants.record(grant);
-                    }
+                if let Some(grant) = grant {
+                    self.standing_grants.record(grant);
                 }
                 self.wake.notify_waiters();
                 Ok(ResolveApprovalOutcome::Resolved)
@@ -179,7 +202,11 @@ impl ApprovalGate for ApprovalBroker {
                             RequestToolApprovalOutcome::Requested(approval)
                             | RequestToolApprovalOutcome::Existing(approval) => {
                                 let publication = journaled.required_event.map_or(
-                                    ApprovalRequiredPublication::None,
+                                    if approval.approved_by_standing_grant {
+                                        ApprovalRequiredPublication::StandingGrant
+                                    } else {
+                                        ApprovalRequiredPublication::None
+                                    },
                                     |event| {
                                         if approval.decision().is_some() {
                                             ApprovalRequiredPublication::Recovered {
@@ -195,6 +222,9 @@ impl ApprovalGate for ApprovalBroker {
                                     },
                                 );
                                 break (approval, publication);
+                            }
+                            RequestToolApprovalOutcome::Granted(approval) => {
+                                break (approval, ApprovalRequiredPublication::StandingGrant);
                             }
                             RequestToolApprovalOutcome::IdentityConflict => {
                                 return ready_reject("approval request identity conflict");
@@ -219,8 +249,16 @@ impl ApprovalGate for ApprovalBroker {
                     Ok(RequestToolApprovalOutcome::Requested(approval)) => {
                         (approval, ApprovalRequiredPublication::Ordinary)
                     }
-                    Ok(RequestToolApprovalOutcome::Existing(approval)) => {
-                        (approval, ApprovalRequiredPublication::None)
+                    Ok(RequestToolApprovalOutcome::Existing(approval)) => (
+                        approval.clone(),
+                        if approval.approved_by_standing_grant {
+                            ApprovalRequiredPublication::StandingGrant
+                        } else {
+                            ApprovalRequiredPublication::None
+                        },
+                    ),
+                    Ok(RequestToolApprovalOutcome::Granted(approval)) => {
+                        (approval, ApprovalRequiredPublication::StandingGrant)
                     }
                     Ok(RequestToolApprovalOutcome::IdentityConflict) => {
                         return ready_reject("approval request identity conflict");
@@ -367,6 +405,48 @@ mod tests {
         )
     }
 
+    async fn request_for(
+        store: &Arc<dyn Store>,
+        chat_id: ChatId,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> ApprovalRequest {
+        let request = ApprovalRequest {
+            call_id: CallId::new(),
+            chat_id,
+            turn_id: TurnId::new(),
+            tool_name: tool_name.into(),
+            class: ApprovalClass::Sensitive,
+            kind: openwave_core::ToolApprovalKind::for_tool_name(tool_name),
+            preview: None,
+            summary: "private summary".into(),
+        };
+        assert!(matches!(
+            store
+                .accept_tool_call(&ToolCallRecord {
+                    id: request.call_id,
+                    chat_id,
+                    turn_id: request.turn_id,
+                    provider_id: format!("provider-{}", request.call_id),
+                    name: tool_name.into(),
+                    arguments,
+                    execution: ToolCallExecution::Server,
+                    status: ToolCallStatus::Pending,
+                    result: None,
+                    error_code: None,
+                    error_detail: None,
+                    client_executor_id: None,
+                    client_lease_expires_at: None,
+                    created_at: Utc::now(),
+                    resolved_at: None,
+                })
+                .await
+                .unwrap(),
+            AcceptToolCallOutcome::Accepted(_)
+        ));
+        request
+    }
+
     #[tokio::test]
     async fn decision_survives_broker_recreation() {
         let (store, request) = setup("search").await;
@@ -483,6 +563,117 @@ mod tests {
             request.kind,
             &json!({})
         ));
+    }
+
+    #[tokio::test]
+    async fn standing_grant_survives_broker_recreation_and_stays_chat_scoped() {
+        let (store, first_request) =
+            setup_with_arguments("web_search", json!({"query": "quarterly filings"})).await;
+        let first = ApprovalBroker::new(store.clone());
+        let _pending = first.register(first_request.clone(), None).await;
+        assert_eq!(
+            first
+                .resolve_with_grant(
+                    first_request.chat_id,
+                    first_request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::ExactAction),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+
+        // This broker has no in-process grant mirror from the first decision.
+        // The immediate approval proves the restarted broker read the durable
+        // row while registering the new canonical call.
+        let restarted = ApprovalBroker::new(store.clone());
+        let matching = request_for(
+            &store,
+            first_request.chat_id,
+            "web_search",
+            json!({"query": "quarterly filings"}),
+        )
+        .await;
+        let registration = restarted.register(matching.clone(), None).await;
+        assert!(matches!(
+            registration.publication,
+            ApprovalRequiredPublication::StandingGrant
+        ));
+        assert_eq!(registration.decision.await, ApprovalDecision::Approve);
+        assert!(
+            store
+                .get_tool_call_approval(matching.call_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .approved_by_standing_grant
+        );
+
+        let other_chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: Some("Other approval test".into()),
+            model: None,
+            reasoning_effort: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&other_chat).await.unwrap();
+        let other = request_for(
+            &store,
+            other_chat.id,
+            "web_search",
+            json!({"query": "quarterly filings"}),
+        )
+        .await;
+        let pending = restarted.register(other, None).await;
+        assert!(matches!(
+            pending.publication,
+            ApprovalRequiredPublication::Ordinary
+        ));
+        drop(pending.decision);
+    }
+
+    #[tokio::test]
+    async fn a_decision_retry_cannot_turn_a_one_shot_approval_into_a_grant() {
+        let (store, request) = setup("search").await;
+        let broker = ApprovalBroker::new(store.clone());
+        let _pending = broker.register(request.clone(), None).await;
+        assert_eq!(
+            broker
+                .resolve(request.chat_id, request.call_id, ApprovalDecision::Approve)
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::WholeTool),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::DecisionConflict
+        );
+
+        let next = request_for(
+            &store,
+            request.chat_id,
+            "search",
+            json!({"query": "private"}),
+        )
+        .await;
+        let pending = ApprovalBroker::new(store).register(next, None).await;
+        assert!(matches!(
+            pending.publication,
+            ApprovalRequiredPublication::Ordinary
+        ));
+        drop(pending.decision);
     }
 
     #[tokio::test]

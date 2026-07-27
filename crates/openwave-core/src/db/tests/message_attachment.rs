@@ -76,12 +76,15 @@ async fn m0014_upgrades_an_existing_store_and_orders_deletion_behind_its_foreign
         .accept_turn(pre_upgrade_turn, chat.id, "gpt-5", "before the upgrade")
         .await
         .unwrap();
+    // The fixture starts before attachment persistence (and therefore before
+    // standing-grant persistence). Upgrade before calling current lifecycle
+    // code: its durable tool-call projection legitimately expects columns that
+    // did not exist in this historical schema.
+    migration::Migrator::up(&conn, None).await.unwrap();
     store
         .request_turn_cancellation_and_append_event(pre_upgrade_turn, Utc::now())
         .await
         .unwrap();
-
-    migration::Migrator::up(&conn, None).await.unwrap();
 
     // History written before the upgrade survives and simply has no images.
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);

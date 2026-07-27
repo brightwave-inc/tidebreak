@@ -2669,6 +2669,17 @@ impl Store for DbStore {
         ops::approval::decide(self, chat_id, call_id, decision, decided_at).await
     }
 
+    async fn decide_tool_call_approval_with_grant(
+        &self,
+        chat_id: ChatId,
+        call_id: CallId,
+        decision: &ApprovalDecision,
+        grant: &crate::StandingGrant,
+        decided_at: chrono::DateTime<Utc>,
+    ) -> Result<DecideToolApprovalOutcome> {
+        ops::approval::decide_with_grant(self, chat_id, call_id, decision, grant, decided_at).await
+    }
+
     async fn get_tool_call_approval(&self, call_id: CallId) -> Result<Option<ToolApproval>> {
         ops::approval::get(self, call_id).await
     }
