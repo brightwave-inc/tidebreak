@@ -63,9 +63,10 @@ pub use agent_tools::{
     validate_spawn_sandbox_agent_arguments, validate_wait_for_agents_arguments,
     wait_for_agents_tool_spec, web_search_tool_spec, SandboxAgentFileResource,
     SpawnSandboxAgentArgs, SpawnSandboxAgentResult, WaitForAgentResult, WaitForAgentsArgs,
-    WaitForAgentsResult, MAX_SANDBOX_AGENT_TASK_CHARS, MAX_WAIT_FOR_AGENTS_CHILDREN,
-    SANDBOX_READ_DELEGATED_FILE_TOOL, SANDBOX_WEB_SEARCH_TOOL, SPAWN_SANDBOX_AGENT_TOOL,
-    WAIT_FOR_AGENTS_TOOL, WEB_SEARCH_TOOL,
+    WaitForAgentsResult, WebSearchArgs, DEFAULT_WEB_SEARCH_RESULTS, MAX_SANDBOX_AGENT_TASK_CHARS,
+    MAX_WAIT_FOR_AGENTS_CHILDREN, MAX_WEB_SEARCH_DOMAINS, MAX_WEB_SEARCH_QUERY_CHARS,
+    MAX_WEB_SEARCH_RESULTS, SANDBOX_READ_DELEGATED_FILE_TOOL, SANDBOX_WEB_SEARCH_TOOL,
+    SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL, WEB_SEARCH_TOOL,
 };
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
@@ -162,7 +163,8 @@ pub use storage::{
     SubmitAgentRunResultOutcome, TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use tool::{
-    ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec,
+    input_schema_for, ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolScratch,
+    ToolSpec,
 };
 #[cfg(feature = "tools")]
 pub use tools::{CreateDeliverable, ListDir, ReadFile, WriteFile};

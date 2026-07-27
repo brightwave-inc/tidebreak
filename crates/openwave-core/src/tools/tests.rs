@@ -35,6 +35,93 @@ async fn every_file_tool_fails_closed_without_private_scratch() {
     assert!(deliverable.is_error);
 }
 
+#[test]
+fn built_in_tool_schemas_preserve_their_provider_contracts() {
+    assert_eq!(
+        ReadFile.spec().input_schema,
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Private-scratch-relative file path."
+                }
+            },
+            "required": ["path"]
+        })
+    );
+    assert_eq!(
+        ListDir.spec().input_schema,
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Private-scratch-relative directory (optional)."
+                }
+            }
+        })
+    );
+    assert_eq!(
+        WriteFile.spec().input_schema,
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Private-scratch-relative file path."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "File contents to write."
+                }
+            },
+            "required": ["path", "content"]
+        })
+    );
+    assert_eq!(
+        CreateDeliverable.spec().input_schema,
+        json!({
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Portable output filename ending in .md, .txt, .csv, .json, or .html.",
+                    "minLength": 1,
+                    "maxLength": crate::MAX_DELIVERABLE_NAME_CHARS
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Complete UTF-8 text contents of the output file (maximum 512 KiB).",
+                    "minLength": 1,
+                    "maxLength": crate::MAX_DELIVERABLE_BYTES
+                }
+            },
+            "required": ["filename", "content"],
+            "additionalProperties": false
+        })
+    );
+}
+
+#[tokio::test]
+async fn malformed_arguments_include_the_typed_schema() {
+    let output = ReadFile
+        .execute(
+            &ToolCtx::without_private_scratch(ChatId::new(), None),
+            json!({"path": 42}),
+        )
+        .await
+        .unwrap();
+
+    assert!(output.is_error);
+    assert!(output.content.contains("invalid arguments:"));
+    assert!(output.content.contains("Expected schema:"));
+    assert!(output
+        .content
+        .contains("Private-scratch-relative file path."));
+    assert!(output.content.contains("\"required\": ["));
+}
+
 #[tokio::test]
 async fn deliverables_are_isolated_in_their_closed_directory() {
     let dir = tempfile::tempdir().unwrap();

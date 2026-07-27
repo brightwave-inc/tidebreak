@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -12,9 +13,13 @@ use super::private_scratch::{list_directory, relative_path};
 /// `list_dir` — list the entries of a private scratch directory.
 pub struct ListDir;
 
-#[derive(Deserialize)]
-struct Arguments {
+#[derive(Deserialize, JsonSchema)]
+pub(super) struct Arguments {
     #[serde(default)]
+    #[schemars(
+        with = "String",
+        description = "Private-scratch-relative directory (optional)."
+    )]
     path: Option<String>,
 }
 

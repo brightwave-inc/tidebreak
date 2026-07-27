@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -12,9 +13,11 @@ use super::private_scratch::{relative_path, write_utf8_file};
 /// `write_file` — atomically write a UTF-8 text file into private scratch.
 pub struct WriteFile;
 
-#[derive(Deserialize)]
-struct Arguments {
+#[derive(Deserialize, JsonSchema)]
+pub(super) struct Arguments {
+    #[schemars(description = "Private-scratch-relative file path.")]
     path: String,
+    #[schemars(description = "File contents to write.")]
     content: String,
 }
 

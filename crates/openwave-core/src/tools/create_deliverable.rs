@@ -1,11 +1,13 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::deliverable::{
     validate_deliverable_name, DELIVERABLES_DIRECTORY, MAX_DELIVERABLE_BYTES,
+    MAX_DELIVERABLE_NAME_CHARS,
 };
 use crate::error::Result;
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
@@ -17,10 +19,18 @@ use super::private_scratch::write_utf8_file;
 /// `create_deliverable` — create or update a user-visible text artifact.
 pub struct CreateDeliverable;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Arguments {
+pub(super) struct Arguments {
+    #[schemars(
+        length(min = 1, max = MAX_DELIVERABLE_NAME_CHARS),
+        description = "Portable output filename ending in .md, .txt, .csv, .json, or .html."
+    )]
     filename: String,
+    #[schemars(
+        length(min = 1, max = MAX_DELIVERABLE_BYTES),
+        description = "Complete UTF-8 text contents of the output file (maximum 512 KiB)."
+    )]
     content: String,
 }
 

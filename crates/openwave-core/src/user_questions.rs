@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -27,11 +28,15 @@ pub const MAX_QUESTION_OPTION_DESCRIPTION_CHARS: usize = 240;
 pub const MAX_FREE_FORM_ANSWER_CHARS: usize = 2_000;
 
 /// One mutually exclusive answer choice.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
+#[schemars(description = "")]
 pub struct UserQuestionOption {
+    #[schemars(length(min = 1, max = MAX_QUESTION_OPTION_ID_CHARS))]
     pub id: String,
+    #[schemars(length(min = 1, max = MAX_QUESTION_OPTION_LABEL_CHARS))]
     pub label: String,
+    #[schemars(length(min = 1, max = MAX_QUESTION_OPTION_DESCRIPTION_CHARS))]
     pub description: String,
 }
 
@@ -45,13 +50,18 @@ impl UserQuestionOption {
 }
 
 /// One bounded question shown to the user.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
+#[schemars(description = "")]
 pub struct UserQuestion {
+    #[schemars(length(min = 1, max = MAX_QUESTION_ID_CHARS))]
     pub id: String,
+    #[schemars(length(min = 1, max = MAX_QUESTION_HEADER_CHARS))]
     pub header: String,
+    #[schemars(length(min = 1, max = MAX_QUESTION_PROMPT_CHARS))]
     pub question: String,
     #[serde(default)]
+    #[schemars(length(max = MAX_QUESTION_OPTIONS))]
     pub options: Vec<UserQuestionOption>,
     #[serde(default)]
     pub allow_free_form: bool,
@@ -76,9 +86,10 @@ impl UserQuestion {
 }
 
 /// Canonical model arguments for [`ASK_USER_QUESTIONS_TOOL`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AskUserQuestionsArgs {
+    #[schemars(length(min = 1, max = MAX_USER_QUESTIONS))]
     pub questions: Vec<UserQuestion>,
 }
 
@@ -188,47 +199,10 @@ pub fn validate_ask_user_questions_arguments(arguments: &Value) -> bool {
 
 #[must_use]
 pub fn ask_user_questions_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: ASK_USER_QUESTIONS_TOOL.into(),
-        description: "Pause the current foreground turn and ask the user up to three short structured questions. Use stable question and option IDs. Options are mutually exclusive; enable allow_free_form only when a custom answer is useful. Call this tool alone, with no assistant text or sibling tools.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "questions": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": MAX_USER_QUESTIONS,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string", "minLength": 1, "maxLength": MAX_QUESTION_ID_CHARS },
-                            "header": { "type": "string", "minLength": 1, "maxLength": MAX_QUESTION_HEADER_CHARS },
-                            "question": { "type": "string", "minLength": 1, "maxLength": MAX_QUESTION_PROMPT_CHARS },
-                            "options": {
-                                "type": "array",
-                                "maxItems": MAX_QUESTION_OPTIONS,
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "id": { "type": "string", "minLength": 1, "maxLength": MAX_QUESTION_OPTION_ID_CHARS },
-                                        "label": { "type": "string", "minLength": 1, "maxLength": MAX_QUESTION_OPTION_LABEL_CHARS },
-                                        "description": { "type": "string", "minLength": 1, "maxLength": MAX_QUESTION_OPTION_DESCRIPTION_CHARS }
-                                    },
-                                    "required": ["id", "label", "description"],
-                                    "additionalProperties": false
-                                }
-                            },
-                            "allow_free_form": { "type": "boolean" }
-                        },
-                        "required": ["id", "header", "question"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["questions"],
-            "additionalProperties": false
-        }),
-    }
+    ToolSpec::for_args::<AskUserQuestionsArgs>(
+        ASK_USER_QUESTIONS_TOOL,
+        "Pause the current foreground turn and ask the user up to three short structured questions. Use stable question and option IDs. Options are mutually exclusive; enable allow_free_form only when a custom answer is useful. Call this tool alone, with no assistant text or sibling tools.",
+    )
 }
 
 fn valid_text(value: &str, max_chars: usize) -> bool {
@@ -280,6 +254,42 @@ mod tests {
         let mut unknown = sample();
         unknown["questions"][0]["secret"] = Value::String("no".into());
         assert!(!validate_ask_user_questions_arguments(&unknown));
+    }
+
+    #[test]
+    fn question_schema_is_derived_with_all_nested_bounds() {
+        let schema = ask_user_questions_tool_spec().input_schema;
+        let questions = &schema["properties"]["questions"];
+        let question = &questions["items"];
+        let option = &question["properties"]["options"]["items"];
+
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], serde_json::json!(["questions"]));
+        assert_eq!(questions["minItems"], 1);
+        assert_eq!(questions["maxItems"], MAX_USER_QUESTIONS);
+        assert_eq!(question["additionalProperties"], false);
+        assert_eq!(
+            question["required"],
+            serde_json::json!(["id", "header", "question"])
+        );
+        assert_eq!(
+            question["properties"]["question"]["maxLength"],
+            MAX_QUESTION_PROMPT_CHARS
+        );
+        assert_eq!(
+            question["properties"]["options"]["maxItems"],
+            MAX_QUESTION_OPTIONS
+        );
+        assert_eq!(option["additionalProperties"], false);
+        assert_eq!(
+            option["required"],
+            serde_json::json!(["id", "label", "description"])
+        );
+        assert_eq!(
+            option["properties"]["description"]["maxLength"],
+            MAX_QUESTION_OPTION_DESCRIPTION_CHARS
+        );
+        assert!(!schema.to_string().contains("\"default\""));
     }
 
     #[test]
