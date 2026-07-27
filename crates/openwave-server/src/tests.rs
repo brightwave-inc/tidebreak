@@ -7162,6 +7162,7 @@ async fn resolve_embedder_uses_openai_only_when_enabled_and_keyed() {
     assert_eq!(offline.dimensions(), HashEmbedder::default().dimensions());
 }
 
+#[cfg(feature = "vec-lance")]
 #[tokio::test(flavor = "multi_thread")]
 async fn connect_vector_store_opens_a_durable_lance_index_under_data_dir() {
     let dir = tempfile::tempdir().unwrap();
@@ -7193,6 +7194,42 @@ async fn connect_vector_store_opens_a_durable_lance_index_under_data_dir() {
     );
     let reopened = connect_vector_store(&config, 2).await.unwrap();
     assert_eq!(reopened.len().await.unwrap(), 1);
+}
+
+/// The lean build's stand-in still ingests and searches — it just forgets. A
+/// release build never reaches it (`build.rs` rejects a release build without
+/// `vec-lance`), so this pins the development behaviour rather than a shipped
+/// one: the store works, sized to the embedder, and writes nothing to disk.
+#[cfg(not(feature = "vec-lance"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn connect_vector_store_falls_back_to_an_in_memory_index_without_vec_lance() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config::desktop(dir.path());
+
+    let store = connect_vector_store(&config, 2).await.unwrap();
+    let doc = openwave_retrieval::DocumentId::new();
+    let chunk =
+        openwave_retrieval::Chunk::new(doc, 0, openwave_retrieval::ByteSpan::new(0, 4), "note");
+    store
+        .upsert(vec![openwave_retrieval::VectorRecord {
+            chat_id: None,
+            project_id: None,
+            source: openwave_retrieval::DocumentSource::Inline,
+            generation: None,
+            chunk,
+            embedding: openwave_retrieval::Embedding(vec![1.0, 0.0]),
+        }])
+        .await
+        .unwrap();
+    assert_eq!(store.len().await.unwrap(), 1);
+
+    assert!(
+        !dir.path().join("vectors").exists(),
+        "the in-memory store leaves no index on disk"
+    );
+    // A second connect starts empty: nothing carried over from the first.
+    let reopened = connect_vector_store(&config, 2).await.unwrap();
+    assert_eq!(reopened.len().await.unwrap(), 0);
 }
 
 #[tokio::test]

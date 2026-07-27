@@ -206,17 +206,15 @@ jobs:
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: v0.16.0
-      - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
+      - name: Install system deps (Tauri)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
-            libprotobuf-dev \
             librsvg2-dev \
             mold \
-            patchelf \
-            protobuf-compiler
+            patchelf
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
@@ -257,17 +255,15 @@ jobs:
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: v0.16.0
-      - name: Install system deps (Tauri; protobuf for the LanceDB vector store)
+      - name: Install system deps (Tauri)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
-            libprotobuf-dev \
             librsvg2-dev \
             mold \
-            patchelf \
-            protobuf-compiler
+            patchelf
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
@@ -301,13 +297,10 @@ jobs:
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: v0.16.0
-      - name: Install headless system deps (protobuf for the LanceDB vector store)
+      - name: Install headless system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libprotobuf-dev \
-            mold \
-            protobuf-compiler
+          sudo apt-get install -y --no-install-recommends mold
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
@@ -324,6 +317,64 @@ jobs:
         run: cargo fetch --locked
       - name: headless tests
         run: cargo test --workspace --exclude openwave-desktop --locked
+
+  vectors:
+    name: durable vector store
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
+      RUSTC_WRAPPER: sccache
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: v0.16.0
+      # The only lane that compiles LanceDB, so the only one that needs protoc.
+      - name: Install headless system deps (protobuf for the LanceDB vector store)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libprotobuf-dev \
+            mold \
+            protobuf-compiler
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: false
+      # The build script has no build-dependencies, so it runs and fails long
+      # before the dependency tree is built: seconds of runner time to prove a
+      # shipped binary cannot silently lose the durable store.
+      - name: A release build without the durable store must fail
+        run: |
+          if cargo check -p openwave-server --release --locked \
+            > "$RUNNER_TEMP/durable-guard.log" 2>&1; then
+            echo "A release build without vec-lance succeeded; the guard is gone." >&2
+            exit 1
+          fi
+          grep -q "durable vector store" "$RUNNER_TEMP/durable-guard.log" || {
+            echo "The release build failed for some other reason:" >&2
+            cat "$RUNNER_TEMP/durable-guard.log" >&2
+            exit 1
+          }
+      - name: LanceDB-backed tests
+        run: |
+          cargo test -p openwave-retrieval --features vec-lance --locked
+          cargo test -p openwave-server --features vec-lance --locked
 
   postgres:
     name: postgres state machine
@@ -415,6 +466,7 @@ jobs:
         lint,
         desktop,
         test,
+        vectors,
         postgres,
         ui,
       ]
@@ -426,6 +478,7 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           DESKTOP_RESULT: ${{ needs.desktop.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          VECTORS_RESULT: ${{ needs.vectors.result }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
           UI_RESULT: ${{ needs.ui.result }}
           PR_TITLE_RESULT: ${{ needs.pr-title.result }}
@@ -457,6 +510,7 @@ jobs:
               test "$LINT_RESULT" = success
               test "$DESKTOP_RESULT" = success
               test "$TEST_RESULT" = success
+              test "$VECTORS_RESULT" = success
               test "$POSTGRES_RESULT" = success
               ;;
             false)
@@ -464,6 +518,7 @@ jobs:
               test "$LINT_RESULT" = skipped
               test "$DESKTOP_RESULT" = skipped
               test "$TEST_RESULT" = skipped
+              test "$VECTORS_RESULT" = skipped
               test "$POSTGRES_RESULT" = skipped
               ;;
             *)
