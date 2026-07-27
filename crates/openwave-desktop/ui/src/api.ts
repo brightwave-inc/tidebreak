@@ -656,11 +656,21 @@ export class ApiClient {
     return cancellation;
   }
 
-  postMessage(chatId: string, turnId: string, content: string): Promise<void> {
+  /**
+   * `attachments` names images already published for this chat, in the order
+   * they should be shown to the model. Only identity crosses: the server
+   * re-derives every attachment's format and dimensions from the stored bytes.
+   */
+  postMessage(
+    chatId: string,
+    turnId: string,
+    content: string,
+    attachments: readonly string[] = [],
+  ): Promise<void> {
     return this.json(`/chats/${chatId}/messages`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ turn_id: turnId, content }),
+      body: JSON.stringify({ turn_id: turnId, content, attachments }),
     });
   }
 

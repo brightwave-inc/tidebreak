@@ -1608,6 +1608,158 @@ body {
   background: var(--bg-elevated);
 }
 
+.composer.is-dropping {
+  border-color: var(--primary, var(--ink));
+  box-shadow: var(--shadow-lg);
+}
+
+.composer-drop-hint {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  color: var(--muted-foreground);
+  font-size: 0.78rem;
+}
+
+.composer-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.composer-image {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.4rem 1.6rem 0.4rem 0.45rem;
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+
+.composer-image.is-failed {
+  border-color: var(--danger, var(--line));
+}
+
+.composer-image-thumb {
+  display: inline-flex;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+}
+
+.composer-image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.composer-image-body {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.composer-image-body strong {
+  max-width: 12rem;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-image-body small {
+  font-size: 0.68rem;
+}
+
+.composer-image.is-failed .composer-image-body small {
+  color: var(--danger, inherit);
+}
+
+.composer-image-progress {
+  width: 100%;
+  height: 3px;
+  margin-top: 0.15rem;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.composer-image-progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.composer-image-progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: var(--ink);
+  transition: width 120ms linear;
+}
+
+/* The bar still fills — it reports real bytes and dropping it would remove
+   information — but it stops sliding between the values it is given. */
+@media (prefers-reduced-motion: reduce) {
+  .composer,
+  .composer-image-progress::-webkit-progress-value {
+    transition: none;
+  }
+}
+
+.composer-image-progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: var(--ink);
+}
+
+.composer-image-retry {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  color: var(--ink);
+  background: var(--bg-elevated);
+  font-size: 0.68rem;
+}
+
+/* Always visible: a control that appears on hover is unreachable by touch and
+   invisible to a keyboard user who has already focused it. */
+.composer-image-remove {
+  position: absolute;
+  top: 0.15rem;
+  right: 0.15rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.1rem;
+  color: inherit;
+  background: transparent;
+}
+
+.composer-image-remove:hover,
+.composer-image-remove:focus-visible {
+  color: var(--ink);
+  background: var(--bg-elevated);
+}
+
 /* ---------- Model menu (composer) ---------- */
 
 .model-menu-trigger {

@@ -170,7 +170,12 @@ describe("app shell", () => {
     // Home writes the message but does not post it — the chat route does, so
     // there is only one send path.
     await waitFor(() =>
-      expect(postMessage).toHaveBeenCalledWith("chat-1", expect.any(String), "summarise the filing"),
+      expect(postMessage).toHaveBeenCalledWith(
+        "chat-1",
+        expect.any(String),
+        "summarise the filing",
+        [],
+      ),
     );
   });
 

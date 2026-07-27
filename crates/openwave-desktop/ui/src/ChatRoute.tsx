@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
-import type { ModelSelectionKey, ReasoningEffort, SequencedEvent } from "./api";
+import type {
+  ModelInfo,
+  ModelSelectionKey,
+  ReasoningEffort,
+  SequencedEvent,
+} from "./api";
 import { useApp } from "./AppContext";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import { reconcilePendingApprovalCards } from "./ApprovalHistory";
@@ -26,6 +31,8 @@ import { DocumentsView } from "./DocumentsView";
 import { FoldersView } from "./FoldersView";
 import { hasNativeHost } from "./host";
 import { importLibraryDocument, type ImportedDocument } from "./documents";
+import { readyImageAttachmentIds } from "./ImageAttachments";
+import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
 import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
 import {
@@ -79,6 +86,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const [attachingSource, setAttachingSource] = useState(false);
   const [recentSource, setRecentSource] = useState<ImportedDocument | null>(null);
   const [sourceAttachmentError, setSourceAttachmentError] = useState<string | null>(null);
+  const images = useImageAttachments(client, chatId);
   const handleEventRef = useRef<(event: SequencedEvent) => void>(() => {});
   const terminalHydrationGenerationRef = useRef(0);
   const draftRef = useRef("");
@@ -239,6 +247,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
    */
   async function sendMessage(content: string) {
     if (!chat || !content || busy || deletingChatId !== null) return;
+    const attachments = readyImageAttachmentIds(images.attachments);
     const turnId = crypto.randomUUID();
     terminalHydrationGenerationRef.current += 1;
     setComposerDraft("");
@@ -253,8 +262,12 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     }));
     signalTurnLifecycle("submitted");
     try {
-      await client.postMessage(chatId, turnId, content);
+      await client.postMessage(chatId, turnId, content, attachments);
       setRecentSource(null);
+      // Only once the turn is durably accepted. A refused send — an image the
+      // selected model cannot read, say — must leave the attachments where the
+      // reader can fix the problem and try again.
+      images.clear();
     } catch (err) {
       updateSession((session) => ({
         ...session,
@@ -312,6 +325,19 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             attachingSource={attachingSource}
             attachedSourceName={recentSource?.displayName ?? null}
             sourceAttachmentError={sourceAttachmentError}
+            composerImages={{
+              items: images.attachments,
+              // Drop and paste hand the composer the bytes directly; only the
+              // picker needs the host, so only it is withheld in a browser.
+              canPick: hasNativeHost(),
+              picking: images.attachingFromPicker,
+              error: images.error,
+              unsupportedModel: textOnlyModelLabel(models, chat!.model),
+              onPick: images.attachFromPicker,
+              onAttachFiles: images.attachFiles,
+              onRemove: images.remove,
+              onRetry: images.retry,
+            }}
             composerModelMenu={
               <>
                 <ModelMenu
@@ -391,6 +417,21 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
 function withoutConnectionState(status: string): string {
   return status.replace(/ · (?:live|reconnecting)$/, "");
+}
+
+/**
+ * The label of the chat's model when it cannot read images, or `null`.
+ *
+ * A chat with no model of its own follows the global default, which the
+ * renderer does not resolve; the server still refuses such a turn, so the
+ * composer stays quiet rather than guessing at a name it would have to print.
+ */
+function textOnlyModelLabel(
+  models: ModelInfo[],
+  selection: string | null,
+): string | null {
+  const model = modelForSelection(models, selection);
+  return model && !model.multimodal ? model.display_name : null;
 }
 
 function friendlySourceAttachmentError(error: unknown): string {
