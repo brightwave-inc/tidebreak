@@ -2833,6 +2833,10 @@ impl Store for DbStore {
         ops::user_question::list_pending(self, chat_id).await
     }
 
+    async fn list_pending_chat_prompts(&self) -> Result<Vec<crate::PendingChatPrompt>> {
+        ops::chat_prompt::list_pending_chat_prompts(self).await
+    }
+
     async fn answer_user_questions(
         &self,
         request: &crate::AnswerUserQuestionsRequest,

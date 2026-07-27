@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiClient,
   parseFolderAccessRequest,
+  parsePendingChatPrompt,
   parsePendingUserQuestions,
   parsePendingToolApproval,
   parseSandboxAgentCancellation,
@@ -98,6 +99,52 @@ describe("parseFolderAccessRequest", () => {
         claimed: "yes",
       }),
     ).toBeNull();
+  });
+});
+
+describe("pending chat prompt summaries", () => {
+  const safe = {
+    chat_id: "chat-1",
+    question_call_ids: ["question-1"],
+    folder_access_call_ids: ["folder-1"],
+  };
+
+  it("accepts only opaque prompt identities", () => {
+    expect(parsePendingChatPrompt(safe)).toEqual({
+      chatId: "chat-1",
+      questionCallIds: ["question-1"],
+      folderAccessCallIds: ["folder-1"],
+    });
+  });
+
+  it("rejects detail, duplicate identities, and empty summaries", () => {
+    expect(parsePendingChatPrompt({ ...safe, questions: [{ question: "private" }] })).toBeNull();
+    expect(
+      parsePendingChatPrompt({ ...safe, folder_access_call_ids: ["question-1"] }),
+    ).toBeNull();
+    expect(
+      parsePendingChatPrompt({
+        ...safe,
+        question_call_ids: [],
+        folder_access_call_ids: [],
+      }),
+    ).toBeNull();
+  });
+
+  it("fetches and validates the complete page", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify([safe]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await expect(client.listPendingChatPrompts()).resolves.toEqual([
+      { chatId: "chat-1", questionCallIds: ["question-1"], folderAccessCallIds: ["folder-1"] },
+    ]);
+    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1/chats/pending-prompts");
   });
 });
 

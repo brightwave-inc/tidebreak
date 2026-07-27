@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useChatListStore } from "./ChatListStore";
 import { usePendingPrompts } from "./PendingPrompts";
+import { useRefreshSignals } from "./RefreshSignals";
 import { useUiStore } from "./UiStore";
 
 /**
@@ -25,6 +26,7 @@ const listChats = vi.fn(async () => chats);
 const createChat = vi.fn(async () => chats[0]);
 const listPendingUserQuestions = vi.fn(async () => [] as unknown[]);
 const listPendingFolderAccessRequests = vi.fn(async () => [] as unknown[]);
+const listPendingChatPrompts = vi.fn(async () => [] as unknown[]);
 const requestUserAttention = vi.fn(async () => {});
 const postMessage = vi.fn(async () => {});
 
@@ -40,6 +42,7 @@ vi.mock("./api", () => ({
     createChat = createChat;
     listPendingUserQuestions = listPendingUserQuestions;
     listPendingFolderAccessRequests = listPendingFolderAccessRequests;
+    listPendingChatPrompts = listPendingChatPrompts;
     postMessage = postMessage;
     openEvents = vi.fn(() => ({ close: vi.fn() }));
   },
@@ -119,9 +122,12 @@ beforeEach(() => {
   listChats.mockClear();
   listChats.mockResolvedValue(chats);
   createChat.mockClear();
-  listPendingUserQuestions.mockClear();
+  listPendingUserQuestions.mockReset();
   listPendingUserQuestions.mockResolvedValue([]);
-  listPendingFolderAccessRequests.mockClear();
+  listPendingFolderAccessRequests.mockReset();
+  listPendingFolderAccessRequests.mockResolvedValue([]);
+  listPendingChatPrompts.mockReset();
+  listPendingChatPrompts.mockResolvedValue([]);
   requestUserAttention.mockClear();
   postMessage.mockClear();
   usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
@@ -148,6 +154,16 @@ describe("app shell", () => {
 
     const recent = await screen.findAllByRole("button", { name: "Roadmap" });
     expect(recent.length).toBeGreaterThan(0);
+  });
+
+  it("marks a parked conversation other than the one that is open", async () => {
+    listPendingChatPrompts.mockResolvedValue([
+      { chatId: "chat-2", questionCallIds: ["call-parked"], folderAccessCallIds: [] },
+    ]);
+    await mountApp({ at: "/c/chat-1" });
+
+    expect(await screen.findByLabelText("New chat needs attention")).toBeInTheDocument();
+    expect(requestUserAttention).toHaveBeenCalledOnce();
   });
 
   it("says so when there is nothing to pick up", async () => {
@@ -259,14 +275,17 @@ describe("app shell", () => {
 
     // What must not stop is being told the agent has parked a turn on a
     // question. The watcher belongs to the shell, so it is still running.
-    const readsBefore = listPendingUserQuestions.mock.calls.length;
+    const readsBefore = listPendingChatPrompts.mock.calls.length;
     listPendingUserQuestions.mockResolvedValue([
       { callId: "call-1", turnId: "turn-1", askedAt: "2026-07-27T00:00:00Z", questions: [] },
     ]);
-    usePendingPrompts.getState().refresh();
+    listPendingChatPrompts.mockResolvedValue([
+      { chatId: "chat-1", questionCallIds: ["call-1"], folderAccessCallIds: [] },
+    ]);
+    useRefreshSignals.getState().signal("userQuestions");
 
     await waitFor(() =>
-      expect(listPendingUserQuestions.mock.calls.length).toBeGreaterThan(readsBefore),
+      expect(listPendingChatPrompts.mock.calls.length).toBeGreaterThan(readsBefore),
     );
     await waitFor(() =>
       expect(usePendingPrompts.getState().userQuestions).toHaveLength(1),

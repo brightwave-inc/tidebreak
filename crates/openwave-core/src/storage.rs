@@ -69,6 +69,18 @@ pub struct ChatRefusalSnapshot {
     pub refusal: RefusalOutcome,
 }
 
+/// Opaque indication that a conversation is parked on a renderer-owned prompt.
+///
+/// This is intentionally a summary rather than a prompt projection: it lets a
+/// shell mark conversations needing attention without exposing question text,
+/// folder-access arguments, executor state, or any other canonical tool data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingChatPrompt {
+    pub chat_id: ChatId,
+    pub question_call_ids: Vec<CallId>,
+    pub folder_access_call_ids: Vec<CallId>,
+}
+
 /// Result of a fail-closed conversation deletion request.
 ///
 /// A conversation is only removable after every turn is terminal and no host
@@ -2626,6 +2638,13 @@ pub trait Store: Send + Sync {
         &self,
         _chat_id: ChatId,
     ) -> Result<Vec<PendingUserQuestions>> {
+        turn_storage_unavailable()
+    }
+
+    /// List every conversation that has a renderer-owned prompt awaiting the
+    /// user. The result carries opaque call ids only; callers fetch detail for
+    /// an individual open conversation through its dedicated recovery route.
+    async fn list_pending_chat_prompts(&self) -> Result<Vec<PendingChatPrompt>> {
         turn_storage_unavailable()
     }
 

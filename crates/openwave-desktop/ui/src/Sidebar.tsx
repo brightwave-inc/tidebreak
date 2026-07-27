@@ -1,5 +1,6 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
+  CircleAlert,
   Ellipsis,
   FolderOpen,
   Library,
@@ -18,6 +19,7 @@ import {
 } from "lucide-react";
 
 import type { Chat } from "./api";
+import { useChatAttention } from "./ChatAttention";
 import { useChatListStore } from "./ChatListStore";
 import {
   DropdownMenu,
@@ -81,6 +83,9 @@ export function Sidebar({
 }: SidebarProps) {
   const navigate = useNavigate();
   const chats = useChatListStore((state) => state.chats);
+  const chatIdsWithPendingPrompts = useChatAttention(
+    (state) => state.chatIdsWithPendingPrompts,
+  );
   const activeChatId = useChatListStore((state) => state.selected?.id ?? null);
   const chatsError = useChatListStore((state) => state.chatsError);
   const creatingChat = useChatListStore((state) => state.creatingChat);
@@ -197,6 +202,7 @@ export function Sidebar({
               key={chat.id}
               chat={chat}
               active={onChatRoute && chat.id === activeChatId}
+              needsAttention={chatIdsWithPendingPrompts.has(chat.id)}
               renaming={renamingChatId === chat.id}
               renameDraft={renameChatDraft}
               savingTitle={savingTitle}
@@ -280,6 +286,7 @@ function WorkspacePanelButton({
 function RecentChatRow({
   chat,
   active,
+  needsAttention,
   renaming,
   renameDraft,
   savingTitle,
@@ -293,6 +300,7 @@ function RecentChatRow({
 }: {
   chat: Chat;
   active: boolean;
+  needsAttention: boolean;
   renaming: boolean;
   renameDraft: string;
   savingTitle: boolean;
@@ -345,6 +353,15 @@ function RecentChatRow({
       >
         {title}
       </button>
+      {needsAttention && (
+        <span
+          className="shrink-0 text-amber-600 dark:text-amber-400"
+          aria-label={`${title} needs attention`}
+          title="Needs attention"
+        >
+          <CircleAlert aria-hidden="true" size={15} />
+        </span>
+      )}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button

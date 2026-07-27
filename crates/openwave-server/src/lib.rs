@@ -306,6 +306,10 @@ pub fn app(state: AppState) -> Router {
         .merge(public_document_api)
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route(
+            "/chats/pending-prompts",
+            get(routes::list_pending_chat_prompts),
+        )
+        .route(
             "/chats/{id}",
             get(routes::get_chat)
                 .patch(routes::patch_chat)
