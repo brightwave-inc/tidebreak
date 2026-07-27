@@ -24,6 +24,8 @@ export type HydratedTranscriptEntry =
       id: string;
       kind: "tool";
       name: string;
+      /** Opaque child correlation for a historical sandbox spawn. */
+      backgroundAgentRunId?: string;
       preview: ToolActionPreview | null;
       status: ToolCallStatus;
       createdAt: string;
@@ -79,6 +81,7 @@ export function hydrateTranscriptHistory(
       // Already an allowlisted renderer tool name, folded server-side, so the
       // same presentation the live stream uses applies directly.
       name: activity.tool,
+      backgroundAgentRunId: activity.background_agent_run_id,
       status: activity.status,
       // History carries what the call did but not what it produced: results
       // are not persisted, so a reloaded command card shows its command alone.

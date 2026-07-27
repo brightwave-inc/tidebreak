@@ -7878,6 +7878,10 @@ async fn agent_run_snapshots_expose_only_safe_live_sandbox_activity() {
         snapshot.get("activity"),
         Some(&serde_json::json!({"kind": "web_search", "status": "waiting"}))
     );
+    assert_eq!(
+        snapshot.get("spawn_call_id"),
+        Some(&serde_json::json!(run.spawn_call_id))
+    );
 
     // The projection is intentionally independent of the durable checkpoint's
     // sensitive executor data.
@@ -9561,6 +9565,44 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
         openwave_core::ResolveToolCallOutcome::Resolved
     );
 
+    // Spawn history carries only the derived child id. The task and canonical
+    // call record stay server-side, while the transcript can reattach the
+    // durable child snapshot to this exact historical step after a reload.
+    let spawn_call_id = CallId::new();
+    store
+        .accept_tool_call(&ToolCallRecord {
+            id: spawn_call_id,
+            chat_id: chat.id,
+            turn_id: turn.id,
+            provider_id: "provider-spawn".into(),
+            name: openwave_core::SPAWN_SANDBOX_AGENT_TOOL.into(),
+            arguments: serde_json::json!({"task": "private delegated task"}),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: started_at + chrono::Duration::milliseconds(3),
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_server_tool_call(
+                spawn_call_id,
+                &ToolCallResolution::Completed {
+                    result: "private child id".into(),
+                },
+                started_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap(),
+        openwave_core::ResolveToolCallOutcome::Resolved
+    );
+
     // An approval-in-flight call must stay on the event journal. Including it
     // in this durable snapshot could race its corresponding live event.
     store
@@ -9665,7 +9707,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
     }
     let transcript: serde_json::Value = serde_json::from_str(&body).unwrap();
     let activity = transcript["tool_activity"].as_array().unwrap();
-    assert_eq!(activity.len(), 2);
+    assert_eq!(activity.len(), 3);
     assert!(activity.iter().any(|card| {
         card["tool"] == "other"
             && card["status"] == "failed"
@@ -9675,6 +9717,13 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
     assert!(activity
         .iter()
         .any(|card| { card["tool"] == "request_folder_access" && card["status"] == "cancelled" }));
+    assert!(activity.iter().any(|card| {
+        card["tool"] == "spawn_sandbox_agent"
+            && card["background_agent_run_id"]
+                == serde_json::json!(openwave_core::AgentRunId::sandbox_for_spawn_call(
+                    spawn_call_id
+                ))
+    }));
 }
 
 #[tokio::test]

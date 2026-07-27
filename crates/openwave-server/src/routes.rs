@@ -1200,6 +1200,10 @@ pub struct AgentRunSnapshot {
     pub activity: Option<AgentActivitySnapshot>,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
+    // This is an OpenWave call id, not a provider call identity. It lets a
+    // transcript observer attach this durable status to its exact spawning
+    // step without exposing delegated input or executor data.
+    pub spawn_call_id: Option<openwave_core::CallId>,
 }
 
 impl AgentRunSnapshot {
@@ -1207,6 +1211,7 @@ impl AgentRunSnapshot {
         Self {
             id: run.id,
             parent_id: run.parent_id,
+            spawn_call_id: run.spawn_call_id,
             execution: run.execution,
             status: run.status,
             started_at: run.started_at,
