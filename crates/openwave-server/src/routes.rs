@@ -915,9 +915,38 @@ pub struct ChatMessageSnapshot {
     pub content: String,
     pub created_at: chrono::DateTime<Utc>,
     pub citations: Vec<openwave_core::AssistantCitationSnapshot>,
+    /// Images submitted with this user message. These are durable identity and
+    /// geometry only; image bytes remain behind a chat-scoped authenticated
+    /// endpoint and never enter the transcript payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub image_attachments: Option<Vec<TranscriptImageAttachment>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub refusal: Option<crate::event_projection::RendererRefusal>,
+}
+
+/// One renderer-safe image identity attached to a historical user message.
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct TranscriptImageAttachment {
+    /// Content-addressed opaque attachment identity, not a host path.
+    pub attachment_id: uuid::Uuid,
+    /// Sniffed IANA media type from the trusted image ingest boundary.
+    pub media_type: String,
+    /// Header-derived dimensions, bounded at image publication.
+    pub width: u32,
+    pub height: u32,
+}
+
+impl From<openwave_core::MessageAttachment> for TranscriptImageAttachment {
+    fn from(attachment: openwave_core::MessageAttachment) -> Self {
+        Self {
+            attachment_id: attachment.image.blob_id,
+            media_type: attachment.image.media_type.as_str().to_owned(),
+            width: attachment.image.width,
+            height: attachment.image.height,
+        }
+    }
 }
 
 /// One visible transcript plus the durable journal watermark that produced it.
@@ -975,6 +1004,7 @@ impl ChatMessageSnapshot {
             content: message.content,
             created_at: message.created_at,
             citations: Vec::new(),
+            image_attachments: None,
             refusal: None,
         })
     }
@@ -999,6 +1029,13 @@ pub async fn list_chat_messages(
             .or_insert_with(Vec::new)
             .push(citation);
     }
+    let mut image_attachments_by_message = std::collections::HashMap::new();
+    for attachment in transcript.message_attachments {
+        image_attachments_by_message
+            .entry(attachment.message_id)
+            .or_insert_with(Vec::new)
+            .push(TranscriptImageAttachment::from(attachment));
+    }
     let mut refusals_by_message = transcript
         .refusals
         .into_iter()
@@ -1017,6 +1054,13 @@ pub async fn list_chat_messages(
             snapshot.citations = citations_by_message
                 .remove(&snapshot.id)
                 .unwrap_or_default();
+            if snapshot.role == TranscriptRole::User {
+                let image_attachments = image_attachments_by_message
+                    .remove(&snapshot.id)
+                    .unwrap_or_default();
+                snapshot.image_attachments =
+                    (!image_attachments.is_empty()).then_some(image_attachments);
+            }
             snapshot.refusal = refusals_by_message.remove(&snapshot.id);
             Some(snapshot)
         })

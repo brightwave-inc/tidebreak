@@ -1374,6 +1374,7 @@ impl Store for MemStore {
             .unwrap_or(0);
         Ok(Some(ChatTranscriptSnapshot {
             messages: Vec::new(),
+            message_attachments: Vec::new(),
             refusals: Vec::new(),
             citations: Vec::new(),
             tool_activity: Vec::new(),

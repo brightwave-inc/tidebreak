@@ -20,9 +20,10 @@
 
 use std::io::Cursor;
 
+use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use image::{ImageFormat, ImageReader};
 use serde::Serialize;
 use uuid::Uuid;
@@ -99,6 +100,63 @@ pub async fn publish_chat_image_attachment(
         StatusCode::CREATED,
         crate::extract::Json(PublishedImageAttachment::from(image)),
     ))
+}
+
+/// `GET /chats/{chat_id}/attachments/images/{attachment_id}` — return pixels
+/// only for an image durably attached to this conversation.
+///
+/// This is deliberately separate from the renderer transcript. The transcript
+/// contains identity and geometry only; a renderer must present its bearer
+/// token and the image must still be referenced by a message in the requested
+/// chat before bytes can cross this endpoint.
+pub async fn get_chat_image_attachment(
+    State(state): State<AppState>,
+    Path((chat_id, attachment_id)): Path<(ChatId, Uuid)>,
+) -> Result<Response, ServerError> {
+    if state.store.get_chat(chat_id).await?.is_none() {
+        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
+    }
+    let attachment = state
+        .store
+        .list_message_attachments(chat_id)
+        .await?
+        .into_iter()
+        .find(|attachment| attachment.image.blob_id == attachment_id)
+        .ok_or_else(|| {
+            ServerError::not_found(format!(
+                "image attachment {attachment_id} not found in chat {chat_id}"
+            ))
+        })?;
+    let bytes = state
+        .blobs
+        .get(attachment.image.blob_id)
+        .await?
+        .ok_or_else(|| {
+            ServerError::internal(format!(
+                "image attachment {attachment_id} is missing from blob storage"
+            ))
+        })?;
+    let actual_len = u64::try_from(bytes.len())
+        .map_err(|_| ServerError::internal("image attachment byte length exceeds u64"))?;
+    if actual_len != attachment.image.byte_len {
+        return Err(ServerError::internal(format!(
+            "image attachment {attachment_id} does not match its descriptor"
+        )));
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, attachment.image.media_type.as_str())
+        .header(header::CONTENT_LENGTH, actual_len.to_string())
+        // The bearer is never put in a URL. Do not let the resulting pixels
+        // persist in an HTTP cache either; the renderer owns the object URL's
+        // short lifetime instead.
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(bytes))
+        .map_err(|error| {
+            ServerError::internal(format!(
+                "failed to build image attachment response: {error}"
+            ))
+        })
 }
 
 /// Derive durable identity from candidate image bytes.

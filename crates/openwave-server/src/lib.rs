@@ -308,6 +308,13 @@ pub fn app(state: AppState) -> Router {
             axum::routing::delete(routes::delete_provider_credential),
         )
         .merge(public_document_api)
+        // The transcript must fetch pixels with its bearer rather than putting
+        // a token in an image URL. Unlike image publication, this is renderer
+        // presentation of an image already durably attached to the chat.
+        .route(
+            "/chats/{chat_id}/attachments/images/{attachment_id}",
+            get(routes::get_chat_image_attachment),
+        )
         .route("/chats", post(routes::create_chat).get(routes::list_chats))
         .route(
             "/chats/pending-prompts",

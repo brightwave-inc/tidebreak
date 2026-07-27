@@ -642,6 +642,8 @@ pub(in crate::db) async fn get_chat_transcript(
         return Ok(None);
     }
     let messages = list_messages_on(&transaction, chat_id).await?;
+    let message_attachments =
+        super::message_attachment::list_for_chat_on(&transaction, chat_id).await?;
     let refusals = list_terminal_refusals_on(&transaction, chat_id).await?;
     let citations = super::citation::list_snapshots_on(&transaction, chat_id).await?;
     let tool_activity = list_terminal_tool_activity_on(&transaction, chat_id).await?;
@@ -649,6 +651,7 @@ pub(in crate::db) async fn get_chat_transcript(
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(ChatTranscriptSnapshot {
         messages,
+        message_attachments,
         refusals,
         citations,
         tool_activity,

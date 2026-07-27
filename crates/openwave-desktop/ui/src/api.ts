@@ -39,6 +39,7 @@ import {
   type RendererSequencedEvent,
   type RendererToolName,
   type ToolActionPreview,
+  type TranscriptImageAttachment as WireTranscriptImageAttachment,
   type TranscriptRole,
   type ToolApprovalKind,
   type ToolResultPreview as WireToolResultPreview,
@@ -138,8 +139,13 @@ export type Chat = WireChat;
  * that reads it. Narrowing it to match the wire would delete that guard rather
  * than earn it, so the override is spelled out instead of hidden.
  */
-export type ChatMessage = Omit<ChatMessageSnapshot, "citations"> & {
+export type ChatMessage = Omit<
+  ChatMessageSnapshot,
+  "citations" | "image_attachments"
+> & {
   citations?: ChatMessageCitation[];
+  /** Omitted by the server when this message has no images. */
+  image_attachments?: ChatMessageImageAttachment[];
 };
 
 /**
@@ -149,6 +155,9 @@ export type ChatMessage = Omit<ChatMessageSnapshot, "citations"> & {
  * deliberately skips `message_id` on the wire. Do not reintroduce it.
  */
 export type ChatMessageCitation = AssistantCitationSnapshot;
+
+/** One durable image identity in a historical user message. */
+export type ChatMessageImageAttachment = WireTranscriptImageAttachment;
 
 /**
  * A fixed, terminal tool-card projection with no canonical tool data.
@@ -616,6 +625,28 @@ export class ApiClient {
     return this.json(`/chats/${chatId}/messages`, {
       headers: this.headers(),
     });
+  }
+
+  async getChatImageAttachment(
+    chatId: string,
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    const response = await fetch(
+      `${this.baseUrl}/chats/${encodeURIComponent(chatId)}/attachments/images/${encodeURIComponent(attachmentId)}`,
+      { headers: this.headers(), signal },
+    );
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const body = (await response.json()) as { message?: string };
+        if (body.message) detail = body.message;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(`${response.status}: ${detail}`);
+    }
+    return response.blob();
   }
 
   patchChatTitle(chatId: string, title: string | null): Promise<Chat> {

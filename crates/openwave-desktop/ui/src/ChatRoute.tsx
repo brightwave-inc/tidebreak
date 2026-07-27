@@ -31,7 +31,10 @@ import { DocumentsView } from "./DocumentsView";
 import { FoldersView } from "./FoldersView";
 import { hasNativeHost } from "./host";
 import { importLibraryDocument, type ImportedDocument } from "./documents";
-import { readyImageAttachmentIds } from "./ImageAttachments";
+import {
+  readyImageAttachmentIds,
+  readyTranscriptImageAttachments,
+} from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
 import { modelForSelection } from "./ModelSelection";
 import { ModelMenu, ReasoningEffortMenu } from "./ModelMenu";
@@ -248,6 +251,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   async function sendMessage(content: string) {
     if (!chat || !content || busy || deletingChatId !== null) return;
     const attachments = readyImageAttachmentIds(images.attachments);
+    const transcriptImages = readyTranscriptImageAttachments(images.attachments);
     const turnId = crypto.randomUUID();
     terminalHydrationGenerationRef.current += 1;
     setComposerDraft("");
@@ -257,7 +261,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       activeTurnId: turnId,
       messages: [
         ...session.messages,
-        { id: nextId(), role: "user", text: content, createdAt: new Date().toISOString() },
+        {
+          id: nextId(),
+          role: "user",
+          text: content,
+          images: transcriptImages,
+          createdAt: new Date().toISOString(),
+        },
       ],
     }));
     signalTurnLifecycle("submitted");

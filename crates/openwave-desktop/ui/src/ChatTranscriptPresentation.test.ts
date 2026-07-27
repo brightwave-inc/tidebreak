@@ -173,6 +173,47 @@ describe("terminal transcript presentation", () => {
     ]);
   });
 
+  it("carries durable user-image identity and geometry into the message list", () => {
+    const presented = presentChatTranscript({
+      messages: [
+        {
+          id: "user-image",
+          role: "user",
+          content: "Describe this screenshot",
+          created_at: "2026-07-19T10:00:00Z",
+          citations: [],
+          image_attachments: [
+            {
+              attachment_id: "image-opaque-id",
+              media_type: "image/png",
+              width: 320,
+              height: 240,
+            },
+          ],
+        },
+      ],
+      tool_activity: [],
+      last_event_seq: 15,
+    });
+
+    expect(presented.messages).toEqual([
+      {
+        id: "user-image",
+        role: "user",
+        text: "Describe this screenshot",
+        images: [
+          {
+            attachmentId: "image-opaque-id",
+            mediaType: "image/png",
+            width: 320,
+            height: 240,
+          },
+        ],
+        createdAt: "2026-07-19T10:00:00Z",
+      },
+    ]);
+  });
+
   it("hydrates empty and partial refusals beside their durable assistant output", () => {
     const presented = presentChatTranscript({
       messages: [

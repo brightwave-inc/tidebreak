@@ -793,6 +793,30 @@ body {
   color: var(--ink);
 }
 
+.message-image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+}
+
+.message-image,
+.message-image-pending {
+  display: block;
+  width: 100%;
+  max-width: 18rem;
+  max-height: 16rem;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.message-image-pending {
+  min-height: 6rem;
+  padding: 0.75rem;
+  color: var(--muted-foreground);
+  background: color-mix(in oklch, var(--muted) 60%, transparent);
+}
+
 .message-assistant {
   align-self: flex-start;
   padding: 0.1rem 0;

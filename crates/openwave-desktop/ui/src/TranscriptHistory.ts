@@ -6,6 +6,7 @@ import type {
   ToolActionPreview,
 } from "./api";
 import type { AssistantSource } from "./AssistantSources";
+import type { TranscriptImageAttachment } from "./ImageAttachments";
 import type { ToolCallStatus } from "./ToolCallCard";
 
 export type HydratedTranscriptEntry =
@@ -14,6 +15,7 @@ export type HydratedTranscriptEntry =
       kind: "message";
       role: ChatMessage["role"];
       text: string;
+      images: TranscriptImageAttachment[];
       sources: AssistantSource[];
       createdAt: string;
       refusal?: RendererRefusal;
@@ -38,6 +40,17 @@ export function hydrateTranscriptHistory(
       kind: "message" as const,
       role: message.role,
       text: message.content,
+      images:
+        message.role === "user"
+          ? (message.image_attachments ?? []).map(
+              ({ attachment_id, media_type, width, height }) => ({
+                attachmentId: attachment_id,
+                mediaType: media_type,
+                width,
+                height,
+              }),
+            )
+          : [],
       // Ownership is already established by the server, which groups citations
       // by message before nesting them in each snapshot — which is why the
       // wire shape carries no `message_id`. Re-filtering on one here compared

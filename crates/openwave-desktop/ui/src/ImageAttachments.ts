@@ -42,6 +42,14 @@ export type PublishedImage = {
   byteLen: number;
 };
 
+/** The durable image detail a message needs after the composer has cleared. */
+export type TranscriptImageAttachment = {
+  attachmentId: string;
+  mediaType: string;
+  width: number;
+  height: number;
+};
+
 /** A published image plus the name the host picker read it under. */
 export type PickedImage = PublishedImage & { fileName: string };
 
@@ -246,6 +254,38 @@ export function readyImageAttachmentIds(
     .map((attachment) => attachment.attachmentId)
     .filter((id): id is string => id !== null);
   return [...new Set(ids)];
+}
+
+/**
+ * Convert ready composer chips into the stable identity and geometry that the
+ * optimistic user message can retain after the composer clears. Duplicate
+ * content-addressed ids are folded just as they are in the turn request.
+ */
+export function readyTranscriptImageAttachments(
+  attachments: readonly ImageAttachment[],
+): TranscriptImageAttachment[] {
+  const seen = new Set<string>();
+  return attachments.flatMap((attachment) => {
+    if (
+      attachment.status !== "ready" ||
+      attachment.attachmentId === null ||
+      attachment.mediaType === null ||
+      attachment.width === null ||
+      attachment.height === null ||
+      seen.has(attachment.attachmentId)
+    ) {
+      return [];
+    }
+    seen.add(attachment.attachmentId);
+    return [
+      {
+        attachmentId: attachment.attachmentId,
+        mediaType: attachment.mediaType,
+        width: attachment.width,
+        height: attachment.height,
+      },
+    ];
+  });
 }
 
 /** Whole-percent upload progress for the chip's bar. */
