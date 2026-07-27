@@ -44,7 +44,7 @@ pub enum RequestedFolderCapability {
 ///
 /// This is deliberately not a free-form path. The trusted desktop decides how
 /// (or whether) to map it to a local picker location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RequestedFolderHint {

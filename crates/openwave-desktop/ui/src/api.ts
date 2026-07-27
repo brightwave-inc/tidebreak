@@ -3,6 +3,11 @@ import {
   type ApprovalClass,
   type AssistantCitationSnapshot,
   type ChatMessageSnapshot,
+  type PendingApprovalSnapshot,
+  type PendingFolderAccessRequest as WirePendingFolderAccessRequest,
+  type PendingUserQuestions as WirePendingUserQuestions,
+  type UserQuestion as WireUserQuestion,
+  type UserQuestionOption as WireUserQuestionOption,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
   type RendererAgentEvent,
@@ -802,16 +807,14 @@ export function parseFolderAccessRequest(
   value: unknown,
 ): PendingFolderAccessRequest | null {
   if (!isRecord(value)) return null;
-  const keys = Object.keys(value);
   if (
-    keys.some(
-      (key) =>
-        key !== "call_id" &&
-        key !== "turn_id" &&
-        key !== "reason" &&
-        key !== "folder_hint" &&
-        key !== "claimed",
-    ) ||
+    !onlyKeys<WirePendingFolderAccessRequest>(value, [
+      "call_id",
+      "turn_id",
+      "reason",
+      "folder_hint",
+      "claimed",
+    ]) ||
     typeof value.call_id !== "string" ||
     value.call_id.length === 0 ||
     typeof value.turn_id !== "string" ||
@@ -845,7 +848,12 @@ export function parsePendingUserQuestions(
 ): PendingUserQuestions | null {
   if (
     !isRecord(value) ||
-    !onlyKeys(value, ["call_id", "turn_id", "questions", "asked_at"]) ||
+    !onlyKeys<WirePendingUserQuestions>(value, [
+      "call_id",
+      "turn_id",
+      "questions",
+      "asked_at",
+    ]) ||
     !nonEmptyBounded(value.call_id, 128) ||
     !nonEmptyBounded(value.turn_id, 128) ||
     typeof value.asked_at !== "string" ||
@@ -861,7 +869,7 @@ export function parsePendingUserQuestions(
   for (const item of value.questions) {
     if (
       !isRecord(item) ||
-      !onlyKeys(item, [
+      !onlyKeys<WireUserQuestion>(item, [
         "id",
         "header",
         "question",
@@ -885,7 +893,7 @@ export function parsePendingUserQuestions(
     for (const option of item.options) {
       if (
         !isRecord(option) ||
-        !onlyKeys(option, ["id", "label", "description"]) ||
+        !onlyKeys<WireUserQuestionOption>(option, ["id", "label", "description"]) ||
         !nonEmptyBounded(option.id, 64) ||
         optionIds.has(option.id) ||
         !nonEmptyBounded(option.label, 80) ||
@@ -916,8 +924,20 @@ export function parsePendingUserQuestions(
   };
 }
 
-function onlyKeys(value: Record<string, unknown>, allowed: string[]): boolean {
-  const set = new Set(allowed);
+/**
+ * Whether `value` carries no key outside `allowed`.
+ *
+ * Generic over the wire type so the allowlist has to be spelled with that type's
+ * own keys: a field renamed in Rust drops out of `keyof` and the call below
+ * fails to compile. Without that, a rename left the allowlist naming the old key
+ * and rejecting the new one, so the validator would reject every payload and the
+ * surface would simply stop appearing — with nothing failing.
+ */
+function onlyKeys<Wire>(
+  value: Record<string, unknown>,
+  allowed: readonly (keyof Wire & string)[],
+): boolean {
+  const set = new Set<string>(allowed);
   return Object.keys(value).every((key) => set.has(key));
 }
 
@@ -949,6 +969,26 @@ export function parseSandboxAgentCancellation(
   return { id: value.id, status: value.status };
 }
 
+/**
+ * Every key a pending approval may carry.
+ *
+ * `satisfies` ties this to the generated wire type, so a field renamed
+ * server-side fails to compile here. It used to be eight string literals
+ * compared by hand: a rename would have left them allowing the old name and
+ * rejecting the new one, so the validator would reject every approval and the
+ * consent prompt would simply stop appearing, with nothing failing.
+ */
+const PENDING_APPROVAL_KEYS = [
+  "call_id",
+  "turn_id",
+  "action",
+  "approval",
+  "class",
+  "preview",
+  "can_approve",
+  "can_remember",
+] as const satisfies readonly (keyof PendingApprovalSnapshot)[];
+
 export function parsePendingToolApproval(
   value: unknown,
 ): PendingToolApproval | null {
@@ -956,15 +996,7 @@ export function parsePendingToolApproval(
   const keys = Object.keys(value);
   if (
     keys.some(
-      (key) =>
-        key !== "call_id" &&
-        key !== "turn_id" &&
-        key !== "action" &&
-        key !== "approval" &&
-        key !== "class" &&
-        key !== "preview" &&
-        key !== "can_approve" &&
-        key !== "can_remember",
+      (key) => !(PENDING_APPROVAL_KEYS as readonly string[]).includes(key),
     ) ||
     typeof value.call_id !== "string" ||
     value.call_id.length === 0 ||

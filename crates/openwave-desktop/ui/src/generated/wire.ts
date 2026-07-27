@@ -74,6 +74,34 @@ export type ChatToolActivityStatus = "completed" | "failed" | "cancelled";
  */
 export type MessageId = string;
 
+/**
+ * Closed renderer-safe pending approval projection. Canonical arguments,
+ * model-authored summaries, and unknown tool names never cross this boundary;
+ * only a tool's own closed preview of the action under review does.
+ */
+export type PendingApprovalSnapshot = { call_id: CallId, turn_id: TurnId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
+/**
+ * Absent, not null, when the tool projects no action.
+ */
+preview?: ToolActionPreview, can_approve: boolean, can_remember: boolean, };
+
+/**
+ * One folder-access request that is safe for an untrusted renderer to present.
+ *
+ * This intentionally omits the canonical tool name and arguments, chat and
+ * executor identities, provider metadata, lifecycle details, and diagnostics.
+ */
+export type PendingFolderAccessRequest = { call_id: CallId, turn_id: TurnId, reason: string, folder_hint: RequestedFolderHint | null, claimed: boolean, };
+
+/**
+ * Renderer-safe, durable card projection.
+ *
+ * It contains only the validated presentation contract. Provider metadata,
+ * raw tool arguments, leases, executor identities, and diagnostics stay
+ * behind the server boundary.
+ */
+export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions: Array<UserQuestion>, asked_at: string, };
+
 export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta" } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**
  * The one deliberate opening in this boundary. A human cannot consent
@@ -106,6 +134,14 @@ export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, }
 export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "create_deliverable" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
+
+/**
+ * Non-authoritative, well-known starting location for the native picker.
+ *
+ * This is deliberately not a free-form path. The trusted desktop decides how
+ * (or whether) to map it to a local picker location.
+ */
+export type RequestedFolderHint = "documents" | "downloads";
 
 /**
  * The action a call will take, in a form a human can inspect.
@@ -179,6 +215,16 @@ export type TranscriptRole = "user" | "assistant";
  * Identifies one turn: a single user input through to the final answer.
  */
 export type TurnId = string;
+
+/**
+ * One bounded question shown to the user.
+ */
+export type UserQuestion = { id: string, header: string, question: string, options: Array<UserQuestionOption>, allow_free_form: boolean, };
+
+/**
+ * One mutually exclusive answer choice.
+ */
+export type UserQuestionOption = { id: string, label: string, description: string, };
 
 /**
  * Every tool name the renderer will accept, at runtime.

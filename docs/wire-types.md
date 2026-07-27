@@ -128,11 +128,22 @@ so it belongs with them rather than with the rest of the REST surface. Its `tool
 field was `&'static str`, which generated as `string` and silently dropped the
 allowlist the copy and icon tables are keyed on; it is now typed as the enum.
 
-Not yet generated: the ~37 REST snapshot DTOs. A naive derive sweep over them
-would still widen `ChatMessage.role` from two variants to four — `Role` has
-`System` and `Tool` — making a `system` message render as a user bubble, with no
-compile error. That and the remaining hazards are enumerated on the tracking
-issue; do not sweep without reading it.
+Also generated: the visible transcript entry and its citations, and all three
+consent surfaces — the pending approval, the pending user questions, and the
+folder-access request. Their TypeScript is camelCase because it describes the
+*validator's output*, not the wire, so the generated types are what the
+validators narrow **from**.
+
+Every validator now spells its key allowlist with the generated type's own keys,
+via a generic `onlyKeys<Wire>` or a `satisfies` clause. A field renamed in Rust
+drops out of `keyof` and the allowlist fails to compile, naming the new key. That
+matters more than it sounds: an untied allowlist keeps naming the *old* key after
+a rename, so the validator rejects every payload and the surface silently stops
+appearing — no error, no failing test, just a consent prompt that never shows.
+
+Not yet generated: the settings, provider, model, MCP, project, and agent-run
+DTOs. Nothing known blocks them; they are simply not done. The remaining notes
+are on the tracking issue.
 
 `ChatMessageSnapshot.citations` is deliberately wider in TypeScript than on the
 wire: the server always sends it, but the transcript is not validated, so the `?`
