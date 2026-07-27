@@ -1,9 +1,7 @@
 //! Durable local [`BlobStore`](crate::BlobStore) implementation.
 
-#[cfg(unix)]
-use std::fs::File;
-use std::fs::{self, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -13,7 +11,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use uuid::Uuid;
 
-use crate::{AgentError, BlobStore, BlobStream, DocumentSourceBlob, Result};
+use crate::{AgentError, BlobMetadata, BlobStore, BlobStream, DocumentSourceBlob, Result};
 
 /// Filesystem-backed opaque byte storage.
 ///
@@ -155,6 +153,79 @@ impl BlobStore for FsBlobStore {
         })
         .await
         .map_err(|error| AgentError::Store(format!("blob read task failed: {error}")))?
+    }
+
+    async fn metadata(&self, id: Uuid) -> Result<Option<BlobMetadata>> {
+        let path = self.blob_path(id);
+        let access = Arc::clone(&self.access);
+        tokio::task::spawn_blocking(move || {
+            let _guard = access
+                .read()
+                .map_err(|_| AgentError::Store("blob store lock poisoned".into()))?;
+            match fs::metadata(path) {
+                Ok(metadata) => Ok(Some(BlobMetadata {
+                    byte_len: metadata.len(),
+                })),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(blob_error("read metadata", error)),
+            }
+        })
+        .await
+        .map_err(|error| AgentError::Store(format!("blob metadata task failed: {error}")))?
+    }
+
+    async fn read_range(
+        &self,
+        id: Uuid,
+        range: std::ops::Range<u64>,
+    ) -> Result<Option<BlobStream>> {
+        if range.start > range.end {
+            return Err(AgentError::Store("blob range start exceeds its end".into()));
+        }
+        let path = self.blob_path(id);
+        let access = Arc::clone(&self.access);
+        let start = range.start;
+        let file = tokio::task::spawn_blocking(move || {
+            let _guard = access
+                .read()
+                .map_err(|_| AgentError::Store("blob store lock poisoned".into()))?;
+            let mut file = match File::open(path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(blob_error("open range reader", error)),
+            };
+            file.seek(SeekFrom::Start(start))
+                .map_err(|error| blob_error("seek range reader", error))?;
+            Ok(Some(file))
+        })
+        .await
+        .map_err(|error| AgentError::Store(format!("blob range task failed: {error}")))??;
+        let Some(file) = file else {
+            return Ok(None);
+        };
+
+        let remaining = range.end - range.start;
+        let stream = async_stream::try_stream! {
+            use tokio::io::AsyncReadExt;
+
+            let mut file = tokio::fs::File::from_std(file);
+            let mut remaining = remaining;
+            let mut buffer = vec![0; 64 * 1024];
+            while remaining > 0 {
+                let limit = usize::try_from(remaining.min(buffer.len() as u64))
+                    .expect("bounded buffer length fits in usize");
+                let read = file
+                    .read(&mut buffer[..limit])
+                    .await
+                    .map_err(|error| blob_error("read range", error))?;
+                if read == 0 {
+                    Err(AgentError::Store("blob ended before the requested range".into()))?;
+                }
+                remaining -= u64::try_from(read).expect("usize always fits in u64");
+                yield buffer[..read].to_vec();
+            }
+        };
+        Ok(Some(Box::pin(stream)))
     }
 
     fn delete(&self, id: Uuid) -> Result<()> {
@@ -324,6 +395,7 @@ fn blob_error(action: &str, error: std::io::Error) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::TryStreamExt;
 
     #[tokio::test]
     async fn roundtrips_reopens_and_deletes_idempotently() {
@@ -353,6 +425,38 @@ mod tests {
         reopened.delete(id).unwrap();
         reopened.delete(id).unwrap();
         assert_eq!(reopened.get(id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn reads_metadata_and_a_bounded_range_stream() {
+        let directory = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let store = FsBlobStore::new(directory.path());
+        let bytes: Vec<u8> = (0..(2 * 64 * 1024))
+            .map(|index| u8::try_from(index % 251).expect("remainder fits in u8"))
+            .collect();
+        store.put(id, bytes.clone()).await.unwrap();
+
+        assert_eq!(
+            store.metadata(id).await.unwrap(),
+            Some(BlobMetadata {
+                byte_len: u64::try_from(bytes.len()).expect("usize always fits in u64"),
+            })
+        );
+        let range = 123..(123 + 64 * 1024 + 17);
+        let chunks = store
+            .read_range(id, range.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 64 * 1024));
+        assert_eq!(
+            chunks.concat(),
+            bytes[usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap()]
+        );
     }
 
     #[tokio::test]

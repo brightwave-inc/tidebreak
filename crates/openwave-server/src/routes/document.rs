@@ -2,7 +2,7 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use futures::StreamExt;
@@ -812,9 +812,10 @@ pub async fn get_chat_document(
 pub async fn get_document_file_content(
     State(state): State<AppState>,
     Path(id): Path<DocumentId>,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    serve_document_file_content(&state, id, None, None, &headers).await
+    serve_document_file_content(&state, id, None, None, method, &headers).await
 }
 
 /// `GET /projects/{project_id}/documents/{document_id}/file-content` — serve
@@ -822,10 +823,19 @@ pub async fn get_document_file_content(
 pub async fn get_project_document_file_content(
     State(state): State<AppState>,
     Path((project_id, document_id)): Path<(ProjectId, DocumentId)>,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
     require_project(&state, project_id).await?;
-    serve_document_file_content(&state, document_id, None, Some(project_id), &headers).await
+    serve_document_file_content(
+        &state,
+        document_id,
+        None,
+        Some(project_id),
+        method,
+        &headers,
+    )
+    .await
 }
 
 /// `GET /chats/{chat_id}/documents/{document_id}/file-content` — serve original
@@ -833,10 +843,11 @@ pub async fn get_project_document_file_content(
 pub async fn get_chat_document_file_content(
     State(state): State<AppState>,
     Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
     require_chat(&state, chat_id).await?;
-    serve_document_file_content(&state, document_id, Some(chat_id), None, &headers).await
+    serve_document_file_content(&state, document_id, Some(chat_id), None, method, &headers).await
 }
 
 async fn serve_document_file_content(
@@ -844,6 +855,7 @@ async fn serve_document_file_content(
     document_id: DocumentId,
     chat_id: Option<ChatId>,
     project_id: Option<ProjectId>,
+    method: Method,
     headers: &HeaderMap,
 ) -> Result<Response, ServerError> {
     let Some(document) = state
@@ -861,13 +873,12 @@ async fn serve_document_file_content(
             "original bytes for document {document_id} not found"
         )));
     };
-    let bytes = state.blobs.get(source_blob.id).await?.ok_or_else(|| {
+    let metadata = state.blobs.metadata(source_blob.id).await?.ok_or_else(|| {
         ServerError::internal(format!(
             "original bytes for document {document_id} are missing from blob storage"
         ))
     })?;
-    let actual_len = u64::try_from(bytes.len())
-        .map_err(|_| ServerError::internal("document byte length exceeds u64"))?;
+    let actual_len = metadata.byte_len;
     if actual_len != source_blob.byte_len {
         return Err(ServerError::internal(format!(
             "original byte length for document {document_id} does not match its descriptor"
@@ -883,33 +894,45 @@ async fn serve_document_file_content(
         Ok(range) => range,
         Err(()) => return Ok(range_not_satisfiable_response(actual_len)),
     };
-    let (status, content_range, body) = match requested_range {
+    let (status, content_range, range, body_len) = match requested_range {
         Some(range) => {
-            let start = usize::try_from(range.start)
-                .map_err(|_| ServerError::internal("document range start exceeds usize"))?;
-            let end_exclusive = usize::try_from(range.end_inclusive + 1)
-                .map_err(|_| ServerError::internal("document range end exceeds usize"))?;
+            let end_exclusive = range.end_inclusive + 1;
             (
                 StatusCode::PARTIAL_CONTENT,
                 Some(format!(
                     "bytes {}-{}/{}",
                     range.start, range.end_inclusive, actual_len
                 )),
-                bytes[start..end_exclusive].to_vec(),
+                range.start..end_exclusive,
+                end_exclusive - range.start,
             )
         }
-        None => (StatusCode::OK, None, bytes),
+        None => (StatusCode::OK, None, 0..actual_len, actual_len),
+    };
+    let body = if method == Method::HEAD {
+        Body::empty()
+    } else {
+        let stream = state
+            .blobs
+            .read_range(source_blob.id, range)
+            .await?
+            .ok_or_else(|| {
+                ServerError::internal(format!(
+                    "original bytes for document {document_id} are missing from blob storage"
+                ))
+            })?;
+        Body::from_stream(stream)
     };
 
     let mut response = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CONTENT_LENGTH, body.len().to_string());
+        .header(header::CONTENT_LENGTH, body_len.to_string());
     if let Some(content_range) = content_range {
         response = response.header(header::CONTENT_RANGE, content_range);
     }
-    response.body(Body::from(body)).map_err(|error| {
+    response.body(body).map_err(|error| {
         ServerError::internal(format!("failed to build document response: {error}"))
     })
 }

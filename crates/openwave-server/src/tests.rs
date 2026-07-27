@@ -1,6 +1,10 @@
 use super::*;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::ops::Range;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,9 +14,9 @@ use futures::stream::{self, BoxStream, StreamExt};
 // Tests use the in-memory store; production wires LanceDB in `bind`.
 use openwave_core::{
     Agent, AgentConfig, AgentErrorInfo, AgentEvent, AgentRunInboxStatus, AgentRunStatus,
-    ApprovalClass, BeginRootAttachmentChange, BlobStore, CallId, Chat, ChatId, ChatRequest,
-    ChatRootAttachment, ClaimedAgentEvent, ClientToolCallRequest, ContentBlock,
-    DeleteProjectOutcome, HostRootId, Message, MessageId, ModelProvider,
+    ApprovalClass, BeginRootAttachmentChange, BlobMetadata, BlobStore, BlobStream, CallId, Chat,
+    ChatId, ChatRequest, ChatRootAttachment, ClaimedAgentEvent, ClientToolCallRequest,
+    ContentBlock, DeleteProjectOutcome, HostRootId, Message, MessageId, ModelProvider,
     ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent,
     ProviderId, Role, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentOrigin,
     SandboxToolCallRequest, SecretProvider, SequencedEvent, StopReason, Tool, ToolCallExecution,
@@ -617,6 +621,109 @@ struct FirstPutGatedBlobStore {
     calls: AtomicUsize,
     entered: Notify,
     release: Notify,
+}
+
+/// An instrumented store used to prove a response range never falls back to
+/// [`BlobStore::get`], which would materialize the complete source.
+struct RangeOnlyBlobStore {
+    bytes: Arc<Vec<u8>>,
+    full_reads: AtomicUsize,
+    requested_ranges: Mutex<Vec<Range<u64>>>,
+}
+
+#[async_trait]
+impl BlobStore for RangeOnlyBlobStore {
+    async fn put(&self, _id: uuid::Uuid, _bytes: Vec<u8>) -> Result<()> {
+        Err(AgentError::Store(
+            "range-only test store cannot publish".into(),
+        ))
+    }
+
+    async fn get(&self, _id: uuid::Uuid) -> Result<Option<Vec<u8>>> {
+        self.full_reads.fetch_add(1, Ordering::SeqCst);
+        Err(AgentError::Store(
+            "document route must not materialize the blob".into(),
+        ))
+    }
+
+    async fn metadata(&self, _id: uuid::Uuid) -> Result<Option<BlobMetadata>> {
+        Ok(Some(BlobMetadata {
+            byte_len: u64::try_from(self.bytes.len()).expect("usize always fits in u64"),
+        }))
+    }
+
+    async fn read_range(&self, _id: uuid::Uuid, range: Range<u64>) -> Result<Option<BlobStream>> {
+        self.requested_ranges.lock().unwrap().push(range.clone());
+        let start = usize::try_from(range.start)
+            .map_err(|_| AgentError::Store("test range start exceeds usize".into()))?;
+        let end = usize::try_from(range.end)
+            .map_err(|_| AgentError::Store("test range end exceeds usize".into()))?;
+        let bytes = self
+            .bytes
+            .get(start..end)
+            .ok_or_else(|| AgentError::Store("test range is outside source bytes".into()))?
+            .to_vec();
+        Ok(Some(stream::once(async move { Ok(bytes) }).boxed()))
+    }
+
+    fn delete(&self, _id: uuid::Uuid) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct PendingBlobStream {
+    dropped: Arc<AtomicBool>,
+}
+
+impl futures::Stream for PendingBlobStream {
+    type Item = Result<Vec<u8>>;
+
+    fn poll_next(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Pending
+    }
+}
+
+impl Drop for PendingBlobStream {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
+
+/// A stream that stays pending until the HTTP body is cancelled.
+struct CancellationAwareBlobStore {
+    byte_len: u64,
+    stream_dropped: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl BlobStore for CancellationAwareBlobStore {
+    async fn put(&self, _id: uuid::Uuid, _bytes: Vec<u8>) -> Result<()> {
+        Err(AgentError::Store(
+            "cancellation test store cannot publish".into(),
+        ))
+    }
+
+    async fn get(&self, _id: uuid::Uuid) -> Result<Option<Vec<u8>>> {
+        Err(AgentError::Store(
+            "document route must not materialize the blob".into(),
+        ))
+    }
+
+    async fn metadata(&self, _id: uuid::Uuid) -> Result<Option<BlobMetadata>> {
+        Ok(Some(BlobMetadata {
+            byte_len: self.byte_len,
+        }))
+    }
+
+    async fn read_range(&self, _id: uuid::Uuid, _range: Range<u64>) -> Result<Option<BlobStream>> {
+        Ok(Some(Box::pin(PendingBlobStream {
+            dropped: Arc::clone(&self.stream_dropped),
+        })))
+    }
+
+    fn delete(&self, _id: uuid::Uuid) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -4963,6 +5070,119 @@ async fn document_file_content_supports_full_head_and_single_range_responses() {
             .unwrap()
             .is_empty());
     }
+}
+
+#[tokio::test]
+async fn document_file_content_streams_only_the_requested_range() {
+    let (upload_router, token, mut state, _store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let raw: Vec<u8> = (0..(2 * 1024 * 1024))
+        .map(|index| u8::try_from(index % 251).expect("remainder fits in u8"))
+        .collect();
+    let accepted: serde_json::Value = json_body(
+        post_raw(
+            &upload_router,
+            &bearer,
+            "/documents/raw?title=large.pdf",
+            Some("application/pdf"),
+            raw.clone(),
+        )
+        .await,
+    )
+    .await;
+    let tracker = Arc::new(RangeOnlyBlobStore {
+        bytes: Arc::new(raw.clone()),
+        full_reads: AtomicUsize::new(0),
+        requested_ranges: Mutex::new(Vec::new()),
+    });
+    state.blobs = tracker.clone();
+    let router = app(state);
+    let selected_range = 1_048_576_u64..1_048_608;
+    let uri = format!(
+        "/documents/{}/file-content",
+        accepted["document_id"].as_str().unwrap()
+    );
+
+    let response = request_document_file_content(
+        &router,
+        axum::http::Method::GET,
+        &uri,
+        Some(&bearer),
+        Some("bytes=1048576-1048607"),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        raw[1_048_576..1_048_608]
+    );
+    assert_eq!(tracker.full_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        tracker.requested_ranges.lock().unwrap().as_slice(),
+        std::slice::from_ref(&selected_range)
+    );
+
+    let head = request_document_file_content(
+        &router,
+        axum::http::Method::HEAD,
+        &uri,
+        Some(&bearer),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(head.status(), StatusCode::OK);
+    assert!(to_bytes(head.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        tracker.requested_ranges.lock().unwrap().as_slice(),
+        std::slice::from_ref(&selected_range)
+    );
+}
+
+#[tokio::test]
+async fn document_file_content_cancels_its_blob_stream_when_response_is_dropped() {
+    let (upload_router, token, mut state, _store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let raw = b"cancellation source".to_vec();
+    let accepted: serde_json::Value = json_body(
+        post_raw(
+            &upload_router,
+            &bearer,
+            "/documents/raw?title=cancel.txt",
+            Some("text/plain"),
+            raw.clone(),
+        )
+        .await,
+    )
+    .await;
+    let stream_dropped = Arc::new(AtomicBool::new(false));
+    state.blobs = Arc::new(CancellationAwareBlobStore {
+        byte_len: u64::try_from(raw.len()).expect("usize always fits in u64"),
+        stream_dropped: Arc::clone(&stream_dropped),
+    });
+    let router = app(state);
+    let uri = format!(
+        "/documents/{}/file-content",
+        accepted["document_id"].as_str().unwrap()
+    );
+
+    let response = request_document_file_content(
+        &router,
+        axum::http::Method::GET,
+        &uri,
+        Some(&bearer),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!stream_dropped.load(Ordering::SeqCst));
+    drop(response);
+    assert!(stream_dropped.load(Ordering::SeqCst));
 }
 
 #[tokio::test]

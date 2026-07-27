@@ -147,7 +147,7 @@ pub use storage::{
     AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptSandboxAgentRunAndParkTurnOutcome,
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
     AnswerUserQuestionsOutcome, AppendClaimedMessageOutcome, ApplyTurnSteerOutcome,
-    BeginRootAttachmentChangeOutcome, BlobStore, BlobStream, ChatRefusalSnapshot,
+    BeginRootAttachmentChangeOutcome, BlobMetadata, BlobStore, BlobStream, ChatRefusalSnapshot,
     ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot,
     CheckpointSandboxSpawnOutcome, ClaimAgentRunInboxOutcome, ClaimClientToolCallOutcome,
     ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome, ClaimScanTerminalEvent,
