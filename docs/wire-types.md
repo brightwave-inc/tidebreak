@@ -117,33 +117,31 @@ worth knowing before adding types.
 
 ## Scope today
 
-Generated: the renderer's tool vocabulary and the whole WebSocket event surface —
-the frame, the event union, the tool previews, and the approval kinds. The event
-surface mattered most because the renderer parses each frame with a bare cast and
-no runtime validation, so the generated type is the only contract on that path.
+**Generated: the whole renderer surface.** The WebSocket frame and event union, the
+tool vocabulary and previews, approval kinds, the transcript and its citations,
+all three consent surfaces, and the configuration, catalog, project, chat, and
+agent-run DTOs.
 
-Also generated: `ChatToolActivitySnapshot`, the terminal tool card rebuilt from
-the journal. It shares the vocabulary and the action preview with the live stream,
-so it belongs with them rather than with the rest of the REST surface. Its `tool`
-field was `&'static str`, which generated as `string` and silently dropped the
-allowlist the copy and icon tables are keyed on; it is now typed as the enum.
+**Hand-written, deliberately.** Nine declarations, each for a reason:
 
-Also generated: the visible transcript entry and its citations, and all three
-consent surfaces — the pending approval, the pending user questions, and the
-folder-access request. Their TypeScript is camelCase because it describes the
-*validator's output*, not the wire, so the generated types are what the
-validators narrow **from**.
+| Type | Why |
+|---|---|
+| `PendingToolApproval`, `PendingFolderAccessRequest`, `PendingUserQuestions`, `UserQuestion`, `UserQuestionOption` | camelCase app types describing the *validator's output*, not the wire. Their wire counterparts are generated and imported as `Wire*`, and each validator's key allowlist is tied to `keyof` that type. |
+| `ToolResultPreview` | Same, and its Rust type is carried in the journal — renaming those fields would stop existing chats loading. |
+| `ServerInfo` | Tauri IPC, a different contract from REST. |
+| `ApprovalGrantRung`, `UserQuestionAnswer` | Inbound request bodies. |
+| `ModelSelectionKey` | A template-literal brand over a plain Rust `String`; no generator expresses it. |
 
-Every validator now spells its key allowlist with the generated type's own keys,
-via a generic `onlyKeys<Wire>` or a `satisfies` clause. A field renamed in Rust
-drops out of `keyof` and the allowlist fails to compile, naming the new key. That
-matters more than it sounds: an untied allowlist keeps naming the *old* key after
-a rename, so the validator rejects every payload and the surface silently stops
-appearing — no error, no failing test, just a consent prompt that never shows.
+Two generated types carry a visible override rather than being aliased, both
+written with `Omit` so the divergence is legible:
 
-Not yet generated: the settings, provider, model, MCP, project, and agent-run
-DTOs. Nothing known blocks them; they are simply not done. The remaining notes
-are on the tracking issue.
+- **`ChatMessage.citations`** stays optional. The server always sends it, but the
+  transcript arrives as a parsed cast with no validation, so the `?` is what
+  forces the guard that reads it. Narrowing it would delete that guard rather
+  than earn it.
+- **`ModelInfo.key`** is re-branded as `ModelSelectionKey`. The wire is honestly
+  a string; the brand is the app-level refinement that keeps a
+  provider-qualified key distinct from a bare model id.
 
 `ChatMessageSnapshot.citations` is deliberately wider in TypeScript than on the
 wire: the server always sends it, but the transcript is not validated, so the `?`

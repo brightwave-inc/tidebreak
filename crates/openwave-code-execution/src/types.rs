@@ -17,7 +17,7 @@ pub const MAX_CAPTURE_BYTES: usize = 40_000;
 const MAX_ID_BYTES: usize = 128;
 
 /// A configured code-execution backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CodeExecutionProviderKind {

@@ -28,7 +28,7 @@ pub const LEGACY_ANTHROPIC_API_KEY: &str = "provider.anthropic.api_key";
 
 /// The known provider kinds. `#[non_exhaustive]` so new kinds can land without
 /// breaking wire clients that match on the string form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ProviderKind {
@@ -161,7 +161,7 @@ fn default_custom_max_output_tokens() -> u32 {
 
 /// Conservative, user-inspectable capabilities for one model served by an
 /// OpenAI-compatible endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct CustomModelConfig {
     /// Exact model id sent to the endpoint.
@@ -278,7 +278,7 @@ pub struct CatalogModel {
 }
 
 /// Public view of a provider — never includes the credential itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct ProviderInfo {
     /// Provider kind.
     pub kind: ProviderKind,
@@ -286,6 +286,7 @@ pub struct ProviderInfo {
     pub enabled: bool,
     /// Configured base URL, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub base_url: Option<String>,
     /// Whether a credential is stored (never the credential itself).
     pub has_credential: bool,

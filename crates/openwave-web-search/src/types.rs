@@ -31,7 +31,7 @@ const MAX_METADATA_VALUE_CHARS: usize = 256;
 
 /// A configured web-search backend. The stable string also selects its secret
 /// reference; it is intentionally not a model-controlled argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchProviderKind {
     Exa,

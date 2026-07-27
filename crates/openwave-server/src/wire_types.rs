@@ -322,6 +322,25 @@ mod tests {
         generate::collect_from::<crate::routes::client_execution::PendingFolderAccessRequest>(
             &cfg, &mut out,
         );
+        // Configuration, catalog, and project surfaces. These carry no shared
+        // types with the conversation path, but one generated module keeps the
+        // renderer importing from a single place.
+        generate::collect_from::<crate::routes::Settings>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::ModelInfo>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::ChatTranscript>(&cfg, &mut out);
+        generate::collect_from::<crate::providers::ProviderInfo>(&cfg, &mut out);
+        generate::collect_from::<crate::web_search::WebSearchConfigInfo>(&cfg, &mut out);
+        generate::collect_from::<crate::web_search::WebSearchCredentialReadiness>(&cfg, &mut out);
+        generate::collect_from::<crate::code_execution::CodeExecutionConfigInfo>(&cfg, &mut out);
+        generate::collect_from::<crate::mcp_config::McpServersInfo>(&cfg, &mut out);
+        // Named separately because `serde(flatten)` inlines it into
+        // `McpServerInfo` rather than referencing it, so the walk never reaches
+        // it — and the renderer uses it on its own as the PUT body shape.
+        generate::collect_from::<crate::mcp_config::McpServerDefinition>(&cfg, &mut out);
+        generate::collect_from::<openwave_core::Project>(&cfg, &mut out);
+        generate::collect_from::<openwave_core::Chat>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::AgentRunSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::AgentRunCancellationSnapshot>(&cfg, &mut out);
         out
     }
 
@@ -644,36 +663,53 @@ mod tests {
     /// `string`, which compiled on both sides while deleting the totality check
     /// that makes a tool without an icon a compile error.
     ///
+    /// Scoped per declaration, not per field name. A global check read
+    /// `McpServerDefinition.name: string` as the event stream's `name:
+    /// RendererToolName` having been widened — a false alarm on a field that is
+    /// legitimately a string, and unrelated.
+    ///
     /// Also a backstop rather than the only defence: now that those fields hold
     /// enums, loosening one back to a string breaks the code that assigns to it.
     /// This catches the case where a change is consistent enough to compile —
     /// a new field, or a type swapped along with its call sites.
     #[test]
     fn precision_critical_fields_generate_as_unions() {
-        let generated = rendered_bindings();
-        for (field, expected) in [
-            ("tool", "RendererToolName"),
-            ("name", "RendererToolName"),
-            ("action", "RendererToolName"),
-            ("status", "RendererToolStatus"),
-            ("approval", "ToolApprovalKind"),
-            ("class", "ApprovalClass"),
+        let declarations = event_declarations();
+        for (declaration, field, expected) in [
+            ("RendererAgentEvent", "name", "RendererToolName"),
+            ("RendererAgentEvent", "action", "RendererToolName"),
+            ("RendererAgentEvent", "approval", "ToolApprovalKind"),
+            ("RendererAgentEvent", "class", "ApprovalClass"),
+            ("RendererAgentEvent", "status", "RendererToolStatus"),
+            ("ChatToolActivitySnapshot", "tool", "RendererToolName"),
+            (
+                "ChatToolActivitySnapshot",
+                "status",
+                "ChatToolActivityStatus",
+            ),
+            ("PendingApprovalSnapshot", "action", "RendererToolName"),
+            ("PendingApprovalSnapshot", "approval", "ToolApprovalKind"),
+            ("PendingApprovalSnapshot", "class", "ApprovalClass"),
             // Four variants in the stored Role, two here. A widened union
-            // renders a system message as a user bubble, and the two-arm
-            // branch that reads it still compiles.
-            ("role", "TranscriptRole"),
+            // renders a system message as a user bubble, and the two-arm branch
+            // that reads it still compiles.
+            ("ChatMessageSnapshot", "role", "TranscriptRole"),
+            ("ModelInfo", "input_modalities", "Array<InputModality>"),
         ] {
+            let decl = declarations.get(declaration).unwrap_or_else(|| {
+                panic!("{declaration} is not generated; the precision list is stale")
+            });
             assert!(
-                generated.contains(&format!("{field}: {expected}")),
-                "expected `{field}: {expected}` in the generated types. If the \
-                 Rust field was loosened to a String it now generates as \
-                 `string`, which compiles everywhere and silently drops the \
-                 allowlist the renderer's tables are keyed on"
+                decl.contains(&format!("{field}: {expected}")),
+                "expected `{field}: {expected}` in {declaration}. If the Rust \
+                 field was loosened to a String it now generates as `string`, \
+                 which compiles everywhere and silently drops the allowlist the \
+                 renderer's tables are keyed on.\n{decl}"
             );
             assert!(
-                !generated.contains(&format!("{field}: string")),
-                "`{field}` generates as a bare string, losing the {expected} \
-                 union the renderer depends on"
+                !decl.contains(&format!("{field}: string")),
+                "{declaration}.{field} generates as a bare string, losing the \
+                 {expected} union the renderer depends on"
             );
         }
     }
