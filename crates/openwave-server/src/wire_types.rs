@@ -198,7 +198,14 @@ pub(crate) mod generate {
             const DERIVE: &str = "#[derive(";
             let derives = &after[DERIVE.len()..close];
             rest = &after[close + 2..];
-            if !derives.split(',').any(|d| d.trim() == "TS") {
+            // Match the last path segment: the derive is written both as `TS`
+            // and as `ts_rs::TS`, and matching only the bare name silently
+            // skipped every type that used the qualified form — which was most
+            // of them.
+            if !derives
+                .split(',')
+                .any(|d| d.trim().rsplit("::").next() == Some("TS"))
+            {
                 continue;
             }
             // Walk to the closing brace of the item this derive belongs to.
@@ -307,6 +314,14 @@ mod tests {
         // the stored one, and generating it is what keeps the renderer's
         // two-arm branch honest.
         generate::collect_from::<crate::routes::ChatMessageSnapshot>(&cfg, &mut out);
+        // The two consent surfaces. Their TypeScript describes the validator's
+        // output rather than the wire, so the generated types are what the
+        // validators narrow *from* — see the aliases in api.ts.
+        generate::collect_from::<crate::routes::PendingApprovalSnapshot>(&cfg, &mut out);
+        generate::collect_from::<openwave_core::PendingUserQuestions>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::client_execution::PendingFolderAccessRequest>(
+            &cfg, &mut out,
+        );
         out
     }
 

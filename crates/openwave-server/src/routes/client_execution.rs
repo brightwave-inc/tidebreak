@@ -132,7 +132,7 @@ pub struct ResolvedClientExecution {
 ///
 /// This intentionally omits the canonical tool name and arguments, chat and
 /// executor identities, provider metadata, lifecycle details, and diagnostics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct PendingFolderAccessRequest {
     pub call_id: CallId,
     pub turn_id: TurnId,

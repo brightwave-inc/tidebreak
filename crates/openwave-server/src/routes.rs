@@ -1768,14 +1768,16 @@ fn default_pending_approvals_limit() -> u64 {
 /// Closed renderer-safe pending approval projection. Canonical arguments,
 /// model-authored summaries, and unknown tool names never cross this boundary;
 /// only a tool's own closed preview of the action under review does.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 pub(crate) struct PendingApprovalSnapshot {
     pub call_id: CallId,
     pub turn_id: TurnId,
     pub action: openwave_core::RendererToolName,
     pub approval: openwave_core::ToolApprovalKind,
     pub class: openwave_core::ApprovalClass,
+    /// Absent, not null, when the tool projects no action.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub preview: Option<openwave_core::ToolActionPreview>,
     pub can_approve: bool,
     pub can_remember: bool,

@@ -27,7 +27,7 @@ pub const MAX_QUESTION_OPTION_DESCRIPTION_CHARS: usize = 240;
 pub const MAX_FREE_FORM_ANSWER_CHARS: usize = 2_000;
 
 /// One mutually exclusive answer choice.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct UserQuestionOption {
     pub id: String,
@@ -45,7 +45,7 @@ impl UserQuestionOption {
 }
 
 /// One bounded question shown to the user.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct UserQuestion {
     pub id: String,
@@ -143,7 +143,7 @@ impl AnswerUserQuestions {
 /// It contains only the validated presentation contract. Provider metadata,
 /// raw tool arguments, leases, executor identities, and diagnostics stay
 /// behind the server boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct PendingUserQuestions {
     pub call_id: CallId,
     pub turn_id: TurnId,
