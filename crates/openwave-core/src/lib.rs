@@ -157,10 +157,11 @@ pub use storage::{
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
     JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome,
     ParkSandboxToolCallOutcome, ParkTurnForAgentRunInboxOutcome, ParkTurnForAgentRunWaitSetOutcome,
-    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
-    RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
-    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, SecretProvider, Store,
-    SubmitAgentRunResultOutcome, TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    ParkTurnForClientCallOutcome, PendingChatPrompt, RecordTurnFailureOutcome,
+    RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome, RequestTurnCancellationOutcome,
+    ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome,
+    SecretProvider, Store, SubmitAgentRunResultOutcome, TurnLeaseFence,
+    MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use tool::{
     input_schema_for, ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolScratch,

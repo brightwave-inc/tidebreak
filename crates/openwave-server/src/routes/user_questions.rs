@@ -4,7 +4,7 @@ use axum::extract::State;
 use chrono::Utc;
 use openwave_core::{
     AnswerUserQuestions, AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, CallId, ChatId,
-    PendingUserQuestions, TurnRunStatus,
+    PendingChatPrompt, PendingUserQuestions, TurnRunStatus,
 };
 use serde::Serialize;
 
@@ -23,6 +23,17 @@ pub async fn list_pending_user_questions(
     Ok(Json(
         state.store.list_pending_user_questions(chat_id).await?,
     ))
+}
+
+/// `GET /chats/pending-prompts` — opaque cross-conversation attention state.
+///
+/// The shell uses this single summary read to find parked chats. Detail stays
+/// behind each chat's dedicated prompt-recovery route, so this endpoint never
+/// carries question content, folder-access arguments, or executor metadata.
+pub async fn list_pending_chat_prompts(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<PendingChatPrompt>>, ServerError> {
+    Ok(Json(state.store.list_pending_chat_prompts().await?))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

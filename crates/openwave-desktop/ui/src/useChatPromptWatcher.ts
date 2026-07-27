@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import type { ApiClient } from "./api";
+import { useChatAttention } from "./ChatAttention";
 import { requestUserAttention } from "./host";
 import { usePendingPrompts } from "./PendingPrompts";
 import { useRefreshSignals } from "./RefreshSignals";
@@ -8,35 +9,97 @@ import { useRefreshSignals } from "./RefreshSignals";
 const POLL_INTERVAL_MS = 10_000;
 
 const promptActions = usePendingPrompts.getState();
+const attentionActions = useChatAttention.getState();
 
 /**
- * Watches the open conversation for anything the agent is parked waiting on.
+ * Watches every conversation for a parked prompt and keeps detailed prompt
+ * cards current for the open one.
  *
- * Mounted by the shell rather than by a view, because the answer to "has the
- * agent asked me something?" cannot depend on which screen is rendered. Reading
- * the settings screen does not mean the agent stopped asking.
- *
- * Polling is the durable truth and the event stream only says when to look
- * again, so this stays correct with no socket at all — which is what makes it
- * safe for the conversation itself to unmount.
+ * The summary poll is deliberately one server-side read, rather than a browser
+ * loop over chats. Detail still comes from the selected chat's established
+ * recovery routes, which keeps prompt content scoped to the conversation that
+ * can render it.
  */
 export function useChatPromptWatcher(client: ApiClient | null, chatId: string | null): void {
-  // Which questions the reader has already been alerted to. This lives for as
-  // long as the shell does, so it spans chat switches and screen changes: a
-  // question announced once is not announced again when the reader comes back
-  // to it. Pruned to what is still pending on every read, so a long session
-  // does not accumulate the id of every question ever asked.
+  // Which questions the shell has already announced. It spans chat switches
+  // and screens, then is pruned to the current server summary after each read.
   const announcedCallIdsRef = useRef<Set<string>>(new Set());
   const refreshRef = useRef<(() => void) | null>(null);
+  const detailsRefreshRef = useRef<(() => void) | null>(null);
   const questionsSignal = useRefreshSignals((state) => state.userQuestions);
   const folderSignal = useRefreshSignals((state) => state.folderAccess);
+
+  useEffect(() => {
+    if (!client) {
+      attentionActions.clear();
+      announcedCallIdsRef.current = new Set();
+      refreshRef.current = null;
+      return;
+    }
+
+    // A new client can point at a different local profile. Do not leave its
+    // sidebar carrying the previous server's attention state until the first
+    // summary response arrives.
+    attentionActions.clear();
+    announcedCallIdsRef.current = new Set();
+    let cancelled = false;
+    let summarySeq = 0;
+
+    const readSummary = async () => {
+      const seq = ++summarySeq;
+      try {
+        const pending = await client.listPendingChatPrompts();
+        if (cancelled || seq !== summarySeq) return;
+
+        attentionActions.setChatIdsWithPendingPrompts(
+          pending.map((prompt) => prompt.chatId),
+        );
+        const pendingQuestionIds = new Set(
+          pending.flatMap((prompt) => prompt.questionCallIds),
+        );
+        const unannounced = [...pendingQuestionIds].filter(
+          (callId) => !announcedCallIdsRef.current.has(callId),
+        );
+        announcedCallIdsRef.current = pendingQuestionIds;
+        if (unannounced.length > 0) {
+          void requestUserAttention().catch(() => {
+            // Attention is a best-effort hint. Durable polling is truth.
+          });
+        }
+      } catch (err) {
+        if (!cancelled && seq === summarySeq) {
+          // Keep the last successful state visible. Clearing it on a transient
+          // failure would make a waiting chat look resolved.
+          console.error("failed to refresh pending chat prompts", err);
+        }
+      }
+    };
+
+    const readAll = () => {
+      void readSummary();
+      detailsRefreshRef.current?.();
+    };
+
+    refreshRef.current = readAll;
+    readAll();
+    const interval = window.setInterval(readAll, POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      summarySeq += 1;
+      window.clearInterval(interval);
+      refreshRef.current = null;
+    };
+  }, [client]);
 
   useEffect(() => {
     promptActions.reset(chatId);
     if (!client || !chatId) {
       promptActions.setRefresh(() => {});
+      detailsRefreshRef.current = null;
       return;
     }
+
     let cancelled = false;
     let questionsSeq = 0;
     let folderSeq = 0;
@@ -45,16 +108,8 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
       const seq = ++questionsSeq;
       try {
         const pending = await client.listPendingUserQuestions(chatId);
-        if (cancelled || seq !== questionsSeq) return;
-        const unannounced = pending.filter(
-          (request) => !announcedCallIdsRef.current.has(request.callId),
-        );
-        announcedCallIdsRef.current = new Set(pending.map((request) => request.callId));
-        promptActions.setUserQuestions(chatId, pending);
-        if (unannounced.length > 0) {
-          void requestUserAttention().catch(() => {
-            // Attention is a best-effort hint. Durable polling is truth.
-          });
+        if (!cancelled && seq === questionsSeq) {
+          promptActions.setUserQuestions(chatId, pending);
         }
       } catch (err) {
         if (!cancelled && seq === questionsSeq) {
@@ -76,22 +131,20 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
       }
     };
 
-    const readAll = () => {
+    const readDetails = () => {
       void readQuestions();
       void readFolderAccess();
     };
 
-    refreshRef.current = readAll;
-    promptActions.setRefresh(readAll);
-    readAll();
-    const interval = window.setInterval(readAll, POLL_INTERVAL_MS);
+    detailsRefreshRef.current = readDetails;
+    promptActions.setRefresh(readDetails);
+    readDetails();
 
     return () => {
       cancelled = true;
       questionsSeq += 1;
       folderSeq += 1;
-      window.clearInterval(interval);
-      refreshRef.current = null;
+      detailsRefreshRef.current = null;
       promptActions.setRefresh(() => {});
     };
   }, [client, chatId]);

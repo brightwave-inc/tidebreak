@@ -3,6 +3,7 @@ import { act, cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Chat } from "./api";
+import { useChatAttention } from "./ChatAttention";
 import { useChatListStore, type ChatListStore } from "./ChatListStore";
 import { Sidebar, type SidebarProps } from "./Sidebar";
 import { renderWithRouter } from "./test/router";
@@ -44,7 +45,10 @@ async function renderSidebar(overrides: Partial<SidebarProps> = {}) {
   return { props, router };
 }
 
-beforeEach(() => seedStores());
+beforeEach(() => {
+  seedStores();
+  useChatAttention.getState().clear();
+});
 afterEach(cleanup);
 
 describe("Sidebar", () => {
@@ -101,6 +105,14 @@ describe("Sidebar", () => {
         } as unknown as Chat);
     });
     expect(screen.getByText("Retro notes")).toBeInTheDocument();
+  });
+
+  it("marks recent chats that are waiting for a response", async () => {
+    useChatAttention.getState().setChatIdsWithPendingPrompts(["chat-2"]);
+    await renderSidebar();
+
+    expect(screen.getByLabelText("New chat needs attention")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Roadmap needs attention")).not.toBeInTheDocument();
   });
 
   it("opens a workspace panel by writing it into the URL", async () => {

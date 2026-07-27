@@ -3974,6 +3974,86 @@ async fn renderer_pending_client_executions_are_a_closed_folder_consent_projecti
 }
 
 #[tokio::test]
+async fn pending_chat_prompts_are_cross_chat_opaque_summaries() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let question_chat = make_chat(&router, &bearer).await;
+    let (_question_turn_id, question_call) =
+        park_user_questions_for_route_test(&*store, question_chat.id).await;
+    let folder_chat = make_chat(&router, &bearer).await;
+    let folder_call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: folder_chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "folder-provider-secret".into(),
+        name: openwave_core::REQUEST_FOLDER_ACCESS_TOOL.into(),
+        arguments: serde_json::json!({
+            "reason": "Read the project notes",
+            "requested_capabilities": ["read_files"],
+            "folder_hint": "documents",
+        }),
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+    };
+    let folder_call = match store.accept_tool_call(&folder_call).await.unwrap() {
+        openwave_core::AcceptToolCallOutcome::Accepted(call)
+        | openwave_core::AcceptToolCallOutcome::Existing(call) => call,
+        openwave_core::AcceptToolCallOutcome::IdentityConflict => {
+            panic!("fresh folder call identity conflicted")
+        }
+    };
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/chats/pending-prompts")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let summaries: serde_json::Value = json_body(response).await;
+    let summaries = summaries.as_array().expect("summary response is an array");
+    assert_eq!(summaries.len(), 2);
+    assert!(summaries.iter().any(|summary| {
+        summary["chat_id"] == question_chat.id.to_string()
+            && summary["question_call_ids"] == serde_json::json!([question_call.id.to_string()])
+            && summary["folder_access_call_ids"] == serde_json::json!([])
+    }));
+    assert!(summaries.iter().any(|summary| {
+        summary["chat_id"] == folder_chat.id.to_string()
+            && summary["question_call_ids"] == serde_json::json!([])
+            && summary["folder_access_call_ids"] == serde_json::json!([folder_call.id.to_string()])
+    }));
+
+    let serialized = serde_json::to_string(summaries).unwrap();
+    for private in [
+        "provider-question",
+        "folder-provider-secret",
+        "Where should I deploy?",
+        "Read the project notes",
+        "arguments",
+        "turn_id",
+        "client_executor_id",
+        "folder_hint",
+    ] {
+        assert!(
+            !serialized.contains(private),
+            "pending-chat summary exposed {private}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(

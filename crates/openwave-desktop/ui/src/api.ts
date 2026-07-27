@@ -255,6 +255,13 @@ export type PendingFolderAccessRequest = {
   claimedByDesktop: boolean;
 };
 
+/** Opaque prompt state used to mark another chat as needing attention. */
+export type PendingChatPrompt = {
+  chatId: string;
+  questionCallIds: string[];
+  folderAccessCallIds: string[];
+};
+
 export type UserQuestionOption = {
   id: string;
   label: string;
@@ -501,6 +508,24 @@ export class ApiClient {
 
   listChats(): Promise<Chat[]> {
     return this.json("/chats", { headers: this.headers() });
+  }
+
+  async listPendingChatPrompts(): Promise<PendingChatPrompt[]> {
+    const body = await this.json<unknown>("/chats/pending-prompts", {
+      headers: this.headers(),
+    });
+    if (!Array.isArray(body)) {
+      throw new Error("pending chat prompt response is not an array");
+    }
+    const prompts = new Map<string, PendingChatPrompt>();
+    for (const item of body) {
+      const prompt = parsePendingChatPrompt(item);
+      if (!prompt || prompts.has(prompt.chatId)) {
+        throw new Error("pending chat prompt response contains invalid data");
+      }
+      prompts.set(prompt.chatId, prompt);
+    }
+    return [...prompts.values()];
   }
 
   deleteChat(chatId: string): Promise<void> {
@@ -766,6 +791,46 @@ export function parseFolderAccessRequest(
     folderHint,
     claimedByDesktop: value.claimed,
   };
+}
+
+/**
+ * Validate the intentionally small parked-chat summary before it reaches
+ * shared shell state. Details belong to the selected chat's recovery route,
+ * never to the list indicator.
+ */
+export function parsePendingChatPrompt(value: unknown): PendingChatPrompt | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<{
+      chat_id: string;
+      question_call_ids: string[];
+      folder_access_call_ids: string[];
+    }>(value, ["chat_id", "question_call_ids", "folder_access_call_ids"]) ||
+    !nonEmptyBounded(value.chat_id, 128)
+  ) {
+    return null;
+  }
+  const questionCallIds = parseOpaqueCallIds(value.question_call_ids);
+  const folderAccessCallIds = parseOpaqueCallIds(value.folder_access_call_ids);
+  if (
+    !questionCallIds ||
+    !folderAccessCallIds ||
+    questionCallIds.length + folderAccessCallIds.length === 0 ||
+    questionCallIds.some((callId) => folderAccessCallIds.includes(callId))
+  ) {
+    return null;
+  }
+  return { chatId: value.chat_id, questionCallIds, folderAccessCallIds };
+}
+
+function parseOpaqueCallIds(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > 64) return null;
+  const callIds = new Set<string>();
+  for (const callId of value) {
+    if (!nonEmptyBounded(callId, 128) || callIds.has(callId)) return null;
+    callIds.add(callId);
+  }
+  return [...callIds];
 }
 
 export function parsePendingUserQuestions(

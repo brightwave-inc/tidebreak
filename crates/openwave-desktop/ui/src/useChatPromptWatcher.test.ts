@@ -3,6 +3,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApiClient } from "./api";
+import { useChatAttention } from "./ChatAttention";
 import { usePendingPrompts } from "./PendingPrompts";
 import { useRefreshSignals } from "./RefreshSignals";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
@@ -20,8 +21,16 @@ function folderRequest(callId: string) {
   return { callId, turnId: "turn-1", displayPath: "~/Notes" };
 }
 
+function prompt(
+  chatId: string,
+  { questions = [], folderAccess = [] }: { questions?: string[]; folderAccess?: string[] } = {},
+) {
+  return { chatId, questionCallIds: questions, folderAccessCallIds: folderAccess };
+}
+
 function stubClient(overrides: Record<string, unknown> = {}) {
   return {
+    listPendingChatPrompts: vi.fn().mockResolvedValue([]),
     listPendingUserQuestions: vi.fn().mockResolvedValue([]),
     listPendingFolderAccessRequests: vi.fn().mockResolvedValue([]),
     ...overrides,
@@ -31,6 +40,7 @@ function stubClient(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   vi.mocked(host.requestUserAttention).mockClear();
   usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
+  useChatAttention.getState().clear();
 });
 afterEach(cleanup);
 
@@ -55,17 +65,18 @@ describe("useChatPromptWatcher", () => {
     act(() => useRefreshSignals.getState().signal("userQuestions"));
 
     await waitFor(() => expect(client.listPendingUserQuestions).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(client.listPendingChatPrompts).toHaveBeenCalledTimes(2));
   });
 
   it("asks for attention once per question, not once per read", async () => {
     const client = stubClient({
-      listPendingUserQuestions: vi.fn().mockResolvedValue([question("call-1")]),
+      listPendingChatPrompts: vi.fn().mockResolvedValue([prompt("chat-2", { questions: ["call-1"] })]),
     });
     renderHook(() => useChatPromptWatcher(client, "chat-1"));
     await waitFor(() => expect(host.requestUserAttention).toHaveBeenCalledTimes(1));
 
     act(() => useRefreshSignals.getState().signal("userQuestions"));
-    await waitFor(() => expect(client.listPendingUserQuestions).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(client.listPendingChatPrompts).toHaveBeenCalledTimes(2));
 
     expect(host.requestUserAttention).toHaveBeenCalledTimes(1);
   });
@@ -73,18 +84,18 @@ describe("useChatPromptWatcher", () => {
   it("forgets a question once it stops being pending", async () => {
     // The announce-set spans the life of the shell, so it has to be pruned or a
     // long session accumulates the id of every question ever asked.
-    const listPendingUserQuestions = vi
+    const listPendingChatPrompts = vi
       .fn()
-      .mockResolvedValueOnce([question("call-1")])
+      .mockResolvedValueOnce([prompt("chat-1", { questions: ["call-1"] })])
       .mockResolvedValue([]);
-    const client = stubClient({ listPendingUserQuestions });
+    const client = stubClient({ listPendingChatPrompts });
     renderHook(() => useChatPromptWatcher(client, "chat-1"));
     await waitFor(() => expect(host.requestUserAttention).toHaveBeenCalledTimes(1));
 
     act(() => useRefreshSignals.getState().signal("userQuestions"));
     await waitFor(() => expect(usePendingPrompts.getState().userQuestions).toHaveLength(0));
 
-    listPendingUserQuestions.mockResolvedValue([question("call-2")]);
+    listPendingChatPrompts.mockResolvedValue([prompt("chat-1", { questions: ["call-2"] })]);
     act(() => useRefreshSignals.getState().signal("userQuestions"));
 
     await waitFor(() => expect(host.requestUserAttention).toHaveBeenCalledTimes(2));
@@ -129,10 +140,21 @@ describe("useChatPromptWatcher", () => {
     expect(usePendingPrompts.getState().userQuestions).toHaveLength(0);
   });
 
-  it("stops watching when there is no conversation open", async () => {
-    const client = stubClient();
+  it("marks parked chats even when no conversation is open", async () => {
+    const client = stubClient({
+      listPendingChatPrompts: vi.fn().mockResolvedValue([
+        prompt("chat-2", { questions: ["call-question"] }),
+        prompt("chat-3", { folderAccess: ["call-folder"] }),
+      ]),
+    });
     renderHook(() => useChatPromptWatcher(client, null));
 
+    await waitFor(() =>
+      expect(useChatAttention.getState().chatIdsWithPendingPrompts).toEqual(
+        new Set(["chat-2", "chat-3"]),
+      ),
+    );
+    expect(host.requestUserAttention).toHaveBeenCalledTimes(1);
     expect(client.listPendingUserQuestions).not.toHaveBeenCalled();
     expect(usePendingPrompts.getState().userQuestions).toEqual([]);
   });

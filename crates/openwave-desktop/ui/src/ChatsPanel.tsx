@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { MessageCircleMore, Search } from "lucide-react";
+import { CircleAlert, MessageCircleMore, Search } from "lucide-react";
 
 import type { Chat } from "./api";
+import { useChatAttention } from "./ChatAttention";
 import { useChatListStore } from "./ChatListStore";
 import { PanelSecondaryHeader } from "./components/PanelHeader";
 import { Button } from "./components/ui/button";
@@ -36,6 +37,9 @@ export function ChatsPanel({
 }) {
   const navigate = useNavigate();
   const chats = useChatListStore((state) => state.chats);
+  const chatIdsWithPendingPrompts = useChatAttention(
+    (state) => state.chatIdsWithPendingPrompts,
+  );
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const [query, setQuery] = useState("");
@@ -102,6 +106,15 @@ export function ChatsPanel({
                   >
                     <MessageCircleMore className="size-4 shrink-0 text-muted-foreground" />
                     <span className="min-w-0 truncate">{title}</span>
+                    {chatIdsWithPendingPrompts.has(chat.id) && (
+                      <span
+                        className="ml-auto shrink-0 text-amber-600 dark:text-amber-400"
+                        aria-label={`${title} needs attention`}
+                        title="Needs attention"
+                      >
+                        <CircleAlert aria-hidden="true" className="size-4" />
+                      </span>
+                    )}
                   </button>
                 </li>
               );
