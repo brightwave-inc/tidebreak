@@ -75,9 +75,9 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         // cannot make it through the complete request path.
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        // The Anthropic adapter can stream thinking blocks, but it does not
-        // currently send a caller-selected effort or thinking budget.
-        supports_reasoning_effort: false,
+        // Claude 4.6 and later reason on an adaptive thinking block, and the
+        // Anthropic adapter sends one along with the chat's chosen effort.
+        supports_reasoning_effort: true,
     },
     ModelSpec {
         id: "claude-sonnet-5",
@@ -87,7 +87,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: false,
+        supports_reasoning_effort: true,
     },
     ModelSpec {
         id: "claude-haiku-4-5-20251001",
@@ -97,6 +97,8 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 64_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
+        // Haiku 4.5 predates the adaptive switch: it rejects the effort
+        // control, so the adapter leaves both off and the picker hides it.
         supports_reasoning_effort: false,
     },
     ModelSpec {
@@ -107,7 +109,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: false,
+        supports_reasoning_effort: true,
     },
     ModelSpec {
         id: "claude-opus-4-7",
@@ -117,7 +119,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: false,
+        supports_reasoning_effort: true,
     },
     ModelSpec {
         id: "claude-opus-4-6",
@@ -127,7 +129,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: false,
+        supports_reasoning_effort: true,
     },
     ModelSpec {
         id: "claude-sonnet-4-6",
@@ -137,7 +139,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: false,
+        supports_reasoning_effort: true,
     },
     ModelSpec {
         id: "gpt-5.6-sol",
@@ -376,8 +378,10 @@ mod tests {
         assert_eq!(sonnet.context_window, 1_000_000);
         assert_eq!(sonnet.max_output_tokens, 128_000);
         assert!(sonnet.supports_reasoning);
-        assert!(!sonnet.supports_reasoning_effort);
+        assert!(sonnet.supports_reasoning_effort);
 
+        // Haiku 4.5 predates the adaptive thinking switch and rejects the
+        // effort control, so it is the one Anthropic row without it.
         let haiku = find("claude-haiku-4-5-20251001").unwrap();
         assert_eq!(haiku.context_window, 200_000);
         assert_eq!(haiku.max_output_tokens, 64_000);

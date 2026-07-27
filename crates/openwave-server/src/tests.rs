@@ -8337,8 +8337,16 @@ async fn models_catalog_is_served() {
     assert!(!opus["multimodal"].as_bool().unwrap());
     assert!(!opus["available"].as_bool().unwrap());
     // Capabilities describe what the current adapter implements, not only
-    // what the upstream model could support with a different request shape.
-    assert!(!opus["supports_reasoning_effort"].as_bool().unwrap());
+    // what the upstream model could support with a different request shape:
+    // the Anthropic adapter sends the chat's effort on every model that takes
+    // an adaptive thinking block, and none of the ones that don't.
+    assert!(opus["supports_reasoning_effort"].as_bool().unwrap());
+    let haiku = models
+        .iter()
+        .find(|m| m["id"] == "claude-haiku-4-5-20251001")
+        .expect("curated Anthropic model is present");
+    assert!(haiku["supports_reasoning"].as_bool().unwrap());
+    assert!(!haiku["supports_reasoning_effort"].as_bool().unwrap());
 }
 
 #[tokio::test]
