@@ -28,6 +28,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddUserQuestions),
             Box::new(AddConversationOutputs),
             Box::new(AddMessageAttachments),
+            Box::new(AddOutputRevisionCitations),
         ]
     }
 }
@@ -410,6 +411,133 @@ impl MigrationTrait for AddConversationOutputs {
             .await?;
         manager
             .drop_table(Table::drop().table(Output::Table).to_owned())
+            .await
+    }
+}
+
+/// Persists the bounded evidence lineage of each immutable output revision.
+///
+/// The cited evidence is scoped to the producing chat and turn, rather than
+/// relying on a source token alone. This preserves the exact source sequence
+/// without allowing a revision to reference another conversation's evidence.
+struct AddOutputRevisionCitations;
+
+impl MigrationName for AddOutputRevisionCitations {
+    fn name(&self) -> &str {
+        "m20260727_000015_add_output_revision_citations"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddOutputRevisionCitations {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(OutputRevisionCitation::Table)
+                    .col(
+                        ColumnDef::new(OutputRevisionCitation::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(OutputRevisionCitation::OutputRevisionId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OutputRevisionCitation::Ordinal)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OutputRevisionCitation::ChatId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OutputRevisionCitation::TurnId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OutputRevisionCitation::EvidenceCallId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(OutputRevisionCitation::EvidenceRank)
+                            .integer()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_output_revision_citation_revision")
+                            .from_tbl(OutputRevisionCitation::Table)
+                            .from_col(OutputRevisionCitation::OutputRevisionId)
+                            .to_tbl(OutputRevision::Table)
+                            .to_col(OutputRevision::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_output_revision_citation_evidence")
+                            .from_tbl(OutputRevisionCitation::Table)
+                            .from_col(OutputRevisionCitation::EvidenceCallId)
+                            .from_col(OutputRevisionCitation::EvidenceRank)
+                            .from_col(OutputRevisionCitation::ChatId)
+                            .from_col(OutputRevisionCitation::TurnId)
+                            .to_tbl(RetrievalEvidence::Table)
+                            .to_col(RetrievalEvidence::CallId)
+                            .to_col(RetrievalEvidence::Rank)
+                            .to_col(RetrievalEvidence::ChatId)
+                            .to_col(RetrievalEvidence::TurnId)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(
+                        Expr::col(OutputRevisionCitation::Ordinal)
+                            .between(1, crate::deliverable::MAX_OUTPUT_CITATIONS as i32),
+                    )
+                    .check(
+                        Expr::col(OutputRevisionCitation::EvidenceRank)
+                            .between(1, crate::RetrievalEvidenceInput::MAX_RESULTS as i32),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_output_revision_citation_ordinal")
+                    .table(OutputRevisionCitation::Table)
+                    .col(OutputRevisionCitation::OutputRevisionId)
+                    .col(OutputRevisionCitation::Ordinal)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_output_revision_citation_evidence")
+                    .table(OutputRevisionCitation::Table)
+                    .col(OutputRevisionCitation::OutputRevisionId)
+                    .col(OutputRevisionCitation::EvidenceCallId)
+                    .col(OutputRevisionCitation::EvidenceRank)
+                    .unique()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(OutputRevisionCitation::Table)
+                    .to_owned(),
+            )
             .await
     }
 }
@@ -5662,6 +5790,18 @@ enum OutputRevision {
     Sha256,
     TurnId,
     CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum OutputRevisionCitation {
+    Table,
+    Id,
+    OutputRevisionId,
+    Ordinal,
+    ChatId,
+    TurnId,
+    EvidenceCallId,
+    EvidenceRank,
 }
 
 #[derive(DeriveIden)]

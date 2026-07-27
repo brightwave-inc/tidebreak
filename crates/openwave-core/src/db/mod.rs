@@ -17,7 +17,9 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ToolApproval};
-use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
+use crate::deliverable::{
+    CreateOutput, NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision,
+};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 #[cfg(test)]
@@ -1840,6 +1842,13 @@ impl Store for DbStore {
 
     async fn get_output_revision(&self, id: OutputRevisionId) -> Result<Option<OutputRevision>> {
         ops::output::get_output_revision(self, id).await
+    }
+
+    async fn list_output_revision_citations(
+        &self,
+        revision_id: OutputRevisionId,
+    ) -> Result<Vec<OutputCitationSnapshot>> {
+        ops::output::list_output_revision_citations(self, revision_id).await
     }
 
     async fn delete_output(&self, id: OutputId, deleted_at: chrono::DateTime<Utc>) -> Result<bool> {

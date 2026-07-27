@@ -1182,6 +1182,55 @@ pub mod output_revision {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod output_revision_citation {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "output_revision_citation")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub output_revision_id: Uuid,
+        pub ordinal: i32,
+        pub chat_id: Uuid,
+        pub turn_id: Uuid,
+        pub evidence_call_id: Uuid,
+        pub evidence_rank: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter)]
+    pub enum Relation {
+        OutputRevision,
+        RetrievalEvidence,
+    }
+
+    impl RelationTrait for Relation {
+        fn def(&self) -> RelationDef {
+            match self {
+                Self::OutputRevision => Entity::belongs_to(super::output_revision::Entity)
+                    .from(Column::OutputRevisionId)
+                    .to(super::output_revision::Column::Id)
+                    .into(),
+                Self::RetrievalEvidence => Entity::belongs_to(super::retrieval_evidence::Entity)
+                    .from((Column::EvidenceCallId, Column::EvidenceRank))
+                    .to((
+                        super::retrieval_evidence::Column::CallId,
+                        super::retrieval_evidence::Column::Rank,
+                    ))
+                    .into(),
+            }
+        }
+    }
+
+    impl Related<super::retrieval_evidence::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::RetrievalEvidence.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod event {
     use sea_orm::entity::prelude::*;
 
