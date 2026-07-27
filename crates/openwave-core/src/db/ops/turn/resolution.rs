@@ -117,7 +117,8 @@ pub(in crate::db) async fn complete_refused_turn_run_with_citations_and_append_e
     usage: Usage,
     refusal: RefusalOutcome,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
-    if refusal.partial_output() != !output.content.is_empty() {
+    let carries_output = !output.content.is_empty();
+    if refusal.partial_output() != carries_output {
         return Err(AgentError::Store(format!(
             "turn {id} refusal partial-output metadata does not match its assistant output"
         )));
