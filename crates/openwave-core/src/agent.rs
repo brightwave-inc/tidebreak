@@ -792,84 +792,29 @@ struct PendingCall {
     args: String,
 }
 
+/// Why one call in a step's batch cannot run beside its siblings.
+///
+/// Both reasons are runtime constraints, not mistakes the model made. A call
+/// that parks on the approval gate has to be the turn's only pending row:
+/// [`Agent::resume_pending_server_calls`] recovers an interrupted approval by
+/// identity and cannot choose between two. A checkpoint carries exactly one
+/// call out of the loop. Providers parallelise tool calls by design, so the
+/// loop orders the batch around these instead of asking the model for a shape
+/// it cannot guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallIsolation {
+    /// Parks on the approval gate; runs in this step, after its siblings.
+    Sensitive,
+    /// Leaves the loop as a checkpoint the client resumes.
+    Client,
+    /// Leaves the loop as a sandbox delegation checkpoint.
+    SandboxSpawn,
+    /// Leaves the loop as an ordered child-wait checkpoint.
+    AgentWait,
+}
+
 /// The closed action projection for a pending call, parsed from the arguments
 /// it will run with. Arguments that never parsed cannot describe an action.
-/// How many times one turn may throw a step away for the same reason.
-///
-/// A discarded step costs the model's prose, any sibling call that already
-/// succeeded, and a step from the budget, and it buys a corrective message.
-/// Sending that message a third time is not persuasion, it is spending the rest
-/// of the turn to reach `max_steps_exceeded` by a longer route — so the turn
-/// fails on the reason it actually hit.
-const MAX_REPEATED_STEP_DISCARDS: usize = 2;
-
-/// Why a step was discarded, for the repeat guard and the failure it raises.
-///
-/// These are runtime invariants the model cannot reliably be prompted into
-/// satisfying — providers parallelise tool calls by design — so the count
-/// matters more than the wording.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StepDiscard {
-    ForegroundClientUnavailable,
-    ClientCallWithSiblings,
-    ClientArgumentsNotJson,
-    SandboxSpawnWithSiblings,
-    WaitForAgentsWithSiblings,
-    SensitiveCallWithSiblings,
-}
-
-impl StepDiscard {
-    /// The failure message. Every reason names what kept repeating, because a
-    /// turn that fails on a batch shape is otherwise indistinguishable from one
-    /// that ran out of thinking room.
-    const fn message(self) -> &'static str {
-        match self {
-            Self::ForegroundClientUnavailable => {
-                "the model kept requesting a user continuation this turn cannot claim"
-            }
-            Self::ClientCallWithSiblings => {
-                "the model kept pairing a client-executed tool with sibling tool calls"
-            }
-            Self::ClientArgumentsNotJson => {
-                "the model kept sending client tool arguments that are not valid JSON"
-            }
-            Self::SandboxSpawnWithSiblings => {
-                "the model kept pairing a sandbox delegation with sibling tool calls"
-            }
-            Self::WaitForAgentsWithSiblings => {
-                "the model kept pairing wait_for_agents with sibling tool calls"
-            }
-            Self::SensitiveCallWithSiblings => {
-                "the model kept pairing a tool that needs approval with sibling tool calls"
-            }
-        }
-    }
-}
-
-/// Per-turn tally of discarded steps, keyed by reason.
-#[derive(Debug, Default)]
-struct StepDiscards {
-    seen: Vec<(StepDiscard, usize)>,
-}
-
-impl StepDiscards {
-    /// Record one discard. Returns `true` once this reason has run out of
-    /// retries and the turn should fail on it instead of correcting again.
-    fn record(&mut self, reason: StepDiscard) -> bool {
-        let count = match self.seen.iter_mut().find(|(seen, _)| *seen == reason) {
-            Some((_, count)) => {
-                *count += 1;
-                *count
-            }
-            None => {
-                self.seen.push((reason, 1));
-                1
-            }
-        };
-        count >= MAX_REPEATED_STEP_DISCARDS
-    }
-}
-
 fn call_action_preview(call: &PendingCall) -> Option<ToolActionPreview> {
     serde_json::from_str(&call.args)
         .ok()
@@ -1125,10 +1070,6 @@ impl Agent {
             self.persist(chat.id, turn_id, Role::User, user_input)
                 .await?;
         }
-        // Discarding a step is a correction, not a fix: the invariants below are
-        // runtime constraints a model cannot be prompted into satisfying, so the
-        // same discard can otherwise repeat until the step budget is gone.
-        let mut discards = StepDiscards::default();
         // The provider transcript for this turn: prior stored text + the blocks
         // we build up as the loop runs.
         let mut transcript = self.load_transcript(chat.id).await?;
@@ -1308,283 +1249,21 @@ impl Agent {
             };
             let text = &candidate.content;
 
-            let unavailable_foreground_client = calls.iter().any(|call| {
-                self.tools.is_foreground_client(&call.name) && !self.agent_orchestration_active()
-            });
-            if unavailable_foreground_client {
-                if discards.record(StepDiscard::ForegroundClientUnavailable) {
-                    return Ok(self.repeated_discard_failure(
-                        StepDiscard::ForegroundClientUnavailable,
-                        total_usage,
-                        step,
-                    ));
-                }
-                events.send(AgentEvent::StreamInterrupted);
-                transcript.push(ChatMessage::text(
-                    Role::User,
-                    "That user continuation is available only from a durably claimed foreground turn. Continue without requesting it.",
-                ));
-                continue;
-            }
-            let client_calls = calls
-                .iter()
-                .filter(|call| self.tools.execution(&call.name) == Some(ToolCallExecution::Client))
-                .collect::<Vec<_>>();
-            if !client_calls.is_empty() {
-                // Prose is kept, exactly as for a sensitive call (#372): the
-                // model narrates before it acts, and rejecting the step for
-                // that alone burned the step budget on a correction it was
-                // never going to satisfy. Only sibling calls stay forbidden —
-                // the checkpoint can carry one call across the resume.
-                if calls.len() != 1 || client_calls.len() != 1 {
-                    if discards.record(StepDiscard::ClientCallWithSiblings) {
-                        return Ok(self.repeated_discard_failure(
-                            StepDiscard::ClientCallWithSiblings,
-                            total_usage,
-                            step,
-                        ));
-                    }
-                    events.send(AgentEvent::StreamInterrupted);
-                    transcript.push(ChatMessage {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text {
-                            text: "A client-executed tool must be requested alone, without sibling tool calls. Retry the request in that form.".into(),
-                        }],
-                    });
-                    continue;
-                }
-                let call = client_calls[0];
-                let Some(arguments) = parse_client_args(&call.args) else {
-                    if discards.record(StepDiscard::ClientArgumentsNotJson) {
-                        return Ok(self.repeated_discard_failure(
-                            StepDiscard::ClientArgumentsNotJson,
-                            total_usage,
-                            step,
-                        ));
-                    }
-                    events.send(AgentEvent::StreamInterrupted);
-                    transcript.push(ChatMessage {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text {
-                            text: "The client tool arguments were not valid JSON. Retry the request with a complete JSON value.".into(),
-                        }],
-                    });
-                    continue;
-                };
-                let request = crate::model::ClientToolCallRequest {
-                    id: call.call_id,
-                    chat_id: chat.id,
-                    turn_id,
-                    provider_id: call.provider_id.clone(),
-                    name: call.name.clone(),
-                    arguments,
-                };
-                if !request.is_well_formed()
-                    || !self
-                        .tools
-                        .client_arguments_are_valid(&request.name, &request.arguments)
-                {
-                    events.send(AgentEvent::StreamInterrupted);
-                    transcript.push(ChatMessage {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text {
-                            text: "The client tool request was too large or malformed. Retry it with a valid tool identity and smaller arguments.".into(),
-                        }],
-                    });
-                    continue;
-                }
-                let steer_revision = generation_steer_revision.ok_or_else(|| {
-                    AgentError::Store("client-executed tools require a durably claimed turn".into())
-                })?;
-                // The checkpoint returns from the loop and the resumed attempt
-                // rebuilds its transcript from the store, so an unpersisted
-                // preamble would be lost. Fence on the lease first: the stream
-                // just consumed may have outlasted it.
-                if !text.is_empty() {
-                    self.ensure_durable_lease_current(turn_id).await?;
-                    self.persist_assistant(chat.id, turn_id, &candidate).await?;
-                }
-                return Ok(AgentTurnOutcome::ClientToolCall {
-                    request,
-                    usage: total_usage,
-                    steer_revision,
-                    model_steps: step + 1,
-                });
-            }
-
-            let sandbox_spawns = calls
-                .iter()
-                .filter(|call| {
-                    self.agent_orchestration_active()
-                        && self.tools.is_foreground_sandbox_spawn(&call.name)
-                })
-                .collect::<Vec<_>>();
-            if !sandbox_spawns.is_empty() {
-                if calls.len() != 1 || sandbox_spawns.len() != 1 {
-                    if discards.record(StepDiscard::SandboxSpawnWithSiblings) {
-                        return Ok(self.repeated_discard_failure(
-                            StepDiscard::SandboxSpawnWithSiblings,
-                            total_usage,
-                            step,
-                        ));
-                    }
-                    events.send(AgentEvent::StreamInterrupted);
-                    transcript.push(ChatMessage {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text {
-                            text: "A sandbox delegation must be requested alone, without sibling tool calls. Retry the request in that form.".into(),
-                        }],
-                    });
-                    continue;
-                }
-                let call = sandbox_spawns[0];
-                let Some(arguments) = parse_client_args(&call.args) else {
-                    events.send(AgentEvent::StreamInterrupted);
-                    transcript.push(ChatMessage {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text {
-                            text: "The sandbox task arguments were not valid JSON. Retry with one complete task value.".into(),
-                        }],
-                    });
-                    continue;
-                };
-                let Some(task) = self.tools.sandbox_spawn_task(&call.name, &arguments) else {
-                    events.send(AgentEvent::StreamInterrupted);
-                    transcript.push(ChatMessage {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text {
-                            text: "The sandbox task needs one non-empty, bounded `task`. It may also include one `resource` object containing only `root_id` and `relative_path`; omit `resource` entirely when unused rather than sending null. Retry with that exact shape.".into(),
-                        }],
-                    });
-                    continue;
-                };
-                let Some(steer_revision) = generation_steer_revision else {
-                    events.send(AgentEvent::StreamInterrupted);
-                    transcript.push(ChatMessage {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text {
-                            text: "Sandbox delegation is available only from a durably claimed foreground turn. Continue without delegating.".into(),
-                        }],
-                    });
-                    continue;
-                };
-                if !text.is_empty() {
-                    self.ensure_durable_lease_current(turn_id).await?;
-                    self.persist_assistant(chat.id, turn_id, &candidate).await?;
-                }
-                return Ok(AgentTurnOutcome::SandboxAgentSpawn {
-                    request: SandboxAgentSpawnRequest {
-                        call_id: call.call_id,
-                        provider_id: call.provider_id.clone(),
-                        child_run_id: AgentRunId::sandbox_for_spawn_call(call.call_id),
-                        task,
-                        arguments,
-                    },
-                    usage: total_usage,
-                    steer_revision,
-                    model_steps: step + 1,
-                });
-            }
-
-            let agent_waits = calls
-                .iter()
-                .filter(|call| {
-                    self.agent_orchestration_active()
-                        && self.tools.is_foreground_agent_wait(&call.name)
-                })
-                .collect::<Vec<_>>();
-            if !agent_waits.is_empty() {
-                if calls.len() != 1 || agent_waits.len() != 1 {
-                    if discards.record(StepDiscard::WaitForAgentsWithSiblings) {
-                        return Ok(self.repeated_discard_failure(
-                            StepDiscard::WaitForAgentsWithSiblings,
-                            total_usage,
-                            step,
-                        ));
-                    }
-                    events.send(AgentEvent::StreamInterrupted);
-                    transcript.push(ChatMessage::text(
-                        Role::User,
-                        "wait_for_agents must be requested alone, without sibling tool calls. Retry the request in that form.",
-                    ));
-                    continue;
-                }
-                let call = agent_waits[0];
-                let Some(arguments) = parse_client_args(&call.args) else {
-                    events.send(AgentEvent::StreamInterrupted);
-                    transcript.push(ChatMessage::text(
-                        Role::User,
-                        "The wait_for_agents arguments were not valid JSON. Retry with one complete ordered agent_ids value.",
-                    ));
-                    continue;
-                };
-                let Some(child_run_ids) = self.tools.wait_for_agent_ids(&call.name, &arguments)
-                else {
-                    events.send(AgentEvent::StreamInterrupted);
-                    transcript.push(ChatMessage::text(
-                        Role::User,
-                        "wait_for_agents requires one non-empty, bounded, unique agent_ids list with no extra properties.",
-                    ));
-                    continue;
-                };
-                let Some(steer_revision) = generation_steer_revision else {
-                    events.send(AgentEvent::StreamInterrupted);
-                    transcript.push(ChatMessage::text(
-                        Role::User,
-                        "wait_for_agents is available only from a durably claimed foreground turn.",
-                    ));
-                    continue;
-                };
-                if !text.is_empty() {
-                    self.ensure_durable_lease_current(turn_id).await?;
-                    self.persist_assistant(chat.id, turn_id, &candidate).await?;
-                }
-                return Ok(AgentTurnOutcome::WaitForAgents {
-                    request: ForegroundAgentWaitRequest {
-                        call_id: call.call_id,
-                        provider_id: call.provider_id.clone(),
-                        child_run_ids,
-                        arguments,
-                    },
-                    usage: total_usage,
-                    steer_revision,
-                    model_steps: step + 1,
-                });
-            }
-
-            let sensitive_calls = calls
-                .iter()
-                .filter(|call| {
-                    self.tools
-                        .get(&call.name)
-                        .is_some_and(|tool| tool.approval_class() == ApprovalClass::Sensitive)
-                })
-                .collect::<Vec<_>>();
-            // A sensitive call may carry assistant prose ("I'll search for…"):
-            // the step then persists its message and parks exactly like any
-            // other text+tool step — three lease-fenced writes, with recovery
-            // abandoning an interrupted call behind its visible preamble. Only
-            // sibling calls stay forbidden: a multi-call sensitive batch has no
-            // unambiguous resume shape (see resume_pending_server_calls).
-            // Rejecting prose here used to burn the whole step budget on
-            // corrective retries the model never satisfied (#372).
-            if !sensitive_calls.is_empty() && (calls.len() != 1 || sensitive_calls.len() != 1) {
-                if discards.record(StepDiscard::SensitiveCallWithSiblings) {
-                    return Ok(self.repeated_discard_failure(
-                        StepDiscard::SensitiveCallWithSiblings,
-                        total_usage,
-                        step,
-                    ));
-                }
-                events.send(AgentEvent::StreamInterrupted);
-                transcript.push(ChatMessage {
-                    role: Role::User,
-                    content: vec![ContentBlock::Text {
-                        text: "A sensitive tool must be requested alone, without sibling tool calls. Retry the request in that form.".into(),
-                    }],
-                });
-                continue;
-            }
+            // Sequence the batch rather than refuse its shape. A refusal
+            // discarded the whole step — the assistant's prose and every
+            // sibling call that had already succeeded — to ask for a form the
+            // model cannot reliably produce, because providers parallelise
+            // tool calls by design. The order below is the fix: plain server
+            // calls run first, and the one call that has to stand alone is
+            // taken after them, once everything else is terminal.
+            let isolations: Vec<Option<CallIsolation>> =
+                calls.iter().map(|call| self.call_isolation(call)).collect();
+            let isolated = isolations.iter().position(Option::is_some);
+            // A checkpoint suspends the turn instead of consuming a step here,
+            // so the budget for the model call that reads its result belongs to
+            // the attempt that resumes, not to this one.
+            let checkpointing = isolated
+                .is_some_and(|index| !matches!(isolations[index], Some(CallIsolation::Sensitive)));
 
             // This step is about to persist tool-call rows, execute server tool
             // side effects, and record the assistant message. Fence those on the
@@ -1601,80 +1280,38 @@ impl Agent {
             if !text.is_empty() {
                 blocks.push(ContentBlock::Text { text: text.clone() });
                 if !calls.is_empty() {
+                    // A checkpoint returns from the loop and the resumed
+                    // attempt rebuilds its transcript from the store, so an
+                    // unpersisted preamble would be lost.
                     self.persist_assistant(chat.id, turn_id, &candidate).await?;
                 }
             }
-            let mut recovered_results: HashMap<CallId, ToolOutput> = HashMap::new();
             for call in &calls {
-                let args = parse_args(&call.args);
                 blocks.push(ContentBlock::ToolUse {
                     id: call.provider_id.clone(),
                     name: call.name.clone(),
-                    input: args.clone(),
+                    input: parse_args(&call.args),
                 });
-                // Persist the call as soon as args are known so a crash mid-tool
-                // still leaves a reconstructable ToolUse on the next turn.
-                let record = ToolCallRecord {
-                    id: call.call_id,
-                    chat_id: chat.id,
-                    turn_id,
-                    provider_id: call.provider_id.clone(),
-                    name: call.name.clone(),
-                    arguments: args,
-                    execution: ToolCallExecution::Server,
-                    status: ToolCallStatus::Pending,
-                    result: None,
-                    error_code: None,
-                    error_detail: None,
-                    client_executor_id: None,
-                    client_lease_expires_at: None,
-                    created_at: Utc::now(),
-                    resolved_at: None,
-                };
-                let outcome = self.accept_server_call_retry(&record).await?;
-                match outcome {
-                    AcceptedServerCall::Accepted => {}
-                    AcceptedServerCall::Existing(existing) if existing.status.is_terminal() => {
-                        let content = existing.result.ok_or_else(|| {
-                            AgentError::Store(format!(
-                                "terminal tool call {} is missing its result",
-                                call.call_id
-                            ))
-                        })?;
-                        recovered_results.insert(
-                            call.call_id,
-                            ToolOutput {
-                                content,
-                                data: None,
-                                is_error: existing.status != ToolCallStatus::Completed,
-                                // Recovered from a durable row, whose category
-                                // is already recorded there; re-deriving one
-                                // here would be a guess.
-                                error_category: None,
-                                private_evidence: Vec::new(),
-                            },
-                        );
-                    }
-                    AcceptedServerCall::Existing(_) => {}
-                    AcceptedServerCall::IdentityConflict => {
-                        return Err(AgentError::Store(format!(
-                            "tool call {} identity conflicts with its canonical request",
-                            call.call_id
-                        )));
-                    }
-                    AcceptedServerCall::LeaseLost => {
-                        return Err(AgentError::Store(format!(
-                            "turn {turn_id} lost its lease while accepting tool call {}",
-                            call.call_id
-                        )));
-                    }
-                }
             }
             if !blocks.is_empty() {
                 transcript.push(ChatMessage {
                     role: Role::Assistant,
                     content: blocks,
                 });
+            }
+
+            // Admit the plain calls, whose rows may all be pending at once:
+            // recovery replays or abandons them without having to guess which
+            // one an approval belonged to. The isolated call is admitted
+            // further down, after these have resolved.
+            let mut recovered_results: HashMap<CallId, ToolOutput> = HashMap::new();
+            for (index, call) in calls.iter().enumerate() {
+                if isolations[index].is_some() {
+                    continue;
+                }
+                if let Some(recovered) = self.accept_server_call(chat.id, turn_id, call).await? {
+                    recovered_results.insert(call.call_id, recovered);
+                }
             }
 
             if calls.is_empty() {
@@ -1762,73 +1399,28 @@ impl Agent {
             // Tool calls need a following model call to consume their results. If
             // no step remains, stop now — running them would be wasted side
             // effects the model can never act on.
-            if step + 1 >= self.config.max_steps {
+            if !checkpointing && step + 1 >= self.config.max_steps {
                 return Err(AgentError::msg("max steps per turn exceeded"));
             }
 
             // Run the tool calls and feed the results back for the next step.
-            let mut results: Vec<ContentBlock> = Vec::new();
-            for call in &calls {
-                let (output, needs_resolution) = match recovered_results.remove(&call.call_id) {
-                    Some(output) => (output, false),
-                    None if self.cancel.is_cancelled() => (
-                        ToolOutput::failed(
-                            ToolErrorCategory::UserCancelled,
-                            "turn cancelled before tool execution",
-                        ),
-                        true,
-                    ),
-                    None => {
-                        self.ensure_durable_lease_current(turn_id).await?;
-                        (self.run_tool(chat, turn_id, call, events, None).await, true)
-                    }
-                };
-                events.send(AgentEvent::ToolCallCompleted {
-                    call_id: call.call_id,
-                    output: self.tool_output_for_event(&output, call.call_id),
-                    action: call_action_preview(call),
-                    result: ToolResultPreview::build(&call.name, output.data.as_ref()),
-                });
-                if needs_resolution {
-                    let resolution = if output.is_error {
-                        ToolCallResolution::Failed {
-                            result: output.content.clone(),
-                            error_code: output
-                                .error_category
-                                .unwrap_or(ToolErrorCategory::ToolFailed)
-                                .as_str()
-                                .into(),
-                            error_detail: None,
-                        }
-                    } else {
-                        ToolCallResolution::Completed {
-                            result: output.content.clone(),
-                        }
-                    };
-                    let outcome = self
-                        .resolve_server_call_retry(
-                            chat.id,
-                            turn_id,
-                            call.call_id,
-                            &resolution,
-                            &output.private_evidence,
-                        )
-                        .await?;
-                    if !matches!(
-                        outcome,
-                        ResolveToolCallOutcome::Resolved | ResolveToolCallOutcome::Existing
-                    ) {
-                        return Err(AgentError::Store(format!(
-                            "tool call {} could not be resolved: {outcome:?}",
-                            call.call_id
-                        )));
-                    }
+            // Outputs are collected by position so the results message keeps the
+            // order the model asked in, whatever order they were produced.
+            let mut outputs: Vec<Option<ToolOutput>> = vec![None; calls.len()];
+            for (index, call) in calls.iter().enumerate() {
+                if isolations[index].is_some() {
+                    continue;
                 }
-                results.push(ContentBlock::ToolResult {
-                    tool_use_id: call.provider_id.clone(),
-                    content: self.tool_result_for_model(&output.content, call.call_id),
-                    is_error: output.is_error,
-                });
+                outputs[index] = Some(
+                    self.execute_server_call(
+                        chat,
+                        turn_id,
+                        call,
+                        events,
+                        recovered_results.remove(&call.call_id),
+                    )
+                    .await?,
+                );
                 // A cancel that arrived during this tool (including while it was
                 // parked on approval) stops the turn before the next model call.
                 if self.cancel.is_cancelled() {
@@ -1840,10 +1432,118 @@ impl Agent {
                     ));
                 }
             }
-            // Tool results ride in a user-role message (the Messages convention).
+
+            // A batch can name more than one call that has to stand alone. The
+            // extras are answered rather than discarded: the model keeps its
+            // prose and its finished work, and asks again next step. Nothing is
+            // recorded for them because nothing ran, so a rebuilt transcript
+            // carries neither the request nor the refusal.
+            if let Some(taken) = isolated {
+                for (index, call) in calls.iter().enumerate() {
+                    if isolations[index].is_none() || index == taken {
+                        continue;
+                    }
+                    outputs[index] = Some(self.decline_call(
+                        call,
+                        events,
+                        format!(
+                            "not run: {} in the same step has to run on its own, so this step took only that call. Ask for this one again once it has finished.",
+                            calls[taken].name
+                        ),
+                    ));
+                }
+            }
+
+            // The isolated call, taken last so every sibling above is already
+            // terminal. That is what makes the pending set unambiguous by
+            // construction: a sensitive call parks as the turn's only pending
+            // row, and a checkpoint leaves nothing unfinished behind it.
+            if let Some(index) = isolated {
+                let call = &calls[index];
+                match isolations[index].expect("an isolated call has a class") {
+                    CallIsolation::Sensitive => {
+                        let recovered = self.accept_server_call(chat.id, turn_id, call).await?;
+                        outputs[index] = Some(
+                            self.execute_server_call(chat, turn_id, call, events, recovered)
+                                .await?,
+                        );
+                        if self.cancel.is_cancelled() {
+                            return Ok(self.finish_cancelled(
+                                events,
+                                total_usage,
+                                step + 1,
+                                publish_terminal,
+                            ));
+                        }
+                    }
+                    CallIsolation::Client => {
+                        match self.client_checkpoint(chat, turn_id, call, generation_steer_revision)
+                        {
+                            Ok((request, steer_revision)) => {
+                                return Ok(AgentTurnOutcome::ClientToolCall {
+                                    request,
+                                    usage: total_usage,
+                                    steer_revision,
+                                    model_steps: step + 1,
+                                })
+                            }
+                            Err(reason) => {
+                                outputs[index] =
+                                    Some(self.decline_call(call, events, reason.into()));
+                            }
+                        }
+                    }
+                    CallIsolation::SandboxSpawn => {
+                        match self.sandbox_checkpoint(call, generation_steer_revision) {
+                            Ok((request, steer_revision)) => {
+                                return Ok(AgentTurnOutcome::SandboxAgentSpawn {
+                                    request,
+                                    usage: total_usage,
+                                    steer_revision,
+                                    model_steps: step + 1,
+                                })
+                            }
+                            Err(reason) => {
+                                outputs[index] =
+                                    Some(self.decline_call(call, events, reason.into()));
+                            }
+                        }
+                    }
+                    CallIsolation::AgentWait => {
+                        match self.agent_wait_checkpoint(call, generation_steer_revision) {
+                            Ok((request, steer_revision)) => {
+                                return Ok(AgentTurnOutcome::WaitForAgents {
+                                    request,
+                                    usage: total_usage,
+                                    steer_revision,
+                                    model_steps: step + 1,
+                                })
+                            }
+                            Err(reason) => {
+                                outputs[index] =
+                                    Some(self.decline_call(call, events, reason.into()));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Tool results ride in a user-role message (the Messages
+            // convention). Every call the model made is answered here, so the
+            // next step never sees a request it cannot account for.
             transcript.push(ChatMessage {
                 role: Role::User,
-                content: results,
+                content: calls
+                    .iter()
+                    .zip(outputs)
+                    .filter_map(|(call, output)| {
+                        output.map(|output| ContentBlock::ToolResult {
+                            tool_use_id: call.provider_id.clone(),
+                            content: self.tool_result_for_model(&output.content, call.call_id),
+                            is_error: output.is_error,
+                        })
+                    })
+                    .collect(),
             });
             // Boundary steer after tools — injected before the next model step.
             self.apply_steers(chat, turn_id, &mut transcript, None, events)
@@ -1863,27 +1563,271 @@ impl Agent {
         })
     }
 
-    /// Fail the turn on a discard reason that has already been corrected once.
+    /// Why `call` cannot run beside its siblings, if it cannot.
     ///
-    /// Reported as its own kind rather than `max_steps_exceeded`, because the
-    /// turn did not run out of room to think — it kept being handed a batch
-    /// shape the loop refuses, and saying so is the difference between a
-    /// debuggable failure and a mystery.
-    fn repeated_discard_failure(
-        &self,
-        reason: StepDiscard,
-        usage: Usage,
-        step: usize,
-    ) -> AgentTurnOutcome {
-        AgentTurnOutcome::Failed {
-            error: crate::error::AgentErrorInfo {
-                kind: "repeated_step_discard".into(),
-                message: reason.message().into(),
-            },
-            usage,
-            // The discarded step still consumed a provider call.
-            model_steps: step + 1,
+    /// A name this turn does not advertise is deliberately plain: it reaches
+    /// [`Self::run_tool`], which answers it with `unknown tool` rather than
+    /// bending the batch around a call that was never going to run.
+    fn call_isolation(&self, call: &PendingCall) -> Option<CallIsolation> {
+        if self.tools.execution(&call.name) == Some(ToolCallExecution::Client) {
+            return Some(CallIsolation::Client);
         }
+        if self.agent_orchestration_active() {
+            if self.tools.is_foreground_sandbox_spawn(&call.name) {
+                return Some(CallIsolation::SandboxSpawn);
+            }
+            if self.tools.is_foreground_agent_wait(&call.name) {
+                return Some(CallIsolation::AgentWait);
+            }
+        }
+        self.tools
+            .get(&call.name)
+            .is_some_and(|tool| tool.approval_class() == ApprovalClass::Sensitive)
+            .then_some(CallIsolation::Sensitive)
+    }
+
+    /// Admit one server-executed call to the durable record before it runs, so
+    /// a crash mid-tool still leaves a reconstructable `ToolUse` on the next
+    /// turn.
+    ///
+    /// Returns the result an earlier attempt already committed for this call,
+    /// which the caller replays instead of repeating the side effect.
+    async fn accept_server_call(
+        &self,
+        chat_id: crate::id::ChatId,
+        turn_id: TurnId,
+        call: &PendingCall,
+    ) -> Result<Option<ToolOutput>> {
+        let record = ToolCallRecord {
+            id: call.call_id,
+            chat_id,
+            turn_id,
+            provider_id: call.provider_id.clone(),
+            name: call.name.clone(),
+            arguments: parse_args(&call.args),
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: Utc::now(),
+            resolved_at: None,
+        };
+        match self.accept_server_call_retry(&record).await? {
+            AcceptedServerCall::Accepted => Ok(None),
+            AcceptedServerCall::Existing(existing) if existing.status.is_terminal() => {
+                let content = existing.result.ok_or_else(|| {
+                    AgentError::Store(format!(
+                        "terminal tool call {} is missing its result",
+                        call.call_id
+                    ))
+                })?;
+                Ok(Some(ToolOutput {
+                    content,
+                    data: None,
+                    is_error: existing.status != ToolCallStatus::Completed,
+                    // Recovered from a durable row, whose category is already
+                    // recorded there; re-deriving one here would be a guess.
+                    error_category: None,
+                    private_evidence: Vec::new(),
+                }))
+            }
+            AcceptedServerCall::Existing(_) => Ok(None),
+            AcceptedServerCall::IdentityConflict => Err(AgentError::Store(format!(
+                "tool call {} identity conflicts with its canonical request",
+                call.call_id
+            ))),
+            AcceptedServerCall::LeaseLost => Err(AgentError::Store(format!(
+                "turn {turn_id} lost its lease while accepting tool call {}",
+                call.call_id
+            ))),
+        }
+    }
+
+    /// Run one admitted server call, announce it, and commit its result.
+    async fn execute_server_call(
+        &self,
+        chat: &Chat,
+        turn_id: TurnId,
+        call: &PendingCall,
+        events: &EventSink<'_>,
+        recovered: Option<ToolOutput>,
+    ) -> Result<ToolOutput> {
+        let (output, needs_resolution) = match recovered {
+            Some(output) => (output, false),
+            None if self.cancel.is_cancelled() => (
+                ToolOutput::failed(
+                    ToolErrorCategory::UserCancelled,
+                    "turn cancelled before tool execution",
+                ),
+                true,
+            ),
+            None => {
+                self.ensure_durable_lease_current(turn_id).await?;
+                (self.run_tool(chat, turn_id, call, events, None).await, true)
+            }
+        };
+        events.send(AgentEvent::ToolCallCompleted {
+            call_id: call.call_id,
+            output: self.tool_output_for_event(&output, call.call_id),
+            action: call_action_preview(call),
+            result: ToolResultPreview::build(&call.name, output.data.as_ref()),
+        });
+        if needs_resolution {
+            let resolution = if output.is_error {
+                ToolCallResolution::Failed {
+                    result: output.content.clone(),
+                    error_code: output
+                        .error_category
+                        .unwrap_or(ToolErrorCategory::ToolFailed)
+                        .as_str()
+                        .into(),
+                    error_detail: None,
+                }
+            } else {
+                ToolCallResolution::Completed {
+                    result: output.content.clone(),
+                }
+            };
+            let outcome = self
+                .resolve_server_call_retry(
+                    chat.id,
+                    turn_id,
+                    call.call_id,
+                    &resolution,
+                    &output.private_evidence,
+                )
+                .await?;
+            if !matches!(
+                outcome,
+                ResolveToolCallOutcome::Resolved | ResolveToolCallOutcome::Existing
+            ) {
+                return Err(AgentError::Store(format!(
+                    "tool call {} could not be resolved: {outcome:?}",
+                    call.call_id
+                )));
+            }
+        }
+        Ok(output)
+    }
+
+    /// Answer a call this step did not run.
+    ///
+    /// The reader saw it start, so it has to be seen to finish; the model gets
+    /// a result it can act on instead of a discarded step. Nothing is written
+    /// to the record because nothing happened — the call has no side effect to
+    /// recover and no place in a rebuilt history.
+    fn decline_call(
+        &self,
+        call: &PendingCall,
+        events: &EventSink<'_>,
+        reason: String,
+    ) -> ToolOutput {
+        let output = ToolOutput::error(reason);
+        events.send(AgentEvent::ToolCallCompleted {
+            call_id: call.call_id,
+            output: self.tool_output_for_event(&output, call.call_id),
+            action: call_action_preview(call),
+            result: ToolResultPreview::build(&call.name, output.data.as_ref()),
+        });
+        output
+    }
+
+    /// The client-tool checkpoint for `call`, or what the model is told when
+    /// the request cannot be made.
+    fn client_checkpoint(
+        &self,
+        chat: &Chat,
+        turn_id: TurnId,
+        call: &PendingCall,
+        steer_revision: Option<i64>,
+    ) -> std::result::Result<(crate::model::ClientToolCallRequest, i64), &'static str> {
+        if self.tools.is_foreground_client(&call.name) && !self.agent_orchestration_active() {
+            return Err("not run: that user continuation is available only from a durably claimed foreground turn. Continue without it.");
+        }
+        let Some(arguments) = parse_client_args(&call.args) else {
+            return Err("not run: the client tool arguments were not valid JSON. Ask again with one complete JSON value.");
+        };
+        let request = crate::model::ClientToolCallRequest {
+            id: call.call_id,
+            chat_id: chat.id,
+            turn_id,
+            provider_id: call.provider_id.clone(),
+            name: call.name.clone(),
+            arguments,
+        };
+        if !request.is_well_formed()
+            || !self
+                .tools
+                .client_arguments_are_valid(&request.name, &request.arguments)
+        {
+            return Err("not run: the client tool request was too large or malformed. Ask again with a valid tool identity and smaller arguments.");
+        }
+        let Some(steer_revision) = steer_revision else {
+            return Err(
+                "not run: client-executed tools are available only from a durably claimed turn.",
+            );
+        };
+        Ok((request, steer_revision))
+    }
+
+    /// The sandbox delegation checkpoint for `call`, or what the model is told
+    /// when the request cannot be made.
+    fn sandbox_checkpoint(
+        &self,
+        call: &PendingCall,
+        steer_revision: Option<i64>,
+    ) -> std::result::Result<(SandboxAgentSpawnRequest, i64), &'static str> {
+        let Some(arguments) = parse_client_args(&call.args) else {
+            return Err("not run: the sandbox task arguments were not valid JSON. Ask again with one complete task value.");
+        };
+        let Some(task) = self.tools.sandbox_spawn_task(&call.name, &arguments) else {
+            return Err("not run: the sandbox task needs one non-empty, bounded `task`. It may also include one `resource` object containing only `root_id` and `relative_path`; omit `resource` entirely when unused rather than sending null. Ask again with that exact shape.");
+        };
+        let Some(steer_revision) = steer_revision else {
+            return Err("not run: sandbox delegation is available only from a durably claimed foreground turn.");
+        };
+        Ok((
+            SandboxAgentSpawnRequest {
+                call_id: call.call_id,
+                provider_id: call.provider_id.clone(),
+                child_run_id: AgentRunId::sandbox_for_spawn_call(call.call_id),
+                task,
+                arguments,
+            },
+            steer_revision,
+        ))
+    }
+
+    /// The ordered child-wait checkpoint for `call`, or what the model is told
+    /// when the request cannot be made.
+    fn agent_wait_checkpoint(
+        &self,
+        call: &PendingCall,
+        steer_revision: Option<i64>,
+    ) -> std::result::Result<(ForegroundAgentWaitRequest, i64), &'static str> {
+        let Some(arguments) = parse_client_args(&call.args) else {
+            return Err("not run: the wait_for_agents arguments were not valid JSON. Ask again with one complete ordered agent_ids value.");
+        };
+        let Some(child_run_ids) = self.tools.wait_for_agent_ids(&call.name, &arguments) else {
+            return Err("not run: wait_for_agents requires one non-empty, bounded, unique agent_ids list with no extra properties.");
+        };
+        let Some(steer_revision) = steer_revision else {
+            return Err(
+                "not run: wait_for_agents is available only from a durably claimed foreground turn.",
+            );
+        };
+        Ok((
+            ForegroundAgentWaitRequest {
+                call_id: call.call_id,
+                provider_id: call.provider_id.clone(),
+                child_run_ids,
+                arguments,
+            },
+            steer_revision,
+        ))
     }
 
     /// Emit the cancellation terminal event and end the turn as a (non-error)
@@ -2492,8 +2436,14 @@ impl Agent {
     }
 
     /// Resume persisted server calls accepted by an earlier attempt before
-    /// asking the provider for new output. Approval-bearing calls are isolated
-    /// at admission, so their recovery never guesses batch order.
+    /// asking the provider for new output.
+    ///
+    /// An approval-bearing call is admitted only once every sibling in its step
+    /// is terminal, so recovery never has to choose which of several pending
+    /// rows an interrupted approval belonged to. The check below states that as
+    /// an invariant rather than relying on it: a batch that violates it was
+    /// written by something other than this loop, and guessing would risk
+    /// re-running a call the reader approved for different arguments.
     async fn resume_pending_server_calls(
         &self,
         chat: &Chat,
@@ -3271,8 +3221,9 @@ mod tests {
 
     struct ClientToolProvider {
         assistant_text: bool,
-        /// Emit a second, server-executed call beside the client one — the
-        /// shape the loop still refuses, since a checkpoint carries one call.
+        /// Emit a second, server-executed call beside the client one. The
+        /// checkpoint still carries a single call, so the loop has to run this
+        /// sibling first rather than refuse the batch.
         sibling_call: bool,
         name: &'static str,
         arguments: &'static str,
@@ -3979,9 +3930,19 @@ mod tests {
         );
         assert!(request.is_well_formed());
         assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
-        assert!(correction_events
+        // The correction arrives as the call's own result rather than as a
+        // discarded step, so the assistant's output for that step survives it.
+        assert!(!correction_events
             .iter()
             .any(|event| matches!(event, AgentEvent::StreamInterrupted)));
+        assert!(
+            correction_events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolCallCompleted { output, .. }
+                    if output.is_error && output.content.contains("omit `resource`")
+            )),
+            "{correction_events:?}"
+        );
     }
 
     #[tokio::test]
@@ -4073,7 +4034,116 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_batch_shape_the_loop_refuses_twice_fails_on_that_reason() {
+    async fn a_mixed_batch_runs_the_server_call_then_checkpoints_the_client_one() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("a.txt"), "sibling result").unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "fake", "connect documents")
+            .await
+            .unwrap();
+        let lease_token = uuid::Uuid::new_v4();
+        let claimed_at = Utc::now();
+        store
+            .claim_turn_run(
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register_client(ToolSpec {
+            name: "connect_folder".into(),
+            description: "Ask the desktop to connect a folder".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        });
+        registry.register(Box::new(ReadFile));
+        let agent = Agent::new(
+            Arc::new(ClientToolProvider {
+                assistant_text: true,
+                sibling_call: true,
+                name: "connect_folder",
+                arguments: r#"{"hint":"Documents"}"#,
+            }),
+            Arc::new(registry),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                max_steps: 2,
+                tool_scratch: Some(tool_scratch(workspace.path())),
+                ..AgentConfig::default()
+            },
+        )
+        .with_durable_steer(lease_token);
+        let (tx, rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        drop(tx);
+        let events = emitted_events(rx.collect().await);
+
+        // This batch used to be refused twice and then fail the turn, throwing
+        // away the preamble and the sibling's finished work each time. Now the
+        // server call runs and commits, and the client call still leaves as the
+        // step's checkpoint — a checkpoint that carries exactly one call.
+        let AgentTurnOutcome::ClientToolCall {
+            request,
+            model_steps,
+            ..
+        } = outcome
+        else {
+            panic!("the client call should still reach its checkpoint: {outcome:?}");
+        };
+        assert_eq!(request.name, "connect_folder");
+        assert_eq!(model_steps, 1);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::StreamInterrupted)));
+        let messages = store.list_messages(chat.id).await.unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.role == Role::Assistant
+                    && message.content.contains("I will connect it")),
+            "the preamble should survive the checkpoint: {messages:?}"
+        );
+        // The sibling is terminal before the turn suspends, so the resuming
+        // attempt finds nothing pending to guess about.
+        let calls = store.list_tool_calls(chat.id).await.unwrap();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].status, ToolCallStatus::Completed);
+        assert_eq!(calls[0].result.as_deref(), Some("sibling result"));
+    }
+
+    /// Arguments the loop cannot parse used to discard the step and count
+    /// towards failing the turn. They are a property of the one call, so they
+    /// are answered like any other bad call: the model is told what was wrong
+    /// and keeps the step it already spent.
+    #[tokio::test]
+    async fn a_client_call_with_unparseable_arguments_is_answered_not_discarded() {
         let db = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
@@ -4118,45 +4188,50 @@ mod tests {
         let agent = Agent::new(
             Arc::new(ClientToolProvider {
                 assistant_text: false,
-                sibling_call: true,
+                sibling_call: false,
                 name: "connect_folder",
-                arguments: r#"{"hint":"Documents"}"#,
+                arguments: "{not json",
             }),
             Arc::new(registry),
             store.clone(),
             AgentConfig {
                 model: "fake".into(),
-                max_steps: 2,
+                max_steps: 1,
                 ..AgentConfig::default()
             },
         )
         .with_durable_steer(lease_token);
-        let (tx, _rx) = unbounded();
+        let (tx, rx) = unbounded();
         let outcome = agent
             .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
             .await
             .unwrap();
-        // The loop corrects the shape once and fails on the second refusal.
-        // It used to keep correcting until the step budget ran out and then
-        // report `max_steps_exceeded`, which described the symptom rather than
-        // the cause — the model was never going to satisfy a runtime invariant
-        // it cannot see.
+        drop(tx);
+        let events = emitted_events(rx.collect().await);
+
+        // Nothing to check point on: the call never became a request, so the
+        // turn runs out its steps rather than suspending on a malformed one.
         assert!(
-            matches!(
-                &outcome,
-                AgentTurnOutcome::Failed {
-                    error,
-                    usage: Usage {
-                        input_tokens: 10,
-                        output_tokens: 4,
-                        ..
-                    },
-                    model_steps: 2,
-                } if error.kind == "repeated_step_discard"
-                    && error.message.contains("sibling tool calls")
-            ),
-            "{outcome:?}"
+            !matches!(outcome, AgentTurnOutcome::ClientToolCall { .. }),
+            "a call that could not be parsed must not reach a checkpoint: {outcome:?}"
         );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::StreamInterrupted)));
+        let completions: Vec<&ToolOutput> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolCallCompleted { output, .. } => Some(output),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completions.len(), 1, "{completions:?}");
+        assert!(completions[0].is_error);
+        assert!(
+            completions[0].content.contains("not valid JSON"),
+            "the model should be told what to fix: {completions:?}"
+        );
+        // Declined before it ran, so there is no record for a resume to find.
         assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     }
 
@@ -4224,34 +4299,6 @@ mod tests {
         let content = found.expect("the resumed transcript replays the result");
         assert!(content.len() < oversized.len());
         assert!(content.contains("[truncated:"));
-    }
-
-    #[test]
-    fn a_discard_reason_is_corrected_once_before_it_fails_the_turn() {
-        let mut discards = StepDiscards::default();
-        // One correction is worth sending; a second identical one is not.
-        assert!(!discards.record(StepDiscard::ClientCallWithSiblings));
-        assert!(discards.record(StepDiscard::ClientCallWithSiblings));
-
-        // Reasons are counted separately: hitting two different invariants once
-        // each is a model exploring, not a model looping.
-        let mut mixed = StepDiscards::default();
-        assert!(!mixed.record(StepDiscard::SensitiveCallWithSiblings));
-        assert!(!mixed.record(StepDiscard::SandboxSpawnWithSiblings));
-        assert!(!mixed.record(StepDiscard::WaitForAgentsWithSiblings));
-        assert!(mixed.record(StepDiscard::SensitiveCallWithSiblings));
-
-        // Every reason carries its own kind and a message naming what repeated.
-        for reason in [
-            StepDiscard::ForegroundClientUnavailable,
-            StepDiscard::ClientCallWithSiblings,
-            StepDiscard::ClientArgumentsNotJson,
-            StepDiscard::SandboxSpawnWithSiblings,
-            StepDiscard::WaitForAgentsWithSiblings,
-            StepDiscard::SensitiveCallWithSiblings,
-        ] {
-            assert!(reason.message().starts_with("the model kept"));
-        }
     }
 
     /// The model narrates before it acts. Rejecting a client call for carrying
@@ -5315,8 +5362,9 @@ mod tests {
         );
     }
 
-    /// Provider that pairs the sensitive call with a sibling call, which is
-    /// still malformed and must keep the corrective retry.
+    /// Provider that asks for two sensitive calls in one step. Only one can be
+    /// taken — a parked call has to be the turn's only pending row — so the
+    /// other must be answered rather than cost the step.
     struct SiblingBoomProvider {
         calls: AtomicUsize,
     }
@@ -5364,7 +5412,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sensitive_call_with_sibling_calls_still_retries() {
+    async fn a_second_sensitive_call_is_answered_instead_of_discarding_the_step() {
         use crate::approval::AutoApproveGate;
 
         let db = tempfile::tempdir().unwrap();
@@ -5396,7 +5444,7 @@ mod tests {
         let agent = Agent::new(
             provider.clone(),
             tools,
-            store,
+            store.clone(),
             AgentConfig {
                 model: "fake".into(),
                 ..Default::default()
@@ -5409,14 +5457,193 @@ mod tests {
         drop(tx);
         let events: Vec<AgentEvent> = rx.collect().await;
 
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::StreamInterrupted)));
+        // The step stands: one call is taken and parks, the other is answered
+        // with a result the model can act on. This used to be discarded whole,
+        // which cost the step and taught the model nothing.
         assert!(!events
             .iter()
-            .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
-        assert_eq!(ran.load(Ordering::SeqCst), 0);
+            .any(|e| matches!(e, AgentEvent::StreamInterrupted)));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ApprovalRequired { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        // Both calls are accounted for: the reader saw two start, so two finish.
+        let completions: Vec<&ToolOutput> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolCallCompleted { output, .. } => Some(output),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completions.len(), 2, "{completions:?}");
+        assert!(completions
+            .iter()
+            .any(|output| output.content == "boomed" && !output.is_error));
+        assert!(
+            completions
+                .iter()
+                .any(|output| output.is_error && output.content.starts_with("not run: boom")),
+            "{completions:?}"
+        );
+        // The declined call ran nothing, so it leaves no record to recover.
+        assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Provider that pairs a plain server call with a sensitive one in the same
+    /// step, then finishes.
+    struct MixedBoomProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for MixedBoomProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("mixed-boom")
+        }
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "call_read".into(),
+                        name: "read_file".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: r#"{"path":"a.txt"}"#.into(),
+                    },
+                    ProviderEvent::ToolCallStarted {
+                        index: 1,
+                        id: "call_boom".into(),
+                        name: "boom".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 1,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ProviderEvent::TextDelta { text: "ok".into() },
+                    ProviderEvent::Stop {
+                        reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    /// Approval gate that photographs the durable record at the instant the
+    /// request is registered, then approves.
+    struct RecordingGate {
+        store: Arc<dyn Store>,
+        chat_id: ChatId,
+        observed: Arc<Mutex<Vec<(String, ToolCallStatus)>>>,
+    }
+
+    impl crate::approval::ApprovalGate for RecordingGate {
+        fn register(
+            &self,
+            _request: crate::approval::ApprovalRequest,
+            _journal: Option<crate::approval::ApprovalJournalIdentity>,
+        ) -> crate::approval::ApprovalRegistrationFuture<'_> {
+            Box::pin(async move {
+                let calls = self.store.list_tool_calls(self.chat_id).await.unwrap();
+                *self.observed.lock().unwrap() = calls
+                    .into_iter()
+                    .map(|call| (call.name, call.status))
+                    .collect();
+                crate::approval::ApprovalRegistration {
+                    decision: Box::pin(async { crate::approval::ApprovalDecision::Approve })
+                        as crate::approval::ApprovalFuture,
+                    publication: crate::approval::ApprovalRequiredPublication::Ordinary,
+                }
+            })
+        }
+    }
+
+    /// The resume invariant, stated as behaviour: a call that parks on the gate
+    /// is the turn's only pending row. The loop no longer refuses the batch to
+    /// get that — it admits the sensitive call after its plain siblings have
+    /// resolved, so `resume_pending_server_calls` has nothing to disambiguate.
+    #[tokio::test]
+    async fn a_sensitive_call_parks_only_after_its_plain_sibling_is_terminal() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("a.txt"), "read first").unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(MixedBoomProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let agent = Agent::new(
+            provider.clone(),
+            Arc::new(
+                ToolRegistry::new()
+                    .with(Box::new(ReadFile))
+                    .with(Box::new(BoomTool { ran: ran.clone() })),
+            ),
+            store.clone(),
+            AgentConfig {
+                model: "fake".into(),
+                tool_scratch: Some(tool_scratch(workspace.path())),
+                ..Default::default()
+            },
+        )
+        .with_approvals(Arc::new(RecordingGate {
+            store: store.clone(),
+            chat_id: chat.id,
+            observed: observed.clone(),
+        }));
+
+        let (tx, rx) = unbounded();
+        agent.run_turn(&chat, "go", &tx).await.unwrap();
+        drop(tx);
+        let events: Vec<AgentEvent> = rx.collect().await;
+
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::StreamInterrupted)));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        let at_approval = observed.lock().unwrap().clone();
+        assert_eq!(
+            at_approval,
+            vec![
+                ("read_file".into(), ToolCallStatus::Completed),
+                ("boom".into(), ToolCallStatus::Pending),
+            ],
+            "the parked call must be the only pending row"
+        );
     }
 
     /// A Sensitive, standing-grantable tool (`search`) that records whether it
