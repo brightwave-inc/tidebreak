@@ -9,7 +9,8 @@
 //! model stops, bounded by a max-steps guard.
 //!
 //! v1 scope (deliberately small; each is a tracked follow-up):
-//! - tool calls run **sequentially** (concurrency for independent calls later);
+//! - read-only tool calls may run concurrently; workspace writes and calls that
+//!   require a checkpoint or approval stay ordered;
 //! - approval is **auto** for `ReadOnly`/`Workspace`; `Sensitive` parks via an
 //!   [`ApprovalGate`] until approve/reject unless a standing grant covers it;
 //! - context reduction is deterministic floor+restore (no LLM summarization);
@@ -63,6 +64,10 @@ use crate::storage::{
 use crate::tool::{
     ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec,
 };
+
+/// Keep a model-produced read batch from overwhelming the local runtime or a
+/// remote read service. Results still retain the provider's requested order.
+const MAX_PARALLEL_READ_ONLY_CALLS: usize = 8;
 
 /// A name-keyed registry of the tools available to the agent.
 #[derive(Clone, Default)]
@@ -1434,8 +1439,58 @@ impl Agent {
             // Outputs are collected by position so the results message keeps the
             // order the model asked in, whatever order they were produced.
             let mut outputs: Vec<Option<ToolOutput>> = vec![None; calls.len()];
+
+            // Only a leading run of read-only calls can overlap. A workspace
+            // mutation remains a sequencing boundary, so a later read cannot
+            // race it and observe either side nondeterministically. The
+            // isolated call is also a boundary: it is deliberately taken only
+            // after every ordinary sibling is terminal.
+            let parallel_prefix_len = calls
+                .iter()
+                .enumerate()
+                .take_while(|(index, call)| {
+                    isolations[*index].is_none() && self.call_is_parallel_eligible(call)
+                })
+                .count();
+            // One call gains nothing from the concurrent path, and must still
+            // flow through the ordinary sequential loop below.
+            let parallel_batch_len = (parallel_prefix_len > 1).then_some(parallel_prefix_len);
+            if let Some(parallel_batch_len) = parallel_batch_len {
+                let parallel_results =
+                    futures::stream::iter((0..parallel_batch_len).map(|index| {
+                        let call = &calls[index];
+                        let recovered = recovered_results.remove(&call.call_id);
+                        async move {
+                            (
+                                index,
+                                self.execute_server_call(chat, turn_id, call, events, recovered)
+                                    .await,
+                            )
+                        }
+                    }))
+                    .buffer_unordered(MAX_PARALLEL_READ_ONLY_CALLS)
+                    .collect::<Vec<_>>()
+                    .await;
+
+                // Drain the whole batch before propagating a storage failure.
+                // Every admitted sibling is then terminal rather than being
+                // left pending behind an early error return.
+                for (index, output) in parallel_results {
+                    outputs[index] = Some(output?);
+                }
+                if self.cancel.is_cancelled() {
+                    return Ok(self.finish_cancelled(
+                        events,
+                        total_usage,
+                        step + 1,
+                        publish_terminal,
+                    ));
+                }
+            }
+
             for (index, call) in calls.iter().enumerate() {
-                if isolations[index].is_some() {
+                if parallel_batch_len.is_some_and(|len| index < len) || isolations[index].is_some()
+                {
                     continue;
                 }
                 outputs[index] = Some(
@@ -1611,6 +1666,17 @@ impl Agent {
             .get(&call.name)
             .is_some_and(|tool| tool.approval_class() == ApprovalClass::Sensitive)
             .then_some(CallIsolation::Sensitive)
+    }
+
+    /// Whether a call may overlap the read-only calls before it in this step.
+    ///
+    /// Unknown names intentionally stay sequential so they follow the ordinary
+    /// `unknown tool` path without widening the concurrent surface. Every
+    /// workspace write, approval-bearing call, and checkpoint is a boundary.
+    fn call_is_parallel_eligible(&self, call: &PendingCall) -> bool {
+        self.tools
+            .get(&call.name)
+            .is_some_and(|tool| tool.approval_class() == ApprovalClass::ReadOnly)
     }
 
     /// Admit one server-executed call to the durable record before it runs, so
@@ -6572,6 +6638,330 @@ mod tests {
             ])
             .boxed())
         }
+    }
+
+    #[tokio::test]
+    async fn parallel_read_results_stay_ordered_even_when_a_failure_finishes_first() {
+        struct SlowRead {
+            started: Arc<tokio::sync::Notify>,
+            release: Mutex<Option<oneshot::Receiver<()>>>,
+        }
+
+        #[async_trait]
+        impl Tool for SlowRead {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "slow_read".into(),
+                    description: "a deliberately delayed read".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }
+            }
+
+            fn approval_class(&self) -> ApprovalClass {
+                ApprovalClass::ReadOnly
+            }
+
+            async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+                self.started.notify_one();
+                let release = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("slow read runs once");
+                release.await.expect("test releases the slow read");
+                Ok(ToolOutput::text("slow result"))
+            }
+        }
+
+        struct FastFailingRead;
+
+        #[async_trait]
+        impl Tool for FastFailingRead {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "fast_read".into(),
+                    description: "a read that fails immediately".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }
+            }
+
+            fn approval_class(&self) -> ApprovalClass {
+                ApprovalClass::ReadOnly
+            }
+
+            async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+                Ok(ToolOutput::error("fast read failed"))
+            }
+        }
+
+        struct ParallelReadProvider {
+            calls: AtomicUsize,
+            received_results: Arc<Mutex<Vec<(String, String, bool)>>>,
+        }
+
+        #[async_trait]
+        impl ModelProvider for ParallelReadProvider {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("parallel-read")
+            }
+
+            async fn stream(
+                &self,
+                request: ChatRequest,
+            ) -> Result<BoxStream<'static, ProviderEvent>> {
+                let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    vec![
+                        ProviderEvent::ToolCallStarted {
+                            index: 0,
+                            id: "slow_call".into(),
+                            name: "slow_read".into(),
+                        },
+                        ProviderEvent::ToolCallArgsDelta {
+                            index: 0,
+                            fragment: "{}".into(),
+                        },
+                        ProviderEvent::ToolCallStarted {
+                            index: 1,
+                            id: "fast_call".into(),
+                            name: "fast_read".into(),
+                        },
+                        ProviderEvent::ToolCallArgsDelta {
+                            index: 1,
+                            fragment: "{}".into(),
+                        },
+                        ProviderEvent::Stop {
+                            reason: StopReason::ToolUse,
+                        },
+                    ]
+                } else {
+                    let results = request
+                        .messages
+                        .last()
+                        .expect("the second request includes the tool results")
+                        .content
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } => Some((tool_use_id.clone(), content.clone(), *is_error)),
+                            _ => None,
+                        })
+                        .collect();
+                    *self.received_results.lock().unwrap() = results;
+                    vec![
+                        ProviderEvent::TextDelta {
+                            text: "done".into(),
+                        },
+                        ProviderEvent::Stop {
+                            reason: StopReason::EndTurn,
+                        },
+                    ]
+                };
+                Ok(stream::iter(events).boxed())
+            }
+        }
+
+        let (store, chat, _workspace) = cancel_test_chat().await;
+        let slow_started = Arc::new(tokio::sync::Notify::new());
+        let (release_slow, slow_release) = oneshot::channel();
+        let received_results = Arc::new(Mutex::new(Vec::new()));
+        let agent = Agent::new(
+            Arc::new(ParallelReadProvider {
+                calls: AtomicUsize::new(0),
+                received_results: received_results.clone(),
+            }),
+            Arc::new(
+                ToolRegistry::new()
+                    .with(Box::new(SlowRead {
+                        started: slow_started.clone(),
+                        release: Mutex::new(Some(slow_release)),
+                    }))
+                    .with(Box::new(FastFailingRead)),
+            ),
+            store.clone(),
+            AgentConfig {
+                model: "parallel-read".into(),
+                ..Default::default()
+            },
+        );
+
+        let chat_id = chat.id;
+        let (tx, mut rx) = unbounded();
+        let turn = tokio::spawn(async move { agent.run_turn(&chat, "go", &tx).await });
+        slow_started.notified().await;
+        let first_completion = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(AgentEvent::ToolCallCompleted { output, .. }) = rx.next().await {
+                    break output;
+                }
+            }
+        })
+        .await
+        .expect("the fast call must finish before the slow call is released");
+        assert!(first_completion.is_error);
+        assert_eq!(first_completion.content, "fast read failed");
+        release_slow.send(()).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), turn)
+            .await
+            .expect("the released read finishes the turn")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *received_results.lock().unwrap(),
+            vec![
+                ("slow_call".into(), "slow result".into(), false),
+                ("fast_call".into(), "fast read failed".into(), true),
+            ],
+            "the next model request keeps the provider's requested order"
+        );
+        assert!(
+            store
+                .list_tool_calls(chat_id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|call| call.status.is_terminal()),
+            "a failed sibling cannot leave the slow call pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_every_parallel_read_future() {
+        struct ParallelBlockingRead {
+            name: &'static str,
+            entered: Arc<AtomicUsize>,
+            both_entered: Arc<tokio::sync::Notify>,
+            dropped: Arc<AtomicUsize>,
+        }
+
+        struct CountDrop(Arc<AtomicUsize>);
+
+        impl Drop for CountDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[async_trait]
+        impl Tool for ParallelBlockingRead {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: self.name.into(),
+                    description: "waits for cancellation".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }
+            }
+
+            fn approval_class(&self) -> ApprovalClass {
+                ApprovalClass::ReadOnly
+            }
+
+            async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
+                let _drop = CountDrop(self.dropped.clone());
+                if self.entered.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                    self.both_entered.notify_one();
+                }
+                future::pending().await
+            }
+        }
+
+        struct ParallelBlockingProvider;
+
+        #[async_trait]
+        impl ModelProvider for ParallelBlockingProvider {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("parallel-blocking")
+            }
+
+            async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+                Ok(stream::iter(vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "blocking_a".into(),
+                        name: "blocking_a".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::ToolCallStarted {
+                        index: 1,
+                        id: "blocking_b".into(),
+                        name: "blocking_b".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 1,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ])
+                .boxed())
+            }
+        }
+
+        let (store, chat, _workspace) = cancel_test_chat().await;
+        let cancel = CancelToken::new();
+        let entered = Arc::new(AtomicUsize::new(0));
+        let both_entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let agent = Agent::new(
+            Arc::new(ParallelBlockingProvider),
+            Arc::new(
+                ToolRegistry::new()
+                    .with(Box::new(ParallelBlockingRead {
+                        name: "blocking_a",
+                        entered: entered.clone(),
+                        both_entered: both_entered.clone(),
+                        dropped: dropped.clone(),
+                    }))
+                    .with(Box::new(ParallelBlockingRead {
+                        name: "blocking_b",
+                        entered: entered.clone(),
+                        both_entered: both_entered.clone(),
+                        dropped: dropped.clone(),
+                    })),
+            ),
+            store,
+            AgentConfig {
+                model: "parallel-blocking".into(),
+                ..Default::default()
+            },
+        )
+        .with_cancel(cancel.clone());
+
+        let (tx, rx) = unbounded();
+        let turn = tokio::spawn(async move { agent.run_turn(&chat, "go", &tx).await });
+        let both_started =
+            tokio::time::timeout(std::time::Duration::from_secs(1), both_entered.notified()).await;
+        cancel.cancel();
+        both_started.expect("both read-only calls should begin together");
+        tokio::time::timeout(std::time::Duration::from_secs(1), turn)
+            .await
+            .expect("cancellation stops every parallel read")
+            .unwrap()
+            .unwrap();
+
+        let events = rx.collect::<Vec<_>>().await;
+        assert_eq!(entered.load(Ordering::SeqCst), 2);
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    AgentEvent::ToolCallCompleted { output, .. }
+                        if output.is_error && output.content == "turn cancelled during tool execution"
+                ))
+                .count(),
+            2,
+            "every admitted read receives a terminal cancellation result"
+        );
     }
 
     #[tokio::test]

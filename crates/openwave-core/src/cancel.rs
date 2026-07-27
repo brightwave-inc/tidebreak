@@ -7,18 +7,16 @@
 //! cancel takes effect promptly rather than only at the next natural boundary.
 //!
 //! Deliberately dependency-free: an [`AtomicBool`] for the level-triggered
-//! `is_cancelled` check plus a single [`AtomicWaker`] for the awaitable
+//! `is_cancelled` check plus a small waker set for the awaitable
 //! [`cancelled`](CancelToken::cancelled), so `openwave-core` needn't pull in a
-//! runtime for this. It is **single-consumer**: one turn task awaits a token at
-//! a time (the loop never races the token from two places at once).
+//! runtime for this. One turn may have several independent read-only tools in
+//! flight, so cancellation must wake every waiter rather than just one.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::task::{Context, Poll};
-
-use futures::task::AtomicWaker;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 /// A shared, cloneable signal that a turn should stop.
 ///
@@ -33,7 +31,7 @@ pub struct CancelToken {
 #[derive(Default)]
 struct Inner {
     cancelled: AtomicBool,
-    waker: AtomicWaker,
+    wakers: Mutex<Vec<Waker>>,
 }
 
 impl CancelToken {
@@ -43,11 +41,16 @@ impl CancelToken {
         Self::default()
     }
 
-    /// Trip the token. Idempotent — calling it again is a no-op. Wakes a task
-    /// parked on [`cancelled`](Self::cancelled).
+    /// Trip the token. Idempotent — calling it again is a no-op. Wakes every
+    /// task parked on [`cancelled`](Self::cancelled).
     pub fn cancel(&self) {
-        self.inner.cancelled.store(true, Ordering::Release);
-        self.inner.waker.wake();
+        if self.inner.cancelled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let wakers = std::mem::take(&mut *self.inner.wakers.lock().unwrap());
+        for waker in wakers {
+            waker.wake();
+        }
     }
 
     /// Whether the token has been cancelled. Cheap; use between loop steps.
@@ -79,12 +82,16 @@ impl Future for Cancelled {
         if self.inner.cancelled.load(Ordering::Acquire) {
             return Poll::Ready(());
         }
-        // Register before the second check so a cancel racing this poll can't
-        // slip between the load and the park without waking us.
-        self.inner.waker.register(cx.waker());
+        // Hold the registration lock across the second check so a cancel racing
+        // this poll either sees this waker or leaves the flag set for us to
+        // observe. Each concurrent tool gets its own wake-up.
+        let mut wakers = self.inner.wakers.lock().unwrap();
         if self.inner.cancelled.load(Ordering::Acquire) {
             Poll::Ready(())
         } else {
+            if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                wakers.push(cx.waker().clone());
+            }
             Poll::Pending
         }
     }
@@ -127,5 +134,24 @@ mod tests {
         });
         waiter.await;
         trip.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_future_wakes_every_parked_waiter() {
+        let token = CancelToken::new();
+        let first = token.clone();
+        let second = token.clone();
+        let first_waiter = tokio::spawn(async move { first.cancelled().await });
+        let second_waiter = tokio::spawn(async move { second.cancelled().await });
+
+        // Let both spawned tasks register before broadcasting the cancel.
+        tokio::task::yield_now().await;
+        token.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            first_waiter.await.unwrap();
+            second_waiter.await.unwrap();
+        })
+        .await
+        .expect("cancellation wakes every waiter");
     }
 }
