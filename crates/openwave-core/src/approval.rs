@@ -237,12 +237,14 @@ pub struct StandingGrant {
 /// much larger thing to agree to than "don't ask me about `cargo` again".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantScope {
-    /// Exactly this argument vector, in this directory, and nothing else.
-    ExactCommand {
-        command: String,
-        args: Vec<String>,
-        cwd: String,
-    },
+    /// Exactly the action the card showed, and nothing else.
+    ///
+    /// Holding the projection itself rather than one tool's fields is what
+    /// keeps this from being an `exec` scope wearing a general name: every tool
+    /// that can describe its action exactly gets a rung below the whole tool,
+    /// instead of every non-`exec` approval offering "allow all of these" as
+    /// its only standing choice.
+    ExactAction(ToolActionPreview),
     /// This executable, with any arguments.
     AnyArgsFor { command: String },
     /// Every call to the tool.
@@ -264,27 +266,22 @@ impl GrantScope {
     /// asking.
     #[must_use]
     pub fn covers_call(&self, tool_name: &str, arguments: &serde_json::Value) -> bool {
-        use crate::preview::ToolActionPreview;
         if matches!(self, Self::WholeTool) {
             return true;
         }
         if !ToolActionPreview::describes_exactly(tool_name, arguments) {
             return false;
         }
-        let Some(ToolActionPreview::Exec {
-            command: call_command,
-            args: call_args,
-            cwd: call_cwd,
-        }) = ToolActionPreview::build(tool_name, arguments)
-        else {
+        let Some(action) = ToolActionPreview::build(tool_name, arguments) else {
             return false;
         };
         match self {
             Self::WholeTool => true,
-            Self::ExactCommand { command, args, cwd } => {
-                call_command == *command && call_args == *args && call_cwd == *cwd
-            }
-            Self::AnyArgsFor { command } => call_command == *command,
+            Self::ExactAction(granted) => *granted == action,
+            Self::AnyArgsFor { command } => matches!(
+                &action,
+                ToolActionPreview::Exec { command: called, .. } if called == command
+            ),
         }
     }
 
@@ -292,32 +289,31 @@ impl GrantScope {
     ///
     /// A call with nothing to describe — or nothing describable *exactly* —
     /// can only be granted wholesale, because there is no narrower thing that
-    /// could be named without naming it approximately.
+    /// could be named without naming it approximately. Any other call gets the
+    /// exact rung: a search that has to keep asking about the query it already
+    /// asked about is offered "allow every search in this chat" as its only
+    /// alternative, which is the widest thing on the ladder.
     #[must_use]
     pub fn ladder_for(tool_name: &str, arguments: &serde_json::Value) -> Vec<Self> {
-        use crate::preview::ToolActionPreview;
         if !ToolActionPreview::describes_exactly(tool_name, arguments) {
             return vec![Self::WholeTool];
         }
-        match ToolActionPreview::build(tool_name, arguments) {
-            Some(ToolActionPreview::Exec { command, args, cwd }) => {
-                let mut ladder = vec![Self::ExactCommand {
+        let Some(action) = ToolActionPreview::build(tool_name, arguments) else {
+            return vec![Self::WholeTool];
+        };
+        let mut ladder = vec![Self::ExactAction(action.clone())];
+        // A command is the one action with a rung between "this exact call" and
+        // "every call": the executable it runs. With no arguments even that
+        // would read as two names for one grant.
+        if let ToolActionPreview::Exec { command, args, .. } = &action {
+            if !args.is_empty() {
+                ladder.push(Self::AnyArgsFor {
                     command: command.clone(),
-                    args: args.clone(),
-                    cwd: cwd.clone(),
-                }];
-                // With no arguments, "exactly this" and "this executable with
-                // any arguments" would read as two names for one grant.
-                if !args.is_empty() {
-                    ladder.push(Self::AnyArgsFor {
-                        command: command.clone(),
-                    });
-                }
-                ladder.push(Self::WholeTool);
-                ladder
+                });
             }
-            _ => vec![Self::WholeTool],
         }
+        ladder.push(Self::WholeTool);
+        ladder
     }
 }
 
@@ -729,6 +725,25 @@ mod standing_grant_tests {
         serde_json::json!({ "command": command, "args": args })
     }
 
+    /// The exact-action scope for a command run in the default directory.
+    fn exact_command(command: &str, args: &[&str]) -> GrantScope {
+        GrantScope::ExactAction(ToolActionPreview::Exec {
+            command: command.into(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            cwd: ".".into(),
+        })
+    }
+
+    /// The exact-action scope for an unfiltered public web search.
+    fn exact_web_search(query: &str) -> GrantScope {
+        GrantScope::ExactAction(ToolActionPreview::WebSearch {
+            query: query.into(),
+            domains: Vec::new(),
+            start_published_at: None,
+            end_published_at: None,
+        })
+    }
+
     #[test]
     fn an_exact_grant_covers_only_the_vector_it_named() {
         let chat = ChatId::new();
@@ -739,11 +754,7 @@ mod standing_grant_tests {
                 chat,
                 "exec",
                 kind,
-                GrantScope::ExactCommand {
-                    command: "cargo".into(),
-                    args: vec!["test".into()],
-                    cwd: ".".into(),
-                },
+                exact_command("cargo", &["test"]),
                 Utc::now(),
             )
             .unwrap(),
@@ -767,11 +778,7 @@ mod standing_grant_tests {
                 chat,
                 "exec",
                 kind,
-                GrantScope::ExactCommand {
-                    command: "bash".into(),
-                    args: vec!["-c".into(), long.clone()],
-                    cwd: ".".into(),
-                },
+                exact_command("bash", &["-c", &long]),
                 Utc::now(),
             )
             .unwrap(),
@@ -801,11 +808,7 @@ mod standing_grant_tests {
                 chat,
                 "exec",
                 kind,
-                GrantScope::ExactCommand {
-                    command: "foo".into(),
-                    args: vec!["bar".into()],
-                    cwd: ".".into(),
-                },
+                exact_command("foo", &["bar"]),
                 Utc::now(),
             )
             .unwrap(),
@@ -847,11 +850,11 @@ mod standing_grant_tests {
                 chat,
                 "exec",
                 kind,
-                GrantScope::ExactCommand {
+                GrantScope::ExactAction(ToolActionPreview::Exec {
                     command: "npm".into(),
                     args: vec!["install".into()],
                     cwd: "./sandbox".into(),
-                },
+                }),
                 Utc::now(),
             )
             .unwrap(),
@@ -903,11 +906,7 @@ mod standing_grant_tests {
         assert_eq!(
             GrantScope::ladder_for("exec", &exec_args("cargo", &["test"])),
             vec![
-                GrantScope::ExactCommand {
-                    command: "cargo".into(),
-                    args: vec!["test".into()],
-                    cwd: ".".into(),
-                },
+                exact_command("cargo", &["test"]),
                 GrantScope::AnyArgsFor {
                     command: "cargo".into(),
                 },
@@ -918,20 +917,85 @@ mod standing_grant_tests {
         // be two names for the same grant.
         assert_eq!(
             GrantScope::ladder_for("exec", &exec_args("true", &[])),
-            vec![
-                GrantScope::ExactCommand {
-                    command: "true".into(),
-                    args: vec![],
-                    cwd: ".".into(),
-                },
-                GrantScope::WholeTool,
-            ]
+            vec![exact_command("true", &[]), GrantScope::WholeTool,]
         );
         // Nothing to describe means nothing narrower to offer.
         assert_eq!(
             GrantScope::ladder_for("search", &no_args()),
             vec![GrantScope::WholeTool]
         );
+    }
+
+    #[test]
+    fn a_search_is_offered_a_grant_narrower_than_every_search() {
+        // The ladder used to be `exec`-shaped, so approving a Sensitive search
+        // offered "don't ask again about searches" as the only standing choice
+        // — the widest rung there is, from a card that had already shown the
+        // one query the person was actually deciding about.
+        assert_eq!(
+            GrantScope::ladder_for(
+                "web_search",
+                &serde_json::json!({ "query": "quarterly filings" })
+            ),
+            vec![exact_web_search("quarterly filings"), GrantScope::WholeTool,]
+        );
+        // A query is one thing, so there is no middle rung between it and the
+        // whole tool; only a command has an executable to name.
+        assert_eq!(
+            GrantScope::ladder_for("search", &serde_json::json!({ "query": "revenue" })),
+            vec![
+                GrantScope::ExactAction(ToolActionPreview::Search {
+                    query: "revenue".into()
+                }),
+                GrantScope::WholeTool,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_query_grant_covers_that_query_and_no_other_search() {
+        let chat = ChatId::new();
+        let kind = ToolApprovalKind::for_tool_name("web_search");
+        let grants = StandingGrants::new();
+        grants.record(
+            StandingGrant::scoped(
+                chat,
+                "web_search",
+                kind,
+                exact_web_search("quarterly filings"),
+                Utc::now(),
+            )
+            .unwrap(),
+        );
+
+        let query = |query: &str| serde_json::json!({ "query": query });
+        assert!(grants.covers(chat, "web_search", kind, &query("quarterly filings")));
+        // The tool trims before searching, so padding is not a different search.
+        assert!(grants.covers(chat, "web_search", kind, &query("  quarterly filings ")));
+        assert!(!grants.covers(chat, "web_search", kind, &query("payroll")));
+        // Same query, different tool: a grant is scoped to the tool it was
+        // given for, and a private-source search is not a public web search.
+        assert!(!grants.covers(
+            chat,
+            "search",
+            ToolApprovalKind::for_tool_name("search"),
+            &query("quarterly filings"),
+        ));
+        // The filters go to the provider too, so the same query with a domain
+        // filter is a different disclosure and was never the one granted.
+        assert!(!grants.covers(
+            chat,
+            "web_search",
+            kind,
+            &serde_json::json!({ "query": "quarterly filings", "domains": ["sec.gov"] }),
+        ));
+        // Bounding the response is not part of what leaves the machine.
+        assert!(grants.covers(
+            chat,
+            "web_search",
+            kind,
+            &serde_json::json!({ "query": "quarterly filings", "max_results": 10 }),
+        ));
     }
 
     #[test]

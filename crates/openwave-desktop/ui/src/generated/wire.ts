@@ -163,7 +163,21 @@ args: Array<string>,
  * Working directory relative to the chat's private scratch, never a
  * host path.
  */
-cwd: string, } | { "tool": "search", query: string, } | { "tool": "web_search", query: string, };
+cwd: string, } | { "tool": "search", query: string, } | { "tool": "web_search", query: string, 
+/**
+ * Sites the search is confined to, empty when the model named none.
+ */
+domains: Array<string>, 
+/**
+ * Earliest publication date the search will accept, as the model
+ * wrote it. Kept verbatim rather than reformatted: the card's job is
+ * to show what the provider is actually told.
+ */
+start_published_at: string | null, 
+/**
+ * Latest publication date the search will accept.
+ */
+end_published_at: string | null, };
 
 /**
  * Closed immutable consent semantics stored with each approval request.

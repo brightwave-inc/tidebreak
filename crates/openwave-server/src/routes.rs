@@ -1738,8 +1738,8 @@ pub struct ApprovalBody {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalGrantRung {
-    /// Exactly this argument vector.
-    ExactCommand,
+    /// Exactly the action the card showed.
+    ExactAction,
     /// This executable, with any arguments.
     AnyArgsForCommand,
     /// Every call to this tool.

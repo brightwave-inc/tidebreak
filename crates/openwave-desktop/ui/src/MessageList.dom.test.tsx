@@ -199,6 +199,67 @@ describe("approval card interactions", () => {
     expect(onDecide).toHaveBeenCalledWith("call-1", "approve", null);
   });
 
+  it("offers a search the query it showed, not every search in the chat", async () => {
+    const user = userEvent.setup();
+    const onDecide = vi.fn();
+    render(
+      card({
+        onDecide,
+        summary:
+          "Allow web search to send this query and its explicit filters to the configured search provider outside OpenWave?",
+        preview: {
+          tool: "web_search",
+          query: "quarterly filings",
+          domains: ["sec.gov"],
+          start_published_at: null,
+          end_published_at: null,
+        },
+      }),
+    );
+
+    // The ladder used to be exec-shaped, so this card's only standing option
+    // was the widest rung there is.
+    expect(
+      screen.getAllByRole("option").map((option) => option.textContent),
+    ).toEqual([
+      ONCE,
+      "2.Yes, and always allow exactly “quarterly filings”",
+      `3.${MORE}`,
+      "4.No, don't allow this",
+    ]);
+    // The filters are part of what is being consented to, so the card shows
+    // them alongside the query it leads with.
+    expect(screen.getByText(/# limited to sec.gov/)).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole("option")[1]!);
+    expect(onDecide).toHaveBeenLastCalledWith(
+      "call-1",
+      "approve",
+      "exact_action",
+    );
+  });
+
+  it("keeps a long query to one row of the option list", () => {
+    render(
+      card({
+        preview: {
+          tool: "web_search",
+          query:
+            "what did the company say about revenue recognition in the most recent quarter",
+          domains: [],
+          start_published_at: null,
+          end_published_at: null,
+        },
+      }),
+    );
+
+    // A natural-language query runs to hundreds of characters; the unabridged
+    // one is in the block above, which is where it is meant to be read.
+    expect(screen.getAllByRole("option")[1]?.textContent).toBe(
+      "2.Yes, and always allow exactly “what did the company say about revenue recogniti…”",
+    );
+  });
+
   it("offers only the whole tool when the action names nothing narrower", async () => {
     const user = userEvent.setup();
     render(card());

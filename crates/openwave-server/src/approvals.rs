@@ -135,28 +135,24 @@ fn grant_scope(
     if matches!(rung, ApprovalGrantRung::WholeTool) {
         return Some(GrantScope::WholeTool);
     }
-    // A narrow rung names a command, and the preview it would be named from is
+    // A narrow rung names the action, and the preview it would be named from is
     // clamped for display. Naming one from a clamped preview would authorize
     // every other call that clamps to the same text, so an approximate
     // description is refused rather than turned into standing authority.
     if !action_is_exact {
         return None;
     }
-    match (rung, action) {
+    match (rung, action?) {
         (ApprovalGrantRung::WholeTool, _) => Some(GrantScope::WholeTool),
-        (ApprovalGrantRung::ExactCommand, Some(ToolActionPreview::Exec { command, args, cwd })) => {
-            Some(GrantScope::ExactCommand {
-                command: command.clone(),
-                args: args.clone(),
-                cwd: cwd.clone(),
-            })
-        }
-        (ApprovalGrantRung::AnyArgsForCommand, Some(ToolActionPreview::Exec { command, .. })) => {
+        (ApprovalGrantRung::ExactAction, action) => Some(GrantScope::ExactAction(action.clone())),
+        (ApprovalGrantRung::AnyArgsForCommand, ToolActionPreview::Exec { command, .. }) => {
             Some(GrantScope::AnyArgsFor {
                 command: command.clone(),
             })
         }
-        _ => None,
+        // Only a command has an executable to name, so no other action can
+        // reach the rung between exact and whole-tool.
+        (ApprovalGrantRung::AnyArgsForCommand, _) => None,
     }
 }
 
@@ -507,7 +503,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::ExactCommand),
+                    Some(crate::routes::ApprovalGrantRung::ExactAction),
                 )
                 .await
                 .unwrap(),
@@ -535,6 +531,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_search_can_be_remembered_for_its_query_rather_than_for_every_search() {
+        // The narrow rung used to exist only for `exec`, so approving a
+        // Sensitive search offered nothing between "this once" and "every
+        // search in this chat".
+        let (store, request) =
+            setup_with_arguments("web_search", json!({ "query": "quarterly filings" })).await;
+        let broker = ApprovalBroker::new(store);
+        let _pending = broker.register(request.clone(), None).await;
+
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::ExactAction),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::Resolved
+        );
+
+        let grants = broker.standing_grants();
+        let query = |query: &str| json!({ "query": query });
+        assert!(grants.covers(
+            request.chat_id,
+            "web_search",
+            request.kind,
+            &query("quarterly filings"),
+        ));
+        // The grant names the query the card showed, so the next search still
+        // asks.
+        assert!(!grants.covers(
+            request.chat_id,
+            "web_search",
+            request.kind,
+            &query("payroll")
+        ));
+        // Only a command has an executable to name, so the middle rung has
+        // nothing to build from and is refused rather than widened.
+        let (store, request) =
+            setup_with_arguments("web_search", json!({ "query": "payroll" })).await;
+        let broker = ApprovalBroker::new(store);
+        let _pending = broker.register(request.clone(), None).await;
+        assert_eq!(
+            broker
+                .resolve_with_grant(
+                    request.chat_id,
+                    request.call_id,
+                    ApprovalDecision::Approve,
+                    Some(crate::routes::ApprovalGrantRung::AnyArgsForCommand),
+                )
+                .await
+                .unwrap(),
+            ResolveApprovalOutcome::GrantNotAvailable
+        );
+    }
+
+    #[tokio::test]
     async fn a_rung_the_call_cannot_describe_is_refused_rather_than_widened() {
         // The approval carries no action, so "always allow exactly this" has
         // nothing to name. Falling back to a broader grant would hand out more
@@ -549,7 +604,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::ExactCommand),
+                    Some(crate::routes::ApprovalGrantRung::ExactAction),
                 )
                 .await
                 .unwrap(),

@@ -12078,10 +12078,17 @@ async fn foreground_web_search_runs_end_to_end_through_durable_approval() {
     // about nothing in particular.
     assert_eq!(pending[0]["preview"]["tool"], "web_search");
     assert_eq!(pending[0]["preview"]["query"], "OpenWave release");
+    // The domain filter is told to the provider alongside the query, so it is
+    // part of what the card has to show. A grant may only be built from a call
+    // the card showed in full.
+    assert_eq!(pending[0]["preview"]["domains"][0], "Example.com");
     let pending_json = pending.to_string();
     // What came *back* is still private: the query is the action under review,
-    // the results are the answer the model works from.
-    assert!(!pending_json.contains("Example.com"));
+    // the results are the answer the model works from. The snippet is the only
+    // token unique to a result — the stub's title repeats the query and its URL
+    // repeats the domain filter, so neither would notice a leak.
+    assert!(!pending_json.contains("OpenWave web search is ready."));
+    assert!(!pending_json.contains("example.com/openwave"));
 
     let decide = router
         .clone()
