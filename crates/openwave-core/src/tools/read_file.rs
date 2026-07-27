@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -12,8 +13,9 @@ use super::private_scratch::{read_utf8_file, relative_path};
 /// `read_file` — read a UTF-8 text file from private scratch.
 pub struct ReadFile;
 
-#[derive(Deserialize)]
-struct Arguments {
+#[derive(Deserialize, JsonSchema)]
+pub(super) struct Arguments {
+    #[schemars(description = "Private-scratch-relative file path.")]
     path: String,
 }
 

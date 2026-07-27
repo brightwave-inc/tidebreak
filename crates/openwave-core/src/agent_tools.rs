@@ -5,6 +5,8 @@
 //! so the model can never bypass its lease, steer, or accounting fences. The
 //! production registry exposes them only to durably claimed foreground turns.
 
+use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -34,6 +36,14 @@ pub const SANDBOX_READ_DELEGATED_FILE_TOOL: &str = "read_delegated_file";
 pub const MAX_SANDBOX_AGENT_TASK_CHARS: usize = 16_000;
 /// Maximum number of depth-one children in one foreground wait request.
 pub const MAX_WAIT_FOR_AGENTS_CHILDREN: usize = TurnAgentRunWaitSet::MAX_CHILDREN;
+/// Maximum web-search query length advertised to a model.
+pub const MAX_WEB_SEARCH_QUERY_CHARS: usize = 400;
+/// Maximum requested web-search result count.
+pub const MAX_WEB_SEARCH_RESULTS: usize = 10;
+/// Maximum number of web-search domain filters.
+pub const MAX_WEB_SEARCH_DOMAINS: usize = 20;
+/// Default result count when a model omits `max_results`.
+pub const DEFAULT_WEB_SEARCH_RESULTS: usize = 5;
 
 /// Maximum serialized JSON bytes allocated to one model-facing child result.
 ///
@@ -49,10 +59,14 @@ pub(crate) const WAIT_CANCELLED_WITH_TURN_RESULT: &str =
     "Wait cancelled because the foreground turn was cancelled.";
 
 /// Canonical model proposal for one isolated sandbox task.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnSandboxAgentArgs {
     /// A self-contained task for the isolated child. It cannot spawn children.
+    #[schemars(
+        length(min = 1, max = MAX_SANDBOX_AGENT_TASK_CHARS),
+        description = "A concise, self-contained task for one isolated background agent."
+    )]
     pub task: String,
     /// Optional exact file a compatible native executor may make available.
     ///
@@ -60,16 +74,25 @@ pub struct SpawnSandboxAgentArgs {
     /// executor advertises the read only while the root remains attached, then
     /// revalidates authority with the host broker before bytes move.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "SandboxAgentFileResource",
+        description = "Optional exact file identity within a folder already connected to this conversation. This delegates only its identity; a compatible native executor must revalidate current access before any read."
+    )]
     pub resource: Option<SandboxAgentFileResource>,
 }
 
 /// One exact, pathless-root file identity delegated to a sandbox child.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxAgentFileResource {
     /// Opaque host-broker root identity attached to the foreground chat.
+    #[schemars(with = "uuid::Uuid", description = "")]
     pub root_id: HostRootId,
     /// Nonempty path relative to that root; absolute and parent paths are invalid.
+    #[schemars(
+        length(min = 1, max = crate::client_tools::MAX_CONNECTED_FOLDER_PATH_BYTES),
+        description = "Nonempty root-relative file path."
+    )]
     pub relative_path: String,
 }
 
@@ -98,12 +121,65 @@ pub struct SpawnSandboxAgentResult {
 /// every listed child has delivered an immutable result. The durable runtime
 /// additionally verifies that each id belongs to a depth-one child owned by
 /// the exact foreground turn; UUID shape alone cannot prove that authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WaitForAgentsArgs {
     /// Unique child identities in the order their results must be returned.
+    #[schemars(
+        with = "Vec<uuid::Uuid>",
+        length(min = 1, max = MAX_WAIT_FOR_AGENTS_CHILDREN),
+        extend("uniqueItems" = true),
+        description = "Opaque depth-one child agent IDs, in the order their results should be returned."
+    )]
     pub agent_ids: Vec<AgentRunId>,
 }
+
+/// Canonical arguments for the shared provider-backed web-search contract.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchArgs {
+    /// Focused public-web query.
+    #[schemars(
+        length(min = 1, max = MAX_WEB_SEARCH_QUERY_CHARS),
+        description = ""
+    )]
+    pub query: String,
+    /// Requested result count.
+    #[serde(default = "default_web_search_results")]
+    #[schemars(
+        range(min = 1, max = MAX_WEB_SEARCH_RESULTS),
+        description = ""
+    )]
+    pub max_results: usize,
+    /// Optional exact domain filters.
+    #[serde(default)]
+    #[schemars(length(max = MAX_WEB_SEARCH_DOMAINS), description = "")]
+    pub domains: Vec<String>,
+    /// Optional inclusive lower publication-time bound.
+    #[serde(default)]
+    #[schemars(
+        with = "String",
+        extend("format" = "date-time"),
+        description = ""
+    )]
+    pub start_published_at: Option<DateTime<Utc>>,
+    /// Optional inclusive upper publication-time bound.
+    #[serde(default)]
+    #[schemars(
+        with = "String",
+        extend("format" = "date-time"),
+        description = ""
+    )]
+    pub end_published_at: Option<DateTime<Utc>>,
+}
+
+const fn default_web_search_results() -> usize {
+    DEFAULT_WEB_SEARCH_RESULTS
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SandboxReadDelegatedFileArgs {}
 
 impl WaitForAgentsArgs {
     /// Whether this proposal has a non-empty, bounded, unique list of IDs.
@@ -264,38 +340,10 @@ pub fn validate_wait_for_agents_arguments(arguments: &Value) -> bool {
 /// recurse past depth one.
 #[must_use]
 pub fn spawn_sandbox_agent_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: SPAWN_SANDBOX_AGENT_TOOL.into(),
-        description: "Delegate one self-contained task to an isolated background agent and continue immediately. Save every returned agent_id. Before final completion, include every spawned agent_id in a wait_for_agents call; batch independent IDs into one wait, and do not ask it to spawn more agents.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": MAX_SANDBOX_AGENT_TASK_CHARS,
-                    "description": "A concise, self-contained task for one isolated background agent."
-                },
-                "resource": {
-                    "type": "object",
-                    "description": "Optional exact file identity within a folder already connected to this conversation. This delegates only its identity; a compatible native executor must revalidate current access before any read.",
-                    "properties": {
-                        "root_id": { "type": "string", "format": "uuid" },
-                        "relative_path": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": crate::client_tools::MAX_CONNECTED_FOLDER_PATH_BYTES,
-                            "description": "Nonempty root-relative file path."
-                        }
-                    },
-                    "required": ["root_id", "relative_path"],
-                    "additionalProperties": false
-                }
-            },
-            "required": ["task"],
-            "additionalProperties": false
-        }),
-    }
+    ToolSpec::for_args::<SpawnSandboxAgentArgs>(
+        SPAWN_SANDBOX_AGENT_TOOL,
+        "Delegate one self-contained task to an isolated background agent and continue immediately. Save every returned agent_id. Before final completion, include every spawned agent_id in a wait_for_agents call; batch independent IDs into one wait, and do not ask it to spawn more agents.",
+    )
 }
 
 /// Prepared foreground-only contract for waiting on depth-one children.
@@ -304,25 +352,10 @@ pub fn spawn_sandbox_agent_tool_spec() -> ToolSpec {
 /// durably claimed foreground turn.
 #[must_use]
 pub fn wait_for_agents_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: WAIT_FOR_AGENTS_TOOL.into(),
-        description: "Wait until all specified background agents finish, then return their results in the same order. Use only depth-one agent IDs returned by spawn_sandbox_agent.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "agent_ids": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": MAX_WAIT_FOR_AGENTS_CHILDREN,
-                    "uniqueItems": true,
-                    "items": { "type": "string", "format": "uuid" },
-                    "description": "Opaque depth-one child agent IDs, in the order their results should be returned."
-                }
-            },
-            "required": ["agent_ids"],
-            "additionalProperties": false
-        }),
-    }
+    ToolSpec::for_args::<WaitForAgentsArgs>(
+        WAIT_FOR_AGENTS_TOOL,
+        "Wait until all specified background agents finish, then return their results in the same order. Use only depth-one agent IDs returned by spawn_sandbox_agent.",
+    )
 }
 
 /// Narrow, host-executed web-search contract shared by trusted runtimes.
@@ -332,22 +365,10 @@ pub fn wait_for_agents_tool_spec() -> ToolSpec {
 /// same closed arguments without depending on a network integration crate.
 #[must_use]
 pub fn web_search_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: WEB_SEARCH_TOOL.into(),
-        description: "Search the public web for current information. Use focused queries and cite sources with the exact result URLs. Results may be unavailable when the host has not configured web search.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string", "minLength": 1, "maxLength": 400 },
-                "max_results": { "type": "integer", "minimum": 1, "maximum": 10 },
-                "domains": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
-                "start_published_at": { "type": "string", "format": "date-time" },
-                "end_published_at": { "type": "string", "format": "date-time" }
-            },
-            "required": ["query"],
-            "additionalProperties": false
-        }),
-    }
+    ToolSpec::for_args::<WebSearchArgs>(
+        WEB_SEARCH_TOOL,
+        "Search the public web for current information. Use focused queries and cite sources with the exact result URLs. Results may be unavailable when the host has not configured web search.",
+    )
 }
 
 /// Sandbox-specific presentation of the shared web-search contract.
@@ -370,21 +391,16 @@ pub fn sandbox_web_search_tool_spec() -> ToolSpec {
 /// widening its own authority.
 #[must_use]
 pub fn sandbox_read_delegated_file_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: SANDBOX_READ_DELEGATED_FILE_TOOL.into(),
-        description: "Read the exact UTF-8 file delegated to this background task.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        }),
-    }
+    ToolSpec::for_args::<SandboxReadDelegatedFileArgs>(
+        SANDBOX_READ_DELEGATED_FILE_TOOL,
+        "Read the exact UTF-8 file delegated to this background task.",
+    )
 }
 
 /// Whether arguments are the one canonical argument-free payload.
 #[must_use]
 pub fn validate_sandbox_read_delegated_file_arguments(arguments: &Value) -> bool {
-    arguments.as_object().is_some_and(serde_json::Map::is_empty)
+    serde_json::from_value::<SandboxReadDelegatedFileArgs>(arguments.clone()).is_ok()
 }
 
 #[cfg(test)]
@@ -475,12 +491,18 @@ mod tests {
     fn sandbox_spawn_spec_describes_a_single_bounded_task() {
         let spec = spawn_sandbox_agent_tool_spec();
         assert_eq!(spec.name, SPAWN_SANDBOX_AGENT_TOOL);
+        assert!(spec.input_schema.get("title").is_none());
+        assert!(spec.input_schema.get("$schema").is_none());
         assert_eq!(spec.input_schema["additionalProperties"], false);
         assert_eq!(spec.input_schema["required"], serde_json::json!(["task"]));
         assert_eq!(spec.input_schema["properties"]["task"]["maxLength"], 16_000);
         assert_eq!(
             spec.input_schema["properties"]["resource"]["required"],
             serde_json::json!(["root_id", "relative_path"])
+        );
+        assert_eq!(
+            spec.input_schema["properties"]["resource"]["properties"]["root_id"],
+            serde_json::json!({"type": "string", "format": "uuid"})
         );
         assert!(spec.description.contains("do not ask it to spawn"));
     }
@@ -544,6 +566,10 @@ mod tests {
         assert_eq!(
             spec.input_schema["properties"]["agent_ids"]["uniqueItems"],
             true
+        );
+        assert_eq!(
+            spec.input_schema["properties"]["agent_ids"]["items"],
+            serde_json::json!({"type": "string", "format": "uuid"})
         );
         assert!(spec.description.contains("all specified"));
         assert!(spec.description.contains("same order"));
@@ -613,6 +639,19 @@ mod tests {
             foreground.input_schema["properties"]["domains"]["maxItems"],
             20
         );
+        assert_eq!(
+            foreground.input_schema["required"],
+            serde_json::json!(["query"])
+        );
+        assert_eq!(
+            foreground.input_schema["properties"]["start_published_at"],
+            serde_json::json!({"type": "string", "format": "date-time"})
+        );
+        assert_eq!(
+            foreground.input_schema["properties"]["end_published_at"],
+            serde_json::json!({"type": "string", "format": "date-time"})
+        );
+        assert!(!foreground.input_schema.to_string().contains("\"default\""));
         assert_eq!(foreground.input_schema["additionalProperties"], false);
         assert!(foreground.description.contains("exact result URLs"));
         assert!(sandbox.description.contains("at most once"));

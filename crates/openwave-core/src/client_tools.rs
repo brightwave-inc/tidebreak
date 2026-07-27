@@ -4,6 +4,7 @@
 //! trusted client must still validate the payload, obtain explicit user
 //! consent, and derive the actual host-broker grant itself.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -32,11 +33,13 @@ pub const MAX_FOLDER_ACCESS_REASON_CHARS: usize = 500;
 ///
 /// The trusted host derives the granted capabilities after consent; it must not
 /// copy this list directly into a grant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(description = "", transform = preserve_enum_wire_shape)]
 #[non_exhaustive]
 pub enum RequestedFolderCapability {
     /// List directories and read files below the selected folder.
+    #[schemars(description = "")]
     ReadFiles,
 }
 
@@ -44,29 +47,62 @@ pub enum RequestedFolderCapability {
 ///
 /// This is deliberately not a free-form path. The trusted desktop decides how
 /// (or whether) to map it to a local picker location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[schemars(description = "", transform = preserve_enum_wire_shape)]
 #[non_exhaustive]
 pub enum RequestedFolderHint {
     /// Start the picker near the user's documents folder when supported.
+    #[schemars(description = "")]
     Documents,
     /// Start the picker near the user's downloads folder when supported.
+    #[schemars(description = "")]
     Downloads,
 }
 
+// Unit-variant docs make Schemars prefer `oneOf`; providers already consume
+// these two contracts as compact enum-only schemas.
+fn preserve_enum_wire_shape(schema: &mut schemars::Schema) {
+    if let Some(Value::Array(variants)) = schema.remove("oneOf") {
+        let values = variants
+            .iter()
+            .map(|variant| variant.get("const").cloned())
+            .collect::<Option<Vec<_>>>();
+        if let Some(values) = values {
+            schema.insert("enum".into(), Value::Array(values));
+        } else {
+            schema.insert("oneOf".into(), Value::Array(variants));
+        }
+    }
+    schema.remove("type");
+}
+
 /// Canonical arguments for [`REQUEST_FOLDER_ACCESS_TOOL`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RequestFolderAccessArgs {
     /// Short explanation shown to the user before any picker opens.
+    #[schemars(
+        length(min = 1, max = MAX_FOLDER_ACCESS_REASON_CHARS),
+        description = "Why access is needed, shown to the user."
+    )]
     pub reason: String,
     /// Capabilities the model believes it needs; these are proposals only.
+    #[schemars(
+        length(min = 1, max = 1),
+        extend("uniqueItems" = true),
+        description = "Untrusted capability proposals; the host derives any actual grant."
+    )]
     pub requested_capabilities: Vec<RequestedFolderCapability>,
     /// Optional non-authoritative well-known picker hint.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_hint"
+    )]
+    #[schemars(
+        with = "RequestedFolderHint",
+        description = "Optional well-known picker hint, never an absolute path."
     )]
     pub folder_hint: Option<RequestedFolderHint>,
 }
@@ -131,35 +167,10 @@ pub fn validate_request_folder_access_arguments(arguments: &Value) -> bool {
 /// Tool contract advertised by the local control plane.
 #[must_use]
 pub fn request_folder_access_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: REQUEST_FOLDER_ACCESS_TOOL.into(),
-        description: "Ask the user to connect another folder through a native consent flow. This request grants no access by itself. Provide a short reason, the read capability proposal, and optionally a label such as Documents or Downloads; never provide an absolute path.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": MAX_FOLDER_ACCESS_REASON_CHARS,
-                    "description": "Why access is needed, shown to the user."
-                },
-                "requested_capabilities": {
-                    "type": "array",
-                    "description": "Untrusted capability proposals; the host derives any actual grant.",
-                    "items": { "enum": ["read_files"] },
-                    "minItems": 1,
-                    "maxItems": 1,
-                    "uniqueItems": true
-                },
-                "folder_hint": {
-                    "enum": ["documents", "downloads"],
-                    "description": "Optional well-known picker hint, never an absolute path."
-                }
-            },
-            "required": ["reason", "requested_capabilities"],
-            "additionalProperties": false
-        }),
-    }
+    ToolSpec::for_args::<RequestFolderAccessArgs>(
+        REQUEST_FOLDER_ACCESS_TOOL,
+        "Ask the user to connect another folder through a native consent flow. This request grants no access by itself. Provide a short reason, the read capability proposal, and optionally a label such as Documents or Downloads; never provide an absolute path.",
+    )
 }
 
 /// Sandbox-only contract for proposing that the foreground parent consider
@@ -172,37 +183,52 @@ pub fn sandbox_folder_access_proposal_tool_spec() -> ToolSpec {
 }
 
 /// Canonical arguments for [`LIST_CONNECTED_FOLDERS_TOOL`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListConnectedFoldersArgs {}
 
 /// Canonical arguments for [`LIST_FOLDER_TOOL`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListFolderArgs {
     /// Opaque id returned by `list_connected_folders` or folder consent.
+    #[schemars(description = "")]
     pub root_id: uuid::Uuid,
     /// Root-relative directory path; an empty path means the connected root.
+    #[schemars(
+        length(max = MAX_CONNECTED_FOLDER_PATH_BYTES),
+        description = "Root-relative directory path; empty means the folder root."
+    )]
     pub path: String,
 }
 
 /// Canonical arguments for [`READ_CONNECTED_FILE_TOOL`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadConnectedFileArgs {
     /// Opaque id returned by `list_connected_folders` or folder consent.
+    #[schemars(description = "")]
     pub root_id: uuid::Uuid,
     /// Nonempty root-relative file path.
+    #[schemars(
+        length(min = 1, max = MAX_CONNECTED_FOLDER_PATH_BYTES),
+        description = "Root-relative text file path."
+    )]
     pub path: String,
 }
 
 /// Canonical arguments for [`IMPORT_CONNECTED_FILE_TOOL`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImportConnectedFileArgs {
     /// Opaque id returned by `list_connected_folders` or folder consent.
+    #[schemars(description = "")]
     pub root_id: uuid::Uuid,
     /// Nonempty root-relative file path.
+    #[schemars(
+        length(min = 1, max = MAX_CONNECTED_FOLDER_PATH_BYTES),
+        description = "Root-relative file path."
+    )]
     pub path: String,
 }
 
@@ -285,66 +311,34 @@ pub fn validate_import_connected_file_arguments(arguments: &Value) -> bool {
 
 #[must_use]
 pub fn list_connected_folders_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: LIST_CONNECTED_FOLDERS_TOOL.into(),
-        description: "List folders already connected to this conversation. Results contain opaque root IDs and display names only; use request_folder_access to ask the user to choose another folder.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        }),
-    }
+    ToolSpec::for_args::<ListConnectedFoldersArgs>(
+        LIST_CONNECTED_FOLDERS_TOOL,
+        "List folders already connected to this conversation. Results contain opaque root IDs and display names only; use request_folder_access to ask the user to choose another folder.",
+    )
 }
 
 #[must_use]
 pub fn list_folder_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: LIST_FOLDER_TOOL.into(),
-        description: "List a directory below an already connected folder. Use only an opaque root_id and a root-relative path; never use an absolute path or parent traversal.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "root_id": { "type": "string", "format": "uuid" },
-                "path": { "type": "string", "maxLength": MAX_CONNECTED_FOLDER_PATH_BYTES, "description": "Root-relative directory path; empty means the folder root." }
-            },
-            "required": ["root_id", "path"],
-            "additionalProperties": false
-        }),
-    }
+    ToolSpec::for_args::<ListFolderArgs>(
+        LIST_FOLDER_TOOL,
+        "List a directory below an already connected folder. Use only an opaque root_id and a root-relative path; never use an absolute path or parent traversal.",
+    )
 }
 
 #[must_use]
 pub fn read_connected_file_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: READ_CONNECTED_FILE_TOOL.into(),
-        description: "Read a UTF-8 text file below an already connected folder. Use only an opaque root_id and a nonempty root-relative path; never use an absolute path or parent traversal.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "root_id": { "type": "string", "format": "uuid" },
-                "path": { "type": "string", "minLength": 1, "maxLength": MAX_CONNECTED_FOLDER_PATH_BYTES, "description": "Root-relative text file path." }
-            },
-            "required": ["root_id", "path"],
-            "additionalProperties": false
-        }),
-    }
+    ToolSpec::for_args::<ReadConnectedFileArgs>(
+        READ_CONNECTED_FILE_TOOL,
+        "Read a UTF-8 text file below an already connected folder. Use only an opaque root_id and a nonempty root-relative path; never use an absolute path or parent traversal.",
+    )
 }
 
 #[must_use]
 pub fn import_connected_file_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: IMPORT_CONNECTED_FILE_TOOL.into(),
-        description: "Add one file below an already connected folder to this conversation as a source, so it can be searched and cited. Use this for a PDF, Office document, or any other file that read_connected_file cannot return as text. Use only an opaque root_id and a nonempty root-relative path; never use an absolute path or parent traversal. Importing the same file again recovers the same single source rather than adding a duplicate. The result is normally still processing: check list_sources for whether it became searchable.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "root_id": { "type": "string", "format": "uuid" },
-                "path": { "type": "string", "minLength": 1, "maxLength": MAX_CONNECTED_FOLDER_PATH_BYTES, "description": "Root-relative file path." }
-            },
-            "required": ["root_id", "path"],
-            "additionalProperties": false
-        }),
-    }
+    ToolSpec::for_args::<ImportConnectedFileArgs>(
+        IMPORT_CONNECTED_FILE_TOOL,
+        "Add one file below an already connected folder to this conversation as a source, so it can be searched and cited. Use this for a PDF, Office document, or any other file that read_connected_file cannot return as text. Use only an opaque root_id and a nonempty root-relative path; never use an absolute path or parent traversal. Importing the same file again recovers the same single source rather than adding a duplicate. The result is normally still processing: check list_sources for whether it became searchable.",
+    )
 }
 
 pub(crate) fn valid_connected_folder_path(path: &str, allow_root: bool) -> bool {
@@ -434,6 +428,21 @@ mod tests {
         assert_eq!(
             spec.input_schema["required"],
             serde_json::json!(["reason", "requested_capabilities"])
+        );
+        assert_eq!(
+            spec.input_schema["properties"]["reason"]["maxLength"],
+            MAX_FOLDER_ACCESS_REASON_CHARS
+        );
+        assert_eq!(
+            spec.input_schema["properties"]["requested_capabilities"]["items"],
+            serde_json::json!({"enum": ["read_files"]})
+        );
+        assert_eq!(
+            spec.input_schema["properties"]["folder_hint"],
+            serde_json::json!({
+                "enum": ["documents", "downloads"],
+                "description": "Optional well-known picker hint, never an absolute path."
+            })
         );
         assert!(spec.description.contains("grants no access"));
     }
@@ -575,6 +584,23 @@ mod tests {
         assert_eq!(file.name, READ_CONNECTED_FILE_TOOL);
         assert_eq!(directory.input_schema["additionalProperties"], false);
         assert_eq!(file.input_schema["additionalProperties"], false);
+        assert_eq!(
+            directory.input_schema["properties"]["path"],
+            serde_json::json!({
+                "type": "string",
+                "maxLength": MAX_CONNECTED_FOLDER_PATH_BYTES,
+                "description": "Root-relative directory path; empty means the folder root."
+            })
+        );
+        assert_eq!(
+            file.input_schema["properties"]["path"],
+            serde_json::json!({
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_CONNECTED_FOLDER_PATH_BYTES,
+                "description": "Root-relative text file path."
+            })
+        );
         assert!(!directory.description.contains("project_id"));
         assert!(!file.description.contains("grant"));
     }

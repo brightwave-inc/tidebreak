@@ -7,11 +7,11 @@ use thiserror::Error;
 use url::Url;
 
 /// Maximum Unicode scalar values accepted in a search query.
-pub const MAX_QUERY_CHARS: usize = 400;
+pub const MAX_QUERY_CHARS: usize = openwave_core::MAX_WEB_SEARCH_QUERY_CHARS;
 /// A provider request may ask for no more than this many normalized results.
-pub const MAX_RESULTS: usize = 10;
+pub const MAX_RESULTS: usize = openwave_core::MAX_WEB_SEARCH_RESULTS;
 /// A request may restrict results to no more than this many domains.
-pub const MAX_DOMAINS: usize = 20;
+pub const MAX_DOMAINS: usize = openwave_core::MAX_WEB_SEARCH_DOMAINS;
 /// Maximum title length preserved from a provider response.
 pub const MAX_RESULT_TITLE_CHARS: usize = 300;
 /// Maximum snippet length preserved from a provider response.

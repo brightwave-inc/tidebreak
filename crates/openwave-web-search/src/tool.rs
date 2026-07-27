@@ -1,16 +1,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use openwave_core::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
-use serde::Deserialize;
+use openwave_core::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec, WebSearchArgs};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::{SearchDomain, WebSearchError, WebSearchProvider, WebSearchRequest, MAX_OUTPUT_BYTES};
 
 /// Default result count when a model omits `max_results`.
-pub const DEFAULT_MAX_RESULTS: usize = 5;
+pub const DEFAULT_MAX_RESULTS: usize = openwave_core::DEFAULT_WEB_SEARCH_RESULTS;
 
 /// Opaque failure to resolve current host policy or credentials.
 ///
@@ -27,30 +25,12 @@ pub trait WebSearchResolver: Send + Sync {
     async fn resolve(&self) -> Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError>;
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WebSearchArguments {
-    query: String,
-    #[serde(default = "default_max_results")]
-    max_results: usize,
-    #[serde(default)]
-    domains: Vec<String>,
-    #[serde(default)]
-    start_published_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    end_published_at: Option<DateTime<Utc>>,
-}
-
-const fn default_max_results() -> usize {
-    DEFAULT_MAX_RESULTS
-}
-
 /// Decode and validate the one canonical model-facing argument shape.
 ///
 /// This is shared by the ordinary foreground tool and the durable sandbox
 /// checkpoint worker so both execution paths enforce identical bounds.
 pub fn request_from_tool_arguments(arguments: Value) -> Result<WebSearchRequest, WebSearchError> {
-    let arguments: WebSearchArguments = serde_json::from_value(arguments)
+    let arguments: WebSearchArgs = serde_json::from_value(arguments)
         .map_err(|_| WebSearchError::InvalidRequest("invalid tool arguments".into()))?;
     let domains = arguments
         .domains
@@ -174,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_schema_matches_request_contract_bounds() {
+    fn shared_typed_schema_preserves_request_bounds() {
         let spec = openwave_core::web_search_tool_spec();
         assert_eq!(spec.name, "web_search");
         assert_eq!(

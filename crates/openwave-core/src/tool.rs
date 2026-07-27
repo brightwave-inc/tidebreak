@@ -15,6 +15,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 
 use async_trait::async_trait;
+use schemars::{generate::SchemaSettings, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
@@ -91,6 +92,68 @@ pub struct ToolSpec {
     pub description: String,
     /// JSON Schema (draft 2020-12) describing the argument object.
     pub input_schema: Value,
+}
+
+impl ToolSpec {
+    /// Build a tool contract whose input schema comes from its deserialized
+    /// argument type.
+    ///
+    /// The provider-facing schema intentionally omits document metadata and
+    /// inlines nested types. OpenWave advertised that compact shape before
+    /// typed derivation, and provider adapters forward this value unchanged.
+    #[must_use]
+    pub fn for_args<Args: JsonSchema>(
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema: input_schema_for::<Args>(),
+        }
+    }
+}
+
+/// Generate the compact provider-facing JSON Schema for one argument type.
+#[must_use]
+pub fn input_schema_for<Args: JsonSchema>() -> Value {
+    let schema = SchemaSettings::draft2020_12()
+        .with(|settings| {
+            settings.meta_schema = None;
+            settings.inline_subschemas = true;
+        })
+        .into_generator()
+        .into_root_schema_for::<Args>();
+    let mut schema =
+        serde_json::to_value(schema).expect("a generated JSON Schema always serializes");
+    let root = schema
+        .as_object_mut()
+        .expect("a typed argument schema is an object");
+    root.remove("title");
+    root.remove("description");
+    if root.get("type").and_then(Value::as_str) == Some("object") {
+        root.entry("properties")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    }
+    remove_schema_defaults(&mut schema);
+    schema
+}
+
+fn remove_schema_defaults(schema: &mut Value) {
+    match schema {
+        Value::Object(object) => {
+            object.remove("default");
+            for value in object.values_mut() {
+                remove_schema_defaults(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                remove_schema_defaults(value);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 /// The result of executing a tool.
@@ -358,6 +421,36 @@ pub trait Tool: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    #[derive(Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    /// Root documentation belongs in Rust docs, not the provider schema.
+    #[allow(dead_code)]
+    struct DerivedArguments {
+        #[serde(default)]
+        #[schemars(with = "String", description = "Optional text.")]
+        optional: Option<String>,
+    }
+
+    #[test]
+    fn typed_argument_schema_keeps_the_compact_provider_shape() {
+        assert_eq!(
+            input_schema_for::<DerivedArguments>(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "optional": {
+                        "type": "string",
+                        "description": "Optional text."
+                    }
+                },
+                "additionalProperties": false
+            })
+        );
+    }
+
     #[test]
     fn a_reader_choice_is_not_recorded_as_a_product_failure() {
         // The distinction this exists for: a cancelled or declined call is a
