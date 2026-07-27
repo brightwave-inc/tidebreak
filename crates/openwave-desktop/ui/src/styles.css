@@ -297,159 +297,27 @@ body {
   background: var(--page-background);
 }
 
-.sidebar {
-  display: flex;
-  flex: 0 0 224px;
-  min-width: 0;
-  flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.5rem;
-  overflow: hidden;
-}
-
-.sidebar-brand {
+/* The settings sidebar is still hand-styled; the app rail moved to the
+   Tailwind primitives in `sidebar/primitives.tsx`. */
+.sidebar-action {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  height: 2.25rem;
-  padding: 0 0.5rem;
-  margin-bottom: 0.85rem;
-  font-weight: 600;
-  font-size: 0.95rem;
-  letter-spacing: -0.01em;
-}
-
-.sidebar-brand > svg {
-  width: 1.15rem;
-  height: auto;
-  color: var(--ink);
-}
-
-.theme-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.75rem;
-  height: 1.75rem;
-  flex: 0 0 auto;
-  margin-left: auto;
-  border: 0;
-  border-radius: 6px;
-  color: var(--muted-foreground);
-  background: transparent;
-  transition: background-color 100ms ease, color 100ms ease;
-}
-
-.theme-toggle:hover {
-  color: var(--ink);
-  background: var(--accent);
-}
-
-.new-chat {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem;
-  border: 0;
-  border-radius: 6px;
-  color: var(--ink);
-  background: transparent;
-  font-size: 0.875rem;
-  font-weight: 500;
-  text-align: left;
-  transition: background-color 100ms ease;
-}
-
-.new-chat:hover:not(:disabled) {
-  background: var(--accent);
-}
-
-.new-chat svg {
-  flex: 0 0 auto;
-  color: var(--muted-foreground);
-}
-
-.sidebar-section {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  gap: 0.15rem;
-  min-height: 0;
-  margin-top: 0.85rem;
-  overflow: hidden;
-}
-
-.conversation-list {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  align-content: flex-start;
-  gap: 1px;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.sidebar-label {
-  padding: 0.25rem 0.5rem;
-  color: var(--muted-foreground);
-  font-size: 0.8125rem;
-  font-weight: 500;
-}
-
-.conversation-item,
-.sidebar-action {
-  display: flex;
   width: 100%;
-  min-width: 0;
-  align-items: center;
-  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
   border: 0;
   border-radius: 6px;
-  padding: 0.5rem;
-  color: var(--ink);
   background: transparent;
-  font-size: 0.875rem;
-  font-weight: 450;
+  color: var(--muted-foreground);
+  font-size: 0.85rem;
   text-align: left;
-}
-
-.conversation-row {
-  display: flex;
-  flex: 0 0 auto;
-  height: 2.25rem;
-  align-items: center;
-  min-width: 0;
-  border-radius: 6px;
-  transition: background-color 100ms ease;
-}
-
-.conversation-row:hover,
-.conversation-row.is-active {
-  background: var(--accent);
-}
-
-.conversation-row:hover .conversation-item,
-.conversation-row.is-active .conversation-item {
-  color: var(--ink);
-}
-
-.conversation-item:hover {
-  color: var(--ink);
-  background: transparent;
-}
-
-.conversation-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.84rem;
-  font-weight: 500;
+  cursor: pointer;
 }
 
 .sidebar-action.is-active,
 .sidebar-action:hover {
+  background: var(--sidebar-active);
   color: var(--ink);
-  background: var(--accent);
 }
 
 .sidebar-action svg {
@@ -462,98 +330,6 @@ body {
   color: var(--ink);
 }
 
-.conversation-item {
-  flex: 1 1 auto;
-}
-
-.conversation-menu {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.65rem;
-  height: 1.65rem;
-  flex: 0 0 auto;
-  margin-right: 0.15rem;
-  border: 0;
-  border-radius: 5px;
-  color: var(--muted-foreground);
-  background: transparent;
-  line-height: 1;
-  opacity: 0;
-  transition: opacity 100ms ease, background-color 100ms ease;
-}
-
-.conversation-row:hover .conversation-menu,
-.conversation-row.is-active .conversation-menu,
-.conversation-menu:focus-visible,
-.conversation-menu[data-state="open"] {
-  opacity: 1;
-}
-
-.conversation-menu:hover:not(:disabled),
-.conversation-menu[data-state="open"] {
-  color: var(--ink);
-  background: color-mix(in srgb, var(--accent) 70%, transparent);
-}
-
-.conversation-menu:disabled {
-  cursor: not-allowed;
-}
-
-.conversation-row.is-renaming {
-  padding: 0 0.15rem;
-  background: var(--accent);
-}
-
-.conversation-rename-input {
-  width: 100%;
-  min-width: 0;
-  height: 1.85rem;
-  border: 0;
-  border-radius: 5px;
-  padding: 0 0.35rem;
-  background: transparent;
-  color: var(--ink);
-  font-size: 0.84rem;
-  font-weight: 500;
-  outline: none;
-}
-
-
-.sidebar-error {
-  margin: 0;
-  padding: 0 0.4rem;
-  color: var(--danger);
-  font-size: 0.75rem;
-}
-
-.sidebar-footer {
-  display: grid;
-  gap: 2px;
-  margin-top: auto;
-}
-
-.sidebar-update {
-  color: var(--success-foreground);
-  background: var(--success-background);
-}
-
-.sidebar-update:hover {
-  color: var(--success-foreground);
-  background: color-mix(in srgb, var(--success-background) 78%, var(--success));
-}
-
-.sidebar-update svg,
-.sidebar-update:hover svg {
-  color: var(--success-foreground);
-}
-
-.sidebar-update-version {
-  margin-left: auto;
-  color: inherit;
-  font-size: 0.7rem;
-  opacity: 0.75;
-}
 
 /* ---------- Buttons ---------- */
 
@@ -2903,37 +2679,12 @@ body {
   scrollbar-width: thin;
 }
 
-/* ---------- Sidebar collapse ---------- */
-
-.sidebar-expand {
-  position: absolute;
-  top: 0.6rem;
-  left: 0.6rem;
-  z-index: 20;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.8rem;
-  height: 1.8rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--bg-elevated);
-  color: var(--muted-foreground);
-}
-
-.sidebar-expand:hover {
-  color: var(--ink);
-}
+/* ---------- Window chrome ---------- */
 
 .app-shell {
   position: relative;
 }
 
-/* With the sidebar collapsed the main surface reaches the window's left
-   edge; restore the same gutter the other sides get. */
-.app-shell.sidebar-collapsed .main {
-  margin-left: 0.5rem;
-}
 
 /* macOS overlay titlebar: one strip carries the traffic lights, panel
    toggle, brand, and theme control, and drags the window. */

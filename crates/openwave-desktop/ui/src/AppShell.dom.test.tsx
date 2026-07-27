@@ -26,6 +26,7 @@ const createChat = vi.fn(async () => chats[0]);
 const listPendingUserQuestions = vi.fn(async () => [] as unknown[]);
 const listPendingFolderAccessRequests = vi.fn(async () => [] as unknown[]);
 const requestUserAttention = vi.fn(async () => {});
+const postMessage = vi.fn(async () => {});
 
 vi.mock("./boot", () => ({
   resolveServerInfo: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:1", token: "t" })),
@@ -39,6 +40,7 @@ vi.mock("./api", () => ({
     createChat = createChat;
     listPendingUserQuestions = listPendingUserQuestions;
     listPendingFolderAccessRequests = listPendingFolderAccessRequests;
+    postMessage = postMessage;
     openEvents = vi.fn(() => ({ close: vi.fn() }));
   },
 }));
@@ -96,7 +98,8 @@ vi.mock("react-resizable-panels", () => ({
   PanelResizeHandle: () => <div />,
 }));
 
-async function mountApp() {
+async function mountApp({ at }: { at?: string } = {}) {
+  if (at) window.location.hash = `#${at}`;
   const { createHashHistory, createRouter, RouterProvider } = await import(
     "@tanstack/react-router"
   );
@@ -120,6 +123,7 @@ beforeEach(() => {
   listPendingUserQuestions.mockResolvedValue([]);
   listPendingFolderAccessRequests.mockClear();
   requestUserAttention.mockClear();
+  postMessage.mockClear();
   usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
   // The stores outlive a test file's renders, so a chat list left behind would
   // decide the next test's routing before its own boot ever ran.
@@ -129,25 +133,65 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("app shell", () => {
-  it("opens on a conversation once the chat list resolves", async () => {
+  it("opens on home rather than on a conversation", async () => {
     const { router } = await mountApp();
 
-    await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
-    expect(await screen.findByTestId("transcript")).toBeInTheDocument();
+    expect(await screen.findByText("What are we working on?")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/");
+    // Home used to create a chat on every cold start, leaving an empty one
+    // behind whenever the reader did not use it.
     expect(createChat).not.toHaveBeenCalled();
   });
 
-  it("makes a conversation when there is nothing to open", async () => {
-    listChats.mockResolvedValueOnce([]);
+  it("lists recent conversations to pick up again", async () => {
+    await mountApp();
+
+    const recent = await screen.findAllByRole("button", { name: "Roadmap" });
+    expect(recent.length).toBeGreaterThan(0);
+  });
+
+  it("says so when there is nothing to pick up", async () => {
+    listChats.mockResolvedValue([]);
+    await mountApp();
+
+    expect(await screen.findByText("No chats yet")).toBeInTheDocument();
+  });
+
+  it("starts a conversation from the home composer and sends what was written", async () => {
+    const user = userEvent.setup();
     const { router } = await mountApp();
+    await screen.findByText("What are we working on?");
+
+    await user.type(screen.getByRole("textbox"), "summarise the filing");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() => expect(createChat).toHaveBeenCalledOnce());
     await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
+    // Home writes the message but does not post it — the chat route does, so
+    // there is only one send path.
+    await waitFor(() =>
+      expect(postMessage).toHaveBeenCalledWith("chat-1", expect.any(String), "summarise the filing"),
+    );
+  });
+
+  it("opens a conversation from the sidebar", async () => {
+    const user = userEvent.setup();
+    const { router } = await mountApp();
+    await screen.findByText("What are we working on?");
+
+    const recentList = screen.getByLabelText("Chats");
+    const [row] = screen
+      .getAllByRole("button", { name: "Roadmap" })
+      .filter((button) => recentList.contains(button));
+    await user.click(row);
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
+    expect(await screen.findByTestId("transcript")).toBeInTheDocument();
   });
 
   it("arranges panels beside the conversation from the sidebar", async () => {
     const user = userEvent.setup();
-    const { router } = await mountApp();
+    const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
 
     await user.click(screen.getByRole("button", { name: "Sources" }));
@@ -162,7 +206,7 @@ describe("app shell", () => {
 
   it("closes a panel back to the conversation alone", async () => {
     const user = userEvent.setup();
-    const { router } = await mountApp();
+    const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
     await user.click(screen.getByRole("button", { name: "Sources" }));
     await screen.findByTestId("sources");
@@ -174,15 +218,30 @@ describe("app shell", () => {
   });
 
   it("restores the arrangement a deep link describes", async () => {
-    window.location.hash = "#/c/chat-2?left=outputs&right=chat";
-    await mountApp();
+    await mountApp({ at: "/c/chat-2?left=outputs&right=chat" });
 
     expect(await screen.findByTestId("outputs")).toBeInTheDocument();
   });
 
+  it("finds a conversation through the chats panel's search", async () => {
+    const user = userEvent.setup();
+    await mountApp({ at: "/c/chat-1" });
+    await screen.findByTestId("transcript");
+
+    await user.click(screen.getByRole("button", { name: "All chats" }));
+    const search = await screen.findByRole("textbox", { name: "Search chats" });
+
+    await user.type(search, "roadmap");
+    expect(screen.getAllByRole("button", { name: "Roadmap" }).length).toBeGreaterThan(0);
+
+    await user.clear(search);
+    await user.type(search, "nothing matches this");
+    expect(await screen.findByText("No matches")).toBeInTheDocument();
+  });
+
   it("keeps watching for the agent's questions while settings is open", async () => {
     const user = userEvent.setup();
-    const { router } = await mountApp();
+    const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
     await waitFor(() => expect(listPendingUserQuestions).toHaveBeenCalled());
 
@@ -213,7 +272,7 @@ describe("app shell", () => {
 
   it("returns from settings to the conversation that was open", async () => {
     const user = userEvent.setup();
-    const { router } = await mountApp();
+    const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
     await user.click(screen.getByText("Settings"));
     await screen.findByTestId("settings");

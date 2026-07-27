@@ -19,6 +19,8 @@ export type AppContextValue = {
   refreshCatalog: () => Promise<void>;
   status: string;
   setStatus: (next: string | ((current: string) => string)) => void;
+  /** Start a conversation and open it. Fenced against a second in-flight create. */
+  newChat: () => void;
   themeMode: ThemeMode;
   setThemeMode: (mode: ThemeMode) => void;
   updateState: DesktopUpdateState;
