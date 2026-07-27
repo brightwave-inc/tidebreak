@@ -29,6 +29,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddConversationOutputs),
             Box::new(AddMessageAttachments),
             Box::new(AddOutputRevisionCitations),
+            Box::new(AddContextCheckpoints),
         ]
     }
 }
@@ -682,6 +683,91 @@ impl MigrationTrait for AddMessageAttachments {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop().table(MessageAttachment::Table).to_owned())
+            .await
+    }
+}
+
+/// Stores one bounded, versioned semantic checkpoint per conversation.
+///
+/// It is separate from `message`: checkpoints are agent-maintained provider
+/// context, not user-visible transcript entries. The source sequence is copied
+/// from the validated source message solely to make stale-writer rejection
+/// atomic; source text is never copied into this schema by the migration.
+struct AddContextCheckpoints;
+
+impl MigrationName for AddContextCheckpoints {
+    fn name(&self) -> &str {
+        "m20260727_000016_add_context_checkpoints"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AddContextCheckpoints {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(ContextCheckpoint::Table)
+                    .col(
+                        ColumnDef::new(ContextCheckpoint::ChatId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(ContextCheckpoint::SourceMessageId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ContextCheckpoint::SourceMessageSeq)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ContextCheckpoint::FormatVersion)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ContextCheckpoint::Content)
+                            .string_len(
+                                crate::semantic_checkpoint::MAX_CONTEXT_CHECKPOINT_BYTES as u32,
+                            )
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ContextCheckpoint::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_context_checkpoint_chat")
+                            .from(ContextCheckpoint::Table, ContextCheckpoint::ChatId)
+                            .to(Chat::Table, Chat::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_context_checkpoint_source_message")
+                            .from(ContextCheckpoint::Table, ContextCheckpoint::SourceMessageId)
+                            .to(Message::Table, Message::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .check(Expr::col(ContextCheckpoint::SourceMessageSeq).gt(0))
+                    .check(
+                        Expr::col(ContextCheckpoint::FormatVersion)
+                            .eq(crate::semantic_checkpoint::CONTEXT_CHECKPOINT_FORMAT_V1 as i32),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(ContextCheckpoint::Table).to_owned())
             .await
     }
 }
@@ -6137,6 +6223,17 @@ enum Message {
     Role,
     Content,
     TurnLeaseToken,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum ContextCheckpoint {
+    Table,
+    ChatId,
+    SourceMessageId,
+    SourceMessageSeq,
+    FormatVersion,
+    Content,
     CreatedAt,
 }
 

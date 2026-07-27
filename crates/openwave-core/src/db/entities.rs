@@ -329,6 +329,27 @@ pub mod message {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod context_checkpoint {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "context_checkpoint")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub chat_id: Uuid,
+        pub source_message_id: Uuid,
+        pub source_message_seq: i64,
+        pub format_version: i32,
+        pub content: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod message_attachment {
     use sea_orm::entity::prelude::*;
 
