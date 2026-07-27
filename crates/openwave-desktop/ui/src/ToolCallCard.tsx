@@ -91,6 +91,12 @@ const TOOL_PRESENTATIONS: Record<
     complete: "Source read complete",
     settled: "Read a source",
   },
+  read_tool_result: {
+    label: "Re-read a tool result",
+    active: "Re-reading a tool result",
+    complete: "Tool result read complete",
+    settled: "Re-read a tool result",
+  },
   web_search: {
     label: "Search the web",
     active: "Searching the web",

@@ -271,6 +271,7 @@ export type RendererToolName =
   | "search"
   | "list_sources"
   | "read_source"
+  | "read_tool_result"
   | "web_search"
   | "read_delegated_file"
   | "read_file"
@@ -1109,6 +1110,7 @@ export function isRendererToolName(value: unknown): value is RendererToolName {
     value === "list_connected_folders" ||
     value === "list_folder" ||
     value === "read_connected_file" ||
+    value === "read_tool_result" ||
     value === "import_connected_file" ||
     value === "spawn_sandbox_agent" ||
     value === "wait_for_agents" ||

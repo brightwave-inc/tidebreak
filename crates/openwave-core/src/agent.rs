@@ -1785,7 +1785,7 @@ impl Agent {
                 };
                 events.send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
-                    output: self.tool_output_for_event(&output),
+                    output: self.tool_output_for_event(&output, call.call_id),
                     action: call_action_preview(call),
                     result: ToolResultPreview::build(&call.name, output.data.as_ref()),
                 });
@@ -1826,7 +1826,7 @@ impl Agent {
                 }
                 results.push(ContentBlock::ToolResult {
                     tool_use_id: call.provider_id.clone(),
-                    content: self.tool_result_for_model(&output.content),
+                    content: self.tool_result_for_model(&output.content, call.call_id),
                     is_error: output.is_error,
                 });
                 // A cancel that arrived during this tool (including while it was
@@ -2465,6 +2465,7 @@ impl Agent {
         if let Some(truncated) = truncate_to_bytes(
             &output.content,
             crate::model::ToolCallRecord::MAX_RESULT_BYTES,
+            None,
         ) {
             output.content = truncated;
         }
@@ -2473,8 +2474,8 @@ impl Agent {
 
     /// The tool result as the model sees it, bounded by the turn's feedback
     /// budget rather than by what the record holds.
-    fn tool_result_for_model(&self, content: &str) -> String {
-        truncate_to_bytes(content, self.config.max_tool_result_bytes)
+    fn tool_result_for_model(&self, content: &str, call_id: CallId) -> String {
+        truncate_to_bytes(content, self.config.max_tool_result_bytes, Some(call_id))
             .unwrap_or_else(|| content.to_owned())
     }
 
@@ -2483,9 +2484,9 @@ impl Agent {
     /// Bounded like the model's copy, not like the record's: this rides the
     /// journaled event stream, so it must not grow just because the record is
     /// now allowed to keep more.
-    fn tool_output_for_event(&self, output: &ToolOutput) -> ToolOutput {
+    fn tool_output_for_event(&self, output: &ToolOutput, call_id: CallId) -> ToolOutput {
         ToolOutput {
-            content: self.tool_result_for_model(&output.content),
+            content: self.tool_result_for_model(&output.content, call_id),
             ..output.clone()
         }
     }
@@ -2585,7 +2586,7 @@ impl Agent {
                 }
                 events.send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,
-                    output: self.tool_output_for_event(&output),
+                    output: self.tool_output_for_event(&output, call.call_id),
                     action: call_action_preview(&call),
                     result: ToolResultPreview::build(&call.name, output.data.as_ref()),
                 });
@@ -2660,7 +2661,7 @@ impl Agent {
             }
             events.send(AgentEvent::ToolCallCompleted {
                 call_id: call.call_id,
-                output: self.tool_output_for_event(&output),
+                output: self.tool_output_for_event(&output, call.call_id),
                 action: call_action_preview(&call),
                 result: ToolResultPreview::build(&call.name, output.data.as_ref()),
             });
@@ -3090,7 +3091,7 @@ fn push_tool_batch(
                     // The record may hold more than a turn can afford to
                     // re-read, so a resumed transcript is bounded the same way
                     // a live one is.
-                    content: truncate_to_bytes(content, max_result_bytes)
+                    content: truncate_to_bytes(content, max_result_bytes, Some(call.id))
                         .unwrap_or_else(|| content.clone()),
                     is_error: call.status != ToolCallStatus::Completed,
                 })
@@ -3106,7 +3107,7 @@ fn push_tool_batch(
 
 /// Truncate `content` to at most `max_bytes` (on a UTF-8 char boundary) and
 /// append a notice. Returns `None` when it already fits.
-fn truncate_to_bytes(content: &str, max_bytes: usize) -> Option<String> {
+fn truncate_to_bytes(content: &str, max_bytes: usize, call_id: Option<CallId>) -> Option<String> {
     if content.len() <= max_bytes {
         return None;
     }
@@ -3114,11 +3115,21 @@ fn truncate_to_bytes(content: &str, max_bytes: usize) -> Option<String> {
     while end > 0 && !content.is_char_boundary(end) {
         end -= 1;
     }
+    // Naming the call turns a dead end into a next step: the record kept the
+    // whole result, so the model can read past this point instead of guessing
+    // at what it missed.
+    let recovery = match call_id {
+        Some(call_id) => {
+            format!("; read the rest with read_tool_result(call_id: \"{call_id}\")")
+        }
+        None => String::new(),
+    };
     Some(format!(
-        "{}\n\n[truncated: {} of {} bytes shown]",
+        "{}\n\n[truncated: {} of {} bytes shown{}]",
         &content[..end],
         end,
-        content.len()
+        content.len(),
+        recovery
     ))
 }
 
@@ -4166,12 +4177,18 @@ mod tests {
         // is the whole class of result that used to lose its tail.
         let content = "x".repeat(feedback * 2);
         assert!(content.len() < durable);
-        assert_eq!(truncate_to_bytes(&content, durable), None);
+        assert_eq!(truncate_to_bytes(&content, durable, None), None);
 
-        let for_model = truncate_to_bytes(&content, feedback).expect("exceeds the budget");
+        let call_id = CallId::new();
+        let for_model =
+            truncate_to_bytes(&content, feedback, Some(call_id)).expect("exceeds the budget");
         assert!(for_model.len() < content.len());
         assert!(for_model.contains("[truncated:"));
         assert!(for_model.contains(&content.len().to_string()));
+        // The notice names the call, so the cut is a next step rather than a
+        // dead end.
+        assert!(for_model.contains("read_tool_result"));
+        assert!(for_model.contains(&call_id.to_string()));
     }
 
     #[test]
