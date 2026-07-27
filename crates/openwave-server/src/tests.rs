@@ -10546,6 +10546,7 @@ async fn providers_list_and_put_roundtrip() {
     assert_eq!(info["enabled"], true);
     assert_eq!(info["has_credential"], true);
     assert!(info.get("credential").is_none());
+    assert!(!info.to_string().contains("sk-openai"));
 
     // Credential never appears on the list either.
     let list = router
@@ -10568,6 +10569,7 @@ async fn providers_list_and_put_roundtrip() {
         .unwrap();
     assert_eq!(openai["has_credential"], true);
     assert!(openai.get("credential").is_none());
+    assert!(!body.to_string().contains("sk-openai"));
 
     let delete = router
         .clone()
@@ -10602,6 +10604,37 @@ async fn providers_list_and_put_roundtrip() {
         .find(|p| p["kind"] == "openai")
         .unwrap();
     assert_eq!(openai["has_credential"], false);
+}
+
+#[tokio::test]
+async fn providers_never_echo_an_unsupported_service_account() {
+    let (router, token, _store, _dir) = test_app().await;
+    let secret = "test-private-key-material";
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/providers/openai")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "credential": {
+                            "type": "service_account",
+                            "json": secret,
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = json_body(response).await;
+    assert_eq!(body["kind"], "bad_request");
+    assert!(!body.to_string().contains(secret));
 }
 
 #[tokio::test]
