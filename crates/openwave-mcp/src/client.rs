@@ -9,6 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use openwave_core::{
     AgentError, ApprovalClass, Result, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec,
+    ToolUiView,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -349,6 +350,7 @@ impl McpClient {
                 spec: tool.spec.clone(),
                 remote_name: tool.remote_name.clone(),
                 server_name: self.server_name.clone(),
+                ui_resource_uri: tool.ui_resource_uri.clone(),
                 session: Arc::clone(&self.session),
             }));
         }
@@ -914,6 +916,9 @@ struct McpTool {
     spec: ToolSpec,
     remote_name: String,
     server_name: String,
+    /// Validated `ui://` view from discovery, stamped onto each output so the
+    /// host can surface the declared MCP Apps view for this tool's results.
+    ui_resource_uri: Option<String>,
     session: Arc<Mutex<Session>>,
 }
 
@@ -959,6 +964,12 @@ impl Tool for McpTool {
             error_category: result
                 .is_error
                 .then_some(openwave_core::ToolErrorCategory::ToolFailed),
+            ui_view: self.ui_resource_uri.as_ref().map(|uri| {
+                Box::new(ToolUiView {
+                    server: self.server_name.clone(),
+                    resource_uri: uri.clone(),
+                })
+            }),
             private_evidence: Vec::new(),
         })
     }
@@ -1051,6 +1062,14 @@ mod tests {
         assert_eq!(output.content, "found waves");
         assert_eq!(output.data, Some(json!({"matches": 1})));
         assert!(!output.is_error);
+        // The declared view rides the output so the host can surface it.
+        assert_eq!(
+            output.ui_view,
+            Some(Box::new(ToolUiView {
+                server: "private_docs".into(),
+                resource_uri: "ui://fixture/app.html".into(),
+            }))
+        );
 
         assert_eq!(
             client.ui_resource_uri("mcp__private_docs__search"),

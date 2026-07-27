@@ -219,9 +219,29 @@ pub struct ToolOutput {
     /// Why it failed, when it did. `None` on success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_category: Option<ToolErrorCategory>,
+    /// The validated MCP Apps view declared for the tool that produced this
+    /// output, when there is one. Journal-durable so a replayed completion can
+    /// still surface its view; never part of the model-facing content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_view: Option<Box<ToolUiView>>,
     /// Server-private durable sidecar committed with the canonical tool result.
     #[serde(skip)]
     pub private_evidence: Vec<crate::RetrievalEvidenceInput>,
+}
+
+/// A tool's declared MCP Apps view: which configured server can serve it and
+/// the validated `ui://` document it declared at discovery.
+///
+/// `server` is the locally configured namespace (user-authored, already shown
+/// in Settings), and `resource_uri` passed the discovery-time validation in
+/// `openwave-mcp` (bounded, `ui://`-schemed, no control characters). Remote
+/// tool names and descriptions still never cross the renderer boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolUiView {
+    /// The configured MCP server namespace that can serve the document.
+    pub server: String,
+    /// The validated `ui://` document URI.
+    pub resource_uri: String,
 }
 
 impl ToolOutput {
@@ -232,6 +252,7 @@ impl ToolOutput {
             data: None,
             is_error: false,
             error_category: None,
+            ui_view: None,
             private_evidence: Vec::new(),
         }
     }
@@ -252,8 +273,17 @@ impl ToolOutput {
             data: None,
             is_error: true,
             error_category: Some(category),
+            ui_view: None,
             private_evidence: Vec::new(),
         }
+    }
+
+    /// Attach a declared MCP Apps view to this output.
+    #[must_use]
+    pub fn with_ui_view(mut self, view: ToolUiView) -> Self {
+        // Boxed so the rare view does not widen every ToolOutput ever moved.
+        self.ui_view = Some(Box::new(view));
+        self
     }
 
     /// Attach a structured payload to this output.

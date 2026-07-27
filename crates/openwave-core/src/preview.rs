@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
+use crate::tool::ToolOutput;
+
 /// Longest command, argument, or directory string an action preview carries.
 pub const MAX_ACTION_FIELD_CHARS: usize = 512;
 
@@ -21,6 +23,11 @@ pub const MAX_ACTION_ARGS: usize = 32;
 /// Longest captured stream a result preview carries. The execution provider
 /// already bounds what it captures; this bounds what crosses the boundary.
 pub const MAX_RESULT_STREAM_CHARS: usize = 40_000;
+
+/// Longest `ui://` view reference a result preview carries. Mirrors the
+/// discovery-time bound in `openwave-mcp`; a reference is carried whole or not
+/// at all, because a truncated URI is a different URI.
+pub const MAX_RESULT_VIEW_URI_CHARS: usize = 2 * 1024;
 
 /// The action a call will take, in a form a human can inspect.
 ///
@@ -160,19 +167,33 @@ pub enum ToolResultPreview {
         stdout: String,
         stderr: String,
     },
+    /// An external MCP tool that declared an MCP Apps view for its results.
+    ///
+    /// This is a *reference*, never markup: the renderer asks the server for
+    /// the document by these coordinates and renders it only inside its
+    /// sandboxed frame. `server` is the user-configured namespace already
+    /// shown in Settings; `resource_uri` passed discovery-time validation.
+    /// Remote tool names, descriptions, and raw output still never cross.
+    McpApp {
+        /// The configured MCP server namespace that serves the view.
+        server: String,
+        /// The validated `ui://` document reference.
+        resource_uri: String,
+    },
 }
 
 impl ToolResultPreview {
-    /// Project the result of a call from the tool's own structured output.
+    /// Project the result of a call from the tool's own output.
     ///
-    /// `data` is [`crate::ToolOutput::data`], which is otherwise private. A
-    /// tool opts in by putting the enumerated fields there; everything else it
-    /// carries stays behind the boundary.
+    /// A tool opts in by putting the enumerated fields in
+    /// [`ToolOutput::data`], or — for an external MCP tool — by carrying the
+    /// host-side [`ToolOutput::ui_view`] declaration. Everything else the
+    /// output carries stays behind the boundary.
     #[must_use]
-    pub fn build(tool_name: &str, data: Option<&Value>) -> Option<Self> {
+    pub fn build(tool_name: &str, output: &ToolOutput) -> Option<Self> {
         match tool_name {
             "exec" => {
-                let data = data?;
+                let data = output.data.as_ref()?;
                 Some(Self::Exec {
                     exit_code: data
                         .get("exit_code")
@@ -190,6 +211,22 @@ impl ToolResultPreview {
                     stderr: stream(data.get("stderr")),
                 })
             }
+            // Only an external MCP proxy can carry a view declaration, and a
+            // failed call has no result worth a rich surface.
+            name if name.starts_with("mcp__") && !output.is_error => {
+                let view = output.ui_view.as_ref()?;
+                if !view.resource_uri.starts_with("ui://")
+                    || view.resource_uri.chars().count() > MAX_RESULT_VIEW_URI_CHARS
+                    || view.resource_uri.chars().any(char::is_control)
+                    || !survives_clamp(&view.server)
+                {
+                    return None;
+                }
+                Some(Self::McpApp {
+                    server: view.server.clone(),
+                    resource_uri: view.resource_uri.clone(),
+                })
+            }
             _ => None,
         }
     }
@@ -199,6 +236,7 @@ impl ToolResultPreview {
     pub fn has_output(&self) -> bool {
         match self {
             Self::Exec { stdout, stderr, .. } => !stdout.is_empty() || !stderr.is_empty(),
+            Self::McpApp { .. } => true,
         }
     }
 }
@@ -327,6 +365,10 @@ mod tests {
             start_published_at: None,
             end_published_at: None,
         }
+    }
+
+    fn output_with_data(data: serde_json::Value) -> crate::ToolOutput {
+        crate::ToolOutput::text("done").with_data(data)
     }
 
     #[test]
@@ -466,7 +508,10 @@ mod tests {
             ("mcp__server__tool", serde_json::json!({ "any": "thing" })),
         ] {
             assert_eq!(ToolActionPreview::build(tool, &arguments), None);
-            assert_eq!(ToolResultPreview::build(tool, Some(&arguments)), None);
+            assert_eq!(
+                ToolResultPreview::build(tool, &output_with_data(arguments.clone())),
+                None
+            );
         }
 
         // The searches project an *action* so their query can be reviewed, and
@@ -475,7 +520,76 @@ mod tests {
         for tool in ["search", "web_search"] {
             let arguments = serde_json::json!({ "query": "private" });
             assert!(ToolActionPreview::build(tool, &arguments).is_some());
-            assert_eq!(ToolResultPreview::build(tool, Some(&arguments)), None);
+            assert_eq!(
+                ToolResultPreview::build(tool, &output_with_data(arguments.clone())),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn an_mcp_tool_with_a_declared_view_projects_a_reference_not_markup() {
+        let output =
+            output_with_data(serde_json::json!({"status": 200})).with_ui_view(crate::ToolUiView {
+                server: "gateway".into(),
+                resource_uri: "ui://gateway/app.html".into(),
+            });
+        assert_eq!(
+            ToolResultPreview::build("mcp__gateway__tool__proxy_api", &output),
+            Some(ToolResultPreview::McpApp {
+                server: "gateway".into(),
+                resource_uri: "ui://gateway/app.html".into(),
+            })
+        );
+
+        // The projection is a closed reference: serialized, it carries the
+        // coordinates and nothing from the tool's output or structured data.
+        let json = serde_json::to_string(
+            &ToolResultPreview::build("mcp__gateway__tool", &output).unwrap(),
+        )
+        .unwrap();
+        assert!(!json.contains("200"));
+        assert!(!json.contains("done"));
+    }
+
+    #[test]
+    fn mcp_views_stay_behind_the_boundary_without_a_valid_declaration() {
+        let view = |server: &str, uri: &str| {
+            crate::ToolOutput::text("done").with_ui_view(crate::ToolUiView {
+                server: server.into(),
+                resource_uri: uri.into(),
+            })
+        };
+
+        // No declaration, non-MCP name, failed call, malformed URI or server.
+        assert_eq!(
+            ToolResultPreview::build("mcp__gateway__tool", &crate::ToolOutput::text("done")),
+            None
+        );
+        assert_eq!(
+            ToolResultPreview::build("write_file", &view("gateway", "ui://gateway/app.html")),
+            None
+        );
+        let mut failed = view("gateway", "ui://gateway/app.html");
+        failed.is_error = true;
+        assert_eq!(
+            ToolResultPreview::build("mcp__gateway__tool", &failed),
+            None
+        );
+        for (server, uri) in [
+            ("gateway", "https://evil.example/app"),
+            ("gateway", "ui://x\u{1b}[31m"),
+            ("bad\nserver", "ui://gateway/app.html"),
+            (
+                "gateway",
+                &format!("ui://{}", "x".repeat(MAX_RESULT_VIEW_URI_CHARS)),
+            ),
+        ] {
+            assert_eq!(
+                ToolResultPreview::build("mcp__gateway__tool", &view(server, uri)),
+                None,
+                "{server} {uri:.40}"
+            );
         }
     }
 
@@ -515,7 +629,7 @@ mod tests {
     fn exec_result_carries_the_streams_and_the_exit_status() {
         let result = ToolResultPreview::build(
             "exec",
-            Some(&serde_json::json!({
+            &output_with_data(serde_json::json!({
                 "exit_code": 1,
                 "timed_out": false,
                 "output_truncated": true,
@@ -540,7 +654,7 @@ mod tests {
     fn a_signal_kill_has_no_exit_code_and_a_silent_run_has_no_output() {
         let Some(result) = ToolResultPreview::build(
             "exec",
-            Some(&serde_json::json!({ "exit_code": null, "timed_out": true })),
+            &output_with_data(serde_json::json!({ "exit_code": null, "timed_out": true })),
         ) else {
             panic!("exec projects a result");
         };
@@ -561,7 +675,7 @@ mod tests {
     fn captured_streams_keep_their_line_breaks_but_stay_bounded() {
         let Some(ToolResultPreview::Exec { stdout, stderr, .. }) = ToolResultPreview::build(
             "exec",
-            Some(&serde_json::json!({
+            &output_with_data(serde_json::json!({
                 "stdout": "a".repeat(MAX_RESULT_STREAM_CHARS * 2),
                 "stderr": "kept\nlines\n\u{1b}[31mbut not escapes",
             })),

@@ -13576,3 +13576,147 @@ async fn ws_subprotocol_wrong_token_is_rejected() {
     );
     assert!(connect_async(request).await.is_err());
 }
+
+/// The MCP App view frame contract, at the HTTP boundary: minting requires
+/// the bearer, the frame route does not (an iframe carries no headers), the
+/// served document brings its own strict CSP, and a token redeems exactly
+/// once.
+#[tokio::test]
+async fn mcp_view_frames_are_single_use_capabilities_with_their_own_csp() {
+    use axum::routing::post as axum_post;
+
+    async fn fake_mcp(body: String) -> ([(&'static str, &'static str); 1], String) {
+        let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let id = request.get("id").cloned().unwrap_or_default();
+        let result = match request["method"].as_str().unwrap_or_default() {
+            "initialize" => serde_json::json!({
+                "protocolVersion": openwave_mcp::PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "frame-fixture", "version": "1"}
+            }),
+            "tools/list" => serde_json::json!({
+                "tools": [{
+                    "name": "viewer",
+                    "description": "Tool with a declared view",
+                    "inputSchema": {"type": "object"},
+                    "_meta": {"ui": {"resourceUri": "ui://fixture/app.html"}}
+                }]
+            }),
+            "resources/read" => serde_json::json!({
+                "contents": [{
+                    "uri": "ui://fixture/app.html",
+                    "mimeType": "text/html;profile=mcp-app",
+                    "text": "<html><script>render()</script></html>"
+                }]
+            }),
+            _ => serde_json::json!({}),
+        };
+        (
+            [("content-type", "application/json")],
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+        )
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mcp_address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/mcp", axum_post(fake_mcp)))
+            .await
+            .unwrap();
+    });
+
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let put = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/mcp/servers")
+                .header("authorization", &bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    "{{\"servers\":[{{\"name\":\"gateway\",\"url\":\"http://{mcp_address}/mcp\",\"request_timeout_ms\":30000,\"enabled\":true}}]}}"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Minting requires the bearer.
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/mcp/servers/gateway/view-session")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"uri":"ui://fixture/app.html"}"#))
+            .unwrap()
+    };
+    let unauthenticated = router.clone().oneshot(request()).await.unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let minted = router
+        .clone()
+        .oneshot({
+            let mut request = request();
+            request
+                .headers_mut()
+                .insert("authorization", bearer.parse().unwrap());
+            request
+        })
+        .await
+        .unwrap();
+    assert_eq!(minted.status(), StatusCode::OK);
+    let session: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(minted.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let frame_path = session["frame_path"].as_str().unwrap().to_string();
+    assert!(frame_path.starts_with("/mcp/view-frames/"));
+
+    // The frame redeems once, without auth, with its own strict policy.
+    let frame = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&frame_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(frame.status(), StatusCode::OK);
+    let csp = frame
+        .headers()
+        .get("content-security-policy")
+        .and_then(|value| value.to_str().ok())
+        .unwrap();
+    assert!(csp.contains("default-src 'none'"));
+    assert!(csp.contains("script-src 'unsafe-inline'"));
+    assert!(csp.contains("connect-src 'none'"));
+    assert_eq!(
+        frame
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
+    let body = axum::body::to_bytes(frame.into_body(), 2 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"<html><script>render()</script></html>");
+
+    // Replay is refused: the capability is spent.
+    let replay = router
+        .oneshot(
+            Request::builder()
+                .uri(&frame_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+}

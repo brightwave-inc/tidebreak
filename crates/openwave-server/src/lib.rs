@@ -269,6 +269,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::post_mcp_server_reconnect),
         )
         .route(
+            "/mcp/servers/{name}/view-session",
+            post(routes::post_mcp_view_session),
+        )
+        .route(
             "/web-search/credentials",
             get(routes::get_web_search_credentials),
         )
@@ -333,7 +337,8 @@ pub fn app(state: AppState) -> Router {
             state.clone(),
             auth::require_token,
         ))
-        .with_state(state);
+        .with_state(state.clone());
+    let frame_state = state;
 
     // Loopback-only + bearer token is the real gate. CORS mirrors the request
     // Origin so the Tauri webview (and a browser on `vite` during UI work) can
@@ -361,8 +366,15 @@ pub fn app(state: AppState) -> Router {
             header::CONTENT_RANGE,
         ]);
 
+    // Reached by capability (single-use token), not by bearer: iframes send
+    // no headers. See `routes::get_mcp_view_frame`.
+    let view_frames = Router::new()
+        .route("/mcp/view-frames/{token}", get(routes::get_mcp_view_frame))
+        .with_state(frame_state);
+
     Router::new()
         .route("/healthz", get(healthz))
+        .merge(view_frames)
         .merge(api)
         .layer(cors)
 }

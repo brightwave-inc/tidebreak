@@ -307,6 +307,11 @@ bearer_token_env: string | null, request_timeout_ms: number, enabled: boolean, }
 export type McpServersInfo = { servers: Array<McpServerInfo>, };
 
 /**
+ * Where the sandboxed iframe should load one view from, valid once.
+ */
+export type McpViewSession = { frame_path: string, };
+
+/**
  * Identifies a persisted message within a chat.
  */
 export type MessageId = string;
@@ -605,7 +610,15 @@ timed_out: boolean,
 /**
  * Whether the provider dropped output past its capture limit.
  */
-output_truncated: boolean, stdout: string, stderr: string, };
+output_truncated: boolean, stdout: string, stderr: string, } | { "tool": "mcp_app", 
+/**
+ * The configured MCP server namespace that serves the view.
+ */
+server: string, 
+/**
+ * The validated `ui://` document reference.
+ */
+resource_uri: string, };
 
 /**
  * The roles a visible transcript entry can have.

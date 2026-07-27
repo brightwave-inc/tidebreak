@@ -75,6 +75,77 @@ pub async fn put_mcp_servers(
     ))
 }
 
+/// `POST /mcp/servers/{name}/view-session` — trade the API bearer for a
+/// single-use frame token addressing one prefetched MCP Apps view.
+///
+/// The frame itself cannot send an `Authorization` header, so the
+/// authenticated renderer mints a short-lived capability here and points the
+/// iframe at [`get_mcp_view_frame`].
+pub async fn post_mcp_view_session(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<McpViewSessionRequest>,
+) -> Result<Json<McpViewSession>, ServerError> {
+    let token = state
+        .mcp
+        .mint_view_frame(&name, &body.uri)
+        .await
+        .ok_or_else(|| ServerError::not_found("no such MCP App view"))?;
+    Ok(Json(McpViewSession {
+        frame_path: format!("/mcp/view-frames/{token}"),
+    }))
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+pub struct McpViewSessionRequest {
+    uri: String,
+}
+
+/// Where the sandboxed iframe should load one view from, valid once.
+#[derive(Serialize, ts_rs::TS)]
+pub struct McpViewSession {
+    frame_path: String,
+}
+
+/// `GET /mcp/view-frames/{token}` — redeem a frame token for its document.
+///
+/// Deliberately outside the bearer-guarded router (an iframe carries no
+/// headers); reachable only with an unguessable single-use token that expires
+/// in a minute. `frame-ancestors` is intentionally absent: the embedding
+/// origin differs between dev and packaged builds, and access is gated by
+/// token secrecy plus single use, not by who may embed. The response carries its **own** Content-Security-Policy —
+/// an http-served document never inherits the app's policy the way a
+/// `blob:`/`srcdoc` document would, which is precisely why the frame is
+/// served instead of minted in the renderer: the view's inline script runs
+/// under this explicit policy, network egress stays shut, and the app CSP
+/// remains as strict as before.
+pub async fn get_mcp_view_frame(
+    State(state): State<AppState>,
+    Path(token): Path<uuid::Uuid>,
+) -> Response {
+    let Some(document) = state.mcp.take_view_frame(token).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        [
+            ("content-type", "text/html; charset=utf-8"),
+            (
+                "content-security-policy",
+                concat!(
+                    "default-src 'none'; script-src 'unsafe-inline'; ",
+                    "style-src 'unsafe-inline'; img-src data:; font-src data:; ",
+                    "connect-src 'none'; form-action 'none'; base-uri 'none'"
+                ),
+            ),
+            ("x-content-type-options", "nosniff"),
+            ("referrer-policy", "no-referrer"),
+            ("cache-control", "no-store"),
+        ],
+        document.html,
+    )
+        .into_response()
+}
+
 /// `POST /mcp/servers/{name}/reconnect` — explicitly establish a fresh session,
 /// rediscover tools, and publish them for subsequent turns.
 pub async fn post_mcp_server_reconnect(

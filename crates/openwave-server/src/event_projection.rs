@@ -379,7 +379,7 @@ mod tests {
                 ),
                 result: ToolResultPreview::build(
                     "exec",
-                    Some(&serde_json::json!({
+                    &ToolOutput::text("provider: local").with_data(serde_json::json!({
                         "provider": "local",
                         "exit_code": 0,
                         "duration_ms": 12,
@@ -401,6 +401,42 @@ mod tests {
     }
 
     #[test]
+    fn an_mcp_completion_projects_a_view_reference_and_no_remote_metadata() {
+        let output = ToolOutput::text("remote result text")
+            .with_data(serde_json::json!({ "remote_field": "remote value" }))
+            .with_ui_view(openwave_core::ToolUiView {
+                server: "gateway".into(),
+                resource_uri: "ui://gateway/app.html".into(),
+            });
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 14,
+            event: AgentEvent::ToolCallCompleted {
+                call_id: CallId::new(),
+                action: ToolActionPreview::build(
+                    "mcp__gateway__private_remote_tool",
+                    &serde_json::json!({ "model": "authored" }),
+                ),
+                result: ToolResultPreview::build("mcp__gateway__private_remote_tool", &output),
+                output,
+            },
+        });
+        let json = serde_json::to_string(&projected).unwrap();
+        // The deliberate opening: a typed reference the renderer resolves
+        // through the dedicated view route into a sandboxed frame. The server
+        // namespace is user-authored configuration, already shown in Settings.
+        assert!(json.contains(r#""tool":"mcp_app""#));
+        assert!(json.contains(r#""server":"gateway""#));
+        assert!(json.contains(r#""resource_uri":"ui://gateway/app.html""#));
+        // Everything remote-authored other than the validated reference stays
+        // behind the boundary: tool name, output text, structured payload.
+        assert!(!json.contains("private_remote_tool"));
+        assert!(!json.contains("remote result text"));
+        assert!(!json.contains("remote_field"));
+        assert!(!json.contains("remote value"));
+        assert!(!json.contains("authored"));
+    }
+
+    #[test]
     fn completions_without_a_projection_stay_closed() {
         let projected = RendererSequencedEvent::from(&SequencedEvent {
             seq: 13,
@@ -418,7 +454,8 @@ mod tests {
                 ),
                 result: ToolResultPreview::build(
                     "write_file",
-                    Some(&serde_json::json!({ "stdout": "private stream" })),
+                    &ToolOutput::text("private result")
+                        .with_data(serde_json::json!({ "stdout": "private stream" })),
                 ),
             },
         });

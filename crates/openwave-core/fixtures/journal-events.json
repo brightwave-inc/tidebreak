@@ -58,7 +58,11 @@
       "data": {
         "exit_code": 0
       },
-      "is_error": false
+      "is_error": false,
+      "ui_view": {
+        "server": "gateway",
+        "resource_uri": "ui://gateway/app.html"
+      }
     },
     "action": {
       "tool": "exec",

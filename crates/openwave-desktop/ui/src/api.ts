@@ -14,6 +14,7 @@ import {
   type CustomModelConfig as WireCustomModelConfig,
   type McpHealth as WireMcpHealth,
   type McpServerDefinition as WireMcpServerDefinition,
+  type McpViewSession,
   type McpServerInfo as WireMcpServerInfo,
   type McpServersInfo as WireMcpServersInfo,
   type ModelInfo as WireModelInfo,
@@ -194,14 +195,28 @@ export type AgentActivity = AgentActivitySnapshot;
  * That remap reads the generated wire type, so a field renamed in Rust breaks
  * there at compile time rather than silently producing `undefined`.
  */
-export type ToolResultPreview = {
-  tool: "exec";
-  exitCode: number | null;
-  timedOut: boolean;
-  outputTruncated: boolean;
-  stdout: string;
-  stderr: string;
-};
+export type ToolResultPreview =
+  | {
+      tool: "exec";
+      exitCode: number | null;
+      timedOut: boolean;
+      outputTruncated: boolean;
+      stdout: string;
+      stderr: string;
+    }
+  | {
+      /** A reference to an MCP Apps view — never markup. The document is
+       * fetched separately and rendered only inside the sandboxed frame. */
+      tool: "mcp_app";
+      server: string;
+      resourceUri: string;
+    };
+
+/** The exec-shaped result the command card renders. */
+export type ExecResultPreview = Extract<ToolResultPreview, { tool: "exec" }>;
+
+/** A single-use frame address for one MCP Apps view. */
+export type McpViewSessionInfo = McpViewSession;
 
 
 /** Approval kinds a human may approve from the renderer. */
@@ -458,6 +473,15 @@ export class ApiClient {
     return this.json(`/mcp/servers/${encodeURIComponent(name)}/reconnect`, {
       method: "POST",
       headers: this.headers(),
+    });
+  }
+
+  /** Trade the bearer for a single-use iframe address for one view. */
+  createMcpViewFrame(server: string, uri: string): Promise<McpViewSession> {
+    return this.json(`/mcp/servers/${encodeURIComponent(server)}/view-session`, {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({ uri }),
     });
   }
 
@@ -1014,6 +1038,10 @@ type UncheckedExecResult = Partial<
   Record<keyof Extract<WireToolResultPreview, { tool: "exec" }>, unknown>
 >;
 
+type UncheckedMcpAppResult = Partial<
+  Record<keyof Extract<WireToolResultPreview, { tool: "mcp_app" }>, unknown>
+>;
+
 /**
  * Validate a result field by field, on the same terms as an action: anything
  * that cannot be fully verified is dropped rather than half-rendered.
@@ -1022,7 +1050,20 @@ export function parseToolResultPreview(
   value: unknown,
 ): ToolResultPreview | null {
   if (value === undefined || value === null) return null;
-  if (!isRecord(value) || value.tool !== "exec") return null;
+  if (!isRecord(value)) return null;
+  if (value.tool === "mcp_app") {
+    const { server, resource_uri }: UncheckedMcpAppResult = value;
+    if (
+      typeof server !== "string" ||
+      server.length === 0 ||
+      typeof resource_uri !== "string" ||
+      !resource_uri.startsWith("ui://")
+    ) {
+      return null;
+    }
+    return { tool: "mcp_app", server, resourceUri: resource_uri };
+  }
+  if (value.tool !== "exec") return null;
   const { exit_code, timed_out, output_truncated, stdout, stderr }: UncheckedExecResult = value;
   if (
     (exit_code !== null && typeof exit_code !== "number") ||

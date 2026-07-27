@@ -39,6 +39,10 @@ const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(10);
 const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
+/// How long a minted view-frame token stays redeemable. One iframe load
+/// consumes it; a remount mints a fresh one.
+const VIEW_FRAME_TOKEN_TTL: Duration = Duration::from_secs(60);
+const MAX_VIEW_FRAME_TOKENS: usize = 64;
 
 /// Validated external servers selected by the legacy boot file.
 #[derive(Default)]
@@ -188,6 +192,45 @@ impl McpServerDefinition {
         .await
     }
 
+    /// Connect and prefetch every declared MCP Apps view document.
+    ///
+    /// Views are fetched once per connection and served from memory: they are
+    /// re-fetchable templates, not evidence, so a reconnect refreshes them and
+    /// a fetch failure just leaves that view unavailable (the transcript card
+    /// degrades; tools are unaffected).
+    async fn connect_with_views(&self) -> Result<(McpClient, HashMap<String, UiViewDocument>)> {
+        let client = self.connect().await?;
+        let uris: HashSet<String> = client
+            .tools()
+            .filter_map(|spec| client.ui_resource_uri(&spec.name))
+            .map(str::to_string)
+            .collect();
+        let mut views = HashMap::new();
+        for uri in uris {
+            let Ok(content) = client.read_resource(&uri).await else {
+                continue;
+            };
+            // MCP Apps views are HTML text; a binary body has no sandbox
+            // story, and a non-HTML mime must not be served as a document.
+            let Some(html) = content.text else { continue };
+            if !content
+                .mime_type
+                .as_deref()
+                .is_none_or(|mime| mime.starts_with("text/html"))
+            {
+                continue;
+            }
+            views.insert(
+                uri,
+                UiViewDocument {
+                    mime_type: content.mime_type,
+                    html,
+                },
+            );
+        }
+        Ok((client, views))
+    }
+
     /// Resolve the selected bearer token by name at the connection boundary.
     fn resolve_bearer_token(&self) -> Result<Option<String>> {
         let Some(name) = &self.bearer_token_env else {
@@ -243,6 +286,16 @@ struct ManagedServer {
     reconnect_backoff: Duration,
     epoch: u64,
     reconnect_lock: Arc<Mutex<()>>,
+    /// Prefetched MCP Apps view documents, keyed by declared `ui://` URI.
+    ui_views: HashMap<String, UiViewDocument>,
+}
+
+/// One prefetched MCP Apps view document, served to the renderer only through
+/// the dedicated view route and rendered only inside its sandboxed frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct UiViewDocument {
+    pub(crate) mime_type: Option<String>,
+    pub(crate) html: String,
 }
 
 struct RuntimeState {
@@ -262,6 +315,8 @@ pub(crate) struct McpRuntime {
     mutation: Mutex<()>,
     store: Arc<dyn Store>,
     next_epoch: AtomicU64,
+    /// Outstanding single-use view-frame tokens: token → (server, uri, minted).
+    view_frame_tokens: Mutex<HashMap<uuid::Uuid, (String, String, std::time::Instant)>>,
 }
 
 impl McpRuntime {
@@ -276,6 +331,7 @@ impl McpRuntime {
             mutation: Mutex::new(()),
             store,
             next_epoch: AtomicU64::new(1),
+            view_frame_tokens: Mutex::new(HashMap::new()),
         }
     }
 
@@ -296,6 +352,45 @@ impl McpRuntime {
             }
             None => self.replace_strict(boot.0, false).await.map(|_| ()),
         }
+    }
+
+    /// One prefetched MCP Apps view document, when the named server is
+    /// connected and declared it.
+    pub(crate) async fn ui_view_document(&self, server: &str, uri: &str) -> Option<UiViewDocument> {
+        let state = self.state.lock().await;
+        state.servers.get(server)?.ui_views.get(uri).cloned()
+    }
+
+    /// Mint a single-use, short-lived token addressing one prefetched view.
+    ///
+    /// An iframe cannot carry the API bearer, so the frame route is reached
+    /// by capability instead: the authenticated renderer trades its bearer
+    /// for a token here, and the unauthenticated frame route redeems it
+    /// exactly once within [`VIEW_FRAME_TOKEN_TTL`].
+    pub(crate) async fn mint_view_frame(&self, server: &str, uri: &str) -> Option<uuid::Uuid> {
+        self.ui_view_document(server, uri).await?;
+        let token = uuid::Uuid::new_v4();
+        let mut tokens = self.view_frame_tokens.lock().await;
+        let now = std::time::Instant::now();
+        tokens.retain(|_, (_, _, minted)| now.duration_since(*minted) < VIEW_FRAME_TOKEN_TTL);
+        if tokens.len() >= MAX_VIEW_FRAME_TOKENS {
+            return None;
+        }
+        tokens.insert(token, (server.to_string(), uri.to_string(), now));
+        Some(token)
+    }
+
+    /// Redeem a frame token, consuming it.
+    pub(crate) async fn take_view_frame(&self, token: uuid::Uuid) -> Option<UiViewDocument> {
+        let (server, uri) = {
+            let mut tokens = self.view_frame_tokens.lock().await;
+            let (server, uri, minted) = tokens.remove(&token)?;
+            if minted.elapsed() >= VIEW_FRAME_TOKEN_TTL {
+                return None;
+            }
+            (server, uri)
+        };
+        self.ui_view_document(&server, &uri).await
     }
 
     /// One immutable tool surface for a live turn.
@@ -369,14 +464,14 @@ impl McpRuntime {
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| async move {
             if definition.enabled {
-                definition.connect().await.map(Some)
+                definition.connect_with_views().await.map(Some)
             } else {
                 Ok(None)
             }
         }))
         .await;
         for (definition, connection) in definitions.iter().zip(connections) {
-            let Some(client) = connection.map_err(|_| {
+            let Some((client, ui_views)) = connection.map_err(|_| {
                 AgentError::config(format!(
                     "external MCP server {} failed to start: {}",
                     definition.name,
@@ -393,6 +488,7 @@ impl McpRuntime {
                         reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
+                        ui_views: HashMap::new(),
                     },
                 );
                 continue;
@@ -406,6 +502,7 @@ impl McpRuntime {
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
+                    ui_views,
                 },
             );
         }
@@ -427,7 +524,7 @@ impl McpRuntime {
         let mut servers = HashMap::new();
         let connections = join_all(definitions.iter().map(|definition| async move {
             if definition.enabled {
-                definition.connect().await.map(Some)
+                definition.connect_with_views().await.map(Some)
             } else {
                 Ok(None)
             }
@@ -442,14 +539,16 @@ impl McpRuntime {
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
+                    ui_views: HashMap::new(),
                 },
-                Ok(Some(client)) => ManagedServer {
+                Ok(Some((client, ui_views))) => ManagedServer {
                     client: Some(client),
                     health: McpHealth::Healthy,
                     diagnostic: None,
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
+                    ui_views,
                 },
                 Err(_) => ManagedServer {
                     client: None,
@@ -458,6 +557,7 @@ impl McpRuntime {
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
+                    ui_views: HashMap::new(),
                 },
             };
             servers.insert(definition.name.clone(), managed);
@@ -547,8 +647,8 @@ impl McpRuntime {
             server.diagnostic = None;
             (definition, server.epoch)
         };
-        match definition.connect().await {
-            Ok(client) => {
+        match definition.connect_with_views().await {
+            Ok((client, ui_views)) => {
                 let mut state = self.state.lock().await;
                 // A settings replacement may have won while the process started.
                 if state
@@ -573,10 +673,12 @@ impl McpRuntime {
                         reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
+                        ui_views: HashMap::new(),
                     });
                 server.client = Some(client);
                 server.health = McpHealth::Healthy;
                 server.diagnostic = None;
+                server.ui_views = ui_views;
                 server.reconnect_backoff = INITIAL_RECONNECT_BACKOFF;
                 server.epoch = self.fresh_epoch();
                 let registry = self.registry_for(&state.servers);
@@ -597,6 +699,7 @@ impl McpRuntime {
                     server.client = None;
                     server.health = McpHealth::Degraded;
                     server.diagnostic = Some(diagnostic.clone());
+                    server.ui_views = HashMap::new();
                     server.reconnect_backoff = server
                         .reconnect_backoff
                         .saturating_mul(2)
@@ -679,6 +782,7 @@ impl McpRuntime {
             server.health = McpHealth::Degraded;
             server.diagnostic =
                 Some("Health check failed. OpenWave will retry this server.".to_string());
+            server.ui_views = HashMap::new();
             server.reconnect_backoff = backoff;
         }
         let registry = self.registry_for(&state.servers);
@@ -1355,7 +1459,15 @@ mod tests {
                     "tools": [{
                         "name": "lookup",
                         "description": "Look something up",
-                        "inputSchema": {"type": "object"}
+                        "inputSchema": {"type": "object"},
+                        "_meta": {"ui": {"resourceUri": "ui://fixture/app.html"}}
+                    }]
+                }),
+                "resources/read" => serde_json::json!({
+                    "contents": [{
+                        "uri": "ui://fixture/app.html",
+                        "mimeType": "text/html;profile=mcp-app",
+                        "text": "<html>fixture view</html>"
                     }]
                 }),
                 _ => serde_json::json!({}),
@@ -1394,6 +1506,39 @@ mod tests {
         assert_eq!(info.servers[0].health, McpHealth::Healthy);
         assert_eq!(info.servers[0].tool_count, 1);
         assert!(runtime.snapshot().get("mcp__gateway__lookup").is_some());
+
+        // The declared view was prefetched at connect and is served from
+        // memory, keyed by the configured namespace and declared URI.
+        let view = runtime
+            .ui_view_document("gateway", "ui://fixture/app.html")
+            .await
+            .expect("declared view is prefetched");
+        assert_eq!(view.html, "<html>fixture view</html>");
+        assert_eq!(view.mime_type.as_deref(), Some("text/html;profile=mcp-app"));
+
+        // Frame tokens are single-use capabilities over the prefetched view.
+        let token = runtime
+            .mint_view_frame("gateway", "ui://fixture/app.html")
+            .await
+            .expect("declared view mints a frame token");
+        let redeemed = runtime
+            .take_view_frame(token)
+            .await
+            .expect("first redemption serves the document");
+        assert_eq!(redeemed.html, "<html>fixture view</html>");
+        assert!(runtime.take_view_frame(token).await.is_none());
+        assert!(runtime
+            .mint_view_frame("gateway", "ui://fixture/other.html")
+            .await
+            .is_none());
+        assert!(runtime
+            .ui_view_document("gateway", "ui://fixture/other.html")
+            .await
+            .is_none());
+        assert!(runtime
+            .ui_view_document("unknown", "ui://fixture/app.html")
+            .await
+            .is_none());
     }
 
     #[test]

@@ -64,6 +64,31 @@ aggregate tool metadata before publishing a connection. A server that exceeds a
 limit stays out of the active tool set and receives only a fixed diagnostic in
 Settings.
 
+## MCP App views
+
+A server may declare an [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
+view for a tool through `_meta` (`ui.resourceUri`, or the legacy flat
+`ui/resourceUri` spelling). OpenWave validates the declaration at discovery —
+it must be a bounded, control-character-free `ui://` URI; a malformed
+declaration fails the connection — and prefetches the document once per
+connection through `resources/read`, bounded at 1 MiB.
+
+When such a tool completes successfully, its transcript card renders the
+declared view. The renderer event stream itself carries only a typed
+reference (the configured server namespace and the validated URI). The
+renderer never holds the markup at all: it trades its bearer for a
+single-use, minute-lived frame token, and the iframe loads the document from
+the host, which serves it with its own strict Content-Security-Policy — an
+http-served frame does not inherit the app's policy the way a `blob:` or
+`srcdoc` document would, so the view's inline script runs while its network
+egress stays shut. The frame is sandboxed with `allow-scripts` only and is
+never same-origin with the app: it has no access to OpenWave's DOM, storage,
+bearer token, or IPC surface. Remote tool names, descriptions, and raw tool
+output still never reach the renderer.
+
+Views are served from memory and refreshed on reconnect. If a view cannot be
+fetched, its card degrades to a reconnect hint; the tool itself is unaffected.
+
 ## Headless bootstrap
 
 `openwave serve` can still read an initial configuration from the JSON file

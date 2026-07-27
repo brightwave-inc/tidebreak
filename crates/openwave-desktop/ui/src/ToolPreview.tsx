@@ -1,4 +1,4 @@
-import type { ToolActionPreview, ToolResultPreview } from "./api";
+import type { ExecResultPreview, ToolActionPreview } from "./api";
 
 /**
  * Presentation of a tool's own preview of the action it is about to take.
@@ -16,7 +16,7 @@ export type ToolPreviewPresentation = {
 
 export function toolPreviewPresentation(
   preview: ToolActionPreview,
-  result: ToolResultPreview | null = null,
+  result: ExecResultPreview | null = null,
 ): ToolPreviewPresentation {
   if (preview.tool === "search") {
     const headline = preview.query;
