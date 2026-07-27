@@ -1,26 +1,26 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatListStore } from "./ChatListStore";
 import { Sidebar, type SidebarProps } from "./Sidebar";
+import { renderWithRouter } from "./test/router";
 import { createUiStore, useUiStore } from "./UiStore";
 
-function renderSidebar() {
+async function renderSidebar() {
   const props: SidebarProps = {
     themeMode: "light",
     updateReady: false,
     updateVersion: null,
     onCycleTheme: vi.fn(),
     onNewChat: vi.fn(),
-    onSelectChat: vi.fn(),
     onStartRename: vi.fn(),
     onCommitRename: vi.fn(),
     onCancelRename: vi.fn(),
     onDeleteChat: vi.fn(),
     onRestartForUpdate: vi.fn(),
   };
-  render(<Sidebar {...props} />);
+  await renderWithRouter(<Sidebar {...props} />);
 }
 
 beforeEach(() => {
@@ -33,7 +33,7 @@ afterEach(cleanup);
 describe("sidebar collapse", () => {
   it("collapses from the sidebar control and persists the preference", async () => {
     const user = userEvent.setup();
-    renderSidebar();
+    await renderSidebar();
     await user.click(screen.getByRole("button", { name: "Hide sidebar" }));
     expect(useUiStore.getState().sidebarCollapsed).toBe(true);
     expect(window.localStorage.getItem("openwave.sidebar-collapsed")).toBe(

@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ApiClient, PendingUserQuestions, UserQuestionAnswer } from "./api";
-import { requestUserAttention } from "./host";
 import { useOpenConversation } from "./OpenConversation";
-import { useRefreshSignals } from "./RefreshSignals";
-
-const POLL_INTERVAL_MS = 10_000;
+import { usePendingPrompts } from "./PendingPrompts";
 
 export type UserQuestions = {
   requests: PendingUserQuestions[];
@@ -15,8 +12,12 @@ export type UserQuestions = {
 };
 
 /**
- * Questions the agent is waiting on for one conversation, and the answers that
- * release it.
+ * Answering the questions the agent is waiting on.
+ *
+ * The questions themselves are watched by the shell, not read here: the agent
+ * parks a turn until one is answered, so being told about it has to survive the
+ * reader looking at another screen. This hook owns only what is genuinely the
+ * view's — which answers are in flight, and which failed.
  *
  * A reply that lands after the conversation has moved on must not write an
  * error onto, or trigger a refresh for, whatever chat is open now — so every
@@ -27,56 +28,12 @@ export function useUserQuestions(
   client: ApiClient | null,
   chatId: string | null,
 ): UserQuestions {
-  const [requests, setRequests] = useState<PendingUserQuestions[]>([]);
+  const requests = usePendingPrompts((state) => state.userQuestions);
+  const refresh = usePendingPrompts((state) => state.refresh);
   const [answering, setAnswering] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
   const answeringRef = useRef<Set<string>>(new Set());
-  const seenCallIdsRef = useRef<Set<string>>(new Set());
-  const refreshRef = useRef<(() => void) | null>(null);
   const stillOpen = useOpenConversation(chatId);
-  const signal = useRefreshSignals((state) => state.userQuestions);
-
-  useEffect(() => {
-    if (!client || !chatId) return;
-    let cancelled = false;
-    let requestSeq = 0;
-
-    const refresh = async () => {
-      const seq = ++requestSeq;
-      try {
-        const pending = await client.listPendingUserQuestions(chatId);
-        if (cancelled || seq !== requestSeq) return;
-        const hasNewRequest = pending.some(
-          (request) => !seenCallIdsRef.current.has(request.callId),
-        );
-        seenCallIdsRef.current = new Set(
-          pending.map((request) => request.callId),
-        );
-        setRequests(pending);
-        if (hasNewRequest) {
-          void requestUserAttention().catch(() => {
-            // Attention is a best-effort hint. Durable polling is truth.
-          });
-        }
-      } catch (err) {
-        if (!cancelled && seq === requestSeq) {
-          console.error("failed to refresh pending user questions", err);
-        }
-      }
-    };
-
-    refreshRef.current = () => void refresh();
-    void refresh();
-    const interval = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      requestSeq += 1;
-      window.clearInterval(interval);
-      refreshRef.current = null;
-      setRequests([]);
-      seenCallIdsRef.current = new Set();
-    };
-  }, [client, chatId]);
 
   // The pane is keyed on the conversation, so this hook is normally replaced
   // rather than reused. Reset anyway: nothing held here belongs to a different
@@ -90,15 +47,6 @@ export function useUserQuestions(
     },
     [chatId],
   );
-
-  // Only a signal raised after this hook mounted means anything to it; the
-  // counter is app-wide and may already be well past zero on arrival.
-  const lastSignalRef = useRef(signal);
-  useEffect(() => {
-    if (lastSignalRef.current === signal) return;
-    lastSignalRef.current = signal;
-    refreshRef.current?.();
-  }, [signal]);
 
   async function send(
     callId: string,
@@ -126,7 +74,7 @@ export function useUserQuestions(
         next.delete(callId);
         return next;
       });
-      if (stillOpen(startedChatId)) refreshRef.current?.();
+      if (stillOpen(startedChatId)) refresh();
     }
   }
 

@@ -3,16 +3,23 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "./api";
 import { useChatListStore } from "./ChatListStore";
+import { usePendingPrompts } from "./PendingPrompts";
 import { useUserQuestions } from "./useUserQuestions";
-import { useRefreshSignals } from "./RefreshSignals";
-import * as host from "./host";
-
-vi.mock("./host", () => ({
-  requestUserAttention: vi.fn().mockResolvedValue(undefined),
-}));
 
 function pending(callId: string, turnId = "turn-1") {
   return { callId, turnId, questions: [] };
+}
+
+/**
+ * The questions themselves are the shell watcher's job, so a responder test
+ * puts them where the watcher would have.
+ */
+function seedQuestions(chatId: string, requests: ReturnType<typeof pending>[]) {
+  usePendingPrompts.setState({
+    chatId,
+    userQuestions: requests as never,
+    refresh: vi.fn(),
+  });
 }
 
 
@@ -29,7 +36,6 @@ function deferred<T>() {
 
 function stubClient(overrides: Record<string, unknown> = {}) {
   return {
-    listPendingUserQuestions: vi.fn().mockResolvedValue([]),
     answerUserQuestions: vi.fn().mockResolvedValue(undefined),
     cancel: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -39,36 +45,20 @@ function stubClient(overrides: Record<string, unknown> = {}) {
 afterEach(() => {
   cleanup();
   useChatListStore.getState().setDeletingChatId(null);
+  usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
 });
 
 describe("useUserQuestions", () => {
-  it("asks for attention only when a request is new", async () => {
-    const client = stubClient({
-      listPendingUserQuestions: vi.fn().mockResolvedValue([pending("call-1")]),
-    });
-    renderHook(() => useUserQuestions(client, "chat-1"));
-
-    await waitFor(() =>
-      expect(host.requestUserAttention).toHaveBeenCalledTimes(1),
-    );
-
-    act(() => useRefreshSignals.getState().signal("userQuestions"));
-    await waitFor(() =>
-      expect(client.listPendingUserQuestions).toHaveBeenCalledTimes(2),
-    );
-    expect(host.requestUserAttention).toHaveBeenCalledTimes(1);
-  });
-
   it("ignores a second answer for a call already in flight", async () => {
     let release: (() => void) | undefined;
     const client = stubClient({
-      listPendingUserQuestions: vi.fn().mockResolvedValue([pending("call-1")]),
       answerUserQuestions: vi
         .fn()
         .mockImplementation(
           () => new Promise<void>((resolve) => (release = resolve)),
         ),
     });
+    seedQuestions("chat-1", [pending("call-1")]);
     const { result } = renderHook(() => useUserQuestions(client, "chat-1"));
     await waitFor(() => expect(result.current.requests).toHaveLength(1));
 
@@ -83,11 +73,8 @@ describe("useUserQuestions", () => {
   });
 
   it("cancels the turn that owns a request", async () => {
-    const client = stubClient({
-      listPendingUserQuestions: vi
-        .fn()
-        .mockResolvedValue([pending("call-9", "turn-9")]),
-    });
+    const client = stubClient();
+    seedQuestions("chat-1", [pending("call-9", "turn-9")]);
     const { result } = renderHook(() => useUserQuestions(client, "chat-1"));
     await waitFor(() => expect(result.current.requests).toHaveLength(1));
 
@@ -108,13 +95,13 @@ describe("useUserQuestions", () => {
   it("does not report a failure onto the conversation that replaced it", async () => {
     let reject: ((err: Error) => void) | undefined;
     const client = stubClient({
-      listPendingUserQuestions: vi.fn().mockResolvedValue([pending("call-1")]),
       answerUserQuestions: vi
         .fn()
         .mockImplementation(
           () => new Promise<void>((_resolve, no) => (reject = no)),
         ),
     });
+    seedQuestions("chat-1", [pending("call-1")]);
     const { result, rerender } = renderHook(
       ({ chatId }) => useUserQuestions(client, chatId),
       { initialProps: { chatId: "chat-1" } },
@@ -134,10 +121,8 @@ describe("useUserQuestions", () => {
 
   it("drops a failed answer once its chat is being deleted", async () => {
     const answer = deferred<void>();
-    const client = stubClient({
-      listPendingUserQuestions: vi.fn().mockResolvedValue([pending("call-1")]),
-      answerUserQuestions: vi.fn(() => answer.promise),
-    });
+    const client = stubClient({ answerUserQuestions: vi.fn(() => answer.promise) });
+    seedQuestions("chat-1", [pending("call-1")]);
     const { result } = renderHook(() => useUserQuestions(client, "chat-1"));
     await waitFor(() => expect(result.current.requests).toHaveLength(1));
 
@@ -155,10 +140,8 @@ describe("useUserQuestions", () => {
 
   it("does not carry an answer error into the next conversation", async () => {
     const answer = deferred<void>();
-    const client = stubClient({
-      listPendingUserQuestions: vi.fn().mockResolvedValue([pending("call-1")]),
-      answerUserQuestions: vi.fn(() => answer.promise),
-    });
+    const client = stubClient({ answerUserQuestions: vi.fn(() => answer.promise) });
+    seedQuestions("chat-1", [pending("call-1")]);
     const { result, rerender } = renderHook(
       ({ chatId }) => useUserQuestions(client, chatId),
       { initialProps: { chatId: "chat-1" } },

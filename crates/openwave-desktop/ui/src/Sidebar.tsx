@@ -1,13 +1,17 @@
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import type { Chat } from "./api";
 import { Logomark } from "./Logomark";
 import {
   Ellipsis,
+  FolderOpen,
+  Library,
   Monitor,
   PanelLeftClose,
   Moon,
   Pencil,
   RotateCw,
   Settings,
+  Shapes,
   SquarePen,
   Sun,
   Trash2,
@@ -22,6 +26,8 @@ import {
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { ThemeMode } from "./theme";
 import { useChatListStore } from "./ChatListStore";
+import { usePanelNav } from "./panel/usePanelNav";
+import type { PanelContent } from "./panel/panelTypes";
 import { useUiStore } from "./UiStore";
 
 export type SidebarProps = {
@@ -32,7 +38,6 @@ export type SidebarProps = {
   updateVersion: string | null;
   onCycleTheme: () => void;
   onNewChat: () => void;
-  onSelectChat: (chat: Chat) => void;
   onStartRename: (chat: Chat) => void;
   onCommitRename: (chat: Chat) => void;
   onCancelRename: () => void;
@@ -41,10 +46,13 @@ export type SidebarProps = {
 };
 
 /**
- * The navigation aside: brand/theme, chat list, and footer actions. List and
- * view state come straight from the chat-list and UI stores; the callback
- * props are the mutations whose orchestration (fences, confirm dialog,
- * session lifecycle) lives with the owner.
+ * The navigation aside: brand and theme, the panels of the open conversation,
+ * the chat list, and footer actions.
+ *
+ * List state comes straight from the chat-list store; the callback props are
+ * the mutations whose orchestration (fences, confirm dialog, chat lifecycle)
+ * lives with the shell. Where the workspace is pointed comes from the URL, so
+ * selecting a chat or a panel here is navigation rather than a store write.
  */
 export function Sidebar({
   collapseControl = true,
@@ -53,7 +61,6 @@ export function Sidebar({
   updateVersion,
   onCycleTheme,
   onNewChat,
-  onSelectChat,
   onStartRename,
   onCommitRename,
   onCancelRename,
@@ -69,9 +76,27 @@ export function Sidebar({
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const setRenameDraft = useChatListStore((state) => state.setRenameDraft);
-  const surface = useUiStore((state) => state.surface);
-  const showSettings = useUiStore((state) => state.showSettings);
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
+  const navigate = useNavigate();
+  const settingsOpen = useRouterState({
+    select: (state) => state.location.pathname === "/settings",
+  });
+  const { layout, openPanel } = usePanelNav();
+
+  const openPanelTypes = new Set(
+    layout.mode === "split" ? [layout.left.type, layout.right.type] : ["chat"],
+  );
+
+  function showPanel(panel: PanelContent) {
+    if (settingsOpen && activeChatId) {
+      void navigate({ to: "/c/$chatId", params: { chatId: activeChatId } });
+    }
+    openPanel(panel);
+  }
+
+  function openChat(chat: Chat) {
+    void navigate({ to: "/c/$chatId", params: { chatId: chat.id } });
+  }
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -125,11 +150,34 @@ export function Sidebar({
       </button>
 
       <div className="sidebar-section">
+        <div className="conversation-list" aria-label="Workspace">
+          <SidebarPanelButton
+            label="Sources"
+            icon={<Library size={15} />}
+            active={!settingsOpen && openPanelTypes.has("sources")}
+            onClick={() => showPanel({ type: "sources" })}
+          />
+          <SidebarPanelButton
+            label="Outputs"
+            icon={<Shapes size={15} />}
+            active={!settingsOpen && openPanelTypes.has("outputs")}
+            onClick={() => showPanel({ type: "outputs" })}
+          />
+          <SidebarPanelButton
+            label="Folders"
+            icon={<FolderOpen size={15} />}
+            active={!settingsOpen && openPanelTypes.has("folders")}
+            onClick={() => showPanel({ type: "folders" })}
+          />
+        </div>
+      </div>
+
+      <div className="sidebar-section">
         <span className="sidebar-label">Chats</span>
         <div className="conversation-list" aria-label="Chats">
           {chats.map((item) => {
             const chatTitle = item.title?.trim() || "New chat";
-            const isActive = surface.kind === "chat" && item.id === activeChatId;
+            const isActive = !settingsOpen && item.id === activeChatId;
             const mutating = deletingChatId !== null || creatingChat;
 
             if (renamingChatId === item.id) {
@@ -168,7 +216,7 @@ export function Sidebar({
                   className="conversation-item"
                   aria-current={isActive ? "page" : undefined}
                   disabled={mutating}
-                  onClick={() => onSelectChat(item)}
+                  onClick={() => openChat(item)}
                 >
                   <span className="conversation-title">{chatTitle}</span>
                 </button>
@@ -222,13 +270,39 @@ export function Sidebar({
         )}
         <button
           type="button"
-          className={`sidebar-action${surface.kind === "settings" ? " is-active" : ""}`}
-          onClick={showSettings}
+          className={`sidebar-action${settingsOpen ? " is-active" : ""}`}
+          onClick={() => void navigate({ to: "/settings" })}
         >
           <Settings size={16} />
           Settings
         </button>
       </div>
     </aside>
+  );
+}
+
+function SidebarPanelButton({
+  label,
+  icon,
+  active,
+  onClick,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <div className={`conversation-row${active ? " is-active" : ""}`}>
+      <button
+        type="button"
+        className="conversation-item sidebar-panel-item"
+        aria-current={active ? "page" : undefined}
+        onClick={onClick}
+      >
+        {icon}
+        <span className="conversation-title">{label}</span>
+      </button>
+    </div>
   );
 }

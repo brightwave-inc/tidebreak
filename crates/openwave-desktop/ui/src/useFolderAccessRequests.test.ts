@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "./api";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useNativePickerLatch } from "./NativePickerLatch";
-import { useRefreshSignals } from "./RefreshSignals";
+import { usePendingPrompts } from "./PendingPrompts";
 import * as host from "./host";
 
 vi.mock("./host", () => ({
@@ -18,10 +18,21 @@ function request(callId: string) {
 
 function stubClient(overrides: Partial<Record<string, unknown>> = {}) {
   return {
-    listPendingFolderAccessRequests: vi.fn().mockResolvedValue([]),
     cancel: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as unknown as ApiClient;
+}
+
+/**
+ * The requests themselves are the shell watcher's job, so a responder test puts
+ * them where the watcher would have.
+ */
+function seedRequests(chatId: string, requests: ReturnType<typeof request>[]) {
+  usePendingPrompts.setState({
+    chatId,
+    folderAccess: requests as never,
+    refresh: vi.fn(),
+  });
 }
 
 beforeEach(() => {
@@ -30,41 +41,12 @@ beforeEach(() => {
   // The latch is app-wide, so a decision left open by one case would block
   // the next one.
   useNativePickerLatch.setState({ holder: null });
+  usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
 });
 
 afterEach(cleanup);
 
 describe("useFolderAccessRequests", () => {
-  it("loads the conversation's pending requests", async () => {
-    const client = stubClient({
-      listPendingFolderAccessRequests: vi.fn().mockResolvedValue([
-        request("call-1"),
-      ]),
-    });
-    const { result } = renderHook(() =>
-      useFolderAccessRequests(client, "chat-1"),
-    );
-
-    await waitFor(() => expect(result.current.requests).toHaveLength(1));
-    expect(client.listPendingFolderAccessRequests).toHaveBeenCalledWith(
-      "chat-1",
-    );
-  });
-
-  it("refreshes when the event stream signals", async () => {
-    const client = stubClient();
-    renderHook(() => useFolderAccessRequests(client, "chat-1"));
-    await waitFor(() =>
-      expect(client.listPendingFolderAccessRequests).toHaveBeenCalledTimes(1),
-    );
-
-    act(() => useRefreshSignals.getState().signal("folderAccess"));
-
-    await waitFor(() =>
-      expect(client.listPendingFolderAccessRequests).toHaveBeenCalledTimes(2),
-    );
-  });
-
   it("allows only one decision at a time, since each opens a native dialog", async () => {
     let release: (() => void) | undefined;
     vi.mocked(host.resolveFolderAccessRequest).mockImplementation(
@@ -118,27 +100,6 @@ describe("useFolderAccessRequests", () => {
     );
   });
 
-  it("drops the previous chat's requests when the conversation changes", async () => {
-    const client = stubClient({
-      listPendingFolderAccessRequests: vi
-        .fn()
-        .mockResolvedValueOnce([request("call-1")])
-        .mockResolvedValue([]),
-    });
-    const { result, rerender } = renderHook(
-      ({ chatId }) => useFolderAccessRequests(client, chatId),
-      { initialProps: { chatId: "chat-1" } },
-    );
-    await waitFor(() => expect(result.current.requests).toHaveLength(1));
-
-    rerender({ chatId: "chat-2" });
-
-    await waitFor(() => expect(result.current.requests).toHaveLength(0));
-    expect(client.listPendingFolderAccessRequests).toHaveBeenLastCalledWith(
-      "chat-2",
-    );
-  });
-
   it("keeps the native picker latched across a conversation switch", async () => {
     // The picker is one shared host resource. Leaving the chat that opened it
     // must not hand a second decision a fresh claim, or the host rejects it and
@@ -183,14 +144,11 @@ describe("useFolderAccessRequests", () => {
   });
 
   it("does not carry a decision error into the next conversation", async () => {
-    const client = stubClient({
-      listPendingFolderAccessRequests: vi.fn().mockResolvedValue([
-        request("call-1"),
-      ]),
-    });
+    const client = stubClient();
     vi.mocked(host.resolveFolderAccessRequest).mockRejectedValue(
       new Error("no such folder"),
     );
+    seedRequests("chat-1", [request("call-1")]);
     const { result, rerender } = renderHook(
       ({ chatId }) => useFolderAccessRequests(client, chatId),
       { initialProps: { chatId: "chat-1" } },
