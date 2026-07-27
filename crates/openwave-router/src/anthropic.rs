@@ -637,6 +637,40 @@ mod tests {
     }
 
     #[test]
+    fn refusal_after_text_deltas_preserves_the_streamed_prefix() {
+        let out = run(&[
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "A partial "}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "answer"}}),
+            json!({
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": "refusal",
+                    "stop_details": {"type": "refusal", "category": "general_harms"}
+                },
+                "usage": {"output_tokens": 3}
+            }),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "A partial ".into(),
+                },
+                ProviderEvent::TextDelta {
+                    text: "answer".into(),
+                },
+                ProviderEvent::Usage(Usage {
+                    output_tokens: 3,
+                    ..Usage::default()
+                }),
+                ProviderEvent::Refusal {
+                    details: RefusalDetails::from_category(Some("general_harms")),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn refusal_allows_missing_or_null_stop_details() {
         for delta in [
             json!({"stop_reason": "refusal"}),

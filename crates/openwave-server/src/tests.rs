@@ -364,6 +364,28 @@ impl ModelProvider for FakeProvider {
     }
 }
 
+/// A provider that emits visible text before the provider's terminal refusal.
+struct MidStreamRefusalProvider;
+
+#[async_trait]
+impl ModelProvider for MidStreamRefusalProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("mid-stream-refusal")
+    }
+
+    async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        Ok(stream::iter(vec![
+            ProviderEvent::TextDelta {
+                text: "Visible partial answer".into(),
+            },
+            ProviderEvent::Refusal {
+                details: openwave_core::RefusalDetails::from_category(Some("general_harms")),
+            },
+        ])
+        .boxed())
+    }
+}
+
 /// Drives non-blocking spawn, premature completion correction, ordered wait,
 /// and final foreground completion. The sandbox surface remains independent.
 #[derive(Default)]
@@ -2255,6 +2277,7 @@ async fn wait_for_turn(store: &Arc<dyn Store>, chat: ChatId) -> Vec<SequencedEve
             matches!(
                 e.event,
                 AgentEvent::TurnCompleted { .. }
+                    | AgentEvent::TurnRefused { .. }
                     | AgentEvent::TurnFailed { .. }
                     | AgentEvent::TurnCancelled { .. }
             )
@@ -10737,6 +10760,54 @@ async fn post_message_runs_a_turn_and_journals_its_events() {
     assert!(events
         .iter()
         .any(|e| matches!(e.event, AgentEvent::TurnCompleted { .. })));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_commits_a_mid_stream_refusal_with_its_partial_output() {
+    let (router, token, store, _dir) = test_app_with(Arc::new(MidStreamRefusalProvider)).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message(&router, &bearer, chat.id, "unsafe request").await,
+        StatusCode::ACCEPTED
+    );
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(events.iter().any(
+        |event| matches!(&event.event, AgentEvent::TextDelta { text } if text == "Visible partial answer")
+    ));
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.event,
+            AgentEvent::TurnRefused { refusal, .. }
+                if refusal.category() == Some("general_harms") && refusal.partial_output()
+        )
+    }));
+
+    let turn = store.list_turn_runs(chat.id).await.unwrap().pop().unwrap();
+    assert_eq!(turn.status, TurnRunStatus::Completed);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let transcript: serde_json::Value = json_body(response).await;
+    let output = transcript["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["content"] == "Visible partial answer")
+        .expect("the partial output remains a durable assistant message");
+    assert_eq!(output["refusal"]["category"], "general_harms");
+    assert_eq!(output["refusal"]["partial_output"], true);
 }
 
 #[tokio::test(flavor = "multi_thread")]
