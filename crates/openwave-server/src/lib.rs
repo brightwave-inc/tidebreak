@@ -98,6 +98,10 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_RAW_DOCUMENT_BYTES)),
         )
         .route(
+            "/chats/{chat_id}/documents/raw-stream",
+            post(routes::ingest_streamed_raw_chat_document),
+        )
+        .route(
             "/chats/{chat_id}/documents/{document_id}",
             get(routes::get_chat_document).delete(routes::delete_chat_document),
         )

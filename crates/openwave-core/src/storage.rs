@@ -16,6 +16,7 @@
 //! introduce those record types.
 
 use async_trait::async_trait;
+use futures::{stream::BoxStream, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -32,7 +33,7 @@ use crate::model::{
     AgentRun, AgentRunExecution, AgentRunInboxEntry, AgentRunResult, AgentRunWaitSetCandidate,
     BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus, Chat, ClientToolCallRequest,
     DocumentGeneration, DocumentJob, DocumentJobKind, DocumentJobStatus, DocumentListCursor,
-    DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceUpsert,
+    DocumentParseOutput, DocumentRecord, DocumentScope, DocumentSourceBlob, DocumentSourceUpsert,
     DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment, Project, ReasoningEffort,
     RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
     TurnAgentRunWait, TurnAgentRunWaitSet, TurnCheckpointProgress, TurnClientWait,
@@ -43,6 +44,10 @@ use crate::{AnswerUserQuestionsRequest, PendingUserQuestions};
 
 /// Largest pending attachment-reconciliation page accepted by [`Store`].
 pub const MAX_PENDING_ROOT_ATTACHMENT_CHANGES: u64 = 256;
+
+/// Chunks supplied to a [`BlobStore`] without requiring the caller to buffer a
+/// whole source in memory.
+pub type BlobStream = BoxStream<'static, Result<Vec<u8>>>;
 
 /// A mutually consistent conversation transcript and event-journal cursor.
 ///
@@ -2742,6 +2747,36 @@ pub trait BlobStore: Send + Sync {
     /// under an existing id fails without changing the stored value. Callers
     /// allocate a new id when content changes.
     async fn put(&self, id: uuid::Uuid, bytes: Vec<u8>) -> Result<()>;
+
+    /// Publish a content-addressed source from a stream of chunks.
+    ///
+    /// Filesystem-backed storage overrides this to write each chunk directly
+    /// to its durable temporary file. Other implementations retain a correct
+    /// fallback while they add their own streaming primitive.
+    async fn put_stream(&self, source: DocumentSourceBlob, mut chunks: BlobStream) -> Result<()> {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk?;
+            let chunk_len = u64::try_from(chunk.len())
+                .map_err(|_| AgentError::Store("blob chunk length exceeds u64".into()))?;
+            let next_len = u64::try_from(bytes.len())
+                .map_err(|_| AgentError::Store("blob length exceeds u64".into()))?
+                .checked_add(chunk_len)
+                .ok_or_else(|| AgentError::Store("blob length exceeds u64".into()))?;
+            if next_len > source.byte_len {
+                return Err(AgentError::Store(
+                    "streamed blob exceeds its declared byte length".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if DocumentSourceBlob::from_bytes(&bytes) != source {
+            return Err(AgentError::Store(
+                "streamed blob does not match its declared digest".into(),
+            ));
+        }
+        self.put(source.id, bytes).await
+    }
 
     /// Fetch bytes by `id`, or `None` if absent.
     async fn get(&self, id: uuid::Uuid) -> Result<Option<Vec<u8>>>;

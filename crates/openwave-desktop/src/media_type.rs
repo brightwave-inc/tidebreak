@@ -18,7 +18,7 @@ pub(crate) const OPAQUE_MEDIA_TYPE: &str = "application/octet-stream";
 /// first few hundred bytes, except the Zip-container formats, whose central
 /// directory `infer` reads from the local file header near the start. Bounding
 /// the window keeps sniffing cheap for a multi-megabyte document.
-const SNIFF_WINDOW_BYTES: usize = 8_192;
+pub(crate) const SNIFF_WINDOW_BYTES: usize = 8_192;
 
 /// Text formats that carry no magic number, so only the name can distinguish
 /// them. All of these reach the same plain-text parser, so a wrong guess here

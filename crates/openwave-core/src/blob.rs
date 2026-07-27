@@ -3,16 +3,17 @@
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use uuid::Uuid;
 
-use crate::{AgentError, BlobStore, Result};
+use crate::{AgentError, BlobStore, BlobStream, DocumentSourceBlob, Result};
 
 /// Filesystem-backed opaque byte storage.
 ///
@@ -111,6 +112,34 @@ impl BlobStore for FsBlobStore {
         .map_err(|error| AgentError::Store(format!("blob write task failed: {error}")))?
     }
 
+    async fn put_stream(&self, source: DocumentSourceBlob, mut chunks: BlobStream) -> Result<()> {
+        if !source.has_content_addressed_id() {
+            return Err(AgentError::Store(
+                "streamed source blob id does not match its SHA-256 digest".into(),
+            ));
+        }
+        let root = Arc::clone(&self.root);
+        let access = Arc::clone(&self.access);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        let writer = tokio::task::spawn_blocking(move || {
+            write_streamed_blob(&root, &access, source, &mut receiver)
+        });
+
+        while let Some(chunk) = chunks.next().await {
+            let is_failure = chunk.is_err();
+            if sender.send(chunk).await.is_err() {
+                break;
+            }
+            if is_failure {
+                break;
+            }
+        }
+        drop(sender);
+        writer
+            .await
+            .map_err(|error| AgentError::Store(format!("blob write task failed: {error}")))?
+    }
+
     async fn get(&self, id: Uuid) -> Result<Option<Vec<u8>>> {
         let path = self.blob_path(id);
         let access = Arc::clone(&self.access);
@@ -141,6 +170,103 @@ impl BlobStore for FsBlobStore {
             Err(error) => Err(blob_error("delete file", error)),
         }
     }
+}
+
+fn write_streamed_blob(
+    root: &Path,
+    access: &RwLock<()>,
+    source: DocumentSourceBlob,
+    receiver: &mut tokio::sync::mpsc::Receiver<Result<Vec<u8>>>,
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    fs::create_dir_all(root).map_err(|error| blob_error("create directory", error))?;
+    if let Some(parent) = root.parent().filter(|path| !path.as_os_str().is_empty()) {
+        sync_directory(parent)?;
+    }
+    let temporary = root.join(format!(".{}.tmp", Uuid::new_v4()));
+    let destination = root.join(format!("{}.blob", source.id));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| blob_error("create temporary file", error))?;
+        let mut digest = Sha256::new();
+        let mut byte_len = 0_u64;
+        while let Some(chunk) = receiver.blocking_recv() {
+            let chunk = chunk?;
+            byte_len = byte_len
+                .checked_add(u64::try_from(chunk.len()).map_err(|_| {
+                    AgentError::Store("streamed blob chunk length exceeds u64".into())
+                })?)
+                .ok_or_else(|| AgentError::Store("streamed blob length exceeds u64".into()))?;
+            if byte_len > source.byte_len {
+                return Err(AgentError::Store(
+                    "streamed blob exceeds its declared byte length".into(),
+                ));
+            }
+            digest.update(&chunk);
+            file.write_all(&chunk)
+                .map_err(|error| blob_error("write temporary file", error))?;
+        }
+        let sha256: [u8; 32] = digest.finalize().into();
+        if DocumentSourceBlob::from_digest(sha256, byte_len) != source {
+            return Err(AgentError::Store(
+                "streamed blob does not match its declared digest".into(),
+            ));
+        }
+        file.sync_all()
+            .map_err(|error| blob_error("sync temporary file", error))?;
+        drop(file);
+
+        let _guard = access
+            .write()
+            .map_err(|_| AgentError::Store("blob store lock poisoned".into()))?;
+        match publish_new_file(&temporary, &destination) {
+            Ok(()) => sync_directory(root),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                if existing_file_matches_source(&destination, &source)? {
+                    sync_directory(root)
+                } else {
+                    Err(AgentError::Store(
+                        "immutable blob id already contains different bytes".into(),
+                    ))
+                }
+            }
+            Err(error) => Err(blob_error("publish immutable file", error)),
+        }
+    })();
+    if fs::remove_file(&temporary).is_ok() {
+        let _ = sync_directory(root);
+    }
+    result
+}
+
+fn existing_file_matches_source(path: &Path, source: &DocumentSourceBlob) -> Result<bool> {
+    use sha2::{Digest, Sha256};
+
+    let mut file =
+        fs::File::open(path).map_err(|error| blob_error("read immutable file", error))?;
+    let mut digest = Sha256::new();
+    let mut byte_len = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| blob_error("read immutable file", error))?;
+        if read == 0 {
+            break;
+        }
+        byte_len = byte_len
+            .checked_add(u64::try_from(read).expect("buffer length fits u64"))
+            .ok_or_else(|| AgentError::Store("stored blob length exceeds u64".into()))?;
+        digest.update(&buffer[..read]);
+    }
+    let sha256: [u8; 32] = digest.finalize().into();
+    Ok(DocumentSourceBlob::from_digest(sha256, byte_len) == *source)
 }
 
 #[cfg(not(windows))]
@@ -241,6 +367,28 @@ mod tests {
         assert_eq!(
             store.get(id).await.unwrap().as_deref(),
             Some(&b"retained source"[..])
+        );
+    }
+
+    #[tokio::test]
+    async fn streams_content_addressed_bytes_without_a_full_input_buffer() {
+        use futures::{stream, StreamExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = FsBlobStore::new(directory.path());
+        let bytes = [vec![b'a'; 64 * 1024], vec![b'b'; 64 * 1024], vec![b'c'; 17]].concat();
+        let source = DocumentSourceBlob::from_bytes(&bytes);
+        let chunks = stream::iter(vec![
+            Ok(bytes[..64 * 1024].to_vec()),
+            Ok(bytes[64 * 1024..128 * 1024].to_vec()),
+            Ok(bytes[128 * 1024..].to_vec()),
+        ])
+        .boxed();
+
+        store.put_stream(source.clone(), chunks).await.unwrap();
+        assert_eq!(
+            store.get(source.id).await.unwrap().as_deref(),
+            Some(bytes.as_slice())
         );
     }
 

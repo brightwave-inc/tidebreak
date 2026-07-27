@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body};
+use axum::body::{to_bytes, Body, Bytes};
 use axum::http::{header, Request, StatusCode};
 use futures::stream::{self, BoxStream, StreamExt};
 // Tests use the in-memory store; production wires LanceDB in `bind`.
@@ -4613,6 +4613,34 @@ async fn post_raw(
         .unwrap()
 }
 
+/// POST a chunked body to the native streamed-document route.
+async fn post_streamed_raw(
+    router: &Router,
+    bearer: &str,
+    uri: &str,
+    content_type: &str,
+    chunks: Vec<Vec<u8>>,
+) -> axum::response::Response {
+    let body = Body::from_stream(stream::iter(
+        chunks
+            .into_iter()
+            .map(|chunk| Ok::<_, std::convert::Infallible>(Bytes::from(chunk))),
+    ));
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, content_type)
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 async fn request_document_file_content(
     router: &Router,
     method: axum::http::Method,
@@ -5045,6 +5073,66 @@ async fn raw_ingest_retains_exact_bytes_and_runs_the_async_pipeline() {
     assert_eq!(
         ready.processing_status,
         openwave_core::DocumentProcessingStatus::Ready
+    );
+}
+
+#[tokio::test]
+async fn streamed_raw_ingest_accepts_large_chunked_sources_and_deduplicates_by_content() {
+    let (router, token, store, dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    // One byte over the legacy raw route's limit proves this endpoint is not
+    // collected by Axum's buffered-body extractor before blob publication.
+    let raw = vec![b'x'; MAX_RAW_DOCUMENT_BYTES + 1];
+    let source_blob = openwave_core::DocumentSourceBlob::from_bytes(&raw);
+    let sha256: String = source_blob
+        .sha256
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let uri = format!(
+        "/chats/{}/documents/raw-stream?title=large.md&sha256={sha256}&byte_len={}",
+        chat.id,
+        raw.len()
+    );
+
+    let response = post_streamed_raw(
+        &router,
+        &bearer,
+        &uri,
+        "text/markdown",
+        vec![raw[..64 * 1024].to_vec(), raw[64 * 1024..].to_vec()],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let accepted: serde_json::Value = json_body(response).await;
+    assert_eq!(accepted["already_present"], false);
+    let document_id: openwave_core::DocumentId =
+        accepted["document_id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        document_id,
+        openwave_core::DocumentId::derive_for_chat_content(chat.id, source_blob.sha256)
+    );
+    assert_eq!(
+        openwave_core::FsBlobStore::new(dir.path().join("blobs"))
+            .get(source_blob.id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(raw.as_slice())
+    );
+
+    let response = post_streamed_raw(&router, &bearer, &uri, "text/markdown", vec![raw]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let duplicate: serde_json::Value = json_body(response).await;
+    assert_eq!(duplicate["already_present"], true);
+    assert_eq!(duplicate["document_id"], accepted["document_id"]);
+    assert_eq!(
+        store
+            .list_document_ids(openwave_core::DocumentScope::Chat(chat.id))
+            .await
+            .unwrap(),
+        vec![document_id]
     );
 }
 

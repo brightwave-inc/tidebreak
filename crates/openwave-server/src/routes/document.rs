@@ -5,12 +5,13 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 use openwave_core::{
-    ChatId, DocumentJobId, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceBlob,
-    DocumentSourceUpsert, DocumentSummaryRecord, ProjectId,
+    AgentError, ChatId, DocumentJobId, DocumentListCursor, DocumentRecord, DocumentScope,
+    DocumentSourceBlob, DocumentSourceUpsert, DocumentSummaryRecord, ProjectId,
 };
 use openwave_retrieval::{
     Citation, DocumentId, RetrievalError, SearchScope, SearchTool, MAX_SEARCH_RESULTS,
@@ -45,6 +46,20 @@ pub struct RawDocumentQuery {
     pub title: Option<String>,
 }
 
+/// Query parameters for a raw source whose request body is streamed into blob
+/// storage. The native bridge computes the descriptor while it securely reads
+/// the selected file; the server verifies it while writing.
+#[derive(Debug, Deserialize)]
+pub struct StreamedRawDocumentQuery {
+    /// Optional human-facing title. This is metadata only.
+    pub title: Option<String>,
+    /// Exact SHA-256 digest of the body, encoded as 64 lowercase or uppercase
+    /// hexadecimal characters.
+    pub sha256: String,
+    /// Exact body length in bytes.
+    pub byte_len: u64,
+}
+
 /// Result of `POST /documents`.
 #[derive(Debug, Serialize)]
 pub struct IngestResult {
@@ -56,6 +71,18 @@ pub struct IngestResult {
     pub content_revision: i64,
     /// Current asynchronous processing state.
     pub processing_status: openwave_core::DocumentProcessingStatus,
+}
+
+/// Result of streamed native-file ingestion.
+#[derive(Debug, Serialize)]
+pub struct StreamedIngestResult {
+    /// The content-derived id in this conversation.
+    pub document_id: DocumentId,
+    /// Current asynchronous processing state.
+    pub processing_status: openwave_core::DocumentProcessingStatus,
+    /// Whether this request found an existing source with the same immutable
+    /// content rather than creating a second catalog record.
+    pub already_present: bool,
 }
 
 /// Catalog metadata returned by document listings.
@@ -306,6 +333,87 @@ pub async fn ingest_raw_chat_document(
     ingest_raw_document_in_scope(&state, Some(chat_id), None, query, &headers, bytes.to_vec()).await
 }
 
+/// `POST /chats/{chat_id}/documents/raw-stream` — stream one native-selected
+/// file into the content-addressed blob store and use its digest as its stable
+/// conversation-local identity.
+pub async fn ingest_streamed_raw_chat_document(
+    State(state): State<AppState>,
+    Path(chat_id): Path<ChatId>,
+    Query(query): Query<StreamedRawDocumentQuery>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<impl IntoResponse, ServerError> {
+    require_chat(&state, chat_id).await?;
+    let source_blob = streamed_source_blob(&query)?;
+    let media_type = raw_document_media_type(&headers)?;
+    let title = normalize_document_title(query.title.as_deref())?;
+    let parser_fingerprint = state
+        .retrieval
+        .canonical_fingerprint_for(&media_type)
+        .map_err(retrieval_error)?;
+    let document_id = DocumentId::derive_for_chat_content(chat_id, source_blob.sha256);
+
+    // A content-derived id is the concurrency key for both duplicate files in
+    // one batch and retries of the same import. Check under that guard before
+    // asking the blob store to read another byte.
+    let _document_write = state.document_writes.acquire(document_id).await;
+    if let Some(existing) = state
+        .store
+        .get_document(document_id)
+        .await?
+        .filter(|document| document.chat_id == Some(chat_id) && document.project_id.is_none())
+    {
+        if existing.source_blob.as_ref() == Some(&source_blob) {
+            return Ok((
+                StatusCode::OK,
+                Json(StreamedIngestResult {
+                    document_id,
+                    processing_status: existing.processing_status,
+                    already_present: true,
+                }),
+            ));
+        }
+    }
+
+    let stream = body
+        .into_data_stream()
+        .map(|chunk| {
+            chunk
+                .map(|chunk| chunk.to_vec())
+                .map_err(|error| AgentError::Store(format!("read streamed document body: {error}")))
+        })
+        .boxed();
+    let _blob_write = state.blob_writes.acquire(source_blob.id).await?;
+    state.blobs.put_stream(source_blob.clone(), stream).await?;
+    let (revision, _job) = state
+        .store
+        .accept_document_source_and_enqueue_parse(
+            &DocumentSourceUpsert {
+                id: document_id,
+                chat_id: Some(chat_id),
+                project_id: None,
+                source_uri: None,
+                media_type,
+                title,
+                source_blob,
+                updated_at: Utc::now(),
+            },
+            &parser_fingerprint,
+            MAX_PARSE_ATTEMPTS,
+        )
+        .await?;
+    state.document_job_wake.notify_one();
+    state.blob_retirement_wake.notify_one();
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(StreamedIngestResult {
+            document_id,
+            processing_status: revision.processing_status,
+            already_present: false,
+        }),
+    ))
+}
+
 async fn ingest_raw_document_in_scope(
     state: &AppState,
     chat_id: Option<ChatId>,
@@ -317,24 +425,14 @@ async fn ingest_raw_document_in_scope(
     if source_bytes.is_empty() {
         return Err(ServerError::bad_request("content must not be empty"));
     }
-    let media_type = headers
-        .get(header::CONTENT_TYPE)
-        .ok_or_else(|| ServerError::bad_request("Content-Type header is required"))?
-        .to_str()
-        .map_err(|_| ServerError::bad_request("Content-Type header is not valid text"))?
-        .trim();
-    if media_type.is_empty() {
-        return Err(ServerError::bad_request(
-            "Content-Type header must not be empty",
-        ));
-    }
+    let media_type = raw_document_media_type(headers)?;
     publish_document_source(
         state,
         chat_id,
         project_id,
         query.uri,
         query.title,
-        media_type.to_owned(),
+        media_type,
         source_bytes,
     )
     .await
@@ -412,6 +510,44 @@ async fn publish_document_source(
             processing_status: revision.processing_status,
         }),
     ))
+}
+
+fn raw_document_media_type(headers: &HeaderMap) -> Result<String, ServerError> {
+    let media_type = headers
+        .get(header::CONTENT_TYPE)
+        .ok_or_else(|| ServerError::bad_request("Content-Type header is required"))?
+        .to_str()
+        .map_err(|_| ServerError::bad_request("Content-Type header is not valid text"))?
+        .trim();
+    if media_type.is_empty() {
+        return Err(ServerError::bad_request(
+            "Content-Type header must not be empty",
+        ));
+    }
+    Ok(media_type.to_owned())
+}
+
+fn streamed_source_blob(
+    query: &StreamedRawDocumentQuery,
+) -> Result<DocumentSourceBlob, ServerError> {
+    if query.byte_len == 0 {
+        return Err(ServerError::bad_request("content must not be empty"));
+    }
+    let sha256 = decode_sha256(&query.sha256).ok_or_else(|| {
+        ServerError::bad_request("sha256 must be a 64-character hexadecimal digest")
+    })?;
+    Ok(DocumentSourceBlob::from_digest(sha256, query.byte_len))
+}
+
+fn decode_sha256(raw: &str) -> Option<[u8; 32]> {
+    if raw.len() != 64 || !raw.is_ascii() {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, slot) in digest.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&raw[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(digest)
 }
 
 fn is_safe_document_title_char(character: char) -> bool {

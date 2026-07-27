@@ -163,6 +163,7 @@ pub fn run() {
             server_info,
             request_user_attention,
             documents::import_library_document,
+            documents::import_library_documents,
             documents::list_library_documents,
             documents::search_library_documents,
             image_attachments::attach_chat_image,
