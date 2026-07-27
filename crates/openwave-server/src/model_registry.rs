@@ -60,11 +60,13 @@ impl ModelSpec {
     }
 }
 
-/// Curated models in picker display order.
+/// Curated models in picker display order: each provider's current generation
+/// first, then the earlier generations a chat can pin when the newest one
+/// regresses on its workload.
 const MODEL_REGISTRY: &[ModelSpec] = &[
     ModelSpec {
-        id: "claude-opus-4-8",
-        display_name: "Claude Opus 4.8",
+        id: "claude-opus-5",
+        display_name: "Claude Opus 5",
         provider: ProviderKind::Anthropic,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
@@ -98,41 +100,104 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_reasoning_effort: false,
     },
     ModelSpec {
-        id: "gpt-4o",
-        display_name: "GPT-4o",
-        provider: ProviderKind::Openai,
-        context_window: 128_000,
-        max_output_tokens: 16_384,
+        id: "claude-opus-4-8",
+        display_name: "Claude Opus 4.8",
+        provider: ProviderKind::Anthropic,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
-        supports_reasoning: false,
+        supports_reasoning: true,
         supports_reasoning_effort: false,
     },
     ModelSpec {
-        id: "gpt-4o-mini",
-        display_name: "GPT-4o mini",
-        provider: ProviderKind::Openai,
-        context_window: 128_000,
-        max_output_tokens: 16_384,
+        id: "claude-opus-4-7",
+        display_name: "Claude Opus 4.7",
+        provider: ProviderKind::Anthropic,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
-        supports_reasoning: false,
+        supports_reasoning: true,
         supports_reasoning_effort: false,
     },
     ModelSpec {
-        id: "o3",
-        display_name: "o3",
+        id: "claude-opus-4-6",
+        display_name: "Claude Opus 4.6",
+        provider: ProviderKind::Anthropic,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        supports_reasoning_effort: false,
+    },
+    ModelSpec {
+        id: "claude-sonnet-4-6",
+        display_name: "Claude Sonnet 4.6",
+        provider: ProviderKind::Anthropic,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        supports_reasoning_effort: false,
+    },
+    ModelSpec {
+        id: "gpt-5.6-sol",
+        display_name: "GPT-5.6 Sol",
         provider: ProviderKind::Openai,
-        context_window: 200_000,
-        max_output_tokens: 100_000,
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        // The whole GPT-5 line reasons on a caller-selected effort, which the
+        // OpenAI-compatible adapter already sends alongside
+        // `max_completion_tokens`.
+        supports_reasoning_effort: true,
+    },
+    ModelSpec {
+        id: "gpt-5.6-terra",
+        display_name: "GPT-5.6 Terra",
+        provider: ProviderKind::Openai,
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
         supports_reasoning_effort: true,
     },
     ModelSpec {
-        id: "o4-mini",
-        display_name: "o4-mini",
+        id: "gpt-5.6-luna",
+        display_name: "GPT-5.6 Luna",
         provider: ProviderKind::Openai,
-        context_window: 200_000,
-        max_output_tokens: 100_000,
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        supports_reasoning_effort: true,
+    },
+    ModelSpec {
+        id: "gpt-5.5",
+        display_name: "GPT-5.5",
+        provider: ProviderKind::Openai,
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        supports_reasoning_effort: true,
+    },
+    ModelSpec {
+        id: "gpt-5.4-mini",
+        display_name: "GPT-5.4 mini",
+        provider: ProviderKind::Openai,
+        context_window: 400_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        supports_reasoning_effort: true,
+    },
+    ModelSpec {
+        id: "gpt-5.4-nano",
+        display_name: "GPT-5.4 nano",
+        provider: ProviderKind::Openai,
+        context_window: 400_000,
+        max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
         supports_reasoning_effort: true,
@@ -288,9 +353,21 @@ mod tests {
         for &provider in ProviderKind::ALL {
             assert!(models_for(provider).all(|spec| spec.provider == provider));
         }
-        assert_eq!(models_for(ProviderKind::Anthropic).count(), 3);
-        assert_eq!(models_for(ProviderKind::Openai).count(), 4);
+        assert_eq!(models_for(ProviderKind::Anthropic).count(), 7);
+        assert_eq!(models_for(ProviderKind::Openai).count(), 6);
         assert_eq!(models_for(ProviderKind::OpenaiCompatible).count(), 0);
+    }
+
+    #[test]
+    fn the_built_in_default_is_the_first_curated_row_of_its_provider() {
+        let spec = find(crate::DEFAULT_MODEL).expect("the default model must be curated");
+        assert_eq!(spec.provider, ProviderKind::Anthropic);
+        // The default has to be the current generation, not a pin that happened
+        // to be current when it was written down.
+        assert_eq!(
+            models_for(ProviderKind::Anthropic).next().map(|s| s.id),
+            Some(crate::DEFAULT_MODEL),
+        );
     }
 
     #[test]
@@ -309,9 +386,28 @@ mod tests {
     }
 
     #[test]
+    fn every_openai_entry_reasons_on_a_caller_selected_effort() {
+        let openai: Vec<_> = models_for(ProviderKind::Openai).collect();
+        assert!(!openai.is_empty());
+        for spec in openai {
+            assert!(
+                spec.supports_reasoning && spec.supports_reasoning_effort,
+                "{} is curated on the OpenAI route without the reasoning shape that route sends",
+                spec.id
+            );
+            assert_eq!(
+                spec.max_output_tokens, 128_000,
+                "{} carries an output cap the GPT-5 line does not have",
+                spec.id
+            );
+        }
+    }
+
+    #[test]
     fn display_name_prefers_registry_and_falls_back_for_unknown_ids() {
         assert_eq!(display_name_for("claude-opus-4-8"), "Claude Opus 4.8");
-        assert_eq!(display_name_for("gpt-4o-mini"), "GPT-4o mini");
+        assert_eq!(display_name_for("gpt-5.6-sol"), "GPT-5.6 Sol");
+        assert_eq!(display_name_for("gpt-4o-mini"), "GPT 4o Mini");
         assert_eq!(
             display_name_for("claude-sonnet-9-20260101"),
             "Claude Sonnet 9"
@@ -322,21 +418,24 @@ mod tests {
 
     #[test]
     fn selection_keys_are_provider_scoped_and_legacy_ids_migrate_losslessly() {
-        let key = selection_key(ProviderKind::Openai, "gpt-4o");
-        assert_eq!(key, "openai::gpt-4o");
+        let key = selection_key(ProviderKind::Openai, "gpt-5.6-sol");
+        assert_eq!(key, "openai::gpt-5.6-sol");
         assert_eq!(
             parse_selection_key(&key),
-            Some((ProviderKind::Openai, "gpt-4o"))
+            Some((ProviderKind::Openai, "gpt-5.6-sol"))
         );
         assert_eq!(
             parse_selection_key("openai_compatible::vendor::model"),
             Some((ProviderKind::OpenaiCompatible, "vendor::model"))
         );
         assert_eq!(
-            migrate_curated_selection("gpt-4o").as_deref(),
-            Some("openai::gpt-4o")
+            migrate_curated_selection("gpt-5.6-sol").as_deref(),
+            Some("openai::gpt-5.6-sol")
         );
-        assert!(migrate_curated_selection("anthropic::gpt-4o").is_none());
-        assert!(parse_selection_key("unknown::gpt-4o").is_none());
+        assert!(migrate_curated_selection("anthropic::gpt-5.6-sol").is_none());
+        assert!(parse_selection_key("unknown::gpt-5.6-sol").is_none());
+        // A retired curated id no longer resolves; the picker surfaces it as
+        // unavailable rather than silently routing it somewhere else.
+        assert!(migrate_curated_selection("gpt-4o").is_none());
     }
 }

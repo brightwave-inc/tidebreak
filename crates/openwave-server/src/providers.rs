@@ -868,22 +868,31 @@ mod tests {
 
         let mut config = AgentConfig::default();
         let gpt = ResolvedModelPolicy::curated(
-            model_registry::find_for(ProviderKind::Openai, "gpt-4o").unwrap(),
+            model_registry::find_for(ProviderKind::Openai, "gpt-5.6-sol").unwrap(),
         );
-        apply_model_policy(&mut config, &gpt, Some(ReasoningEffort::High)).unwrap();
+        apply_model_policy(&mut config, &gpt, Some(ReasoningEffort::Low)).unwrap();
         assert_eq!(config.provider, Some(ProviderId::new("openai")));
-        assert_eq!(config.context_window, 128_000);
-        assert_eq!(config.max_tokens, Some(16_384));
-        assert!(!config.reasoning_model);
-        assert_eq!(config.reasoning_effort, None);
-
-        let mut config = AgentConfig::default();
-        let o3 = ResolvedModelPolicy::curated(
-            model_registry::find_for(ProviderKind::Openai, "o3").unwrap(),
-        );
-        apply_model_policy(&mut config, &o3, Some(ReasoningEffort::Low)).unwrap();
+        assert_eq!(config.context_window, 1_050_000);
+        assert_eq!(config.max_tokens, Some(128_000));
         assert!(config.reasoning_model);
         assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Low));
+
+        // A custom endpoint keeps the conservative shape: no reasoning, and the
+        // requested effort is dropped rather than sent to something that would
+        // reject it.
+        let mut config = AgentConfig::default();
+        let custom = ResolvedModelPolicy::custom(&CustomModelConfig {
+            id: "local-model".into(),
+            display_name: None,
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+        });
+        apply_model_policy(&mut config, &custom, Some(ReasoningEffort::High)).unwrap();
+        assert_eq!(config.provider, Some(ProviderId::new("openai_compatible")));
+        assert_eq!(config.context_window, 32_768);
+        assert_eq!(config.max_tokens, Some(4_096));
+        assert!(!config.reasoning_model);
+        assert_eq!(config.reasoning_effort, None);
     }
 
     #[test]

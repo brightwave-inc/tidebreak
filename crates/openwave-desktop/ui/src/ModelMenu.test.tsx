@@ -84,6 +84,11 @@ describe("formatContextWindow", () => {
     expect(formatContextWindow(1_500_000)).toBe("1.5M");
   });
 
+  it("truncates millions so a limit never reads larger than it is", () => {
+    expect(formatContextWindow(1_050_000)).toBe("1M");
+    expect(formatContextWindow(1_990_000)).toBe("1.9M");
+  });
+
   it("renders small counts verbatim", () => {
     expect(formatContextWindow(512)).toBe("512");
   });

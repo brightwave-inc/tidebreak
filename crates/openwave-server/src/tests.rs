@@ -9857,7 +9857,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
         Arc::new(ToolRegistry::new()),
         retrieval,
         AgentConfig {
-            model: "gpt-4o".into(),
+            model: "gpt-5.6-sol".into(),
             ..AgentConfig::default()
         },
     );
@@ -9865,15 +9865,20 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
     let router = app(state);
 
     // Old bare curated ids are accepted but persisted under their exact owner.
-    let configured = put_settings(&router, &bearer, serde_json::json!({"model": "gpt-4o"})).await;
+    let configured = put_settings(
+        &router,
+        &bearer,
+        serde_json::json!({"model": "gpt-5.6-sol"}),
+    )
+    .await;
     assert_eq!(configured.status(), StatusCode::OK);
     let settings: serde_json::Value = json_body(configured).await;
-    assert_eq!(settings["model"], "openai::gpt-4o");
+    assert_eq!(settings["model"], "openai::gpt-5.6-sol");
 
     let wrong_provider = put_settings(
         &router,
         &bearer,
-        serde_json::json!({"model": "anthropic::gpt-4o"}),
+        serde_json::json!({"model": "anthropic::gpt-5.6-sol"}),
     )
     .await;
     assert_eq!(wrong_provider.status(), StatusCode::BAD_REQUEST);
@@ -9899,7 +9904,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::json!({"model": "openai::gpt-4o"}).to_string(),
+                    serde_json::json!({"model": "openai::gpt-5.6-sol"}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -9907,14 +9912,14 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
         .unwrap();
     assert_eq!(chat_response.status(), StatusCode::CREATED);
     let chat: Chat = json_body(chat_response).await;
-    assert_eq!(chat.model.as_deref(), Some("openai::gpt-4o"));
+    assert_eq!(chat.model.as_deref(), Some("openai::gpt-5.6-sol"));
 
     let turn_id = TurnId::new();
     let accepted = send_message_with_id(&router, &bearer, chat.id, turn_id, "hello").await;
     assert_eq!(accepted, StatusCode::ACCEPTED);
     assert_eq!(
         store.get_turn_run(turn_id).await.unwrap().unwrap().model,
-        "openai::gpt-4o"
+        "openai::gpt-5.6-sol"
     );
 
     // The same raw id may be explicitly configured under another provider.
@@ -9933,7 +9938,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
                         "base_url": "http://127.0.0.1:1234/v1",
                         "credential": {"type": "api_key", "key": "sk-local"},
                         "models": [{
-                            "id": "gpt-4o",
+                            "id": "gpt-5.6-sol",
                             "context_window": 32768,
                             "max_output_tokens": 4096
                         }]
@@ -9946,12 +9951,17 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
         .unwrap();
     assert_eq!(configure_compatible.status(), StatusCode::OK);
 
-    let ambiguous = put_settings(&router, &bearer, serde_json::json!({"model": "gpt-4o"})).await;
+    let ambiguous = put_settings(
+        &router,
+        &bearer,
+        serde_json::json!({"model": "gpt-5.6-sol"}),
+    )
+    .await;
     assert_eq!(ambiguous.status(), StatusCode::BAD_REQUEST);
     let error: AgentErrorInfo = json_body(ambiguous).await;
     assert_eq!(error.kind, "unknown_model");
 
-    for qualified in ["openai::gpt-4o", "openai_compatible::gpt-4o"] {
+    for qualified in ["openai::gpt-5.6-sol", "openai_compatible::gpt-5.6-sol"] {
         let exact = put_settings(&router, &bearer, serde_json::json!({"model": qualified})).await;
         assert_eq!(exact.status(), StatusCode::OK);
         let settings: serde_json::Value = json_body(exact).await;
@@ -10126,7 +10136,7 @@ async fn resolver_includes_openai_when_enabled() {
     // (no anthropic route, no openai_compatible fallback).
     let router = openwave_router::Router::build(routes);
     assert_eq!(
-        router.select("gpt-4o"),
+        router.select("gpt-5.6-sol"),
         Some(openwave_router::RouteKind::Openai)
     );
     assert_eq!(router.select("claude-opus-4-8"), None);

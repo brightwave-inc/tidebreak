@@ -441,7 +441,7 @@ impl Server {
 
 /// Default model when none is configured via settings or per-chat. Overridable
 /// with `OPENWAVE_MODEL`.
-const DEFAULT_MODEL: &str = "claude-opus-4-8";
+const DEFAULT_MODEL: &str = "claude-opus-5";
 
 /// Wire the store from `config` and bind the API to an ephemeral loopback port.
 ///
