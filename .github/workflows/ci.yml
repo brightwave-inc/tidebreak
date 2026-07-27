@@ -185,11 +185,14 @@ jobs:
         run: cargo fmt --all --check
 
   lint:
-    name: clippy
+    name: clippy · test
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      statuses: write
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -227,11 +230,56 @@ jobs:
           # target archive that previously exhausted a hosted runner. sccache
           # reuses individual compiler outputs without pre-filling target/.
           cache-targets: false
-          # Every lane restores the shared trusted-main registry cache; only the
-          # comprehensive headless test job below publishes a new immutable key.
-          save-if: false
+          # Every lane restores the shared trusted-main registry cache; this
+          # comprehensive clippy-and-test job publishes a new immutable key.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       - name: clippy
+        id: clippy
+        continue-on-error: true
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: headless tests
+        id: test
+        if: ${{ always() }}
+        continue-on-error: true
+        run: cargo test --workspace --exclude openwave-desktop --locked
+      # One runner keeps Cargo artifacts warm, but separate commit statuses make
+      # a lint failure and a test failure distinct in the PR checks list.
+      - name: Publish clippy and test statuses
+        if: ${{ always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
+        env:
+          CLIPPY_OUTCOME: ${{ steps.clippy.outcome }}
+          GH_TOKEN: ${{ github.token }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+        run: |
+          publish_status() {
+            local outcome="$1"
+            local context="$2"
+            local state=success
+            local description="$context passed"
+
+            if [[ "$outcome" != success ]]; then
+              state=failure
+              description="$context failed"
+            fi
+
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+              -f state="$state" \
+              -f context="$context" \
+              -f description="$description" \
+              -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          }
+
+          publish_status "$CLIPPY_OUTCOME" clippy
+          publish_status "$TEST_OUTCOME" test
+      - name: Require clippy and headless tests to pass
+        if: ${{ always() }}
+        env:
+          CLIPPY_OUTCOME: ${{ steps.clippy.outcome }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+        run: |
+          test "$CLIPPY_OUTCOME" = success
+          test "$TEST_OUTCOME" = success
 
   desktop:
     name: desktop test
@@ -274,49 +322,6 @@ jobs:
           save-if: false
       - name: desktop tests
         run: cargo test -p openwave-desktop --locked
-
-  test:
-    name: test
-    needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
-      RUSTC_WRAPPER: sccache
-      RUSTFLAGS: -C link-arg=-fuse-ld=mold
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install toolchain (honors rust-toolchain.toml)
-        run: rustup show
-      - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-        with:
-          version: v0.16.0
-      - name: Install headless system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mold
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
-          cache-bin: false
-          cache-targets: false
-          # This is the single Cargo-download writer. sccache remains the
-          # compiler-output cache used independently by every Rust lane.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
-      - name: Fetch the complete workspace lockfile
-        if: ${{ github.ref == 'refs/heads/main' }}
-        run: cargo fetch --locked
-      - name: headless tests
-        run: cargo test --workspace --exclude openwave-desktop --locked
 
   vectors:
     name: durable vector store
@@ -465,7 +470,6 @@ jobs:
         fmt,
         lint,
         desktop,
-        test,
         vectors,
         postgres,
         ui,
@@ -477,7 +481,6 @@ jobs:
           FMT_RESULT: ${{ needs.fmt.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           DESKTOP_RESULT: ${{ needs.desktop.result }}
-          TEST_RESULT: ${{ needs.test.result }}
           VECTORS_RESULT: ${{ needs.vectors.result }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
           UI_RESULT: ${{ needs.ui.result }}
@@ -509,7 +512,6 @@ jobs:
               test "$FMT_RESULT" = success
               test "$LINT_RESULT" = success
               test "$DESKTOP_RESULT" = success
-              test "$TEST_RESULT" = success
               test "$VECTORS_RESULT" = success
               test "$POSTGRES_RESULT" = success
               ;;
@@ -517,7 +519,6 @@ jobs:
               test "$FMT_RESULT" = skipped
               test "$LINT_RESULT" = skipped
               test "$DESKTOP_RESULT" = skipped
-              test "$TEST_RESULT" = skipped
               test "$VECTORS_RESULT" = skipped
               test "$POSTGRES_RESULT" = skipped
               ;;

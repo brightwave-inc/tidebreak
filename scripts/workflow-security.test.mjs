@@ -79,7 +79,7 @@ test("workflow container images are pinned by digest", () => {
 test("Rust CI requires the same PostgreSQL lane on pull requests and main", () => {
   const ci = workflows["ci.yml"];
   const postgres = workflowJob(ci, "postgres");
-  const testJob = workflowJob(ci, "test");
+  const lint = workflowJob(ci, "lint");
   const aggregate = workflowJob(ci, "rust");
 
   assert.match(
@@ -99,9 +99,8 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
   assert.match(aggregate, /\*\) test "\$PR_TITLE_RESULT" = skipped ;;/);
 
   for (const job of [
-    workflowJob(ci, "lint"),
+    lint,
     workflowJob(ci, "desktop"),
-    testJob,
     postgres,
   ]) {
     assert.match(
@@ -111,8 +110,21 @@ test("Rust CI requires the same PostgreSQL lane on pull requests and main", () =
     assert.match(job, /add-rust-environment-hash-key: "false"/);
     assert.match(job, /cache-targets: false/);
   }
-  assert.match(testJob, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
-  assert.match(testJob, /cache-on-failure: true/);
+  assert.match(lint, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
+  assert.match(lint, /cache-on-failure: true/);
+  assert.match(lint, /cargo clippy --workspace --all-targets --locked -- -D warnings/);
+  assert.match(
+    lint,
+    /cargo test --workspace --exclude openwave-desktop --locked/,
+  );
+  assert.match(lint, /statuses: write/);
+  assert.match(lint, /publish_status "\$CLIPPY_OUTCOME" clippy/);
+  assert.match(lint, /publish_status "\$TEST_OUTCOME" test/);
+  assert.match(lint, /test "\$CLIPPY_OUTCOME" = success/);
+  assert.match(lint, /test "\$TEST_OUTCOME" = success/);
+  assert.doesNotMatch(ci, /^  test:$/m);
+  assert.doesNotMatch(aggregate, /^\s+test,$/m);
+  assert.doesNotMatch(aggregate, /TEST_RESULT/);
 });
 
 test("production secrets remain isolated to the release workflow", () => {
