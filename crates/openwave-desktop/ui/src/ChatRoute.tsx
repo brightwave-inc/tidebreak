@@ -312,6 +312,10 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
   function renderPanel(panel: PanelContent, position: "left" | "right" | "chat", visible: boolean) {
     if (panel.type === "chat") {
+      // Only the levels the selected model accepts are offerable, and a model
+      // that accepts none gets no selector at all.
+      const efforts =
+        modelForSelection(models, chat!.model)?.reasoning_efforts ?? [];
       return (
         <TranscriptVisibilityProvider value={visible}>
           <ChatView
@@ -346,8 +350,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
                   disabled={deletingChatId !== null}
                   onChange={onModelChange}
                 />
-                {modelForSelection(models, chat!.model)?.supports_reasoning_effort && (
+                {efforts.length > 0 && (
                   <ReasoningEffortMenu
+                    levels={efforts}
                     value={chat!.reasoning_effort}
                     disabled={deletingChatId !== null}
                     onChange={onReasoningEffortChange}

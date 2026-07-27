@@ -196,8 +196,9 @@ pub struct ResolvedModelPolicy {
     pub input_modalities: Vec<InputModality>,
     /// Whether the provider request uses a reasoning-model shape.
     pub supports_reasoning: bool,
-    /// Whether the chat may set a reasoning-effort override.
-    pub supports_reasoning_effort: bool,
+    /// The reasoning-effort levels this model accepts, ascending. Empty when
+    /// the model takes no effort control.
+    pub reasoning_efforts: Vec<ReasoningEffort>,
 }
 
 impl ResolvedModelPolicy {
@@ -211,7 +212,7 @@ impl ResolvedModelPolicy {
             max_output_tokens: spec.max_output_tokens,
             input_modalities: spec.input_modalities.to_vec(),
             supports_reasoning: spec.supports_reasoning,
-            supports_reasoning_effort: spec.supports_reasoning_effort,
+            reasoning_efforts: spec.reasoning_efforts.to_vec(),
         }
     }
 
@@ -230,7 +231,7 @@ impl ResolvedModelPolicy {
             // Unknown endpoints get deliberately conservative request shaping.
             // Capability editing can be added later without changing the key.
             supports_reasoning: false,
-            supports_reasoning_effort: false,
+            reasoning_efforts: Vec::new(),
         }
     }
 
@@ -247,8 +248,11 @@ impl ResolvedModelPolicy {
 /// Apply one resolved registry row to the provider-neutral agent config.
 ///
 /// The stored selection key never reaches an adapter: requests carry the raw
-/// model id plus the exact provider hint. Unsupported reasoning controls are
-/// normalized away before provider dispatch.
+/// model id plus the exact provider hint. This is the one place a chat's stored
+/// reasoning effort is reconciled with the model actually about to run, so a
+/// level the model does not accept can never reach an adapter: it degrades to
+/// the closest level the model does take, or is dropped when the model exposes
+/// no effort control at all.
 pub fn apply_model_policy(
     config: &mut AgentConfig,
     policy: &ResolvedModelPolicy,
@@ -260,10 +264,8 @@ pub fn apply_model_policy(
     config.context_window = usize::try_from(policy.context_window)
         .map_err(|_| openwave_core::AgentError::config("model context window is unsupported"))?;
     config.max_tokens = Some(policy.max_output_tokens);
-    config.reasoning_effort = policy
-        .supports_reasoning_effort
-        .then_some(reasoning_effort)
-        .flatten();
+    config.reasoning_effort =
+        reasoning_effort.and_then(|effort| effort.clamp_to(&policy.reasoning_efforts));
     if policy.supports_reasoning {
         config.temperature = None;
     }
@@ -859,12 +861,12 @@ mod tests {
         let opus = ResolvedModelPolicy::curated(
             model_registry::find_for(ProviderKind::Anthropic, "claude-opus-4-8").unwrap(),
         );
-        apply_model_policy(&mut config, &opus, Some(ReasoningEffort::High)).unwrap();
+        apply_model_policy(&mut config, &opus, Some(ReasoningEffort::XHigh)).unwrap();
         assert_eq!(config.provider, Some(ProviderId::new("anthropic")));
         assert_eq!(config.model, "claude-opus-4-8");
         assert_eq!(config.context_window, 1_000_000);
         assert_eq!(config.max_tokens, Some(128_000));
-        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::XHigh));
         assert_eq!(config.temperature, None);
 
         // Haiku 4.5 reasons but rejects the effort control, so the request is
@@ -907,6 +909,56 @@ mod tests {
     }
 
     #[test]
+    fn a_level_a_model_does_not_accept_never_survives_policy_application() {
+        let apply = |id: &str, provider: ProviderKind, effort: ReasoningEffort| {
+            let mut config = AgentConfig::default();
+            let policy =
+                ResolvedModelPolicy::curated(model_registry::find_for(provider, id).unwrap());
+            apply_model_policy(&mut config, &policy, Some(effort)).unwrap();
+            config.reasoning_effort
+        };
+
+        // `max` arrived with GPT-5.6; on 5.5 the same stored choice degrades to
+        // the top level that generation takes rather than failing the turn.
+        assert_eq!(
+            apply("gpt-5.6-sol", ProviderKind::Openai, ReasoningEffort::Max),
+            Some(ReasoningEffort::Max)
+        );
+        assert_eq!(
+            apply("gpt-5.5", ProviderKind::Openai, ReasoningEffort::Max),
+            Some(ReasoningEffort::XHigh)
+        );
+        // Anthropic has no "don't reason" level, so `none` comes up to `low`.
+        assert_eq!(
+            apply(
+                "claude-opus-5",
+                ProviderKind::Anthropic,
+                ReasoningEffort::None
+            ),
+            Some(ReasoningEffort::Low)
+        );
+        assert_eq!(
+            apply(
+                "claude-opus-5",
+                ProviderKind::Anthropic,
+                ReasoningEffort::XHigh
+            ),
+            Some(ReasoningEffort::XHigh)
+        );
+        // Haiku 4.5 errors on the parameter, so it is dropped outright.
+        for effort in ReasoningEffort::ALL {
+            assert_eq!(
+                apply(
+                    "claude-haiku-4-5-20251001",
+                    ProviderKind::Anthropic,
+                    *effort
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn every_curated_model_applies_its_exact_runtime_contract() {
         for &provider in ProviderKind::ALL {
             for spec in model_registry::models_for(provider) {
@@ -928,8 +980,7 @@ mod tests {
                 assert_eq!(config.reasoning_model, spec.supports_reasoning);
                 assert_eq!(
                     config.reasoning_effort,
-                    spec.supports_reasoning_effort
-                        .then_some(ReasoningEffort::Low)
+                    ReasoningEffort::Low.clamp_to(spec.reasoning_efforts)
                 );
                 assert_eq!(
                     config.temperature,

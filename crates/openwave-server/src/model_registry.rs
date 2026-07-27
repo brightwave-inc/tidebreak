@@ -4,6 +4,8 @@
 //! provider routing. Provider configuration decides which registry entries are
 //! available; it does not duplicate model ids or capabilities.
 
+use openwave_core::ReasoningEffort;
+
 use crate::providers::ProviderKind;
 
 /// An input modality a model accepts.
@@ -38,6 +40,36 @@ impl InputModality {
 
 const TEXT_ONLY: &[InputModality] = &[InputModality::Text];
 
+/// The reasoning-effort scales the curated rows draw from, ascending.
+///
+/// No provider offers one scale across its whole line, so these are named for
+/// their contents rather than for a provider or a generation.
+const EFFORT_NONE_TO_MAX: &[ReasoningEffort] = &[
+    ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+    ReasoningEffort::Max,
+];
+const EFFORT_NONE_TO_XHIGH: &[ReasoningEffort] = &[
+    ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+];
+const EFFORT_LOW_TO_MAX: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+    ReasoningEffort::Max,
+];
+/// For a model that takes no effort parameter at all. Not the same as a model
+/// that ignores one: Claude Haiku 4.5 rejects the request.
+const EFFORT_UNSUPPORTED: &[ReasoningEffort] = &[];
+
 /// Separator in the stable provider-scoped selection key persisted for new
 /// defaults, chat overrides, and turn receipts.
 pub const MODEL_KEY_SEPARATOR: &str = "::";
@@ -59,8 +91,12 @@ pub struct ModelSpec {
     pub input_modalities: &'static [InputModality],
     /// Whether the model can produce an internal reasoning stream.
     pub supports_reasoning: bool,
-    /// Whether callers can choose a reasoning-effort level.
-    pub supports_reasoning_effort: bool,
+    /// The reasoning-effort levels this model accepts, ascending.
+    ///
+    /// A single flag cannot describe the range: a model may take `high` and
+    /// reject `xhigh`, or take `xhigh` and reject `max`. Empty means the model
+    /// exposes no effort control, and the parameter is left off its requests.
+    pub reasoning_efforts: &'static [ReasoningEffort],
 }
 
 impl ModelSpec {
@@ -68,6 +104,12 @@ impl ModelSpec {
     #[cfg(test)]
     pub fn accepts(&self, modality: InputModality) -> bool {
         self.input_modalities.contains(&modality)
+    }
+
+    /// Whether callers can choose a reasoning-effort level at all.
+    #[cfg(test)]
+    pub const fn supports_reasoning_effort(&self) -> bool {
+        !self.reasoning_efforts.is_empty()
     }
 }
 
@@ -87,8 +129,10 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
         // Claude 4.6 and later reason on an adaptive thinking block, and the
-        // Anthropic adapter sends one along with the chat's chosen effort.
-        supports_reasoning_effort: true,
+        // Anthropic adapter sends one along with the chat's chosen effort. That
+        // generation onward takes `low` through `max`; there is no `none`,
+        // because a model on the adaptive block always reasons.
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
         id: "claude-sonnet-5",
@@ -98,7 +142,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: true,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
         id: "claude-haiku-4-5-20251001",
@@ -110,7 +154,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_reasoning: true,
         // Haiku 4.5 predates the adaptive switch: it rejects the effort
         // control, so the adapter leaves both off and the picker hides it.
-        supports_reasoning_effort: false,
+        reasoning_efforts: EFFORT_UNSUPPORTED,
     },
     ModelSpec {
         id: "claude-opus-4-8",
@@ -120,7 +164,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: true,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
         id: "claude-opus-4-7",
@@ -130,7 +174,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: true,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
         id: "claude-opus-4-6",
@@ -140,7 +184,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: true,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
         id: "claude-sonnet-4-6",
@@ -150,7 +194,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: true,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
         id: "gpt-5.6-sol",
@@ -162,8 +206,8 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_reasoning: true,
         // The whole GPT-5 line reasons on a caller-selected effort, which the
         // OpenAI-compatible adapter already sends alongside
-        // `max_completion_tokens`.
-        supports_reasoning_effort: true,
+        // `max_completion_tokens`. Only the 5.6 generation added `max`.
+        reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
     ModelSpec {
         id: "gpt-5.6-terra",
@@ -173,7 +217,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: true,
+        reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
     ModelSpec {
         id: "gpt-5.6-luna",
@@ -183,7 +227,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: true,
+        reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
     ModelSpec {
         id: "gpt-5.5",
@@ -193,7 +237,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: true,
+        reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
     ModelSpec {
         id: "gpt-5.4-mini",
@@ -203,7 +247,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: true,
+        reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
     ModelSpec {
         id: "gpt-5.4-nano",
@@ -213,7 +257,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        supports_reasoning_effort: true,
+        reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
 ];
 
@@ -354,8 +398,15 @@ mod tests {
                 spec.id
             );
             assert!(
-                !spec.supports_reasoning_effort || spec.supports_reasoning,
+                !spec.supports_reasoning_effort() || spec.supports_reasoning,
                 "{} exposes reasoning effort without reasoning",
+                spec.id
+            );
+            assert!(
+                spec.reasoning_efforts
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1]),
+                "{} lists reasoning-effort levels out of order or with duplicates",
                 spec.id
             );
         }
@@ -389,7 +440,7 @@ mod tests {
         assert_eq!(sonnet.context_window, 1_000_000);
         assert_eq!(sonnet.max_output_tokens, 128_000);
         assert!(sonnet.supports_reasoning);
-        assert!(sonnet.supports_reasoning_effort);
+        assert_eq!(sonnet.reasoning_efforts, EFFORT_LOW_TO_MAX);
 
         // Haiku 4.5 predates the adaptive thinking switch and rejects the
         // effort control, so it is the one Anthropic row without it.
@@ -397,7 +448,26 @@ mod tests {
         assert_eq!(haiku.context_window, 200_000);
         assert_eq!(haiku.max_output_tokens, 64_000);
         assert!(haiku.supports_reasoning);
-        assert!(!haiku.supports_reasoning_effort);
+        assert!(!haiku.supports_reasoning_effort());
+        assert!(haiku.reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn every_anthropic_entry_that_takes_an_effort_takes_xhigh_and_refuses_none() {
+        for spec in
+            models_for(ProviderKind::Anthropic).filter(|spec| spec.supports_reasoning_effort())
+        {
+            assert!(
+                spec.reasoning_efforts.contains(&ReasoningEffort::XHigh),
+                "{} omits the level recommended for coding and agentic work",
+                spec.id
+            );
+            assert!(
+                !spec.reasoning_efforts.contains(&ReasoningEffort::None),
+                "{} offers an OpenAI-only level the Anthropic route rejects",
+                spec.id
+            );
+        }
     }
 
     #[test]
@@ -406,8 +476,13 @@ mod tests {
         assert!(!openai.is_empty());
         for spec in openai {
             assert!(
-                spec.supports_reasoning && spec.supports_reasoning_effort,
+                spec.supports_reasoning && spec.supports_reasoning_effort(),
                 "{} is curated on the OpenAI route without the reasoning shape that route sends",
+                spec.id
+            );
+            assert!(
+                spec.reasoning_efforts.contains(&ReasoningEffort::None),
+                "{} drops the level that turns GPT-5 reasoning off",
                 spec.id
             );
             assert_eq!(
@@ -416,6 +491,24 @@ mod tests {
                 spec.id
             );
         }
+        // `max` arrived with the 5.6 generation; the rows behind it stop at
+        // `xhigh` and would reject it.
+        assert_eq!(
+            find("gpt-5.6-sol").unwrap().reasoning_efforts,
+            EFFORT_NONE_TO_MAX
+        );
+        assert_eq!(
+            find("gpt-5.5").unwrap().reasoning_efforts,
+            EFFORT_NONE_TO_XHIGH
+        );
+        assert_eq!(
+            find("gpt-5.4-mini").unwrap().reasoning_efforts,
+            EFFORT_NONE_TO_XHIGH
+        );
+        assert_eq!(
+            find("gpt-5.4-nano").unwrap().reasoning_efforts,
+            EFFORT_NONE_TO_XHIGH
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ import {
   ProviderIcon,
   ReasoningEffortMenu,
   formatContextWindow,
+  reasoningEffortOptions,
 } from "./ModelMenu";
 import type { ModelInfo } from "./api";
 
@@ -19,7 +20,7 @@ const MODELS: ModelInfo[] = [
     max_output_tokens: 64_000,
     input_modalities: ["text", "image"],
     supports_reasoning: true,
-    supports_reasoning_effort: true,
+    reasoning_efforts: ["low", "medium", "high", "xhigh", "max"],
     multimodal: true,
     available: true,
   },
@@ -32,7 +33,7 @@ const MODELS: ModelInfo[] = [
     max_output_tokens: 16_384,
     input_modalities: ["text", "image"],
     supports_reasoning: false,
-    supports_reasoning_effort: false,
+    reasoning_efforts: [],
     multimodal: true,
     available: true,
   },
@@ -126,10 +127,43 @@ describe("ModelCapabilities", () => {
   });
 });
 
+describe("reasoningEffortOptions", () => {
+  it("offers exactly the levels the model accepts, in scale order", () => {
+    expect(
+      reasoningEffortOptions(["high", "low", "xhigh", "medium", "max"]).map(
+        (option) => option.value,
+      ),
+    ).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    // The GPT-5 line adds an off level; generations before 5.6 stop at xhigh.
+    expect(
+      reasoningEffortOptions(["none", "low", "medium", "high", "xhigh"]).map(
+        (option) => option.value,
+      ),
+    ).toEqual(["none", "low", "medium", "high", "xhigh"]);
+    expect(reasoningEffortOptions([])).toEqual([]);
+  });
+
+  it("drops a level this build cannot label", () => {
+    expect(
+      reasoningEffortOptions([
+        "low",
+        "ultra" as never,
+        "max",
+      ]).map((option) => option.value),
+    ).toEqual(["low", "max"]);
+  });
+
+  it("labels the off level as Off, distinct from the menu's Default entry", () => {
+    expect(reasoningEffortOptions(["none"])[0].label).toBe("Off");
+  });
+});
+
 describe("ReasoningEffortMenu", () => {
+  const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+
   it("labels the trigger 'Default' when no effort is set", () => {
     const markup = renderToStaticMarkup(
-      <ReasoningEffortMenu value={null} onChange={() => {}} />,
+      <ReasoningEffortMenu levels={LEVELS} value={null} onChange={() => {}} />,
     );
     expect(markup).toContain('aria-label="Reasoning effort: Default"');
     expect(markup).toContain(">Default<");
@@ -137,15 +171,38 @@ describe("ReasoningEffortMenu", () => {
 
   it("labels the trigger with the selected effort level", () => {
     const markup = renderToStaticMarkup(
-      <ReasoningEffortMenu value="high" onChange={() => {}} />,
+      <ReasoningEffortMenu levels={LEVELS} value="high" onChange={() => {}} />,
     );
     expect(markup).toContain('aria-label="Reasoning effort: High"');
     expect(markup).toContain(">High<");
   });
 
+  it("labels a level above high without falling back to its wire token", () => {
+    const markup = renderToStaticMarkup(
+      <ReasoningEffortMenu levels={LEVELS} value="xhigh" onChange={() => {}} />,
+    );
+    expect(markup).toContain('aria-label="Reasoning effort: Extra High"');
+  });
+
+  it("still labels a stored level the current model no longer accepts", () => {
+    const markup = renderToStaticMarkup(
+      <ReasoningEffortMenu
+        levels={["none", "low", "medium", "high", "xhigh"]}
+        value="max"
+        onChange={() => {}}
+      />,
+    );
+    expect(markup).toContain('aria-label="Reasoning effort: Max"');
+  });
+
   it("disables the trigger when asked", () => {
     const markup = renderToStaticMarkup(
-      <ReasoningEffortMenu value={null} disabled onChange={() => {}} />,
+      <ReasoningEffortMenu
+        levels={LEVELS}
+        value={null}
+        disabled
+        onChange={() => {}}
+      />,
     );
     expect(markup).toContain("disabled");
   });
