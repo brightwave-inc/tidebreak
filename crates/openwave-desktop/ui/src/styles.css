@@ -596,19 +596,48 @@ body {
   cursor: not-allowed;
 }
 
-/* ---------- Main content (floating card) ---------- */
+/* ---------- Routed content ---------- */
 
+/* The card treatment moved onto the panel group itself (`.content-container`),
+   so this is only the box the routes are laid out in. */
 .main {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   flex: 1 1 auto;
   min-height: 0;
-  margin: 0.5rem;
-  margin-left: 0;
-  border: 1px solid var(--line);
-  border-radius: 0.5rem;
-  background: var(--bg-elevated);
+  min-width: 0;
   overflow: hidden;
+}
+
+.routed-surface {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.routed-surface[hidden] {
+  display: none;
+}
+
+/* Panel widths are driven from the URL, so they animate to their new share
+   rather than snapping — except while dragging, where any easing reads as lag. */
+.panel-animated {
+  transition: flex-grow 400ms cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+[data-dragging="true"] .panel-animated {
+  transition: none;
+}
+
+.routed-surface-loading {
+  flex: 1 1 auto;
+}
+
+.sidebar-panel-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .chat-workspace {

@@ -9,6 +9,12 @@ import type { Chat } from "./api";
  */
 export type ChatListStore = {
   chats: Chat[];
+  /**
+   * Whether the list has been fetched. An empty list means something different
+   * before and after the first load — "no chats yet, make one" versus "not
+   * asked yet" — and the home route has to tell them apart.
+   */
+  chatsLoaded: boolean;
   /** The selected chat; `null` only before the first chat resolves at boot. */
   selected: Chat | null;
   chatsError: string | null;
@@ -34,6 +40,7 @@ export type ChatListStore = {
 export function createChatListStore() {
   return create<ChatListStore>()((set) => ({
     chats: [],
+    chatsLoaded: false,
     selected: null,
     chatsError: null,
     creatingChat: false,
@@ -41,7 +48,7 @@ export function createChatListStore() {
     renamingChatId: null,
     renameChatDraft: "",
     savingTitle: false,
-    setChats: (chats) => set({ chats }),
+    setChats: (chats) => set({ chats, chatsLoaded: true }),
     setSelected: (selected) => set({ selected }),
     replaceChat: (chat) =>
       set((state) => ({

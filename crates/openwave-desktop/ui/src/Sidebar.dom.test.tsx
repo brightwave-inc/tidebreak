@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Chat } from "./api";
 import { useChatListStore, type ChatListStore } from "./ChatListStore";
 import { Sidebar, type SidebarProps } from "./Sidebar";
+import { renderWithRouter } from "./test/router";
 import { useUiStore } from "./UiStore";
 
 const chats: Chat[] = [
@@ -24,17 +25,16 @@ function seedStores(overrides: Partial<ChatListStore> = {}) {
     savingTitle: false,
     ...overrides,
   });
-  useUiStore.getState().showChat();
+  useUiStore.setState({ settingsOpen: false });
 }
 
-function renderSidebar(overrides: Partial<SidebarProps> = {}) {
+async function renderSidebar(overrides: Partial<SidebarProps> = {}) {
   const props: SidebarProps = {
     themeMode: "light",
     updateReady: false,
     updateVersion: null,
     onCycleTheme: vi.fn(),
     onNewChat: vi.fn(),
-    onSelectChat: vi.fn(),
     onStartRename: vi.fn(),
     onCommitRename: vi.fn(),
     onCancelRename: vi.fn(),
@@ -42,8 +42,8 @@ function renderSidebar(overrides: Partial<SidebarProps> = {}) {
     onRestartForUpdate: vi.fn(),
     ...overrides,
   };
-  render(<Sidebar {...props} />);
-  return props;
+  const { router } = await renderWithRouter(<Sidebar {...props} />);
+  return { props, router };
 }
 
 beforeEach(() => seedStores());
@@ -52,19 +52,19 @@ afterEach(cleanup);
 describe("Sidebar", () => {
   it("lists chats from the store with the active one marked", async () => {
     const user = userEvent.setup();
-    const props = renderSidebar();
+    const { props, router } = await renderSidebar();
     const active = screen.getByRole("button", { name: "Roadmap" });
     expect(active).toHaveAttribute("aria-current", "page");
 
     await user.click(active);
-    expect(props.onSelectChat).toHaveBeenCalledWith(chats[0]);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
     expect(props.onNewChat).not.toHaveBeenCalled();
   });
 
   it("drives the rename flow: draft edits hit the store, commit and cancel the owner", async () => {
     const user = userEvent.setup();
     seedStores({ renamingChatId: "chat-1", renameChatDraft: "Roadmap" });
-    const props = renderSidebar();
+    const { props } = await renderSidebar();
     const input = screen.getByRole("textbox", { name: "Chat title" });
     await user.type(input, "!");
     expect(useChatListStore.getState().renameChatDraft).toBe("Roadmap!");
@@ -77,15 +77,15 @@ describe("Sidebar", () => {
     expect(props.onCancelRename).toHaveBeenCalled();
   });
 
-  it("disables chat interaction while a mutation is in flight", () => {
+  it("disables chat interaction while a mutation is in flight", async () => {
     seedStores({ deletingChatId: "chat-2" });
-    renderSidebar();
+    await renderSidebar();
     expect(screen.getByRole("button", { name: "Roadmap" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Deleting…" })).toBeDisabled();
   });
 
-  it("re-renders when the store's chat list changes", () => {
-    renderSidebar();
+  it("re-renders when the store's chat list changes", async () => {
+    await renderSidebar();
     expect(screen.queryByText("Retro notes")).not.toBeInTheDocument();
     act(() => {
       useChatListStore
@@ -99,26 +99,51 @@ describe("Sidebar", () => {
     expect(screen.getByText("Retro notes")).toBeInTheDocument();
   });
 
-  it("keeps chat-scoped sources, outputs, and folders out of the sidebar", () => {
-    renderSidebar();
-    expect(screen.queryByText("Sources")).not.toBeInTheDocument();
-    expect(screen.queryByText("Outputs")).not.toBeInTheDocument();
-    expect(screen.queryByText("Folders")).not.toBeInTheDocument();
-  });
-
-  it("navigates to settings through the UI store", async () => {
+  it("opens a workspace panel by writing it into the URL", async () => {
     const user = userEvent.setup();
-    renderSidebar();
-    await user.click(screen.getByText("Settings"));
-    expect(useUiStore.getState().surface).toEqual({ kind: "settings" });
+    const { router } = await renderSidebar();
+
+    await user.click(screen.getByRole("button", { name: "Sources" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ left: "sources", right: "chat" }),
+    );
+
+    // Opening a second navigation panel replaces the first rather than
+    // stacking it, because both belong on the same side.
+    await user.click(screen.getByRole("button", { name: "Outputs" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ left: "outputs", right: "chat" }),
+    );
   });
 
-  it("shows update affordances only when an update is ready", () => {
-    renderSidebar();
+  it("marks the panel the workspace is showing", async () => {
+    const user = userEvent.setup();
+    await renderSidebar();
+    const sources = screen.getByRole("button", { name: "Sources" });
+    expect(sources).not.toHaveAttribute("aria-current");
+
+    await user.click(sources);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Sources" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      ),
+    );
+  });
+
+  it("opens settings over the workspace", async () => {
+    const user = userEvent.setup();
+    await renderSidebar();
+    await user.click(screen.getByText("Settings"));
+    expect(useUiStore.getState().settingsOpen).toBe(true);
+  });
+
+  it("shows update affordances only when an update is ready", async () => {
+    await renderSidebar();
     expect(screen.queryByText("Restart to update")).not.toBeInTheDocument();
     cleanup();
 
-    renderSidebar({ updateReady: true, updateVersion: "1.2.3" });
+    await renderSidebar({ updateReady: true, updateVersion: "1.2.3" });
     expect(screen.getByText("Restart to update")).toBeInTheDocument();
     expect(screen.getByText("v1.2.3")).toBeInTheDocument();
   });

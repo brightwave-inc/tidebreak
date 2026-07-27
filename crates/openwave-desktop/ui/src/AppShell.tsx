@@ -1,0 +1,311 @@
+import { useEffect, useRef, useState } from "react";
+import { Outlet, useNavigate } from "@tanstack/react-router";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+
+import {
+  ApiClient,
+  type Chat,
+  type ModelInfo,
+  type ProviderInfo,
+  type ServerInfo,
+} from "./api";
+import { AppContextProvider } from "./AppContext";
+import { resolveServerInfo } from "./boot";
+import { prependReplacementChat } from "./ChatDeletion";
+import { useChatListStore } from "./ChatListStore";
+import { useConfirm } from "./components/ConfirmDialog";
+import { hasMacOverlayTitlebar } from "./host";
+import { Logomark } from "./Logomark";
+import { SettingsView } from "./SettingsView";
+import { Sidebar } from "./Sidebar";
+import { useTheme } from "./theme";
+import { useUiStore } from "./UiStore";
+import { useDesktopUpdates } from "./updates";
+
+// Store actions are stable for the store's lifetime; these handles are for
+// calling actions only — never read state fields from them.
+const chatListActions = useChatListStore.getState();
+
+/**
+ * The frame every route hangs in: the titlebar, the sidebar, and the connection
+ * to the local server.
+ *
+ * Everything here outlives a conversation. Anything scoped to one — its
+ * transcript, its socket, its composer — belongs to the chat route, which is
+ * remounted per chat and so cannot carry state across a switch.
+ */
+export function AppShell() {
+  const navigate = useNavigate();
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [info, setInfo] = useState<ServerInfo | null>(null);
+  const [client, setClient] = useState<ApiClient | null>(null);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [status, setStatus] = useState("starting…");
+  const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
+  const settingsOpen = useUiStore((state) => state.settingsOpen);
+  const savingTitle = useChatListStore((state) => state.savingTitle);
+  const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
+  const skipRenameCommitRef = useRef(false);
+  const creationInFlightRef = useRef(false);
+  const deletionInFlightRef = useRef(false);
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const { mode: themeMode, cycle: cycleTheme, setMode: setThemeMode } = useTheme();
+  const desktopUpdates = useDesktopUpdates();
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const server = await resolveServerInfo();
+        if (cancelled) return;
+        setInfo(server);
+        setClient(new ApiClient(server.baseUrl, server.token));
+        setStatus(`connected ${server.baseUrl}`);
+      } catch (err) {
+        if (!cancelled) setBootError(String(err));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!client || !info) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [catalog, providerList, existingChats] = await Promise.all([
+          client.listModels(),
+          client.listProviders(),
+          client.listChats(),
+        ]);
+        if (cancelled) return;
+        setModels(catalog.models);
+        setProviders(providerList.providers);
+        chatListActions.setChats(existingChats);
+      } catch (err) {
+        if (!cancelled) setBootError(String(err));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, info]);
+
+  async function refreshCatalog() {
+    if (!client) return;
+    const [catalog, providerList] = await Promise.all([
+      client.listModels(),
+      client.listProviders(),
+    ]);
+    setModels(catalog.models);
+    setProviders(providerList.providers);
+  }
+
+  async function onNewChat() {
+    if (!client || creationInFlightRef.current || deletionInFlightRef.current) return;
+    creationInFlightRef.current = true;
+    chatListActions.setCreatingChat(true);
+    try {
+      const created = await client.createChat();
+      chatListActions.prependChat(created);
+      chatListActions.setChatsError(null);
+      await navigate({ to: "/c/$chatId", params: { chatId: created.id } });
+    } catch (err) {
+      chatListActions.setChatsError(`Could not create a chat: ${String(err)}`);
+    } finally {
+      creationInFlightRef.current = false;
+      chatListActions.setCreatingChat(false);
+    }
+  }
+
+  async function onDeleteChat(target: Chat) {
+    if (!client || deletionInFlightRef.current || creationInFlightRef.current) return;
+    const label = target.title?.trim() || "this chat";
+    const confirmed = await confirm({
+      title: `Delete ${label}?`,
+      description: "This cannot be undone.",
+      confirmLabel: "Delete chat",
+      destructive: true,
+    });
+    if (!confirmed) return;
+
+    deletionInFlightRef.current = true;
+    chatListActions.setDeletingChatId(target.id);
+    chatListActions.setChatsError(null);
+    const deletingOpenChat = useChatListStore.getState().selected?.id === target.id;
+    try {
+      await client.deleteChat(target.id);
+      let refreshed = await client.listChats();
+      if (!deletingOpenChat) {
+        chatListActions.setChats(refreshed);
+        return;
+      }
+      let next: Chat | undefined = refreshed[0];
+      if (!next) {
+        next = await client.createChat();
+        refreshed = prependReplacementChat(refreshed, next);
+      }
+      chatListActions.setChats(refreshed);
+      await navigate({ to: "/c/$chatId", params: { chatId: next.id } });
+    } catch (err) {
+      chatListActions.setChatsError(`Could not delete chat: ${String(err)}`);
+    } finally {
+      deletionInFlightRef.current = false;
+      chatListActions.setDeletingChatId(null);
+    }
+  }
+
+  function startChatRename(target: Chat) {
+    skipRenameCommitRef.current = false;
+    chatListActions.beginRename(target);
+  }
+
+  function cancelChatRename() {
+    skipRenameCommitRef.current = true;
+    chatListActions.endRename();
+  }
+
+  async function commitChatRename(target: Chat) {
+    // A single rename resolves through the input's blur; Enter blurs the field
+    // and Escape sets the skip flag before blurring, so the blur that follows
+    // must not also patch.
+    if (skipRenameCommitRef.current) {
+      skipRenameCommitRef.current = false;
+      return;
+    }
+    if (!client || savingTitle || deletionInFlightRef.current) return;
+    const trimmed = renameChatDraft.trim();
+    if (trimmed === (target.title?.trim() ?? "")) {
+      chatListActions.endRename();
+      return;
+    }
+    chatListActions.setSavingTitle(true);
+    try {
+      const updated = await client.patchChatTitle(target.id, trimmed || null);
+      chatListActions.replaceChat(updated);
+      chatListActions.endRename();
+    } catch (err) {
+      chatListActions.setChatsError(`Could not rename chat: ${String(err)}`);
+    } finally {
+      chatListActions.setSavingTitle(false);
+    }
+  }
+
+  async function onRestartForUpdate() {
+    const version = desktopUpdates.state.version;
+    const confirmed = await confirm({
+      title: "Restart OpenWave to update?",
+      description: `${version ? `Version ${version}` : "The update"} is ready. OpenWave will close and reopen. Wait for active work to finish before restarting.`,
+      confirmLabel: "Restart and update",
+    });
+    if (confirmed) await desktopUpdates.restart();
+  }
+
+  if (bootError) {
+    return (
+      <div className="boot">
+        <div className="boot-brand">
+          <Logomark />
+          <h1>OpenWave</h1>
+        </div>
+        <p>{bootError}</p>
+      </div>
+    );
+  }
+
+  if (!client) {
+    return (
+      <div className="boot">
+        <div className="boot-brand">
+          <Logomark />
+          <h1>OpenWave</h1>
+        </div>
+        <p>{status}</p>
+      </div>
+    );
+  }
+
+  return (
+    <AppContextProvider
+      value={{ client, models, providers, refreshCatalog, status, setStatus }}
+    >
+      <div
+        className={`app-shell${hasMacOverlayTitlebar() ? " with-titlebar" : ""}${
+          sidebarCollapsed ? " sidebar-collapsed" : ""
+        }`}
+      >
+        {confirmDialog}
+        {hasMacOverlayTitlebar() && (
+          <div className="titlebar" data-tauri-drag-region>
+            <button
+              type="button"
+              className="titlebar-panel-toggle"
+              aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+              title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+              onClick={() => useUiStore.getState().toggleSidebar()}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+            </button>
+          </div>
+        )}
+        <div className="app-body">
+          {!hasMacOverlayTitlebar() && sidebarCollapsed && (
+            <button
+              type="button"
+              className="sidebar-expand"
+              aria-label="Show sidebar"
+              title="Show sidebar"
+              onClick={() => useUiStore.getState().toggleSidebar()}
+            >
+              <PanelLeftOpen size={15} />
+            </button>
+          )}
+          {!sidebarCollapsed && (
+            <Sidebar
+              collapseControl={!hasMacOverlayTitlebar()}
+              themeMode={themeMode}
+              updateReady={desktopUpdates.state.status === "ready"}
+              updateVersion={desktopUpdates.state.version ?? null}
+              onCycleTheme={cycleTheme}
+              onNewChat={() => void onNewChat()}
+              onStartRename={startChatRename}
+              onCommitRename={(target) => void commitChatRename(target)}
+              onCancelRename={cancelChatRename}
+              onDeleteChat={(target) => void onDeleteChat(target)}
+              onRestartForUpdate={() => void onRestartForUpdate()}
+            />
+          )}
+          <div className="main">
+            {/*
+              Settings is chrome rather than a place, so it is an overlay here
+              instead of a route. A route would unmount the conversation
+              underneath, and the pollers for its pending approvals and
+              questions live there — someone who steps into Settings should
+              still be told when the agent asks them something.
+            */}
+            {settingsOpen && (
+              <SettingsView
+                client={client}
+                models={models}
+                providers={providers}
+                onProvidersChanged={() => void refreshCatalog()}
+                onBack={() => useUiStore.getState().closeSettings()}
+                themeMode={themeMode}
+                onThemeChange={setThemeMode}
+                updateState={desktopUpdates.state}
+                onCheckForUpdate={desktopUpdates.check}
+                onRestartForUpdate={onRestartForUpdate}
+              />
+            )}
+            <div className="routed-surface" hidden={settingsOpen}>
+              <Outlet />
+            </div>
+          </div>
+        </div>
+      </div>
+    </AppContextProvider>
+  );
+}
