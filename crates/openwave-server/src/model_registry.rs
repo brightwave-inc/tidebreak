@@ -61,12 +61,12 @@ impl ModelSpec {
 }
 
 /// Curated models in picker display order: each provider's current generation
-/// first, then the previous generations a chat can pin when the newest one
+/// first, then the earlier generations a chat can pin when the newest one
 /// regresses on its workload.
 const MODEL_REGISTRY: &[ModelSpec] = &[
     ModelSpec {
-        id: "claude-opus-4-8",
-        display_name: "Claude Opus 4.8",
+        id: "claude-opus-5",
+        display_name: "Claude Opus 5",
         provider: ProviderKind::Anthropic,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
@@ -95,6 +95,16 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Anthropic,
         context_window: 200_000,
         max_output_tokens: 64_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        supports_reasoning_effort: false,
+    },
+    ModelSpec {
+        id: "claude-opus-4-8",
+        display_name: "Claude Opus 4.8",
+        provider: ProviderKind::Anthropic,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
         supports_reasoning_effort: false,
@@ -343,9 +353,21 @@ mod tests {
         for &provider in ProviderKind::ALL {
             assert!(models_for(provider).all(|spec| spec.provider == provider));
         }
-        assert_eq!(models_for(ProviderKind::Anthropic).count(), 6);
+        assert_eq!(models_for(ProviderKind::Anthropic).count(), 7);
         assert_eq!(models_for(ProviderKind::Openai).count(), 6);
         assert_eq!(models_for(ProviderKind::OpenaiCompatible).count(), 0);
+    }
+
+    #[test]
+    fn the_built_in_default_is_the_first_curated_row_of_its_provider() {
+        let spec = find(crate::DEFAULT_MODEL).expect("the default model must be curated");
+        assert_eq!(spec.provider, ProviderKind::Anthropic);
+        // The default has to be the current generation, not a pin that happened
+        // to be current when it was written down.
+        assert_eq!(
+            models_for(ProviderKind::Anthropic).next().map(|s| s.id),
+            Some(crate::DEFAULT_MODEL),
+        );
     }
 
     #[test]
