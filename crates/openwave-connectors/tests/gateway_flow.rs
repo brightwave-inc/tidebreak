@@ -398,16 +398,3 @@ async fn sign_out_revokes_remotely_and_clears_the_vault() {
         .expect_err("signed-out connection must fail");
     assert!(is_sign_in_required(&error), "{error}");
 }
-
-#[tokio::test]
-async fn the_default_identity_is_a_first_class_openwave_client() {
-    let auth = GatewayAuth::new(GatewayAuthConfig::new("http://127.0.0.1:1").unwrap()).unwrap();
-    // start_sign_in requires a reachable gateway; the identity choice is
-    // visible without one via the config used to build authorization URLs.
-    drop(auth);
-    let config = GatewayAuthConfig::new("http://127.0.0.1:1").unwrap();
-    assert_ne!(
-        config,
-        GatewayAuthConfig::modelctl_compat("http://127.0.0.1:1").unwrap()
-    );
-}

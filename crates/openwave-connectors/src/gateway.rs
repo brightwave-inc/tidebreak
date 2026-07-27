@@ -39,11 +39,11 @@ const SIGN_IN_REQUIRED_PREFIX: &str = "gateway sign-in required";
 /// should surface a reconnect affordance instead of treating this as a fault.
 #[must_use]
 pub fn is_sign_in_required(error: &AgentError) -> bool {
-    error.to_string().contains(SIGN_IN_REQUIRED_PREFIX)
+    matches!(error, AgentError::Authentication(_))
 }
 
 fn sign_in_required(detail: &str) -> AgentError {
-    AgentError::config(format!("{SIGN_IN_REQUIRED_PREFIX}: {detail}"))
+    AgentError::Authentication(format!("{SIGN_IN_REQUIRED_PREFIX}: {detail}"))
 }
 
 fn gateway_error(context: &str, detail: impl std::fmt::Display) -> AgentError {
@@ -430,9 +430,14 @@ impl GatewayAuth {
     }
 
     fn endpoint(&self, path: &str) -> Result<reqwest::Url> {
-        self.config
-            .base_url
-            .join(path)
+        // Join below the configured base rather than at its origin, so a
+        // gateway deployed under a subpath keeps its prefix.
+        let mut base = self.config.base_url.to_string();
+        if !base.ends_with('/') {
+            base.push('/');
+        }
+        reqwest::Url::parse(&base)
+            .and_then(|base| base.join(path.trim_start_matches('/')))
             .map_err(|_| gateway_error("configuration", "could not build endpoint URL"))
     }
 }
@@ -530,9 +535,14 @@ impl PendingSignIn {
     }
 }
 
-/// A signed-in gateway connection: vault-backed, refresh-rotating, and safe
-/// to share. All token motion is serialized so refresh rotation can never
-/// race itself into the gateway's reuse detection.
+/// A signed-in gateway connection: vault-backed and refresh-rotating.
+///
+/// Share the *instance*: token motion is serialized per connection, so one
+/// shared `GatewayConnection` can never race itself into the gateway's
+/// reuse detection — but two instances (or two processes) over the same
+/// keychain entry can. A crash between a successful refresh and the vault
+/// write loses the rotated token, which reads as signed-out on the next
+/// call; that window is inherent to rotation and recovers via reconnect.
 pub struct GatewayConnection {
     auth: GatewayAuth,
     vault: CredentialVault,
