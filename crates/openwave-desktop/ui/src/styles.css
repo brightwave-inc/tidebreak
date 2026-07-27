@@ -53,6 +53,19 @@
 
   --radius: 0.5rem;
 
+  /* The app chrome is the page background; every content region is a card
+     floating on it, inset on three sides and flush against the sidebar. These
+     drive both the inset and the layout maths that has to subtract it. */
+  --container-margin: 0.5rem;
+  --container-border: 1px;
+  --container-offset: calc(var(--container-margin) * 2 + var(--container-border) * 2);
+
+  /* Sidebar rail: a fixed 224px until the window is wide enough to spend more. */
+  --sidebar-compact-flex: 0 0 calc(var(--spacing) * 14);
+  --sidebar-expanded-min: calc(var(--spacing) * 56);
+  --sidebar-expanded-max: calc(var(--spacing) * 80);
+  --sidebar-expanded-flex: 0 0 var(--sidebar-expanded-min);
+
   --shadow-sm: 0 0px 8px 0px oklch(0 0 0 / 0.06);
   --shadow: 0 0px 8px 0px oklch(0 0 0 / 0.07);
   --shadow-lg: 0 0px 12px 0px oklch(0 0 0 / 0.07);
@@ -200,6 +213,15 @@
   --shadow-2xl: var(--shadow-lg);
 }
 
+/* Above 1600px the sidebar is allowed to grow with the window rather than
+   leaving an increasingly wide gutter beside a fixed rail. */
+@media (min-width: 1600px) {
+  :root {
+    --sidebar-expanded-flex: 0 1
+      clamp(var(--sidebar-expanded-min), 15%, var(--sidebar-expanded-max));
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -255,6 +277,17 @@ body {
    definitions (`:root`, `.dark`, `@theme inline`) and element resets stay
    unlayered/in `base` on purpose. */
 @layer components {
+
+/* Every content region of the app is this: a bordered card on the page
+   background, inset on three sides and flush left against the sidebar, so the
+   sidebar reads as chrome and the card reads as the thing you are working in. */
+.content-container {
+  margin: var(--container-margin);
+  margin-left: 0;
+  border: var(--container-border) solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-background);
+}
 
 /* ---------- App shell ---------- */
 
