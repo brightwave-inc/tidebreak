@@ -16,7 +16,7 @@ const models: ModelInfo[] = [
     max_output_tokens: 128_000,
     input_modalities: ["text"],
     supports_reasoning: true,
-    supports_reasoning_effort: false,
+    reasoning_efforts: [],
     multimodal: false,
   },
   {
@@ -29,7 +29,7 @@ const models: ModelInfo[] = [
     max_output_tokens: 16_384,
     input_modalities: ["text"],
     supports_reasoning: false,
-    supports_reasoning_effort: false,
+    reasoning_efforts: [],
     multimodal: false,
   },
 ];

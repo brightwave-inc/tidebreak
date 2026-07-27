@@ -452,6 +452,61 @@ async fn set_chat_model_updates_then_clears() {
 }
 
 #[tokio::test]
+async fn chats_stored_before_the_effort_scale_widened_still_load() {
+    let (_dir, store) = temp_store().await;
+    // Written the way a release before `none`/`xhigh`/`max` existed wrote them:
+    // straight into the column, with no chance to migrate the token.
+    for (stored, expected) in [
+        ("low", Some(ReasoningEffort::Low)),
+        ("medium", Some(ReasoningEffort::Medium)),
+        ("high", Some(ReasoningEffort::High)),
+        // A token this build does not recognize is dropped, not fatal — the
+        // chat still opens on the provider default.
+        ("aggressive", None),
+    ] {
+        let chat = sample_chat();
+        entities::chat::ActiveModel {
+            id: Set(chat.id.0),
+            project_id: Set(None),
+            title: Set(chat.title.clone()),
+            model: Set(None),
+            reasoning_effort: Set(Some(stored.to_owned())),
+            attachment_revision: Set(0),
+            created_at: Set(chat.created_at),
+        }
+        .insert(&store.conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .get_chat(chat.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .reasoning_effort,
+            expected,
+            "stored effort {stored} no longer loads"
+        );
+    }
+
+    // Every level this build can write reads back as itself.
+    for effort in ReasoningEffort::ALL {
+        let mut chat = sample_chat();
+        chat.reasoning_effort = Some(*effort);
+        store.create_chat(&chat).await.unwrap();
+        assert_eq!(
+            store
+                .get_chat(chat.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .reasoning_effort,
+            Some(*effort)
+        );
+    }
+}
+
+#[tokio::test]
 async fn list_projects_is_newest_first() {
     let (_dir, store) = temp_store().await;
     let mut older = sample_project();

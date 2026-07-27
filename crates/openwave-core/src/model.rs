@@ -1104,28 +1104,63 @@ pub enum Role {
 
 /// How hard a reasoning-capable model should think before answering.
 ///
-/// A hint honored only by providers whose models expose it (OpenAI's o-series);
-/// other providers ignore it. Persisted per chat and threaded into the model
-/// request for each turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+/// The scale runs from [`Self::None`] to [`Self::Max`] and the ordering is the
+/// scale itself, not an implementation detail: comparisons and
+/// [`Self::clamp_to`] rely on it.
+///
+/// No model accepts the whole scale. `none` is an OpenAI level that the Claude
+/// family rejects, `max` is missing from several rows on both routes, and some
+/// models take no effort control at all. A model's accepted levels live on its
+/// registry entry; a stored choice is mapped onto them with [`Self::clamp_to`]
+/// before a request is built.
+///
+/// Persisted per chat as the token from [`Self::as_str`] and threaded into the
+/// model request for each turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
+    /// Answer without spending reasoning tokens at all.
+    ///
+    /// Distinct from an absent override, which leaves the provider's own
+    /// default in force.
+    None,
     /// Minimize reasoning tokens for the fastest, cheapest response.
     Low,
     /// The provider's balanced default.
     Medium,
     /// Spend more reasoning tokens for harder problems.
     High,
+    /// Above `High`: the level recommended for coding and agentic work.
+    #[serde(rename = "xhigh")]
+    XHigh,
+    /// The most reasoning a model will do, at the highest latency and cost.
+    Max,
 }
 
 impl ReasoningEffort {
+    /// Every level, in ascending order.
+    pub const ALL: &'static [Self] = &[
+        Self::None,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
     /// The wire/storage token for this effort level.
+    ///
+    /// Providers spell the level above `high` as one word, so this is not the
+    /// `snake_case` rendering of the variant name.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::None => "none",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -1136,12 +1171,32 @@ impl ReasoningEffort {
     #[must_use]
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "low" => Some(Self::Low),
-            "medium" => Some(Self::Medium),
-            "high" => Some(Self::High),
-            _ => None,
-        }
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|level| level.as_str() == value)
+    }
+
+    /// The level to actually send to a model that accepts only `supported`.
+    ///
+    /// A chat's effort outlives the model it was chosen for: switching the chat
+    /// to a narrower model, or a provider retiring a level, both leave a stored
+    /// choice the model would reject. Rather than fail a turn on a hint, the
+    /// request degrades to the closest level the model does take — the highest
+    /// at or below the request, or the model's lowest when the request sits
+    /// under its whole range. That matches the degradation Anthropic documents
+    /// for `xhigh` on models without it.
+    ///
+    /// A model that accepts no levels yields `None`, and the parameter is left
+    /// off the request entirely.
+    #[must_use]
+    pub fn clamp_to(self, supported: &[Self]) -> Option<Self> {
+        supported
+            .iter()
+            .copied()
+            .filter(|level| *level <= self)
+            .max()
+            .or_else(|| supported.iter().copied().min())
     }
 }
 
@@ -2465,6 +2520,93 @@ impl ToolCallRecord {
 mod tests {
     use super::*;
     use std::num::NonZeroU32;
+
+    #[test]
+    fn reasoning_effort_tokens_round_trip_and_keep_the_original_three() {
+        for level in ReasoningEffort::ALL {
+            assert_eq!(ReasoningEffort::from_str(level.as_str()), Some(*level));
+            assert_eq!(
+                serde_json::to_string(level).unwrap(),
+                format!("\"{}\"", level.as_str())
+            );
+            assert_eq!(
+                serde_json::from_str::<ReasoningEffort>(&format!("\"{}\"", level.as_str()))
+                    .unwrap(),
+                *level
+            );
+        }
+        // The three levels that shipped before the scale widened are stored in
+        // chat rows and must keep parsing to the same variants.
+        assert_eq!(ReasoningEffort::from_str("low"), Some(ReasoningEffort::Low));
+        assert_eq!(
+            ReasoningEffort::from_str("medium"),
+            Some(ReasoningEffort::Medium)
+        );
+        assert_eq!(
+            ReasoningEffort::from_str("high"),
+            Some(ReasoningEffort::High)
+        );
+        // The level above `high` is one word on the wire, not the snake_case
+        // rendering of its variant name.
+        assert_eq!(ReasoningEffort::XHigh.as_str(), "xhigh");
+        assert!(ReasoningEffort::from_str("x_high").is_none());
+        assert!(ReasoningEffort::from_str("").is_none());
+        assert!(ReasoningEffort::from_str("HIGH").is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_orders_from_none_to_max() {
+        assert!(ReasoningEffort::ALL
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
+        assert_eq!(ReasoningEffort::ALL.first(), Some(&ReasoningEffort::None));
+        assert_eq!(ReasoningEffort::ALL.last(), Some(&ReasoningEffort::Max));
+    }
+
+    #[test]
+    fn an_unsupported_effort_degrades_to_the_closest_level_the_model_takes() {
+        let anthropic = &[
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+        ];
+        let no_max = &[
+            ReasoningEffort::None,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+        ];
+        let classic = &[
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ];
+
+        // A supported level passes through untouched.
+        for level in anthropic {
+            assert_eq!(level.clamp_to(anthropic), Some(*level));
+        }
+        // Above the range: down to the highest level on offer.
+        assert_eq!(
+            ReasoningEffort::Max.clamp_to(no_max),
+            Some(ReasoningEffort::XHigh)
+        );
+        assert_eq!(
+            ReasoningEffort::XHigh.clamp_to(classic),
+            Some(ReasoningEffort::High)
+        );
+        // Below the range: up to the lowest level on offer, because a model
+        // that reasons at all cannot be told to stop.
+        assert_eq!(
+            ReasoningEffort::None.clamp_to(anthropic),
+            Some(ReasoningEffort::Low)
+        );
+        // No control at all: the parameter is dropped.
+        assert_eq!(ReasoningEffort::High.clamp_to(&[]), None);
+    }
 
     #[test]
     fn document_processing_enums_have_stable_snake_case_values() {

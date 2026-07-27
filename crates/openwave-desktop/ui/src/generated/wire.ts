@@ -331,9 +331,15 @@ input_modalities: Array<InputModality>,
  */
 supports_reasoning: boolean, 
 /**
- * Whether the model exposes a reasoning-effort control.
+ * The reasoning-effort levels this model accepts, ascending. Empty when
+ * the model exposes no effort control, which is what a client checks
+ * before offering the selector at all.
+ *
+ * Carries the enum rather than plain strings so the generated TypeScript
+ * is the same union a chat's stored effort has, and a client cannot offer
+ * a level it could not then set.
  */
-supports_reasoning_effort: boolean, 
+reasoning_efforts: Array<ReasoningEffort>, 
 /**
  * Whether the model accepts image input alongside text.
  */
@@ -434,11 +440,20 @@ export type ProviderKind = "anthropic" | "openai" | "openai_compatible";
 /**
  * How hard a reasoning-capable model should think before answering.
  *
- * A hint honored only by providers whose models expose it (OpenAI's o-series);
- * other providers ignore it. Persisted per chat and threaded into the model
- * request for each turn.
+ * The scale runs from [`Self::None`] to [`Self::Max`] and the ordering is the
+ * scale itself, not an implementation detail: comparisons and
+ * [`Self::clamp_to`] rely on it.
+ *
+ * No model accepts the whole scale. `none` is an OpenAI level that the Claude
+ * family rejects, `max` is missing from several rows on both routes, and some
+ * models take no effort control at all. A model's accepted levels live on its
+ * registry entry; a stored choice is mapped onto them with [`Self::clamp_to`]
+ * before a request is built.
+ *
+ * Persisted per chat as the token from [`Self::as_str`] and threaded into the
+ * model request for each turn.
  */
-export type ReasoningEffort = "low" | "medium" | "high";
+export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta" } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**

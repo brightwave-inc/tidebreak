@@ -466,8 +466,14 @@ pub struct ModelInfo {
     pub input_modalities: Vec<crate::model_registry::InputModality>,
     /// Whether the model can produce an internal reasoning stream.
     pub supports_reasoning: bool,
-    /// Whether the model exposes a reasoning-effort control.
-    pub supports_reasoning_effort: bool,
+    /// The reasoning-effort levels this model accepts, ascending. Empty when
+    /// the model exposes no effort control, which is what a client checks
+    /// before offering the selector at all.
+    ///
+    /// Carries the enum rather than plain strings so the generated TypeScript
+    /// is the same union a chat's stored effort has, and a client cannot offer
+    /// a level it could not then set.
+    pub reasoning_efforts: Vec<ReasoningEffort>,
     /// Whether the model accepts image input alongside text.
     pub multimodal: bool,
 }
@@ -497,7 +503,7 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
             max_output_tokens: entry.policy.max_output_tokens,
             input_modalities: entry.policy.input_modalities.clone(),
             supports_reasoning: entry.policy.supports_reasoning,
-            supports_reasoning_effort: entry.policy.supports_reasoning_effort,
+            reasoning_efforts: entry.policy.reasoning_efforts.clone(),
             multimodal: entry
                 .policy
                 .input_modalities
@@ -1446,7 +1452,7 @@ mod image_capability_tests {
         max_output_tokens: 64_000,
         input_modalities: &[InputModality::Text],
         supports_reasoning: false,
-        supports_reasoning_effort: false,
+        reasoning_efforts: &[],
     };
 
     const MULTIMODAL: ModelSpec = ModelSpec {

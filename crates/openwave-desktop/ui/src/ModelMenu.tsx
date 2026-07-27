@@ -85,7 +85,7 @@ export function ModelCapabilities({ model }: { model: ModelInfo }) {
       {model.multimodal && (
         <ImageIcon size={12} aria-label="Accepts image input" />
       )}
-      {model.supports_reasoning_effort && (
+      {model.reasoning_efforts.length > 0 && (
         <Brain size={12} aria-label="Adjustable reasoning effort" />
       )}
     </div>
@@ -199,33 +199,64 @@ export function ModelMenu({
   );
 }
 
-/** The effort levels offered by the picker, in ascending order. */
-const REASONING_EFFORT_OPTIONS: { value: ReasoningEffort; label: string }[] = [
+/**
+ * Every effort level in ascending order, with its menu label.
+ *
+ * "Off" rather than "None" for the lowest level, because the menu already has
+ * a "Default" entry: one means "do not reason", the other means "leave the
+ * provider's own default alone".
+ */
+const REASONING_EFFORT_SCALE: { value: ReasoningEffort; label: string }[] = [
+  { value: "none", label: "Off" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra High" },
+  { value: "max", label: "Max" },
 ];
 
 const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> =
   Object.fromEntries(
-    REASONING_EFFORT_OPTIONS.map((option) => [option.value, option.label]),
+    REASONING_EFFORT_SCALE.map((option) => [option.value, option.label]),
   ) as Record<ReasoningEffort, string>;
 
 /**
+ * The levels to offer for a model, ordered by the scale rather than by the
+ * order the server happened to send. Filtering against the known scale also
+ * drops a level a newer server knows about and this build does not, so the
+ * menu never offers an option it cannot label.
+ */
+export function reasoningEffortOptions(
+  accepted: readonly ReasoningEffort[],
+): { value: ReasoningEffort; label: string }[] {
+  return REASONING_EFFORT_SCALE.filter((option) =>
+    accepted.includes(option.value),
+  );
+}
+
+/**
  * Per-chat reasoning-effort selector, shown next to the model picker. `null`
- * means "use the provider default". The control is interactive only when the
- * chat's selected model advertises `supports_reasoning_effort`; the caller hides
- * it otherwise, since the field is inert for models without the capability.
+ * means "use the provider default".
+ *
+ * `levels` is the selected model's accepted range, and the menu offers exactly
+ * those, since no model takes the whole scale. The caller hides the control
+ * entirely when that range is empty. A level already stored on the chat still
+ * labels the trigger even when the current model does not accept it — the chat
+ * keeps its choice, and the server degrades it to the closest level the model
+ * does take rather than sending one the model would reject.
  */
 export function ReasoningEffortMenu({
+  levels,
   value,
   disabled,
   onChange,
 }: {
+  levels: readonly ReasoningEffort[];
   value: ReasoningEffort | null;
   disabled?: boolean;
   onChange: (effort: ReasoningEffort | null) => void | Promise<void>;
 }) {
+  const options = reasoningEffortOptions(levels);
   const label = value ? REASONING_EFFORT_LABELS[value] : "Default";
   return (
     <DropdownMenu>
@@ -256,7 +287,7 @@ export function ReasoningEffortMenu({
           {value === null && <Check className="ml-auto" />}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        {REASONING_EFFORT_OPTIONS.map((option) => {
+        {options.map((option) => {
           const selected = value === option.value;
           return (
             <DropdownMenuItem

@@ -8735,17 +8735,30 @@ async fn models_catalog_is_served() {
     assert!(opus["supports_reasoning"].as_bool().unwrap());
     assert!(!opus["multimodal"].as_bool().unwrap());
     assert!(!opus["available"].as_bool().unwrap());
-    // Capabilities describe what the current adapter implements, not only
-    // what the upstream model could support with a different request shape:
-    // the Anthropic adapter sends the chat's effort on every model that takes
-    // an adaptive thinking block, and none of the ones that don't.
-    assert!(opus["supports_reasoning_effort"].as_bool().unwrap());
+    // The catalog carries the effort levels the model itself accepts, so a
+    // client can offer exactly those and no more.
+    assert_eq!(
+        opus["reasoning_efforts"],
+        serde_json::json!(["low", "medium", "high", "xhigh", "max"])
+    );
+    // A model that reasons but rejects the effort parameter advertises no
+    // levels at all, which is what tells a client to hide the control.
     let haiku = models
         .iter()
         .find(|m| m["id"] == "claude-haiku-4-5-20251001")
         .expect("curated Anthropic model is present");
     assert!(haiku["supports_reasoning"].as_bool().unwrap());
-    assert!(!haiku["supports_reasoning_effort"].as_bool().unwrap());
+    assert_eq!(haiku["reasoning_efforts"], serde_json::json!([]));
+    // The GPT-5 line adds an off level, and only the 5.6 generation reaches
+    // `max`.
+    let gpt = models
+        .iter()
+        .find(|m| m["id"] == "gpt-5.5")
+        .expect("curated OpenAI model is present");
+    assert_eq!(
+        gpt["reasoning_efforts"],
+        serde_json::json!(["none", "low", "medium", "high", "xhigh"])
+    );
 }
 
 #[tokio::test]

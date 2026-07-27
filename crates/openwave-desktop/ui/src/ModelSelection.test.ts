@@ -12,7 +12,7 @@ const base = {
   max_output_tokens: 4_000,
   input_modalities: ["text"] as const,
   supports_reasoning: false,
-  supports_reasoning_effort: false,
+  reasoning_efforts: [],
   multimodal: false,
   available: true,
 };
