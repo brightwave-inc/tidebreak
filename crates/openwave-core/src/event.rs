@@ -208,4 +208,206 @@ mod tests {
         assert_eq!(json["message_id"], message_id.to_string());
         assert_eq!(serde_json::from_value::<AgentEvent>(json).unwrap(), ev);
     }
+
+    /// Path of the checked-in journal fixture, relative to this crate.
+    const JOURNAL_FIXTURE: &str = "fixtures/journal-events.json";
+
+    /// Fixed ids, because a fixture with a fresh UUID in it would differ on every
+    /// run and the comparison below would be meaningless.
+    fn id(n: u128) -> uuid::Uuid {
+        uuid::Uuid::from_u128(n)
+    }
+
+    /// Declaration index of a variant.
+    ///
+    /// The enum is `#[non_exhaustive]`, but that only binds other crates — the
+    /// match here is exhaustive, so a new variant does not compile until it is
+    /// added, and [`journal_samples`] is then checked for covering it.
+    fn variant_index(event: &AgentEvent) -> usize {
+        match event {
+            AgentEvent::TurnStarted { .. } => 0,
+            AgentEvent::TextDelta { .. } => 1,
+            AgentEvent::ReasoningDelta { .. } => 2,
+            AgentEvent::StreamInterrupted => 3,
+            AgentEvent::ToolCallStarted { .. } => 4,
+            AgentEvent::ToolCallArgsDelta { .. } => 5,
+            AgentEvent::UserQuestionsAsked { .. } => 6,
+            AgentEvent::ApprovalRequired { .. } => 7,
+            AgentEvent::ApprovalDecided { .. } => 8,
+            AgentEvent::ToolCallCompleted { .. } => 9,
+            AgentEvent::TurnCompleted { .. } => 10,
+            AgentEvent::TurnFailed { .. } => 11,
+            AgentEvent::TurnCancelled { .. } => 12,
+            AgentEvent::UserSteered { .. } => 13,
+            AgentEvent::ContextTruncated { .. } => 14,
+        }
+    }
+
+    /// One journal row per variant.
+    ///
+    /// Optional fields are populated rather than left `None`: a `None` field is
+    /// skipped or written as null and would pin nothing, so the nested storage
+    /// types — `ToolActionPreview`, `ToolResultPreview`, `ToolOutput` — would go
+    /// unguarded exactly where the risk is.
+    fn journal_samples() -> Vec<AgentEvent> {
+        vec![
+            AgentEvent::TurnStarted {
+                turn_id: TurnId(id(1)),
+            },
+            AgentEvent::TextDelta {
+                text: "assistant text".into(),
+            },
+            AgentEvent::ReasoningDelta {
+                text: "reasoning text".into(),
+            },
+            AgentEvent::StreamInterrupted,
+            AgentEvent::ToolCallStarted {
+                call_id: CallId(id(2)),
+                name: "exec".into(),
+            },
+            AgentEvent::ToolCallArgsDelta {
+                call_id: CallId(id(2)),
+                fragment: "{\"command\":".into(),
+            },
+            AgentEvent::UserQuestionsAsked {
+                call_id: CallId(id(3)),
+                turn_id: TurnId(id(1)),
+            },
+            AgentEvent::ApprovalRequired {
+                call_id: CallId(id(2)),
+                tool_name: "exec".into(),
+                class: ApprovalClass::Sensitive,
+                kind: crate::approval::ToolApprovalKind::ExecMayRunNetworkedCommand,
+                preview: Some(crate::preview::ToolActionPreview::Exec {
+                    command: "git".into(),
+                    args: vec!["status".into()],
+                    cwd: ".".into(),
+                }),
+                summary: "Run a command".into(),
+            },
+            AgentEvent::ApprovalDecided {
+                call_id: CallId(id(2)),
+                approved: true,
+            },
+            AgentEvent::ToolCallCompleted {
+                call_id: CallId(id(2)),
+                output: ToolOutput {
+                    content: "on branch main".into(),
+                    data: Some(serde_json::json!({"exit_code": 0})),
+                    is_error: false,
+                    error_category: None,
+                    private_evidence: Vec::new(),
+                },
+                action: Some(crate::preview::ToolActionPreview::Exec {
+                    command: "git".into(),
+                    args: vec!["status".into()],
+                    cwd: ".".into(),
+                }),
+                result: Some(crate::preview::ToolResultPreview::Exec {
+                    exit_code: Some(0),
+                    timed_out: false,
+                    output_truncated: false,
+                    stdout: "on branch main".into(),
+                    stderr: String::new(),
+                }),
+            },
+            AgentEvent::TurnCompleted {
+                usage: Usage {
+                    input_tokens: 11,
+                    output_tokens: 22,
+                    cache_read_input_tokens: 33,
+                    cache_creation_input_tokens: 44,
+                },
+                stop_reason: StopReason::EndTurn,
+            },
+            AgentEvent::TurnFailed {
+                error: (&AgentError::config("no provider")).into(),
+            },
+            AgentEvent::TurnCancelled {
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 6,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+            },
+            AgentEvent::UserSteered {
+                message_id: MessageId(id(4)),
+                content: "steered text".into(),
+            },
+            AgentEvent::ContextTruncated {
+                original_tokens: 100_000,
+                fitted_tokens: 60_000,
+            },
+        ]
+    }
+
+    /// Every variant has a sample, so the fixture cannot silently cover fewer
+    /// event kinds than the journal can contain.
+    #[test]
+    fn every_journal_event_kind_has_a_sample() {
+        let samples = journal_samples();
+        let covered: std::collections::BTreeSet<usize> =
+            samples.iter().map(variant_index).collect();
+        assert_eq!(
+            covered.len(),
+            samples.len(),
+            "two samples describe the same variant"
+        );
+        assert_eq!(
+            covered,
+            (0..samples.len()).collect(),
+            "a variant is missing from journal_samples"
+        );
+    }
+
+    /// `AgentEvent` is written into `event.payload` and read back, so its field
+    /// names are a storage format, not only a wire format. Nothing else pins
+    /// them: the desktop schema epoch covers SQLite migrations, and a rename
+    /// changes no table. `list_events` collects into `Result<Vec<_>>`, so one
+    /// unreadable row fails a whole chat's history rather than one message.
+    ///
+    /// Regenerate with `UPDATE_JOURNAL_FIXTURE=1 cargo test -p openwave-core`.
+    /// A diff here means the journal format changed, which needs a
+    /// `#[serde(alias)]` or a migration — not a refreshed fixture.
+    #[test]
+    fn the_journal_event_shape_is_pinned() {
+        let rendered = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&journal_samples()).expect("events serialize")
+        );
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(JOURNAL_FIXTURE);
+        if std::env::var_os("UPDATE_JOURNAL_FIXTURE").is_some() {
+            std::fs::create_dir_all(path.parent().expect("the fixture path has a parent"))
+                .expect("the fixture directory is creatable");
+            std::fs::write(&path, &rendered).expect("the fixture path is writable");
+            return;
+        }
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            existing, rendered,
+            "the journal event shape changed; existing chats may no longer load. \
+             If this is deliberate, add #[serde(alias)] or a migration, then \
+             regenerate with UPDATE_JOURNAL_FIXTURE=1 cargo test -p openwave-core"
+        );
+    }
+
+    /// The direct statement of the compatibility property: bytes that a previous
+    /// binary wrote still parse, and parse back to the same value.
+    ///
+    /// Separate from the comparison above because it fails for a different
+    /// reason. A rename shows up in both, but a field that stops being optional
+    /// only shows up here.
+    #[test]
+    fn journal_rows_written_before_this_build_still_load() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(JOURNAL_FIXTURE);
+        let stored = std::fs::read_to_string(&path).expect("the journal fixture is checked in");
+        let loaded: Vec<AgentEvent> =
+            serde_json::from_str(&stored).expect("stored journal rows still deserialize");
+        assert_eq!(
+            loaded,
+            journal_samples(),
+            "a stored journal row no longer round-trips to the value it was written from"
+        );
+    }
 }
