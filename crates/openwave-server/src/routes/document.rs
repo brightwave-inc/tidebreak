@@ -773,11 +773,9 @@ async fn serve_document_file_content(
     if let Some(content_range) = content_range {
         response = response.header(header::CONTENT_RANGE, content_range);
     }
-    response
-        .body(Body::from(body))
-        .map_err(|error| {
-            ServerError::internal(format!("failed to build document response: {error}"))
-        })
+    response.body(Body::from(body)).map_err(|error| {
+        ServerError::internal(format!("failed to build document response: {error}"))
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -786,10 +784,7 @@ struct ByteRange {
     end_inclusive: u64,
 }
 
-fn requested_byte_range(
-    headers: &HeaderMap,
-    full_len: u64,
-) -> Result<Option<ByteRange>, ()> {
+fn requested_byte_range(headers: &HeaderMap, full_len: u64) -> Result<Option<ByteRange>, ()> {
     // This route does not expose an HTTP validator in this slice. Treat
     // conditional ranges as a request for the complete representation so a
     // stale validator can never produce bytes from the wrong generation.

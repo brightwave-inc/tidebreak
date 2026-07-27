@@ -4659,16 +4659,9 @@ async fn document_file_content_supports_full_head_and_single_range_responses() {
     );
 
     assert_eq!(
-        request_document_file_content(
-            &router,
-            axum::http::Method::GET,
-            &uri,
-            None,
-            None,
-            None,
-        )
-        .await
-        .status(),
+        request_document_file_content(&router, axum::http::Method::GET, &uri, None, None, None,)
+            .await
+            .status(),
         StatusCode::UNAUTHORIZED
     );
 
@@ -4779,9 +4772,7 @@ async fn document_file_content_supports_full_head_and_single_range_responses() {
             "{range}"
         );
         assert_eq!(
-            to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap(),
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
             expected,
             "{range}"
         );
@@ -4799,9 +4790,7 @@ async fn document_file_content_supports_full_head_and_single_range_responses() {
     assert_eq!(conditional.status(), StatusCode::OK);
     assert!(conditional.headers().get(header::CONTENT_RANGE).is_none());
     assert_eq!(
-        to_bytes(conditional.into_body(), usize::MAX)
-            .await
-            .unwrap(),
+        to_bytes(conditional.into_body(), usize::MAX).await.unwrap(),
         raw.as_slice()
     );
 
@@ -4896,7 +4885,10 @@ async fn document_file_content_preserves_document_scope_before_blob_access() {
             "/projects/{}/documents/{project_document_id}/file-content",
             other_project.id
         ),
-        format!("/chats/{}/documents/{project_document_id}/file-content", chat.id),
+        format!(
+            "/chats/{}/documents/{project_document_id}/file-content",
+            chat.id
+        ),
     ] {
         assert_eq!(
             request_document_file_content(
