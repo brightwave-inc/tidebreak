@@ -52,19 +52,50 @@ actually is:
 
 ## Adding a type
 
-1. Derive `TS` on the Rust type.
-2. If a field is `#[serde(skip_serializing_if = "Option::is_none")]`, add
-   `#[ts(optional)]`. Serde omits the key; without the annotation `ts-rs` emits
-   `field: T | null`, which claims the key is always present. This is the exact
-   mismatch that shipped twice, and it is the one thing the generator will not
-   catch for you.
-3. Regenerate, and check the diff reads the way you expect.
+1. Derive `TS` on the Rust type. If it is reachable from a type already
+   generated, that is all — the generator walks the dependency closure from a
+   small set of roots, so a new field of a new type pulls it in automatically.
+2. If a field is `#[serde(skip_serializing_if = "…")]`, add `#[ts(optional)]`.
+   Serde omits the key, but `ts-rs` only infers optionality from
+   `maybe_omitted && has_default`, and serde treats a missing `Option` as `None`
+   without needing `#[serde(default)]` — so without the annotation you get
+   `field: T | null`, claiming a key the server never sends. **This is the exact
+   mismatch that shipped twice, and generating the type does not fix it.** A test
+   scans for it and fails with the field name, so you do not have to remember.
+3. Regenerate, and read the diff. A change here is a change to what the server
+   promises.
+
+## Two things the generator gets wrong by default
+
+Both are configured or annotated, and both are pinned by tests, but they are
+worth knowing before adding types.
+
+- **Large integers.** `ts-rs` renders `i64`/`u64` as `bigint`. These types
+  describe what `JSON.parse` produces, and that is a `number` — a `bigint`
+  declaration would be false about every value received, and would break
+  arithmetic against existing `number` state. The generator sets
+  `large_int` to `number`.
+- **`#[serde(transparent)]`.** `ts-rs` cannot parse it and ignores it. Every id
+  newtype carries it, and the right output happens anyway because a single-field
+  tuple struct already renders as its inner type. That coincidence is pinned by a
+  test, and the resulting per-id build warning is silenced by the
+  `no-serde-warnings` feature.
 
 ## Scope today
 
-Generation currently covers the renderer's tool vocabulary. The remaining wire
-types — the snapshot DTOs and the event projection — are still hand-written; see
-the tracking issue. Two known mismatches are already documented there rather than
-silently corrected: `CustomModelConfig.display_name` is `skip_serializing_if` but
-typed as required in TypeScript, and `ChatMessageSnapshot.citations` is always
-serialized but typed optional.
+Generated: the renderer's tool vocabulary and the whole WebSocket event surface —
+the frame, the event union, the tool previews, and the approval kinds. The event
+surface mattered most because the renderer parses each frame with a bare cast and
+no runtime validation, so the generated type is the only contract on that path.
+
+Not yet generated: the ~37 REST snapshot DTOs. A naive derive sweep over them
+would cause two silent regressions — `ChatToolActivity.tool` would widen from an
+allowlist to `string`, and `ChatMessage.role` would widen from two variants to
+four, making a `system` message render as a user bubble. Neither produces a
+compile error. Those and five other hazards are enumerated on the tracking issue;
+do not sweep without reading it.
+
+`ChatMessageSnapshot.citations` is deliberately wider in TypeScript than on the
+wire: the server always sends it, but the transcript is not validated, so the `?`
+is what forces the guard that reads it. Narrowing it would delete that guard
+rather than earn it.

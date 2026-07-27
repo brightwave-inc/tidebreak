@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use ts_rs::TS;
 
 /// Longest command, argument, or directory string an action preview carries.
 pub const MAX_ACTION_FIELD_CHARS: usize = 512;
@@ -26,7 +27,7 @@ pub const MAX_RESULT_STREAM_CHARS: usize = 40_000;
 /// Approval cards need this because consent to an action you cannot see is not
 /// consent. Result cards reuse it so the same action is described the same way
 /// before and after it runs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 pub enum ToolActionPreview {
     /// A command execution, as the argument vector it will actually run. There
@@ -155,7 +156,7 @@ impl ToolActionPreview {
 ///
 /// A command's output is the whole reason to run it. Withholding it leaves the
 /// transcript asserting that something happened without ever showing what.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 pub enum ToolResultPreview {
     Exec {

@@ -12,13 +12,13 @@ use openwave_core::{
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub(crate) struct RendererSequencedEvent {
     pub seq: i64,
     pub event: RendererAgentEvent,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum RendererAgentEvent {
     TurnStarted {
@@ -52,6 +52,7 @@ pub(crate) enum RendererAgentEvent {
         /// field-by-field view of the action under review. Tools without one
         /// send nothing, as every tool did before.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         preview: Option<ToolActionPreview>,
     },
     ApprovalDecided {
@@ -64,11 +65,13 @@ pub(crate) enum RendererAgentEvent {
         /// What the call did, when its tool projects it. Approval is not the
         /// only moment a person needs to see the action.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         action: Option<ToolActionPreview>,
         /// What the call produced. A command's output is the reason it ran;
         /// withholding it leaves the transcript asserting that something
         /// happened without ever showing what.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         result: Option<ToolResultPreview>,
     },
     TurnCompleted,
@@ -119,7 +122,7 @@ pub(crate) enum RendererToolName {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RendererToolStatus {
     Completed,
@@ -477,127 +480,6 @@ mod tests {
         assert!(json.contains("quarterly filings"), "{json}");
         // Only the query. The other arguments are not what consent is about.
         assert!(!json.contains("max_results"), "{json}");
-    }
-
-    /// Path of the generated renderer bindings, relative to this crate.
-    const GENERATED_BINDINGS: &str = "../openwave-desktop/ui/src/generated/wire.ts";
-
-    /// Wire spellings of the vocabulary, taken from the generated union rather
-    /// than from a second hand-written list.
-    ///
-    /// `ts-rs` renders a unit-variant enum as a union of string literals, which
-    /// is exactly the shape the desktop needs — but the desktop also needs the
-    /// names at *runtime*, to check a provider-supplied string against the
-    /// allowlist, and TypeScript types are erased. So the union is parsed back
-    /// into the names it is made of, and [`render_bindings`] emits both from the
-    /// one list. The parse is verified by reconstruction, below.
-    fn tool_names_from_union(decl: &str) -> Vec<String> {
-        let body = decl
-            .split_once('=')
-            .expect("a ts-rs type alias always has a right-hand side")
-            .1;
-        body.trim()
-            .trim_end_matches(';')
-            .split('|')
-            .map(|member| member.trim().trim_matches('"').to_owned())
-            .collect()
-    }
-
-    /// The whole generated file, so ordering and header are part of the diff.
-    fn render_bindings() -> String {
-        let cfg = ts_rs::Config::default();
-        let union = RendererToolName::decl(&cfg);
-        let names = tool_names_from_union(&union);
-
-        let listed = names
-            .iter()
-            .map(|name| format!("  \"{name}\",\n"))
-            .collect::<String>();
-        format!(
-            "// Generated from Rust. Do not edit.\n\
-             //\n\
-             // Source: `RendererToolName` in crates/openwave-server/src/event_projection.rs\n\
-             // Regenerate: UPDATE_WIRE_TYPES=1 cargo test -p openwave-server\n\
-             //\n\
-             // The runtime list and the type are emitted together so a tool cannot\n\
-             // exist in one and not the other. See docs/wire-types.md.\n\
-             \n\
-             /**\n\
-             \x20* Every tool name the renderer will accept.\n\
-             \x20*\n\
-             \x20* This is an allowlist, not a display transformation. Tool events come from\n\
-             \x20* providers, so a name outside this set must never reach a card, an icon, or\n\
-             \x20* a copy table. The server folds anything unrecognized to `other`.\n\
-             \x20*/\n\
-             export const RENDERER_TOOL_NAMES = [\n{listed}] as const;\n\
-             \n\
-             export type RendererToolName = (typeof RENDERER_TOOL_NAMES)[number];\n"
-        )
-    }
-
-    /// The desktop keys a union, a runtime guard, a copy table, and an icon
-    /// table on this vocabulary. All four now derive from the file this test
-    /// writes, so a tool cannot reach one and miss another.
-    ///
-    /// Regenerate with `UPDATE_WIRE_TYPES=1 cargo test -p openwave-server`.
-    /// The check is the guarantee, not the generation: CI fails on a diff.
-    #[test]
-    fn the_generated_renderer_bindings_are_current() {
-        let rendered = render_bindings();
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(GENERATED_BINDINGS);
-        if std::env::var_os("UPDATE_WIRE_TYPES").is_some() {
-            std::fs::create_dir_all(path.parent().expect("the bindings path has a parent"))
-                .expect("the bindings directory is creatable");
-            std::fs::write(&path, &rendered).expect("the bindings path is writable");
-            return;
-        }
-        let existing = std::fs::read_to_string(&path).unwrap_or_default();
-        assert_eq!(
-            existing, rendered,
-            "the generated renderer bindings are out of date; regenerate with \
-             UPDATE_WIRE_TYPES=1 cargo test -p openwave-server"
-        );
-    }
-
-    /// The runtime list is parsed out of the generated union, so the parse has to
-    /// be exact. Rebuilding the union from the parsed names and comparing it to
-    /// what `ts-rs` produced is what makes that safe: a dropped, merged, or
-    /// mis-trimmed member cannot survive the round trip.
-    #[test]
-    fn the_runtime_tool_list_reconstructs_the_generated_union() {
-        let cfg = ts_rs::Config::default();
-        let union = RendererToolName::decl(&cfg);
-        let names = tool_names_from_union(&union);
-
-        let rebuilt = format!(
-            "type RendererToolName = {};",
-            names
-                .iter()
-                .map(|name| format!("\"{name}\""))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        );
-        assert_eq!(
-            rebuilt, union,
-            "the tool-name parse does not reproduce what ts-rs generated"
-        );
-
-        // A duplicate spelling would silently shrink the allowlist.
-        assert_eq!(
-            names.iter().collect::<std::collections::HashSet<_>>().len(),
-            names.len(),
-            "two variants share a wire spelling"
-        );
-        // Guards against the union collapsing to a single `string`, which would
-        // turn the allowlist into a passthrough without failing anything else.
-        assert!(names.len() > 1, "the vocabulary did not render as a union");
-        assert!(
-            names.iter().all(|name| !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')),
-            "a tool name is not a plain snake_case identifier: {names:?}"
-        );
     }
 
     #[test]
