@@ -609,17 +609,6 @@ body {
   overflow: hidden;
 }
 
-.routed-surface {
-  display: flex;
-  min-height: 0;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.routed-surface[hidden] {
-  display: none;
-}
-
 /* Panel widths are driven from the URL, so they animate to their new share
    rather than snapping — except while dragging, where any easing reads as lag. */
 .panel-animated {

@@ -1,4 +1,4 @@
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import type { Chat } from "./api";
 import { Logomark } from "./Logomark";
 import {
@@ -76,11 +76,11 @@ export function Sidebar({
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const setRenameDraft = useChatListStore((state) => state.setRenameDraft);
-  const settingsOpen = useUiStore((state) => state.settingsOpen);
-  const openSettings = useUiStore((state) => state.openSettings);
-  const closeSettings = useUiStore((state) => state.closeSettings);
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
   const navigate = useNavigate();
+  const settingsOpen = useRouterState({
+    select: (state) => state.location.pathname === "/settings",
+  });
   const { layout, openPanel } = usePanelNav();
 
   const openPanelTypes = new Set(
@@ -88,12 +88,13 @@ export function Sidebar({
   );
 
   function showPanel(panel: PanelContent) {
-    closeSettings();
+    if (settingsOpen && activeChatId) {
+      void navigate({ to: "/c/$chatId", params: { chatId: activeChatId } });
+    }
     openPanel(panel);
   }
 
   function openChat(chat: Chat) {
-    closeSettings();
     void navigate({ to: "/c/$chatId", params: { chatId: chat.id } });
   }
   return (
@@ -270,7 +271,7 @@ export function Sidebar({
         <button
           type="button"
           className={`sidebar-action${settingsOpen ? " is-active" : ""}`}
-          onClick={openSettings}
+          onClick={() => void navigate({ to: "/settings" })}
         >
           <Settings size={16} />
           Settings

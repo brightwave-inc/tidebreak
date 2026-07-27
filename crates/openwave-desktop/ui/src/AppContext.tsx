@@ -1,6 +1,8 @@
 import { createContext, useContext } from "react";
 
 import type { ApiClient, ModelInfo, ProviderInfo } from "./api";
+import type { ThemeMode } from "./theme";
+import type { DesktopUpdateState } from "./updates";
 
 /**
  * What the shell owns and every route needs: the connected client, the model
@@ -17,6 +19,11 @@ export type AppContextValue = {
   refreshCatalog: () => Promise<void>;
   status: string;
   setStatus: (next: string | ((current: string) => string)) => void;
+  themeMode: ThemeMode;
+  setThemeMode: (mode: ThemeMode) => void;
+  updateState: DesktopUpdateState;
+  checkForUpdate: () => Promise<DesktopUpdateState>;
+  restartForUpdate: () => Promise<void>;
 };
 
 const AppContext = createContext<AppContextValue | null>(null);

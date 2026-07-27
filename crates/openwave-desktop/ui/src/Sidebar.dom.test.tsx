@@ -6,7 +6,6 @@ import type { Chat } from "./api";
 import { useChatListStore, type ChatListStore } from "./ChatListStore";
 import { Sidebar, type SidebarProps } from "./Sidebar";
 import { renderWithRouter } from "./test/router";
-import { useUiStore } from "./UiStore";
 
 const chats: Chat[] = [
   { id: "chat-1", title: "Roadmap", project_id: null } as unknown as Chat,
@@ -25,7 +24,6 @@ function seedStores(overrides: Partial<ChatListStore> = {}) {
     savingTitle: false,
     ...overrides,
   });
-  useUiStore.setState({ settingsOpen: false });
 }
 
 async function renderSidebar(overrides: Partial<SidebarProps> = {}) {
@@ -131,11 +129,11 @@ describe("Sidebar", () => {
     );
   });
 
-  it("opens settings over the workspace", async () => {
+  it("navigates to settings", async () => {
     const user = userEvent.setup();
-    await renderSidebar();
+    const { router } = await renderSidebar();
     await user.click(screen.getByText("Settings"));
-    expect(useUiStore.getState().settingsOpen).toBe(true);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/settings"));
   });
 
   it("shows update affordances only when an update is ready", async () => {

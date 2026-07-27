@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, Chat } from "./api";
 import { ChatView, type ChatViewProps } from "./ChatView";
 import { useChatSessionStore } from "./ChatSessionStore";
+import { usePendingPrompts } from "./PendingPrompts";
 
 vi.mock("./host", () => ({
   hasNativeHost: () => false,
@@ -86,6 +87,7 @@ function renderChatView(overrides: Partial<ChatViewProps> = {}) {
 
 beforeEach(() => {
   useChatSessionStore.getState().reset();
+  usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
 });
 afterEach(cleanup);
 
@@ -103,31 +105,33 @@ describe("ChatView", () => {
     expect(screen.getByText("hi!")).toBeInTheDocument();
   });
 
-  it("polls for its own conversation's pending approvals and questions", async () => {
-    vi.mocked(client.listPendingUserQuestions).mockResolvedValueOnce([
-      {
-        callId: "call-q",
-        turnId: "turn-1",
-        askedAt: "2026-07-24T00:00:00.000Z",
-        questions: [
-          {
-            id: "q1",
-            header: "Scope",
-            question: "Which quarter?",
-            options: [],
-            allowFreeForm: true,
-          },
-        ],
-      },
-    ]);
+  it("shows the questions the shell is watching for", async () => {
+    // The transcript no longer polls for these — the shell does, so that the
+    // agent parking a turn is noticed on any screen. This renders whatever the
+    // watcher has published.
+    usePendingPrompts.setState({
+      chatId: "chat-1",
+      userQuestions: [
+        {
+          callId: "call-q",
+          turnId: "turn-1",
+          askedAt: "2026-07-24T00:00:00.000Z",
+          questions: [
+            {
+              id: "q1",
+              header: "Scope",
+              question: "Which quarter?",
+              options: [],
+              allowFreeForm: true,
+            },
+          ],
+        },
+      ] as never,
+    });
 
     renderChatView();
 
     expect(await screen.findByText("Which quarter?")).toBeInTheDocument();
-    expect(client.listPendingUserQuestions).toHaveBeenCalledWith("chat-1");
-    expect(client.listPendingFolderAccessRequests).toHaveBeenCalledWith(
-      "chat-1",
-    );
   });
 
   it("sends an approval decision through its own client", async () => {

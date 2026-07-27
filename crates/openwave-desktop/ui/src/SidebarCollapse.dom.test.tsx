@@ -26,7 +26,7 @@ async function renderSidebar() {
 beforeEach(() => {
   window.localStorage.clear();
   useChatListStore.setState({ chats: [], selected: null });
-  useUiStore.setState({ sidebarCollapsed: false, settingsOpen: false });
+  useUiStore.setState({ sidebarCollapsed: false });
 });
 afterEach(cleanup);
 

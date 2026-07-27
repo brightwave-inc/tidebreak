@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useChatListStore } from "./ChatListStore";
+import { usePendingPrompts } from "./PendingPrompts";
 import { useUiStore } from "./UiStore";
 
 /**
@@ -22,6 +23,9 @@ const chats = [
 
 const listChats = vi.fn(async () => chats);
 const createChat = vi.fn(async () => chats[0]);
+const listPendingUserQuestions = vi.fn(async () => [] as unknown[]);
+const listPendingFolderAccessRequests = vi.fn(async () => [] as unknown[]);
+const requestUserAttention = vi.fn(async () => {});
 
 vi.mock("./boot", () => ({
   resolveServerInfo: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:1", token: "t" })),
@@ -33,6 +37,8 @@ vi.mock("./api", () => ({
     listProviders = vi.fn(async () => ({ providers: [] }));
     listChats = listChats;
     createChat = createChat;
+    listPendingUserQuestions = listPendingUserQuestions;
+    listPendingFolderAccessRequests = listPendingFolderAccessRequests;
     openEvents = vi.fn(() => ({ close: vi.fn() }));
   },
 }));
@@ -40,6 +46,7 @@ vi.mock("./api", () => ({
 vi.mock("./host", () => ({
   hasNativeHost: () => false,
   hasMacOverlayTitlebar: () => false,
+  requestUserAttention,
 }));
 
 vi.mock("./updates", () => ({
@@ -67,7 +74,12 @@ vi.mock("./FoldersView", () => ({
 }));
 
 vi.mock("./SettingsView", () => ({
-  SettingsView: () => <div data-testid="settings">settings</div>,
+  SettingsView: ({ onBack }: { onBack: () => void }) => (
+    <div data-testid="settings">
+      settings
+      <button onClick={onBack}>Back to app</button>
+    </div>
+  ),
 }));
 
 vi.mock("./ChatApprovalHydration", () => ({
@@ -104,10 +116,15 @@ beforeEach(() => {
   listChats.mockClear();
   listChats.mockResolvedValue(chats);
   createChat.mockClear();
+  listPendingUserQuestions.mockClear();
+  listPendingUserQuestions.mockResolvedValue([]);
+  listPendingFolderAccessRequests.mockClear();
+  requestUserAttention.mockClear();
+  usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
   // The stores outlive a test file's renders, so a chat list left behind would
   // decide the next test's routing before its own boot ever ran.
   useChatListStore.setState({ chats: [], chatsLoaded: false, selected: null });
-  useUiStore.setState({ settingsOpen: false, sidebarCollapsed: false });
+  useUiStore.setState({ sidebarCollapsed: false });
 });
 afterEach(cleanup);
 
@@ -163,16 +180,46 @@ describe("app shell", () => {
     expect(await screen.findByTestId("outputs")).toBeInTheDocument();
   });
 
-  it("keeps the conversation mounted underneath settings", async () => {
+  it("keeps watching for the agent's questions while settings is open", async () => {
     const user = userEvent.setup();
-    await mountApp();
+    const { router } = await mountApp();
     await screen.findByTestId("transcript");
+    await waitFor(() => expect(listPendingUserQuestions).toHaveBeenCalled());
 
     await user.click(screen.getByText("Settings"));
-
     expect(await screen.findByTestId("settings")).toBeInTheDocument();
-    // The pollers for this conversation's pending approvals and questions live
-    // in the transcript; stepping into settings must not stop them.
-    expect(screen.getByTestId("transcript")).toBeInTheDocument();
+    await waitFor(() => expect(router.state.location.pathname).toBe("/settings"));
+    // The conversation is gone, and that is fine — the transcript rehydrates
+    // from a durable journal on the way back.
+    expect(screen.queryByTestId("transcript")).not.toBeInTheDocument();
+
+    // What must not stop is being told the agent has parked a turn on a
+    // question. The watcher belongs to the shell, so it is still running.
+    const readsBefore = listPendingUserQuestions.mock.calls.length;
+    listPendingUserQuestions.mockResolvedValue([
+      { callId: "call-1", turnId: "turn-1", askedAt: "2026-07-27T00:00:00Z", questions: [] },
+    ]);
+    usePendingPrompts.getState().refresh();
+
+    await waitFor(() =>
+      expect(listPendingUserQuestions.mock.calls.length).toBeGreaterThan(readsBefore),
+    );
+    await waitFor(() =>
+      expect(usePendingPrompts.getState().userQuestions).toHaveLength(1),
+    );
+    // And the dock still gets told, which is the whole point.
+    await waitFor(() => expect(requestUserAttention).toHaveBeenCalled());
+  });
+
+  it("returns from settings to the conversation that was open", async () => {
+    const user = userEvent.setup();
+    const { router } = await mountApp();
+    await screen.findByTestId("transcript");
+    await user.click(screen.getByText("Settings"));
+    await screen.findByTestId("settings");
+
+    await user.click(screen.getByRole("button", { name: "Back to app" }));
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
   });
 });

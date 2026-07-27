@@ -16,9 +16,9 @@ import { useChatListStore } from "./ChatListStore";
 import { useConfirm } from "./components/ConfirmDialog";
 import { hasMacOverlayTitlebar } from "./host";
 import { Logomark } from "./Logomark";
-import { SettingsView } from "./SettingsView";
 import { Sidebar } from "./Sidebar";
 import { useTheme } from "./theme";
+import { useChatPromptWatcher } from "./useChatPromptWatcher";
 import { useUiStore } from "./UiStore";
 import { useDesktopUpdates } from "./updates";
 
@@ -43,7 +43,7 @@ export function AppShell() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [status, setStatus] = useState("starting…");
   const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
-  const settingsOpen = useUiStore((state) => state.settingsOpen);
+  const openChatId = useChatListStore((state) => state.selected?.id ?? null);
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
   const skipRenameCommitRef = useRef(false);
@@ -52,6 +52,10 @@ export function AppShell() {
   const { confirm, dialog: confirmDialog } = useConfirm();
   const { mode: themeMode, cycle: cycleTheme, setMode: setThemeMode } = useTheme();
   const desktopUpdates = useDesktopUpdates();
+
+  // Watched here rather than in the conversation, so that the agent parking a
+  // turn on a question is noticed whatever screen the reader is on.
+  useChatPromptWatcher(client, openChatId);
 
   useEffect(() => {
     let cancelled = false;
@@ -230,7 +234,19 @@ export function AppShell() {
 
   return (
     <AppContextProvider
-      value={{ client, models, providers, refreshCatalog, status, setStatus }}
+      value={{
+        client,
+        models,
+        providers,
+        refreshCatalog,
+        status,
+        setStatus,
+        themeMode,
+        setThemeMode,
+        updateState: desktopUpdates.state,
+        checkForUpdate: desktopUpdates.check,
+        restartForUpdate: onRestartForUpdate,
+      }}
     >
       <div
         className={`app-shell${hasMacOverlayTitlebar() ? " with-titlebar" : ""}${
@@ -279,30 +295,7 @@ export function AppShell() {
             />
           )}
           <div className="main">
-            {/*
-              Settings is chrome rather than a place, so it is an overlay here
-              instead of a route. A route would unmount the conversation
-              underneath, and the pollers for its pending approvals and
-              questions live there — someone who steps into Settings should
-              still be told when the agent asks them something.
-            */}
-            {settingsOpen && (
-              <SettingsView
-                client={client}
-                models={models}
-                providers={providers}
-                onProvidersChanged={() => void refreshCatalog()}
-                onBack={() => useUiStore.getState().closeSettings()}
-                themeMode={themeMode}
-                onThemeChange={setThemeMode}
-                updateState={desktopUpdates.state}
-                onCheckForUpdate={desktopUpdates.check}
-                onRestartForUpdate={onRestartForUpdate}
-              />
-            )}
-            <div className="routed-surface" hidden={settingsOpen}>
-              <Outlet />
-            </div>
+            <Outlet />
           </div>
         </div>
       </div>

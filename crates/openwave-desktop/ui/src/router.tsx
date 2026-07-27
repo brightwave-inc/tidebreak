@@ -9,6 +9,7 @@ import { AppShell } from "./AppShell";
 import { ChatRoute } from "./ChatRoute";
 import { HomeRoute } from "./HomeRoute";
 import type { PanelSearch } from "./panel/panelUrl";
+import { SettingsRoute } from "./SettingsRoute";
 
 const rootRoute = createRootRoute({ component: AppShell });
 
@@ -39,7 +40,13 @@ function ChatRouteComponent() {
   return <ChatRoute key={chatId} chatId={chatId} />;
 }
 
-export const routeTree = rootRoute.addChildren([homeRoute, chatRoute]);
+export const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings",
+  component: SettingsRoute,
+});
+
+export const routeTree = rootRoute.addChildren([homeRoute, chatRoute, settingsRoute]);
 
 /**
  * Hash history, because the renderer is loaded from a custom protocol with no

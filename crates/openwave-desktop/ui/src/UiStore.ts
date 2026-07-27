@@ -20,7 +20,7 @@ function storeSidebarCollapsed(collapsed: boolean): void {
 
 /**
  * Chrome state that belongs to no conversation and does not deserve a URL:
- * whether the sidebar is showing, and whether Settings is open over the top.
+ * whether the sidebar is showing.
  *
  * Where the workspace is pointed used to live here too. It is in the URL now,
  * because a layout that cannot be linked at cannot be the target of a citation.
@@ -28,9 +28,6 @@ function storeSidebarCollapsed(collapsed: boolean): void {
 export type UiStore = {
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
-  settingsOpen: boolean;
-  openSettings: () => void;
-  closeSettings: () => void;
 };
 
 export function createUiStore() {
@@ -42,9 +39,6 @@ export function createUiStore() {
         storeSidebarCollapsed(sidebarCollapsed);
         return { sidebarCollapsed };
       }),
-    settingsOpen: false,
-    openSettings: () => set({ settingsOpen: true }),
-    closeSettings: () => set({ settingsOpen: false }),
   }));
 }
 
