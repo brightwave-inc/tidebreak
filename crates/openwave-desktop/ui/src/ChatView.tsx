@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -15,6 +16,7 @@ import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useToolApprovals } from "./useToolApprovals";
 import { useTurnControls } from "./useTurnControls";
 import { useUserQuestions } from "./useUserQuestions";
+import { useAgentRuns } from "./useAgentRuns";
 import { ArrowDown } from "lucide-react";
 
 export type ChatViewProps = {
@@ -77,6 +79,18 @@ export function ChatView({
   const reasoningActive = useChatSessionStore(
     (session) => session.reasoningActive,
   );
+  const backgroundAgentSpawnKeys = useMemo(
+    () =>
+      messages.flatMap((message) =>
+        message.role === "tool" && message.name === "spawn_sandbox_agent"
+          && message.status !== "failed"
+          && message.status !== "cancelled"
+          ? [message.backgroundAgentRunId ?? message.callId]
+          : [],
+      ),
+    [messages],
+  );
+  const agentRuns = useAgentRuns(client, chat.id, backgroundAgentSpawnKeys);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followsLatestRef = useRef(true);
@@ -130,6 +144,10 @@ export function ChatView({
           userQuestionErrors={userQuestions.errors}
           decidingApprovalCalls={approvals.deciding}
           approvalErrors={approvals.errors}
+          backgroundAgentRuns={agentRuns.runs}
+          backgroundAgentRunsLoading={agentRuns.loading}
+          backgroundAgentRunsError={agentRuns.error}
+          onRetryBackgroundAgentRuns={agentRuns.refresh}
           busy={busy}
           reasoningActive={reasoningActive}
           scrollRef={scrollRef}

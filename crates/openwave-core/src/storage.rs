@@ -165,6 +165,12 @@ pub struct ChatToolActivitySnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub action: Option<crate::preview::ToolActionPreview>,
+    // Present only for the fixed `spawn_sandbox_agent` renderer tool. It lets
+    // the transcript attach the durable child status without exposing a
+    // canonical tool record, delegated task, or executor identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub background_agent_run_id: Option<crate::id::AgentRunId>,
     pub status: ChatToolActivityStatus,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,

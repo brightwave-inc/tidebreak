@@ -38,6 +38,7 @@ export function presentChatTranscript(
             role: "tool",
             callId: entry.id,
             name: entry.name,
+            backgroundAgentRunId: entry.backgroundAgentRunId,
             status: entry.status,
             preview: entry.preview,
           } satisfies ChatMessage,

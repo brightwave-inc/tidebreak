@@ -260,7 +260,9 @@ The response is deliberately renderer-safe: worker lease tokens, delegated
 input, raw failure details, and scheduler bookkeeping never cross this API
 boundary. A bounded failure code may be included for display and recovery
 guidance; detailed provider, transport, or executor diagnostics remain
-server-side.
+server-side. A sandbox snapshot also carries its opaque OpenWave spawn-call id
+so the transcript can attach it to the exact visible delegation row; this is a
+renderer correlation key, not a provider call identity or scheduler control.
 
 When an agent has a live, supported tool checkpoint, the snapshot may also
 contain a small `activity` object. Its values are a deliberately admitted,

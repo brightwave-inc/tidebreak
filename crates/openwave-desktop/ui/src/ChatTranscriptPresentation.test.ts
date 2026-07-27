@@ -29,6 +29,30 @@ const transcript: ChatTranscript = {
 };
 
 describe("terminal transcript presentation", () => {
+  it("keeps a historical spawn bound to its durable child", () => {
+    const presented = presentChatTranscript({
+      messages: [],
+      tool_activity: [
+        {
+          tool: "spawn_sandbox_agent",
+          status: "completed",
+          started_at: "2026-07-27T12:00:00Z",
+          finished_at: "2026-07-27T12:00:01Z",
+          background_agent_run_id: "child-run",
+        },
+      ],
+      last_event_seq: 4,
+    });
+
+    expect(presented.messages).toEqual([
+      expect.objectContaining({
+        role: "tool",
+        name: "spawn_sandbox_agent",
+        backgroundAgentRunId: "child-run",
+      }),
+    ]);
+  });
+
   it("replaces optimistic text with authoritative content and sources", async () => {
     const listChatMessages = vi.fn(async () => transcript);
     const presented = await loadCurrentTerminalTranscript(

@@ -1,8 +1,29 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import type { AgentRun } from "./api";
 import { MessageBubble, MessageList, type ChatMessage } from "./MessageList";
 
 const noop = () => undefined;
+
+function backgroundRun(
+  id: string,
+  spawnCallId: string,
+  status: AgentRun["status"],
+): AgentRun {
+  return {
+    id,
+    parent_id: "foreground",
+    spawn_call_id: spawnCallId,
+    execution: "sandbox",
+    status,
+    started_at: null,
+    finished_at: null,
+    last_error_code: null,
+    activity: null,
+    created_at: "2026-07-27T12:00:00Z",
+    updated_at: "2026-07-27T12:00:00Z",
+  };
+}
 
 describe("MessageBubble", () => {
   it("keeps the user compact while rendering assistant Markdown without a bubble", () => {
@@ -409,6 +430,45 @@ describe("MessageBubble", () => {
     expect(markup).toContain('aria-label="Copy"');
     expect(markup).toContain('dateTime="2026-07-20T10:00:00Z"');
     expect(markup).toContain('dateTime="2026-07-20T10:01:00Z"');
+  });
+});
+
+describe("background-agent transcript activity", () => {
+  it("hangs the durable status card below its exact delegation phase", () => {
+    const markup = renderToStaticMarkup(
+      <MessageList
+        messages={[
+          {
+            id: "spawn-row",
+            role: "tool",
+            callId: "spawn-call",
+            name: "spawn_sandbox_agent",
+            status: "completed",
+          },
+          { id: "assistant", role: "assistant", text: "I will wait.", sources: [] },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        backgroundAgentRuns={[backgroundRun("run-1", "spawn-call", "running")]}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(markup).toContain("1 background agent");
+    expect(markup).toContain("Working in the background");
+    expect(markup.indexOf("1 background agent")).toBeLessThan(
+      markup.indexOf("I will wait."),
+    );
   });
 });
 

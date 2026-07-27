@@ -64,7 +64,7 @@ last_error_code: string | null,
  * arguments, results, provider call identities, executor leases, or raw
  * executor diagnostics.
  */
-activity: AgentActivitySnapshot | null, created_at: string, updated_at: string, };
+activity: AgentActivitySnapshot | null, created_at: string, updated_at: string, spawn_call_id: CallId | null, };
 
 /**
  * Durable lifecycle of an [`AgentRun`].
@@ -189,7 +189,7 @@ tool: RendererToolName,
  * from the arguments it ran with, so history describes the same action
  * the live stream did.
  */
-action?: ToolActionPreview, status: ChatToolActivityStatus, started_at: string, finished_at: string | null, };
+action?: ToolActionPreview, background_agent_run_id?: AgentRunId, status: ChatToolActivityStatus, started_at: string, finished_at: string | null, };
 
 /**
  * Fixed lifecycle vocabulary exposed for a historical tool card.

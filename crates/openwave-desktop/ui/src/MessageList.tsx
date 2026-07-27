@@ -3,6 +3,7 @@ import type { ReactNode, RefObject, UIEvent } from "react";
 import type {
   ApprovalGrantRung,
   ApiClient,
+  AgentRun,
   PendingFolderAccessRequest,
   PendingUserQuestions,
   ToolActionPreview,
@@ -24,6 +25,7 @@ import { WelcomeState } from "./WelcomeState";
 import { UserQuestionsCard } from "./UserQuestionsCard";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
+import { BackgroundAgentList } from "./BackgroundAgentList";
 
 export type ChatMessage =
   | {
@@ -56,6 +58,8 @@ export type ChatMessage =
       callId: string;
       name: string;
       status: ToolCallStatus;
+      /** Durable child identity retained by a hydrated spawn activity. */
+      backgroundAgentRunId?: string;
       /** The tool's own closed view of what it is doing, when it has one. */
       preview?: ToolActionPreview | null;
       /** What the call produced, once it has produced anything. */
@@ -87,6 +91,10 @@ type MessageListProps = {
   userQuestionErrors?: Record<string, string>;
   decidingApprovalCalls: Set<string>;
   approvalErrors: Record<string, string>;
+  backgroundAgentRuns?: AgentRun[];
+  backgroundAgentRunsLoading?: boolean;
+  backgroundAgentRunsError?: string | null;
+  onRetryBackgroundAgentRuns?: () => void;
   busy: boolean;
   reasoningActive?: boolean;
   scrollRef: RefObject<HTMLDivElement | null>;
@@ -124,6 +132,10 @@ export function MessageList({
   userQuestionErrors = {},
   decidingApprovalCalls,
   approvalErrors,
+  backgroundAgentRuns = [],
+  backgroundAgentRunsLoading = false,
+  backgroundAgentRunsError = null,
+  onRetryBackgroundAgentRuns = () => undefined,
   busy,
   reasoningActive = false,
   scrollRef,
@@ -150,6 +162,12 @@ export function MessageList({
     approvalState,
     imageClient,
     chatId,
+    {
+      runs: backgroundAgentRuns,
+      loading: backgroundAgentRunsLoading,
+      error: backgroundAgentRunsError,
+      retry: onRetryBackgroundAgentRuns,
+    },
   );
   // Only greet a genuinely empty, fully-hydrated conversation. While an
   // existing chat's transcript is still loading it is transiently empty; showing
@@ -231,6 +249,12 @@ export function groupMessageItems(
   },
   imageClient?: Pick<ApiClient, "getChatImageAttachment">,
   chatId?: string,
+  backgroundAgents: {
+    runs: AgentRun[];
+    loading: boolean;
+    error: string | null;
+    retry: () => void;
+  } = { runs: [], loading: false, error: null, retry: () => undefined },
 ) {
   const items: ReactNode[] = [];
   let index = 0;
@@ -290,6 +314,30 @@ export function groupMessageItems(
         entry.role === "tool" && !parked.has(entry.callId),
     );
     const cards = surfacedCards(phase, parked, onApproval, approvalState, chatId);
+    const spawns = activities.flatMap((entry) =>
+      entry.name === "spawn_sandbox_agent"
+        ? [
+            {
+              callId: entry.callId,
+              runId: entry.backgroundAgentRunId,
+              status: entry.status,
+            },
+          ]
+        : [],
+    );
+    const children: ReactNode[] = [...cards];
+    if (spawns.length > 0) {
+      children.push(
+        <BackgroundAgentList
+          key="background-agents"
+          spawns={spawns}
+          runs={backgroundAgents.runs}
+          loading={backgroundAgents.loading}
+          error={backgroundAgents.error}
+          onRetry={backgroundAgents.retry}
+        />,
+      );
+    }
 
     // A tool row renders model-influenced data through several defensive
     // parsers. If one of them is ever wrong, the throw should cost this phase
@@ -304,7 +352,7 @@ export function groupMessageItems(
         }
       >
         <ToolActivityGroup activities={activities} groupIndex={groupIndex}>
-          {cards.length > 0 ? cards : undefined}
+          {children.length > 0 ? children : undefined}
         </ToolActivityGroup>
       </ErrorBoundary>,
     );
