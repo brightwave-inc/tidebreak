@@ -3,6 +3,7 @@ import { ChevronDown } from "lucide-react";
 import { toolCallPresentation, type ToolCallStatus } from "./ToolCallCard";
 import { ToolIcon } from "./ToolIcon";
 import { ToolStatusIcon } from "./ToolStatusIcon";
+import { useStreamingTypewriter } from "./useStreamingTypewriter";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -48,6 +49,10 @@ export function ToolActivityGroup({
   const contentId = `tool-activity-group-${groupIndex}`;
   const safeActivities = normalizeActivities(activities);
   const summary = toolActivityGroupPresentation(safeActivities);
+  const displayedSummary = useStreamingTypewriter(
+    summary.label,
+    summary.inProgress,
+  );
 
   // A phase can be all cards and no rail — every call in it parked on an
   // approval, say. The cards are the part that must never go missing, so they
@@ -84,9 +89,10 @@ export function ToolActivityGroup({
           role="status"
           aria-live="polite"
           aria-atomic="true"
+          aria-label={summary.label}
           className={cn(summary.inProgress && "animate-pulse")}
         >
-          {summary.label}
+          <span aria-hidden="true">{displayedSummary}</span>
         </span>
         <ChevronDown
           className={cn(
@@ -101,43 +107,53 @@ export function ToolActivityGroup({
           className="relative ml-1.5 flex flex-col gap-4 border-l-2 py-1 pl-4 text-sm"
           role="list"
         >
-          {safeActivities.map((activity, index) => {
-            const presentation = toolCallPresentation(
-              activity.name,
-              activity.status,
-            );
-            return (
-              <div
-                className="grid gap-1"
-                role="listitem"
-                key={activity.id ?? `position:${index}`}
-              >
-                <div className="flex items-center gap-1.5 font-medium">
-                  {/* Pinned onto the rail, knocking out the border behind it,
-                      so the row reads as a stop on the timeline rather than a
-                      bullet sitting beside one. */}
-                  <div
-                    className="text-muted-foreground bg-background absolute -left-px -translate-x-1/2 [&_svg]:size-4"
-                    aria-hidden="true"
-                  >
-                    <ToolIcon name={activity.name} />
-                  </div>
-                  <ToolStatusIcon tone={presentation.tone} />
-                  <p
-                    className={cn(
-                      "whitespace-nowrap",
-                      presentation.tone === "running" && "animate-pulse",
-                    )}
-                  >
-                    {presentation.title}
-                  </p>
-                </div>
-              </div>
-            );
-          })}
+          {safeActivities.map((activity, index) => (
+            <ToolActivityRow
+              key={activity.id ?? `position:${index}`}
+              activity={activity}
+              live={summary.inProgress}
+            />
+          ))}
         </div>
       )}
       <div className="mt-2 flex flex-col gap-2 empty:hidden">{children}</div>
+    </div>
+  );
+}
+
+function ToolActivityRow({
+  activity,
+  live,
+}: {
+  activity: ToolActivity;
+  live: boolean;
+}) {
+  const presentation = toolCallPresentation(activity.name, activity.status);
+  const displayedTitle = useStreamingTypewriter(presentation.title, live);
+
+  return (
+    <div className="grid gap-1" role="listitem">
+      <div className="flex items-center gap-1.5 font-medium">
+        {/* Pinned onto the rail, knocking out the border behind it, so the row
+            reads as a stop on the timeline rather than a bullet sitting beside
+            one. */}
+        <div
+          className="text-muted-foreground bg-background absolute -left-px -translate-x-1/2 [&_svg]:size-4"
+          aria-hidden="true"
+        >
+          <ToolIcon name={activity.name} />
+        </div>
+        <ToolStatusIcon tone={presentation.tone} />
+        <p
+          aria-label={presentation.title}
+          className={cn(
+            "whitespace-nowrap",
+            presentation.tone === "running" && "animate-pulse",
+          )}
+        >
+          <span aria-hidden="true">{displayedTitle}</span>
+        </p>
+      </div>
     </div>
   );
 }
