@@ -145,6 +145,7 @@ export function ChatView({
           onUserQuestionsCancel={userQuestions.cancel}
           onSelectPrompt={onSelectPrompt}
           hydrated={hydrated}
+          imageClient={client}
         />
         {hasUnreadActivity && (
           <button

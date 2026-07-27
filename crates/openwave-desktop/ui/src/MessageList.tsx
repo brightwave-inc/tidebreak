@@ -2,6 +2,7 @@ import { memo, useMemo } from "react";
 import type { ReactNode, RefObject, UIEvent } from "react";
 import type {
   ApprovalGrantRung,
+  ApiClient,
   PendingFolderAccessRequest,
   PendingUserQuestions,
   ToolActionPreview,
@@ -21,9 +22,17 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { ToolActivityGroup } from "./ToolActivityGroup";
 import { WelcomeState } from "./WelcomeState";
 import { UserQuestionsCard } from "./UserQuestionsCard";
+import type { TranscriptImageAttachment } from "./ImageAttachments";
+import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
 
 export type ChatMessage =
-  | { id: string; role: "user"; text: string; createdAt?: string }
+  | {
+      id: string;
+      role: "user";
+      text: string;
+      images?: TranscriptImageAttachment[];
+      createdAt?: string;
+    }
   | {
       id: string;
       role: "assistant";
@@ -99,6 +108,7 @@ type MessageListProps = {
   onUserQuestionsCancel?: (turnId: string) => void;
   onSelectPrompt?: (prompt: string) => void;
   hydrated?: boolean;
+  imageClient?: Pick<ApiClient, "getChatImageAttachment">;
 };
 
 export function MessageList({
@@ -125,6 +135,7 @@ export function MessageList({
   onUserQuestionsCancel = () => undefined,
   onSelectPrompt,
   hydrated = true,
+  imageClient,
 }: MessageListProps) {
   // Stable identity between renders so memoized rows only re-render when the
   // approval state itself changes, not on every streamed token.
@@ -137,6 +148,7 @@ export function MessageList({
     busy,
     onApproval,
     approvalState,
+    imageClient,
     chatId,
   );
   // Only greet a genuinely empty, fully-hydrated conversation. While an
@@ -217,6 +229,7 @@ export function groupMessageItems(
     decidingApprovalCalls: Set<string>;
     approvalErrors: Record<string, string>;
   },
+  imageClient?: Pick<ApiClient, "getChatImageAttachment">,
   chatId?: string,
 ) {
   const items: ReactNode[] = [];
@@ -249,6 +262,8 @@ export function groupMessageItems(
           key={message.id}
           message={message}
           busy={message.id === streamingAssistantId}
+          imageClient={imageClient}
+          chatId={chatId}
         />,
       );
       index += 1;
@@ -393,9 +408,13 @@ export const MessageBubble = memo(MessageBubbleImpl);
 function MessageBubbleImpl({
   message,
   busy,
+  imageClient,
+  chatId,
 }: {
   message: ChatMessage;
   busy: boolean;
+  imageClient?: Pick<ApiClient, "getChatImageAttachment">;
+  chatId?: string;
 }) {
   if (message.role === "assistant") {
     if (!message.text && message.sources.length === 0) return null;
@@ -429,6 +448,13 @@ function MessageBubbleImpl({
     return (
       <div className="message-user-frame">
         <article className="message message-user" aria-label="You">
+          {message.images && message.images.length > 0 && imageClient && chatId && (
+            <TranscriptImageAttachments
+              client={imageClient}
+              chatId={chatId}
+              images={message.images}
+            />
+          )}
           <MessageMarkdown>{message.text}</MessageMarkdown>
         </article>
         <MessageFooter

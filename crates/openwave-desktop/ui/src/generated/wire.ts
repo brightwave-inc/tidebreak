@@ -144,7 +144,13 @@ export type ChatId = string;
  * A renderer-safe durable transcript entry. Internal routing and tool state
  * deliberately remain behind the server boundary.
  */
-export type ChatMessageSnapshot = { id: MessageId, role: TranscriptRole, content: string, created_at: string, citations: Array<AssistantCitationSnapshot>, refusal?: RendererRefusal, };
+export type ChatMessageSnapshot = { id: MessageId, role: TranscriptRole, content: string, created_at: string, citations: Array<AssistantCitationSnapshot>, 
+/**
+ * Images submitted with this user message. These are durable identity and
+ * geometry only; image bytes remain behind a chat-scoped authenticated
+ * endpoint and never enter the transcript payload.
+ */
+image_attachments?: Array<TranscriptImageAttachment>, refusal?: RendererRefusal, };
 
 /**
  * One pathless root in a conversation's exact ordered projection.
@@ -630,6 +636,23 @@ server: string,
  * The validated `ui://` document reference.
  */
 resource_uri: string, };
+
+/**
+ * One renderer-safe image identity attached to a historical user message.
+ */
+export type TranscriptImageAttachment = { 
+/**
+ * Content-addressed opaque attachment identity, not a host path.
+ */
+attachment_id: string, 
+/**
+ * Sniffed IANA media type from the trusted image ingest boundary.
+ */
+media_type: string, 
+/**
+ * Header-derived dimensions, bounded at image publication.
+ */
+width: number, height: number, };
 
 /**
  * The roles a visible transcript entry can have.

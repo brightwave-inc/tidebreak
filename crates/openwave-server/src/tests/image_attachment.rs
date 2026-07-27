@@ -8,6 +8,10 @@ fn image_attachments_uri(chat: ChatId) -> String {
     format!("/chats/{chat}/attachments/images")
 }
 
+fn transcript_image_uri(chat: ChatId, attachment_id: uuid::Uuid) -> String {
+    format!("/chats/{chat}/attachments/images/{attachment_id}")
+}
+
 /// Publish `bytes` for `chat` under a declared `Content-Type`.
 async fn publish_image(
     router: &Router,
@@ -328,6 +332,102 @@ async fn a_turn_records_its_attachments_and_an_unpublished_id_is_refused() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let error: AgentErrorInfo = json_body(response).await;
     assert_eq!(error.kind, "image_attachment_not_found");
+}
+
+#[tokio::test]
+async fn transcript_projects_image_identity_and_fetches_pixels_with_the_chat_bearer() {
+    let (router, token, _state, _store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let bytes = png_header(320, 240);
+    let attachment_id = publish_png(&router, &bearer, chat.id, bytes.clone()).await;
+
+    assert_eq!(
+        send_message_with_attachments(
+            &router,
+            &bearer,
+            chat.id,
+            TurnId::new(),
+            "what is in this?",
+            &[attachment_id],
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+
+    let transcript = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(transcript.status(), StatusCode::OK);
+    let transcript: serde_json::Value = json_body(transcript).await;
+    let images = &transcript["messages"][0]["image_attachments"];
+    assert_eq!(
+        images,
+        &serde_json::json!([{
+            "attachment_id": attachment_id,
+            "media_type": "image/png",
+            "width": 320,
+            "height": 240,
+        }])
+    );
+    let encoded = images.to_string();
+    for forbidden in ["byte_len", "bytes", "path", "blob", "data:"] {
+        assert!(
+            !encoded.contains(forbidden),
+            "transcript attachment leaked {forbidden}: {encoded}"
+        );
+    }
+
+    let pixels = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(transcript_image_uri(chat.id, attachment_id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pixels.status(), StatusCode::OK);
+    assert_eq!(pixels.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(pixels.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        pixels.headers()[header::CONTENT_LENGTH],
+        bytes.len().to_string()
+    );
+    assert_eq!(
+        to_bytes(pixels.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .as_ref(),
+        bytes.as_slice()
+    );
+
+    // Publishing the same content in another chat does not grant that chat a
+    // reference to this message attachment.
+    let other_chat = make_chat(&router, &bearer).await;
+    let absent = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(transcript_image_uri(other_chat.id, attachment_id))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(absent.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

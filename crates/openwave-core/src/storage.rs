@@ -66,6 +66,9 @@ pub type BlobStream = BoxStream<'static, Result<Vec<u8>>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatTranscriptSnapshot {
     pub messages: Vec<Message>,
+    /// Durable image identities grouped into the renderer transcript under the
+    /// same per-chat fence as `messages`.
+    pub message_attachments: Vec<MessageAttachment>,
     /// Refusal outcomes keyed to their durably completed assistant message.
     pub refusals: Vec<ChatRefusalSnapshot>,
     /// Ordered renderer-safe sources keyed to their assistant message.

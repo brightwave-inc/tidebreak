@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./ApprovalCard";
@@ -408,6 +408,58 @@ describe("row memoization", () => {
     expect((MessageBubble as unknown as { $$typeof: symbol }).$$typeof).toBe(
       Symbol.for("react.memo"),
     );
+  });
+});
+
+describe("historical image attachments", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("fetches image pixels with the chat client and releases the object URL", async () => {
+    const createObjectUrl = vi.fn(() => "blob:transcript-image");
+    const revokeObjectUrl = vi.fn();
+    vi.stubGlobal("URL", {
+      createObjectURL: createObjectUrl,
+      revokeObjectURL: revokeObjectUrl,
+    });
+    const getChatImageAttachment = vi.fn(async () =>
+      new Blob(["pixels"], { type: "image/png" }),
+    );
+    const { unmount } = render(
+      <MessageBubble
+        message={{
+          id: "user-image",
+          role: "user",
+          text: "Describe this",
+          images: [
+            {
+              attachmentId: "image-opaque-id",
+              mediaType: "image/png",
+              width: 320,
+              height: 240,
+            },
+          ],
+        }}
+        busy={false}
+        imageClient={{ getChatImageAttachment }}
+        chatId="chat-1"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(getChatImageAttachment).toHaveBeenCalledWith(
+        "chat-1",
+        "image-opaque-id",
+        expect.any(AbortSignal),
+      ),
+    );
+    const image = await screen.findByRole("img", {
+      name: "Attached image 1: 320 by 240 pixels",
+    });
+    expect(image).toHaveAttribute("src", "blob:transcript-image");
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+
+    unmount();
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:transcript-image");
   });
 });
 

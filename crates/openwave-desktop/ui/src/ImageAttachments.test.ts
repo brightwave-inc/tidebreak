@@ -15,6 +15,7 @@ import {
   queuedImageAttachment,
   readyImageAttachment,
   readyImageAttachmentIds,
+  readyTranscriptImageAttachments,
   withRetryQueued,
   withUploadFailed,
   withUploadProgress,
@@ -139,6 +140,20 @@ describe("image attachment state machine", () => {
     expect(readyImageAttachmentIds(list)).toEqual([
       ATTACHMENT_ID,
       OTHER_ATTACHMENT_ID,
+    ]);
+    expect(readyTranscriptImageAttachments(list)).toEqual([
+      {
+        attachmentId: ATTACHMENT_ID,
+        mediaType: "image/png",
+        width: 800,
+        height: 600,
+      },
+      {
+        attachmentId: OTHER_ATTACHMENT_ID,
+        mediaType: "image/png",
+        width: 800,
+        height: 600,
+      },
     ]);
   });
 

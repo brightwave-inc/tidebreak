@@ -56,6 +56,7 @@ fn transcript_citation_json_is_closed_and_renderer_bounded() {
             heading: Some("h".repeat(openwave_core::MAX_CITATION_HEADING_CHARS)),
             pages: (1..=u32::try_from(openwave_core::MAX_CITATION_PAGES).unwrap()).collect(),
         }],
+        image_attachments: None,
         refusal: None,
     };
     let json = serde_json::to_value(snapshot).unwrap();

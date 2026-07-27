@@ -486,6 +486,29 @@ describe("active turn steering", () => {
   });
 });
 
+describe("historical image API", () => {
+  it("uses the chat bearer to fetch pixels rather than putting a token in the URL", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("pixels", {
+        status: 200,
+        headers: { "Content-Type": "image/png" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    const blob = await client.getChatImageAttachment("chat/1", "image/1");
+
+    expect(blob.type).toBe("image/png");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1/chats/chat%2F1/attachments/images/image%2F1",
+      expect.objectContaining({
+        headers: { Authorization: "Bearer token" },
+      }),
+    );
+  });
+});
+
 describe("project-scoped conversation API", () => {
   it("creates a named project and a chat in that exact scope", async () => {
     const fetchMock = vi
