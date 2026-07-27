@@ -6669,6 +6669,7 @@ dependencies = [
 name = "openwave-core"
 version = "0.0.0"
 dependencies = [
+ "async-stream",
  "async-trait",
  "cap-fs-ext",
  "cap-std",

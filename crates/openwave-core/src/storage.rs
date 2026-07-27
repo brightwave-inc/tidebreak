@@ -16,9 +16,13 @@
 //! introduce those record types.
 
 use async_trait::async_trait;
-use futures::{stream::BoxStream, StreamExt};
+use futures::{
+    stream::{self, BoxStream},
+    StreamExt,
+};
 use serde::Serialize;
 use serde_json::Value;
+use std::ops::Range;
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ToolApproval};
 use crate::deliverable::{
@@ -47,8 +51,11 @@ use crate::{AnswerUserQuestionsRequest, PendingUserQuestions};
 /// Largest pending attachment-reconciliation page accepted by [`Store`].
 pub const MAX_PENDING_ROOT_ATTACHMENT_CHANGES: u64 = 256;
 
-/// Chunks supplied to a [`BlobStore`] without requiring the caller to buffer a
-/// whole source in memory.
+/// Chunks supplied to or read from a [`BlobStore`] without requiring either
+/// side to buffer a whole source in memory.
+///
+/// Dropping a storage-backed bounded-read stream must cancel any in-flight
+/// storage read.
 pub type BlobStream = BoxStream<'static, Result<Vec<u8>>>;
 
 /// A mutually consistent conversation transcript and event-journal cursor.
@@ -2767,6 +2774,13 @@ pub trait SecretProvider: Send + Sync {
     async fn delete_secret(&self, key: &str) -> Result<()>;
 }
 
+/// Metadata that can be read without materializing a blob's bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobMetadata {
+    /// Number of bytes in the immutable blob.
+    pub byte_len: u64,
+}
+
 /// Opaque byte storage for documents, images, and exports.
 #[async_trait]
 pub trait BlobStore: Send + Sync {
@@ -2809,6 +2823,38 @@ pub trait BlobStore: Send + Sync {
 
     /// Fetch bytes by `id`, or `None` if absent.
     async fn get(&self, id: uuid::Uuid) -> Result<Option<Vec<u8>>>;
+
+    /// Fetch a blob's length without reading its bytes.
+    ///
+    /// Backends should override this when their storage can obtain metadata
+    /// independently. The compatibility implementation keeps existing custom
+    /// stores correct while they adopt the bounded-read API.
+    async fn metadata(&self, id: uuid::Uuid) -> Result<Option<BlobMetadata>> {
+        self.get(id).await.map(|bytes| {
+            bytes.map(|bytes| BlobMetadata {
+                byte_len: u64::try_from(bytes.len()).expect("usize always fits in u64"),
+            })
+        })
+    }
+
+    /// Read the half-open byte `range` without materializing bytes outside it.
+    ///
+    /// A backend that cannot yet stream uses the compatibility implementation;
+    /// production stores should override it so response ranges remain bounded.
+    async fn read_range(&self, id: uuid::Uuid, range: Range<u64>) -> Result<Option<BlobStream>> {
+        let Some(bytes) = self.get(id).await? else {
+            return Ok(None);
+        };
+        let start = usize::try_from(range.start)
+            .map_err(|_| AgentError::Store("blob range start exceeds usize".into()))?;
+        let end = usize::try_from(range.end)
+            .map_err(|_| AgentError::Store("blob range end exceeds usize".into()))?;
+        let bytes = bytes
+            .get(start..end)
+            .ok_or_else(|| AgentError::Store("requested byte range is outside the blob".into()))?
+            .to_vec();
+        Ok(Some(stream::once(async move { Ok(bytes) }).boxed()))
+    }
 
     /// Delete a blob synchronously; a no-op if it doesn't exist.
     ///
