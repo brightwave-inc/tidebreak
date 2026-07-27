@@ -26,7 +26,8 @@ export type ProviderInfo = {
 
 export type CustomModelConfig = {
   id: string;
-  display_name: string | null;
+  /** Absent, not null, when unset — the server skips serializing `None`. */
+  display_name?: string;
   context_window: number;
   max_output_tokens: number;
 };
@@ -147,7 +148,13 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   created_at: string;
-  /** Optional so a partial renderer-boundary response remains non-fatal. */
+  /**
+   * Deliberately wider than the wire: the server always serializes this, as
+   * `[]` when empty. It is optional here because the transcript is not run
+   * through a validator — it arrives as a parsed cast — so the `?` is what
+   * makes the compiler demand a guard at the one place that reads it. Narrowing
+   * this to match the wire would delete that guard, not earn it.
+   */
   citations?: ChatMessageCitation[];
 };
 

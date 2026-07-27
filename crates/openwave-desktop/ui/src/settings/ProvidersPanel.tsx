@@ -60,7 +60,10 @@ function ProviderRow({
         body.models = models.map((model) => ({
           ...model,
           id: model.id.trim(),
-          display_name: model.display_name?.trim() || null,
+          // Omitted rather than null, which is how the server represents an
+          // unset display name and what it sends back. `models` is a full
+          // replacement list, so an absent key clears it just as null did.
+          display_name: model.display_name?.trim() || undefined,
         }));
       }
       if (key.trim()) {
@@ -126,7 +129,6 @@ function ProviderRow({
                     ...current,
                     {
                       id: "",
-                      display_name: null,
                       context_window: 32_768,
                       max_output_tokens: 4_096,
                     },
@@ -173,7 +175,7 @@ function ProviderRow({
                         itemIndex === index
                           ? {
                               ...item,
-                              display_name: event.target.value || null,
+                              display_name: event.target.value || undefined,
                             }
                           : item,
                       ),

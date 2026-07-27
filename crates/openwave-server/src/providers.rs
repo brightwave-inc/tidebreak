@@ -782,6 +782,41 @@ mod tests {
         assert_eq!(ProviderKind::Openai.setting_key(), "provider.openai");
     }
 
+    /// An unset display name is represented by the key being absent, in both
+    /// directions. The desktop used to send an explicit `null` while declaring
+    /// the field non-optional, so its type claimed a key the server never sends.
+    ///
+    /// `deny_unknown_fields` makes the inbound half worth asserting rather than
+    /// assuming: the body has to be accepted with the key missing entirely.
+    #[test]
+    fn an_unset_display_name_is_absent_rather_than_null() {
+        let unset = CustomModelConfig {
+            id: "local/model".into(),
+            display_name: None,
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+        };
+        let json = serde_json::to_value(&unset).expect("a model config serializes");
+        assert!(
+            json.get("display_name").is_none(),
+            "the server should omit an unset display name, not send null: {json}"
+        );
+
+        // What the desktop now sends: no key at all.
+        let parsed: CustomModelConfig = serde_json::from_str(
+            r#"{"id":"local/model","context_window":32768,"max_output_tokens":4096}"#,
+        )
+        .expect("an absent display name is accepted");
+        assert_eq!(parsed, unset);
+
+        // Still accepted, so an older client is not broken by the change.
+        let explicit_null: CustomModelConfig = serde_json::from_str(
+            r#"{"id":"local/model","display_name":null,"context_window":32768,"max_output_tokens":4096}"#,
+        )
+        .expect("an explicit null is still accepted");
+        assert_eq!(explicit_null, unset);
+    }
+
     #[test]
     fn custom_model_validation_is_conservative_and_rejects_duplicates() {
         let valid = CustomModelConfig {
