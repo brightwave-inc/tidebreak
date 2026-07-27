@@ -23,8 +23,9 @@ tool = []
 embed-openai = ["dep:reqwest", "dep:sha2"]
 # A durable, embedded vector store backed by LanceDB (pure-Rust, on-disk). Not a
 # default feature for library consumers because it pulls a large dependency tree
-# and needs `protoc` at build time. OpenWave's workspace CI installs `protoc`, and
-# the server enables this feature explicitly.
+# and needs `protoc` at build time. `openwave-server` forwards it under the same
+# name, off by default there too and required for its release builds, so only the
+# CI lane that compiles this backend installs `protoc`.
 vec-lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-select", "dep:futures", "dep:tokio"]
 # Rich PDF parsing via the local, PDFium-backed `liteparse` engine. Not a default
 # feature: it pulls a large dependency tree. Tesseract OCR is disabled

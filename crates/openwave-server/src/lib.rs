@@ -67,9 +67,11 @@ use openwave_core::{
     KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool,
     ToolRegistry, WriteFile,
 };
+#[cfg(feature = "vec-lance")]
+use openwave_retrieval::LanceVectorStore;
 use openwave_retrieval::{
-    Embedder, FallbackParser, HashEmbedder, LanceVectorStore, OpenAiEmbedder, ParserRegistry,
-    PlainTextParser, Retriever, SearchTool, TextChunker, VectorStore,
+    Embedder, FallbackParser, HashEmbedder, OpenAiEmbedder, ParserRegistry, PlainTextParser,
+    Retriever, SearchTool, TextChunker, VectorStore,
 };
 
 use resolver::KeyedResolver;
@@ -757,7 +759,7 @@ const EMBED_DIMS: usize = 1536;
 ///
 /// Chosen once at startup: the vector index is dimension-bound to the embedder, so
 /// enabling OpenAI (or adding a key) takes effect on restart — where a change in
-/// embedding width rebuilds the persistent index (see [`LanceVectorStore::connect`]).
+/// embedding width rebuilds the persistent index (see `connect_vector_store`).
 async fn resolve_embedder(store: &dyn Store, secrets: &dyn SecretProvider) -> Arc<dyn Embedder> {
     let enabled = providers::read_config(store, providers::ProviderKind::Openai)
         .await
@@ -823,6 +825,7 @@ fn document_parser_registry() -> ParserRegistry {
 /// index is derived, rebuildable data with a different lifecycle). Sized to the
 /// embedder's dimensionality; a change in that width rebuilds the index (see
 /// [`LanceVectorStore::connect`]).
+#[cfg(feature = "vec-lance")]
 async fn connect_vector_store(config: &Config, dims: usize) -> Result<Arc<dyn VectorStore>> {
     let dir = config.data_dir.join("vectors");
     let uri = dir
@@ -832,6 +835,22 @@ async fn connect_vector_store(config: &Config, dims: usize) -> Result<Arc<dyn Ve
         .await
         .map_err(|e| AgentError::config(format!("failed to open vector store: {e}")))?;
     Ok(Arc::new(store))
+}
+
+/// Stand in for the durable index when the build left LanceDB out.
+///
+/// Ingestion and search behave the same, but nothing survives the process, so a
+/// restart starts from an empty index. This exists to keep a lean build — the
+/// default for tests and dev — usable without compiling the LanceDB tree; a
+/// release build cannot take this path, because `build.rs` rejects a release
+/// build that does not enable `vec-lance`.
+#[cfg(not(feature = "vec-lance"))]
+async fn connect_vector_store(_config: &Config, dims: usize) -> Result<Arc<dyn VectorStore>> {
+    eprintln!(
+        "openwave: built without the `vec-lance` feature; document search runs on an \
+         in-memory index that is discarded when this process exits"
+    );
+    Ok(Arc::new(openwave_retrieval::InMemoryVectorStore::new(dims)))
 }
 
 /// Open the durable store the profile selects.

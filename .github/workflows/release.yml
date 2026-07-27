@@ -330,7 +330,10 @@ jobs:
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: crates/openwave-desktop
-          args: --target ${{ matrix.target }} --no-bundle --ci
+          # `vec-lance` carries the durable, on-disk vector store into the
+          # shipped app; the server's build script rejects a release build
+          # without it.
+          args: --target ${{ matrix.target }} --features vec-lance --no-bundle --ci
 
       - name: Save release-specific unsigned Rust build cache
         if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
@@ -570,6 +573,7 @@ jobs:
           projectPath: crates/openwave-desktop
           args: >-
             --target ${{ matrix.target }}
+            --features vec-lance
             --config ${{ runner.temp }}/openwave-release.json
             --bundles app,dmg
 

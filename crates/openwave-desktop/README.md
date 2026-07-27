@@ -50,12 +50,22 @@ Rust host boots the in-process API; the webview calls `server_info` to learn the
 base URL and token. The Tauri pre-dev command builds and stages the broker
 sidecar for the current target automatically.
 
+A dev build leaves out `vec-lance`, so document search runs on an in-memory
+index that is discarded when the app exits — the LanceDB tree it replaces is
+about 330 crates of build time. Add `--features vec-lance` when you are working
+on retrieval and want the index to survive a restart.
+
 Create an installable bundle. The before-build hook compiles the target-specific
 broker and the default Tauri configuration includes it automatically:
 
 ```sh
-cargo tauri build
+cargo tauri build --features vec-lance
 ```
+
+`vec-lance` carries the durable, on-disk vector store into the bundle. It is not
+optional for a shipped build: `openwave-server`'s build script fails any release
+build that leaves it out, rather than quietly shipping an app whose documents
+disappear on exit.
 
 ## PDFium runtime for packaged apps
 

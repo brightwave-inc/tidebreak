@@ -133,7 +133,9 @@ jobs:
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: crates/openwave-desktop
-          args: --target ${{ matrix.target }} --no-bundle --ci
+          # Match the release build, which compiles the durable vector store;
+          # a cache warmed without it would miss on every release compile.
+          args: --target ${{ matrix.target }} --features vec-lance --no-bundle --ci
 
       - name: Report unsigned Rust build cache size
         if: ${{ !cancelled() }}
