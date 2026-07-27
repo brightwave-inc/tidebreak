@@ -137,8 +137,9 @@ replayed. Unsupported hosts fail closed with no unconfined fallback. See
 [Code execution](code-execution.md).
 
 External MCP servers follow the same rule through `openwave-mcp`. A connected
-stdio server completes MCP initialization and paginated `tools/list` discovery
-before its proxies are registered. Each remote name is locally namespaced as
+server — a local stdio child or a remote Streamable HTTP endpoint — completes
+MCP initialization and paginated `tools/list` discovery before its proxies are
+registered. Each remote name is locally namespaced as
 `mcp__{server}__{tool}` and keeps the remote input schema unchanged. Calls are
 serialized per external server and their text, structured content, and error
 flag are translated back into `ToolOutput`. Because MCP tools can cross both the
@@ -146,14 +147,16 @@ workspace and process boundary, every mounted proxy is classified `Sensitive`.
 Each call needs one explicit approval; MCP approval is never remembered by tool
 name because Settings can replace the process behind a stable namespace.
 
-The desktop Settings page manages external stdio servers at runtime. Each entry
-declares a unique namespace, executable, argument array, optional working
-directory, explicit non-secret environment, selected `env_from` names, and a
-bounded request timeout. No shell interprets any field. Child environments are
-always cleared before the selected names and literal values are added, so an MCP
-process cannot inherit provider credentials or other desktop secrets by
-accident. Resolved `env_from` values never enter the database or renderer, and
-child stderr is discarded instead of being copied into host logs.
+The desktop Settings page manages external servers at runtime. Each entry
+declares a unique namespace, one transport — an executable with argument array,
+optional working directory, explicit non-secret environment, and selected
+`env_from` names, or an `http`/`https` URL with a selected bearer-token
+variable name — and a bounded request timeout. No shell interprets any field.
+Child environments are always cleared before the selected names and literal
+values are added, so an MCP process cannot inherit provider credentials or
+other desktop secrets by accident. Resolved `env_from` and bearer-token values
+never enter the database or renderer, and child stderr is discarded instead of
+being copied into host logs.
 
 Saving first validates and connects the complete candidate set, then atomically
 publishes it for later turns. A failure leaves the prior connection set active.
@@ -168,7 +171,7 @@ requests.
 The legacy `OPENWAVE_MCP_CONFIG` JSON file remains available for headless boot;
 when no saved configuration exists it uses the same closed schema and fails
 startup if an enabled server cannot initialize.
-See [Local MCP servers](mcp-servers.md) for the field contract and setup flow.
+See [External MCP servers](mcp-servers.md) for the field contract and setup flow.
 
 ## Foreground and sandbox surfaces
 

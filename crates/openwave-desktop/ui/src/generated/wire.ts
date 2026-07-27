@@ -257,9 +257,12 @@ export type InputModality = "text" | "image";
 export type McpHealth = "initializing" | "healthy" | "degraded" | "reconnecting" | "disabled";
 
 /**
- * One local stdio MCP process definition.
+ * One external MCP server definition: a local stdio process (`command`) or a
+ * remote Streamable HTTP endpoint (`url`). Exactly one of the two is set;
+ * [`validate_servers`] enforces that process fields stay with `command` and
+ * `bearer_token_env` stays with `url`.
  */
-export type McpServerDefinition = { name: string, command: string, args: Array<string>, 
+export type McpServerDefinition = { name: string, command: string | null, args: Array<string>, 
 /**
  * Explicit literal values. The UI labels these as non-secret.
  */
@@ -267,13 +270,22 @@ env: { [key in string]: string },
 /**
  * Parent environment names to forward. Their values never enter this type.
  */
-env_from: Array<string>, cwd: string | null, request_timeout_ms: number, enabled: boolean, };
+env_from: Array<string>, cwd: string | null, 
+/**
+ * Streamable HTTP endpoint for a remote server.
+ */
+url: string | null, 
+/**
+ * Parent environment name holding the HTTP bearer token. The value is
+ * resolved at connect time and never enters this type.
+ */
+bearer_token_env: string | null, request_timeout_ms: number, enabled: boolean, };
 
 /**
  * One renderer-safe server projection. Resolved `env_from` values and child
  * process details are intentionally absent.
  */
-export type McpServerInfo = { health: McpHealth, tool_count: number, diagnostic: string | null, name: string, command: string, args: Array<string>, 
+export type McpServerInfo = { health: McpHealth, tool_count: number, diagnostic: string | null, name: string, command: string | null, args: Array<string>, 
 /**
  * Explicit literal values. The UI labels these as non-secret.
  */
@@ -281,7 +293,16 @@ env: { [key in string]: string },
 /**
  * Parent environment names to forward. Their values never enter this type.
  */
-env_from: Array<string>, cwd: string | null, request_timeout_ms: number, enabled: boolean, };
+env_from: Array<string>, cwd: string | null, 
+/**
+ * Streamable HTTP endpoint for a remote server.
+ */
+url: string | null, 
+/**
+ * Parent environment name holding the HTTP bearer token. The value is
+ * resolved at connect time and never enters this type.
+ */
+bearer_token_env: string | null, request_timeout_ms: number, enabled: boolean, };
 
 export type McpServersInfo = { servers: Array<McpServerInfo>, };
 

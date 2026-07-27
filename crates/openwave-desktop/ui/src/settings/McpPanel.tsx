@@ -25,12 +25,40 @@ function emptyServer(index: number): McpServerInfo {
     env: {},
     env_from: [],
     cwd: null,
+    url: null,
+    bearer_token_env: null,
     request_timeout_ms: DEFAULT_TIMEOUT_MS,
     enabled: true,
     health: "initializing",
     tool_count: 0,
     diagnostic: null,
   };
+}
+
+type Transport = "stdio" | "http";
+
+function transportOf(server: McpServerInfo): Transport {
+  return server.url !== null ? "http" : "stdio";
+}
+
+/** Switching transports clears the other transport's fields so a saved
+ * definition can never carry both. */
+function transportFields(transport: Transport): Partial<McpServerInfo> {
+  return transport === "http"
+    ? {
+        command: null,
+        args: [],
+        env: {},
+        env_from: [],
+        cwd: null,
+        url: "",
+        bearer_token_env: null,
+      }
+    : {
+        command: "",
+        url: null,
+        bearer_token_env: null,
+      };
 }
 
 function definition(server: McpServerInfo): McpServerDefinition {
@@ -123,7 +151,7 @@ export function McpPanel({ client }: { client: ApiClient }) {
   return (
     <SettingsPanel
       title="MCP servers"
-      description="Connect local stdio tool servers without a shell or a desktop restart."
+      description="Connect local stdio tool servers or remote HTTP endpoints without a shell or a desktop restart."
       busy={loading || working}
     >
       {loading ? (
@@ -186,45 +214,111 @@ export function McpPanel({ client }: { client: ApiClient }) {
                 />
               </SettingsField>
 
-              <SettingsField
-                label="Executable"
-                hint="An executable path or command name. OpenWave never invokes a shell."
-              >
-                <Input
-                  value={server.command}
-                  disabled={working}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="/absolute/path/to/server"
-                  onChange={(event) =>
-                    update(index, { command: event.target.value })
-                  }
-                />
-              </SettingsField>
+              <FieldGroup label="Transport">
+                <div className="flex gap-4" role="radiogroup" aria-label="Transport">
+                  {(["stdio", "http"] as const).map((transport) => (
+                    <label
+                      key={transport}
+                      className="flex items-center gap-2 text-sm"
+                    >
+                      <input
+                        type="radio"
+                        name={`transport-${index}`}
+                        checked={transportOf(server) === transport}
+                        disabled={working}
+                        onChange={() =>
+                          update(index, transportFields(transport))
+                        }
+                      />
+                      {transport === "stdio"
+                        ? "Local process (stdio)"
+                        : "Remote endpoint (HTTP)"}
+                    </label>
+                  ))}
+                </div>
+              </FieldGroup>
 
-              <StringListEditor
-                label="Arguments"
-                values={server.args}
-                disabled={working}
-                addLabel="Add argument"
-                onChange={(args) => update(index, { args })}
-              />
+              {transportOf(server) === "stdio" && (
+                <>
+                  <SettingsField
+                    label="Executable"
+                    hint="An executable path or command name. OpenWave never invokes a shell."
+                  >
+                    <Input
+                      value={server.command ?? ""}
+                      disabled={working}
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="/absolute/path/to/server"
+                      onChange={(event) =>
+                        update(index, { command: event.target.value })
+                      }
+                    />
+                  </SettingsField>
 
-              <SettingsField
-                label="Working directory"
-                hint="Optional. It does not grant the server any OpenWave folder capability."
-              >
-                <Input
-                  value={server.cwd ?? ""}
-                  disabled={working}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="Optional"
-                  onChange={(event) =>
-                    update(index, { cwd: event.target.value || null })
-                  }
-                />
-              </SettingsField>
+                  <StringListEditor
+                    label="Arguments"
+                    values={server.args}
+                    disabled={working}
+                    addLabel="Add argument"
+                    onChange={(args) => update(index, { args })}
+                  />
+
+                  <SettingsField
+                    label="Working directory"
+                    hint="Optional. It does not grant the server any OpenWave folder capability."
+                  >
+                    <Input
+                      value={server.cwd ?? ""}
+                      disabled={working}
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="Optional"
+                      onChange={(event) =>
+                        update(index, { cwd: event.target.value || null })
+                      }
+                    />
+                  </SettingsField>
+                </>
+              )}
+
+              {transportOf(server) === "http" && (
+                <>
+                  <SettingsField
+                    label="Server URL"
+                    hint="An http or https MCP endpoint. Credentials never go in the URL."
+                  >
+                    <Input
+                      value={server.url ?? ""}
+                      disabled={working}
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="https://gateway.example/mcp/tools"
+                      onChange={(event) =>
+                        update(index, { url: event.target.value })
+                      }
+                    />
+                  </SettingsField>
+
+                  <SettingsField
+                    label="Bearer token variable"
+                    hint="Optional. Only the name is saved; the token is read from the host environment when connecting and never displayed."
+                  >
+                    <Input
+                      value={server.bearer_token_env ?? ""}
+                      disabled={working}
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="GATEWAY_TOKEN"
+                      onChange={(event) =>
+                        update(index, {
+                          bearer_token_env: event.target.value || null,
+                        })
+                      }
+                    />
+                  </SettingsField>
+                </>
+              )}
 
               <SettingsField
                 label="Request timeout (ms)"
@@ -245,20 +339,24 @@ export function McpPanel({ client }: { client: ApiClient }) {
                 />
               </SettingsField>
 
-              <EnvironmentEditor
-                values={server.env}
-                disabled={working}
-                onChange={(env) => update(index, { env })}
-              />
+              {transportOf(server) === "stdio" && (
+                <>
+                  <EnvironmentEditor
+                    values={server.env}
+                    disabled={working}
+                    onChange={(env) => update(index, { env })}
+                  />
 
-              <StringListEditor
-                label="Forward environment names"
-                hint="Only names are saved or displayed. Their values are resolved in the host process and never returned to the app."
-                values={server.env_from}
-                disabled={working}
-                addLabel="Add variable name"
-                onChange={(env_from) => update(index, { env_from })}
-              />
+                  <StringListEditor
+                    label="Forward environment names"
+                    hint="Only names are saved or displayed. Their values are resolved in the host process and never returned to the app."
+                    values={server.env_from}
+                    disabled={working}
+                    addLabel="Add variable name"
+                    onChange={(env_from) => update(index, { env_from })}
+                  />
+                </>
+              )}
 
               <div className="flex flex-wrap gap-2">
                 {server.enabled &&
@@ -326,8 +424,8 @@ export function McpPanel({ client }: { client: ApiClient }) {
             MCP tools are always sensitive and keep OpenWave’s existing approval
             boundary. Child environments start empty. Put credentials in the
             host environment and select only their variable names above; do not
-            enter secrets in the executable, arguments, working directory, or
-            literal values.
+            enter secrets in the executable, arguments, working directory,
+            literal values, or a server URL.
           </p>
         </>
       )}

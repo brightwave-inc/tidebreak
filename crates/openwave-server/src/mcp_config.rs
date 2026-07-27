@@ -1,10 +1,12 @@
-//! Runtime configuration and supervision for external MCP stdio servers.
+//! Runtime configuration and supervision for external MCP servers.
 //!
-//! Definitions are typed data, never shell fragments. Every child starts with a
-//! cleared environment and receives only literal values explicitly marked
-//! non-secret plus values selected by *name* from the parent environment. The
-//! latter values are resolved only at the process boundary and are never stored
-//! or projected through the API.
+//! A definition is either a local stdio child process or a remote Streamable
+//! HTTP endpoint. Definitions are typed data, never shell fragments. Every
+//! child starts with a cleared environment and receives only literal values
+//! explicitly marked non-secret plus values selected by *name* from the parent
+//! environment; an HTTP server's bearer token is likewise selected by name.
+//! Selected values are resolved only at the connection boundary and are never
+//! stored or projected through the API.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -87,12 +89,16 @@ pub(crate) struct McpServersConfig {
     pub(crate) servers: Vec<McpServerDefinition>,
 }
 
-/// One local stdio MCP process definition.
+/// One external MCP server definition: a local stdio process (`command`) or a
+/// remote Streamable HTTP endpoint (`url`). Exactly one of the two is set;
+/// [`validate_servers`] enforces that process fields stay with `command` and
+/// `bearer_token_env` stays with `url`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct McpServerDefinition {
     pub(crate) name: String,
-    pub(crate) command: String,
+    #[serde(default)]
+    pub(crate) command: Option<String>,
     #[serde(default)]
     pub(crate) args: Vec<String>,
     /// Explicit literal values. The UI labels these as non-secret.
@@ -103,6 +109,13 @@ pub(crate) struct McpServerDefinition {
     pub(crate) env_from: Vec<String>,
     #[serde(default)]
     pub(crate) cwd: Option<PathBuf>,
+    /// Streamable HTTP endpoint for a remote server.
+    #[serde(default)]
+    pub(crate) url: Option<String>,
+    /// Parent environment name holding the HTTP bearer token. The value is
+    /// resolved at connect time and never enters this type.
+    #[serde(default)]
+    pub(crate) bearer_token_env: Option<String>,
     #[serde(default = "default_request_timeout_ms")]
     pub(crate) request_timeout_ms: u64,
     #[serde(default = "enabled_by_default")]
@@ -119,6 +132,8 @@ impl std::fmt::Debug for McpServerDefinition {
             .field("env_names", &self.env.keys().collect::<Vec<_>>())
             .field("env_from", &self.env_from)
             .field("cwd", &self.cwd)
+            .field("url", &self.url)
+            .field("bearer_token_env", &self.bearer_token_env)
             .field("request_timeout_ms", &self.request_timeout_ms)
             .field("enabled", &self.enabled)
             .finish()
@@ -127,7 +142,12 @@ impl std::fmt::Debug for McpServerDefinition {
 
 impl McpServerDefinition {
     fn build_command(&self) -> Result<Command> {
-        let mut command = Command::new(&self.command);
+        let Some(program) = &self.command else {
+            return Err(AgentError::config(
+                "MCP server definition has no command to spawn",
+            ));
+        };
+        let mut command = Command::new(program);
         command.args(&self.args);
         // Deliberately unconditional: a renderer cannot widen a child to the
         // desktop's provider credentials or other ambient environment.
@@ -148,6 +168,17 @@ impl McpServerDefinition {
     }
 
     async fn connect(&self) -> Result<McpClient> {
+        if let Some(url) = &self.url {
+            let bearer_token = self.resolve_bearer_token()?;
+            return McpClient::connect_http_with_timeouts(
+                self.name.clone(),
+                url,
+                bearer_token.as_deref(),
+                INITIALIZATION_TIMEOUT,
+                Duration::from_millis(self.request_timeout_ms),
+            )
+            .await;
+        }
         McpClient::spawn_with_timeouts(
             self.name.clone(),
             self.build_command()?,
@@ -155,6 +186,18 @@ impl McpServerDefinition {
             Duration::from_millis(self.request_timeout_ms),
         )
         .await
+    }
+
+    /// Resolve the selected bearer token by name at the connection boundary.
+    fn resolve_bearer_token(&self) -> Result<Option<String>> {
+        let Some(name) = &self.bearer_token_env else {
+            return Ok(None);
+        };
+        std::env::var(name).map(Some).map_err(|_| {
+            AgentError::config(format!(
+                "required parent environment variable {name:?} is not set"
+            ))
+        })
     }
 }
 
@@ -679,9 +722,57 @@ fn validate_servers(servers: &[McpServerDefinition]) -> Result<()> {
     let mut names = HashSet::new();
     for server in servers {
         validate_name(&server.name)?;
-        validate_process_string(&server.name, "command", &server.command)?;
-        if server.command.is_empty() {
-            return Err(server_error(&server.name, "command must not be empty"));
+        match (&server.command, &server.url) {
+            (Some(_), Some(_)) => {
+                return Err(server_error(
+                    &server.name,
+                    "must configure either command or url, not both",
+                ));
+            }
+            (None, None) => {
+                return Err(server_error(
+                    &server.name,
+                    "must configure a command or a url",
+                ));
+            }
+            (Some(command), None) => {
+                validate_process_string(&server.name, "command", command)?;
+                if command.is_empty() {
+                    return Err(server_error(&server.name, "command must not be empty"));
+                }
+                if server.bearer_token_env.is_some() {
+                    return Err(server_error(
+                        &server.name,
+                        "bearer_token_env applies only to url servers",
+                    ));
+                }
+            }
+            (None, Some(url)) => {
+                validate_process_string(&server.name, "url", url)?;
+                openwave_mcp::validate_http_url(url)
+                    .map_err(|error| server_error(&server.name, error))?;
+                if !server.args.is_empty() {
+                    return Err(server_error(
+                        &server.name,
+                        "args apply only to command servers",
+                    ));
+                }
+                if !server.env.is_empty() || !server.env_from.is_empty() {
+                    return Err(server_error(
+                        &server.name,
+                        "process environment applies only to command servers",
+                    ));
+                }
+                if server.cwd.is_some() {
+                    return Err(server_error(
+                        &server.name,
+                        "cwd applies only to command servers",
+                    ));
+                }
+                if let Some(bearer_name) = &server.bearer_token_env {
+                    validate_environment_name(&server.name, bearer_name)?;
+                }
+            }
         }
         if server.args.len() > MAX_ARGS {
             return Err(server_error(
@@ -777,9 +868,13 @@ fn connection_diagnostic(definition: &McpServerDefinition) -> String {
     if let Some(name) = definition
         .env_from
         .iter()
+        .chain(&definition.bearer_token_env)
         .find(|name| std::env::var_os(name).is_none())
     {
         return format!("Required parent environment variable {name:?} is not set.");
+    }
+    if definition.url.is_some() {
+        return "Could not connect to this server. Check its URL and credentials.".to_string();
     }
     "Could not initialize this server. Check its executable, arguments, and working directory."
         .to_string()
@@ -803,13 +898,30 @@ mod tests {
     fn disabled_definition(name: &str, command: &str) -> McpServerDefinition {
         McpServerDefinition {
             name: name.to_string(),
-            command: command.to_string(),
+            command: Some(command.to_string()),
             args: Vec::new(),
             env: BTreeMap::new(),
             env_from: Vec::new(),
             cwd: None,
+            url: None,
+            bearer_token_env: None,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             enabled: false,
+        }
+    }
+
+    fn http_definition(name: &str, url: &str) -> McpServerDefinition {
+        McpServerDefinition {
+            name: name.to_string(),
+            command: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            env_from: Vec::new(),
+            cwd: None,
+            url: Some(url.to_string()),
+            bearer_token_env: None,
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+            enabled: true,
         }
     }
 
@@ -851,7 +963,7 @@ mod tests {
         .unwrap();
         let server = &config.0[0];
         assert_eq!(server.name, "private_docs");
-        assert_eq!(server.command, "/usr/local/bin/docs-mcp");
+        assert_eq!(server.command.as_deref(), Some("/usr/local/bin/docs-mcp"));
         assert_eq!(server.args, ["--stdio"]);
         assert_eq!(server.env.get("LOG_LEVEL").unwrap(), "info");
         assert_eq!(server.env_from, ["DOCS_TOKEN"]);
@@ -1068,7 +1180,10 @@ mod tests {
             .mark_degraded("docs", old_epoch, INITIAL_RECONNECT_BACKOFF)
             .await;
         let info = runtime.info().await;
-        assert_eq!(info.servers[0].definition.command, "/bin/new");
+        assert_eq!(
+            info.servers[0].definition.command.as_deref(),
+            Some("/bin/new")
+        );
         assert_eq!(info.servers[0].health, McpHealth::Disabled);
         assert!(info.servers[0].diagnostic.is_none());
     }
@@ -1114,6 +1229,171 @@ mod tests {
             "exactly one caller should perform the failed connection attempt"
         );
         assert_eq!(runtime.info().await.servers[0].health, McpHealth::Degraded);
+    }
+
+    #[test]
+    fn parses_a_streamable_http_server_configuration() {
+        let config = parse(
+            r#"{
+                "servers": [{
+                    "name": "gateway",
+                    "url": "http://127.0.0.1:28081/mcp/tools",
+                    "bearer_token_env": "GATEWAY_TOKEN",
+                    "request_timeout_ms": 2500
+                }]
+            }"#,
+        )
+        .unwrap();
+        let server = &config.0[0];
+        assert_eq!(
+            server.url.as_deref(),
+            Some("http://127.0.0.1:28081/mcp/tools")
+        );
+        assert_eq!(server.bearer_token_env.as_deref(), Some("GATEWAY_TOKEN"));
+        assert!(server.command.is_none());
+    }
+
+    #[test]
+    fn each_server_is_exactly_one_transport() {
+        let both = parse(
+            r#"{"servers":[{"name":"docs","command":"/bin/docs","url":"http://127.0.0.1/mcp"}]}"#,
+        )
+        .err()
+        .unwrap();
+        assert!(both.to_string().contains("not both"));
+
+        let neither = parse(r#"{"servers":[{"name":"docs"}]}"#).err().unwrap();
+        assert!(neither.to_string().contains("command or a url"));
+    }
+
+    #[test]
+    fn transport_specific_fields_stay_with_their_transport() {
+        let bearer_on_stdio = parse(
+            r#"{"servers":[{"name":"docs","command":"/bin/docs","bearer_token_env":"TOKEN"}]}"#,
+        )
+        .err()
+        .unwrap();
+        assert!(bearer_on_stdio.to_string().contains("only to url servers"));
+
+        for (field, fragment) in [
+            (r#""args":["--stdio"]"#, "args apply only"),
+            (r#""env":{"A":"b"}"#, "environment applies only"),
+            (r#""env_from":["TOKEN"]"#, "environment applies only"),
+            (r#""cwd":"/srv""#, "cwd applies only"),
+        ] {
+            let error = parse(&format!(
+                r#"{{"servers":[{{"name":"docs","url":"http://127.0.0.1/mcp",{field}}}]}}"#
+            ))
+            .err()
+            .unwrap();
+            assert!(error.to_string().contains(fragment), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_http_urls() {
+        for url in ["ftp://host/mcp", "http://user:secret@host/mcp", "not a url"] {
+            let error = parse(&format!(
+                r#"{{"servers":[{{"name":"docs","url":"{url}"}}]}}"#
+            ))
+            .err()
+            .unwrap();
+            assert!(!error.to_string().contains("secret"), "{url}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_selected_bearer_token_fails_by_name_without_a_value() {
+        const MISSING: &str = "OPENWAVE_TEST_MCP_BEARER_MUST_NOT_EXIST_8A31";
+        assert!(std::env::var_os(MISSING).is_none());
+        let mut definition = http_definition("gateway", "http://127.0.0.1:1/mcp");
+        definition.bearer_token_env = Some(MISSING.to_string());
+        let error = definition.connect().await.err().unwrap();
+        assert!(error.to_string().contains(MISSING));
+        assert!(error.to_string().contains("is not set"));
+
+        let diagnostic = connection_diagnostic(&definition);
+        assert!(diagnostic.contains(MISSING));
+        assert!(!diagnostic.contains('\n'));
+    }
+
+    #[test]
+    fn http_diagnostics_are_fixed_strings_without_the_url() {
+        let definition = http_definition("gateway", "http://127.0.0.1:9/mcp");
+        let diagnostic = connection_diagnostic(&definition);
+        assert_eq!(
+            diagnostic,
+            "Could not connect to this server. Check its URL and credentials."
+        );
+    }
+
+    async fn serve_fake_http_mcp() -> std::net::SocketAddr {
+        use axum::http::HeaderMap;
+        use axum::routing::post;
+
+        async fn handler(
+            headers: HeaderMap,
+            body: String,
+        ) -> ([(&'static str, &'static str); 1], String) {
+            // The config layer resolved the selected variable into the header.
+            let expected = format!("Bearer {}", std::env::var("PATH").unwrap());
+            assert_eq!(
+                headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
+                Some(expected.as_str())
+            );
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let id = request.get("id").cloned().unwrap_or_default();
+            let result = match request["method"].as_str().unwrap_or_default() {
+                "initialize" => serde_json::json!({
+                    "protocolVersion": openwave_mcp::PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "config-fixture", "version": "1"}
+                }),
+                "tools/list" => serde_json::json!({
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Look something up",
+                        "inputSchema": {"type": "object"}
+                    }]
+                }),
+                _ => serde_json::json!({}),
+            };
+            (
+                [("content-type", "application/json")],
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+            )
+        }
+
+        let app = axum::Router::new().route("/mcp", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        address
+    }
+
+    #[tokio::test]
+    async fn replaces_with_a_streamable_http_server_and_mounts_its_tools() {
+        let address = serve_fake_http_mcp().await;
+        let (runtime, _store, _directory) = test_runtime().await;
+        let mut definition = http_definition("gateway", &format!("http://{address}/mcp"));
+        // PATH always exists, so the selected-name path is exercised for real
+        // without mutating the test process environment.
+        definition.bearer_token_env = Some("PATH".to_string());
+        runtime
+            .replace(McpServersConfig {
+                servers: vec![definition],
+            })
+            .await
+            .unwrap();
+
+        let info = runtime.info().await;
+        assert_eq!(info.servers[0].health, McpHealth::Healthy);
+        assert_eq!(info.servers[0].tool_count, 1);
+        assert!(runtime.snapshot().get("mcp__gateway__lookup").is_some());
     }
 
     #[test]

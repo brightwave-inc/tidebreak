@@ -1,29 +1,38 @@
-# Local MCP servers
+# External MCP servers
 
-OpenWave connects to local MCP servers over stdio. In the desktop app, open
-**Settings → MCP servers**, add a definition, and choose **Save and verify**.
-OpenWave starts the executable directly with the argument array shown in the
-form; it never joins the fields into a shell command.
+OpenWave connects to MCP servers over two transports: a local stdio child
+process or a remote Streamable HTTP endpoint. In the desktop app, open
+**Settings → MCP servers**, add a definition, pick its transport, and choose
+**Save and verify**. For a stdio server, OpenWave starts the executable
+directly with the argument array shown in the form; it never joins the fields
+into a shell command. For an HTTP server, OpenWave sends each JSON-RPC request
+as an authenticated `POST` and accepts both plain JSON and `text/event-stream`
+responses.
 
 Each server has:
 
 - a stable namespace containing ASCII letters, numbers, `_`, or `-`;
-- an executable and zero or more individual arguments;
-- an optional working directory;
-- a request timeout from 1 to 3,600,000 milliseconds;
-- optional literal **non-secret** environment values;
-- optional `env_from` names selected from the OpenWave host environment; and
+- exactly one transport:
+  - **stdio** — an executable, zero or more individual arguments, an optional
+    working directory, optional literal **non-secret** environment values, and
+    optional `env_from` names selected from the OpenWave host environment; or
+  - **HTTP** — an `http`/`https` URL and an optional bearer-token variable
+    name selected from the OpenWave host environment;
+- a request timeout from 1 to 3,600,000 milliseconds; and
 - an enabled switch.
 
 The child environment starts empty. Literal values are ordinary settings and
-are visible in the Settings form. Executables, arguments, and working
-directories are also ordinary displayed settings, so do not put credentials in
+are visible in the Settings form. Executables, arguments, working directories,
+and URLs are also ordinary displayed settings, so do not put credentials in
 any of those fields. For a credential, set it in the environment that launches
-OpenWave and enter only its variable name under **Forward environment names**.
-OpenWave resolves that value at process launch; it does not store it in SQLite
+OpenWave and enter only its variable name — under **Forward environment names**
+for a stdio server, or **Bearer token variable** for an HTTP server. OpenWave
+resolves that value at the connection boundary; it does not store it in SQLite
 or return it to the renderer. A missing selected name produces a server-specific
 error containing the name, not a value. Child stderr is discarded so a server
-cannot copy a forwarded credential into OpenWave's host logs.
+cannot copy a forwarded credential into OpenWave's host logs, and HTTP
+diagnostics are fixed strings that never echo the URL, a token, or a response
+body.
 
 All mounted names use `mcp__{namespace}__{remote_tool}`. MCP tools are sensitive:
 the existing OpenWave approval gate must approve each call before it crosses
@@ -72,6 +81,13 @@ named by `OPENWAVE_MCP_CONFIG`:
         "LOG_LEVEL": "info"
       },
       "env_from": ["DOCUMENTS_TOKEN"],
+      "request_timeout_ms": 60000,
+      "enabled": true
+    },
+    {
+      "name": "gateway",
+      "url": "https://gateway.example/mcp/tools",
+      "bearer_token_env": "GATEWAY_TOKEN",
       "request_timeout_ms": 60000,
       "enabled": true
     }
