@@ -863,8 +863,18 @@ mod tests {
         assert_eq!(config.model, "claude-opus-4-8");
         assert_eq!(config.context_window, 1_000_000);
         assert_eq!(config.max_tokens, Some(128_000));
-        assert_eq!(config.reasoning_effort, None);
+        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(config.temperature, None);
+
+        // Haiku 4.5 reasons but rejects the effort control, so the request is
+        // shaped without it rather than with something the model would refuse.
+        let mut config = AgentConfig::default();
+        let haiku = ResolvedModelPolicy::curated(
+            model_registry::find_for(ProviderKind::Anthropic, "claude-haiku-4-5-20251001").unwrap(),
+        );
+        apply_model_policy(&mut config, &haiku, Some(ReasoningEffort::High)).unwrap();
+        assert!(config.reasoning_model);
+        assert_eq!(config.reasoning_effort, None);
 
         let mut config = AgentConfig::default();
         let gpt = ResolvedModelPolicy::curated(

@@ -177,7 +177,66 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     if let Some(temperature) = req.temperature {
         body["temperature"] = json!(temperature);
     }
+    if req.reasoning_model && takes_adaptive_thinking(&req.model) {
+        // An omitted `thinking` means thinking is *off* on Opus 4.7 and later,
+        // so a reasoning model only reasons when the request says so.
+        //
+        // `display` is an opt-in: the API default, `omitted`, still streams
+        // thinking blocks but with empty text, which reads in a live transcript
+        // as a long silent pause before the answer. `summarized` is what makes
+        // the reasoning stream the renderer already draws worth drawing.
+        body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
+        if let Some(effort) = req.reasoning_effort {
+            body["output_config"] = json!({ "effort": effort.as_str() });
+        }
+    }
     Ok(body)
+}
+
+/// Whether `model` takes the adaptive-thinking request shape.
+///
+/// Anthropic split the reasoning switch at Claude 4.6. That generation and
+/// later take `thinking: {"type": "adaptive"}` (plus `output_config.effort`)
+/// and reject a `budget_tokens` thinking block outright; earlier models are the
+/// mirror image, understanding only the budget form. Curated ids carry the
+/// generation in the id itself, so it is read from there rather than pinned to
+/// a list that goes stale on the next release — and going stale here means the
+/// newest model silently stops thinking, which is the bug this exists to
+/// prevent.
+///
+/// An id with no readable generation keeps the request it has today. Sending a
+/// parameter the model rejects fails the whole turn; omitting one only leaves
+/// the model where it already was.
+fn takes_adaptive_thinking(model: &str) -> bool {
+    /// First Claude generation that reasons on `thinking: {"type": "adaptive"}`.
+    const FIRST_ADAPTIVE: (u32, u32) = (4, 6);
+    claude_generation(model).is_some_and(|generation| generation >= FIRST_ADAPTIVE)
+}
+
+/// Read the `(major, minor)` generation out of a Claude model id.
+///
+/// Handles the shapes Anthropic ships: split across tokens (`claude-opus-4-8`),
+/// major only (`claude-opus-5`), and either with a trailing dated snapshot
+/// (`claude-haiku-4-5-20251001`). A trailing date is not a minor version, so
+/// anything longer than two digits does not count as one.
+fn claude_generation(model: &str) -> Option<(u32, u32)> {
+    let starts_with_digit = |token: &&str| token.starts_with(|c: char| c.is_ascii_digit());
+    let mut tokens = model
+        .strip_prefix("claude-")?
+        .split('-')
+        .skip_while(|token| !starts_with_digit(token));
+
+    let major = tokens.next()?;
+    // A dotted generation keeps both halves in one token.
+    if let Some((major, minor)) = major.split_once('.') {
+        return Some((major.parse().ok()?, minor.parse().ok()?));
+    }
+    let minor = tokens
+        .next()
+        .filter(|token| token.len() <= 2)
+        .and_then(|token| token.parse().ok())
+        .unwrap_or(0);
+    Some((major.parse().ok()?, minor))
 }
 
 /// Shape one message's blocks into Anthropic's `content` array.
@@ -343,6 +402,7 @@ mod tests {
     use super::*;
     use openwave_core::provider::ChatMessage;
     use openwave_core::tool::ToolSpec;
+    use openwave_core::ReasoningEffort;
 
     #[test]
     fn request_maps_system_messages_and_tools() {
@@ -371,6 +431,99 @@ mod tests {
         assert_eq!(body["messages"][0]["content"][0]["type"], "text");
         assert_eq!(body["tools"][0]["name"], "read_file");
         assert_eq!(body["temperature"], 0.5);
+    }
+
+    fn reasoning_request(model: &str, effort: Option<ReasoningEffort>) -> ChatRequest {
+        ChatRequest {
+            provider: Some(ProviderId::new("anthropic")),
+            model: model.into(),
+            reasoning_model: true,
+            system: None,
+            messages: vec![ChatMessage::text(Role::User, "hi")],
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            reasoning_effort: effort,
+            images: ImageAttachments::new(),
+        }
+    }
+
+    #[test]
+    fn a_reasoning_model_is_asked_to_think_out_loud() {
+        // Omitting `thinking` means thinking is off on Opus 4.7 and later, and
+        // the default `display` streams empty thinking blocks — a silent pause
+        // where the transcript should be showing reasoning.
+        let body = build_request_json(&reasoning_request("claude-opus-5", None)).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["thinking"]["display"], "summarized");
+        // Absent a per-chat override the provider's own effort default holds.
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn a_per_chat_effort_override_reaches_the_wire() {
+        let body = build_request_json(&reasoning_request(
+            "claude-opus-5",
+            Some(ReasoningEffort::Low),
+        ))
+        .unwrap();
+        assert_eq!(body["output_config"]["effort"], "low");
+    }
+
+    #[test]
+    fn a_non_reasoning_request_asks_for_no_thinking() {
+        let req = request_with(
+            vec![ContentBlock::Text { text: "hi".into() }],
+            ImageAttachments::new(),
+        );
+        assert!(!req.reasoning_model);
+        let body = build_request_json(&req).unwrap();
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn a_pre_adaptive_model_keeps_the_request_it_understands() {
+        // Claude Haiku 4.5 rejects both an adaptive thinking block and
+        // `output_config.effort`; sending either would fail the whole turn.
+        let body = build_request_json(&reasoning_request(
+            "claude-haiku-4-5-20251001",
+            Some(ReasoningEffort::High),
+        ))
+        .unwrap();
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn the_adaptive_switch_follows_the_generation_in_the_model_id() {
+        for id in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-opus-6.2",
+            "claude-opus-5-20260101",
+        ] {
+            assert!(takes_adaptive_thinking(id), "{id} should reason adaptively");
+        }
+        for id in [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-4-5",
+            "claude-opus-4-1-20250805",
+            "claude-3-5-sonnet-20241022",
+            // No readable generation: keep today's request rather than risk a
+            // parameter the endpoint rejects.
+            "some-gateway-alias",
+            "claude-next",
+        ] {
+            assert!(!takes_adaptive_thinking(id), "{id} should not");
+        }
+        assert_eq!(claude_generation("claude-haiku-4-5-20251001"), Some((4, 5)));
+        assert_eq!(claude_generation("claude-opus-5"), Some((5, 0)));
+        assert_eq!(claude_generation("claude-opus-6.2"), Some((6, 2)));
     }
 
     fn run(events: &[Value]) -> Vec<ProviderEvent> {
