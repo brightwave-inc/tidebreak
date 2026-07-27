@@ -6652,6 +6652,18 @@ dependencies = [
 [[package]]
 name = "openwave-connectors"
 version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "openwave-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "uuid",
+]
 
 [[package]]
 name = "openwave-core"

@@ -11,3 +11,18 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+axum = { workspace = true }
+base64 = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["net", "sync", "time"] }
+uuid = { workspace = true }
+# Only the trait contracts (SecretProvider, AgentError/Result), not the
+# SQLite / keychain / agent-loop machinery — hence default-features = false.
+openwave-core = { path = "../openwave-core", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "net"] }
+async-trait = { workspace = true }
