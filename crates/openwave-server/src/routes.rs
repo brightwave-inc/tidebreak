@@ -1455,17 +1455,13 @@ mod image_capability_tests {
         reasoning_efforts: &[],
     };
 
-    const MULTIMODAL: ModelSpec = ModelSpec {
-        input_modalities: &[InputModality::Text, InputModality::Image],
-        ..TEXT_ONLY
-    };
-
     #[test]
     fn advertised_image_input_is_the_only_thing_that_admits_a_turn_with_images() {
-        // Every curated model is pinned text-only today, so the accepting case
-        // is constructed here rather than read from the registry: the rule has
-        // to hold from the moment a model does advertise image input.
-        assert!(require_image_input(&providers::ResolvedModelPolicy::curated(&MULTIMODAL)).is_ok());
+        let native_model = crate::model_registry::find("claude-opus-5")
+            .expect("the default curated Anthropic model is registered");
+        assert!(
+            require_image_input(&providers::ResolvedModelPolicy::curated(native_model)).is_ok()
+        );
 
         let refused = require_image_input(&providers::ResolvedModelPolicy::curated(&TEXT_ONLY))
             .expect_err("a text-only model must refuse a turn carrying images");

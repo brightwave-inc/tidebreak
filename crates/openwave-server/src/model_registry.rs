@@ -38,7 +38,7 @@ impl InputModality {
     }
 }
 
-const TEXT_ONLY: &[InputModality] = &[InputModality::Text];
+const TEXT_AND_IMAGE: &[InputModality] = &[InputModality::Text, InputModality::Image];
 
 /// The reasoning-effort scales the curated rows draw from, ascending.
 ///
@@ -123,10 +123,10 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Anthropic,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
-        // The upstream model accepts images, but OpenWave's normalized content
-        // contract is text/tool-only today. Do not advertise a capability that
-        // cannot make it through the complete request path.
-        input_modalities: TEXT_ONLY,
+        // Image input is advertised only where the provider documents vision
+        // and this provider's adapter shapes hydrated image bytes into the
+        // request format. The capability guard below keeps that promise honest.
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         // Claude 4.6 and later reason on an adaptive thinking block, and the
         // Anthropic adapter sends one along with the chat's chosen effort. That
@@ -140,7 +140,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Anthropic,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
@@ -150,7 +150,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Anthropic,
         context_window: 200_000,
         max_output_tokens: 64_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         // Haiku 4.5 predates the adaptive switch: it rejects the effort
         // control, so the adapter leaves both off and the picker hides it.
@@ -162,7 +162,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Anthropic,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
@@ -172,7 +172,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Anthropic,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
@@ -182,7 +182,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Anthropic,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
@@ -192,7 +192,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Anthropic,
         context_window: 1_000_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
@@ -202,7 +202,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Openai,
         context_window: 1_050_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         // The whole GPT-5 line reasons on a caller-selected effort, which the
         // OpenAI-compatible adapter already sends alongside
@@ -215,7 +215,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Openai,
         context_window: 1_050_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
@@ -225,7 +225,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Openai,
         context_window: 1_050_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
@@ -235,7 +235,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Openai,
         context_window: 1_050_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
@@ -245,7 +245,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Openai,
         context_window: 400_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
@@ -255,7 +255,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         provider: ProviderKind::Openai,
         context_window: 400_000,
         max_output_tokens: 128_000,
-        input_modalities: TEXT_ONLY,
+        input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
@@ -378,6 +378,19 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    /// Whether OpenWave can actually put an image on the wire for `provider`.
+    ///
+    /// Provider documentation alone does not earn a model `InputModality::Image`.
+    /// Each provider has its own request adapter, and a custom compatible
+    /// endpoint is not known to support the image branch at all.
+    const fn provider_carries_image_input(provider: ProviderKind) -> bool {
+        match provider {
+            ProviderKind::Anthropic => true,
+            ProviderKind::Openai => true,
+            ProviderKind::OpenaiCompatible => false,
+        }
+    }
+
     #[test]
     fn registry_provider_model_keys_are_unique_and_capabilities_are_well_formed() {
         let mut keys = HashSet::new();
@@ -393,9 +406,10 @@ mod tests {
             assert!(spec.context_window >= spec.max_output_tokens);
             assert!(spec.accepts(InputModality::Text));
             assert!(
-                !spec.accepts(InputModality::Image),
-                "{} advertises image input before the provider contract supports it",
-                spec.id
+                !spec.accepts(InputModality::Image) || provider_carries_image_input(spec.provider),
+                "{} advertises image input under `{}`, which cannot carry an image block through the complete request path",
+                spec.id,
+                spec.provider
             );
             assert!(
                 !spec.supports_reasoning_effort() || spec.supports_reasoning,
