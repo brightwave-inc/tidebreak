@@ -40,5 +40,7 @@ export function providerLabel(provider: ProviderKind): string {
       return "OpenAI";
     case "openai_compatible":
       return "OpenAI-compatible";
+    case "model_gateway":
+      return "Model Gateway";
   }
 }

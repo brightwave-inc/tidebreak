@@ -41,6 +41,11 @@ pub struct AppState {
     pub tools: Arc<ToolRegistry>,
     /// Runtime-managed MCP connections and immutable per-turn tool snapshots.
     pub(crate) mcp: Arc<McpRuntime>,
+    /// The signed-in model-gateway session handle (sign-in, model sync,
+    /// per-request tokens). The production assembly in `bind_inner` replaces
+    /// this with the resolver's instance — refresh rotation is serialized
+    /// per instance, so routes and resolver must share one.
+    pub(crate) gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
     /// The retrieval pipeline used by the durable document worker and the
     /// agent's shared `search` tool.
     pub retrieval: Arc<Retriever>,
@@ -129,6 +134,7 @@ impl AppState {
         let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
         let blob_writes = Arc::new(BlobWriteGuard::new(config.data_dir.join("blob-locks")));
         let mcp = Arc::new(McpRuntime::new(tools.clone(), store.clone()));
+        let gateway = crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone());
         Ok(Self {
             config: Arc::new(config),
             store: store.clone(),
@@ -137,6 +143,7 @@ impl AppState {
             secrets,
             tools,
             mcp,
+            gateway,
             retrieval,
             document_job_wake: Arc::new(Notify::new()),
             turn_job_wake: Arc::new(Notify::new()),

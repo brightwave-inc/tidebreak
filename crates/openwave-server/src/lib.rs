@@ -27,6 +27,7 @@ mod error;
 mod event_projection;
 mod extract;
 mod foreground_prompt;
+mod gateway_runtime;
 mod mcp_config;
 mod model_registry;
 mod provider;
@@ -271,6 +272,13 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/mcp/servers/{name}/view-session",
             post(routes::post_mcp_view_session),
+        )
+        .route("/gateway/status", get(routes::get_gateway_status))
+        .route("/gateway/sign-in", post(routes::post_gateway_sign_in))
+        .route("/gateway/sign-out", post(routes::post_gateway_sign_out))
+        .route(
+            "/gateway/models/sync",
+            post(routes::post_gateway_models_sync),
         )
         .route(
             "/web-search/credentials",
@@ -543,7 +551,12 @@ async fn bind_inner(
     // Pre-providers installs may only have an env/legacy key — enable Anthropic
     // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade.
     providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
-    let resolver = Arc::new(KeyedResolver::new(store.clone(), secrets.clone()));
+    let gateway = gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone());
+    let resolver = Arc::new(KeyedResolver::new(
+        store.clone(),
+        secrets.clone(),
+        gateway.clone(),
+    ));
     let embedder = resolve_embedder(&*store, &*secrets).await;
     let vector_store = connect_vector_store(&config, embedder.dimensions()).await?;
     let code_execution = Arc::new(code_execution::ConfiguredCodeExecutionProvider::new(
@@ -560,7 +573,7 @@ async fn bind_inner(
         store.clone(),
     );
     let tools = Arc::new(tools);
-    let state = match client_executor_id {
+    let mut state = match client_executor_id {
         Some(client_executor_id) => AppState::new_with_client_executor_id(
             config,
             store,
@@ -581,6 +594,11 @@ async fn bind_inner(
             agent_config,
         ),
     };
+    // The resolver and the /gateway routes must share ONE runtime: refresh
+    // rotation is serialized per GatewayConnection instance, and two
+    // instances over the same keychain entry can race a stale refresh token
+    // into the gateway's reuse detection (a spurious full sign-out).
+    state.gateway = gateway;
     state.mcp.initialize(mcp_servers).await?;
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();

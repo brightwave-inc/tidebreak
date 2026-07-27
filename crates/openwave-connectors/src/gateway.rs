@@ -198,6 +198,17 @@ impl std::fmt::Debug for GatewayCredentials {
     }
 }
 
+/// Whether a gateway session is stored, without constructing a vault.
+///
+/// For readiness surfaces (`has_credential`-style projections) that hold only
+/// a borrowed [`SecretProvider`].
+pub async fn has_stored_credentials(secrets: &dyn SecretProvider) -> bool {
+    matches!(
+        secrets.get_secret(SECRET_KEY).await,
+        Ok(Some(raw)) if serde_json::from_str::<GatewayCredentials>(&raw).is_ok()
+    )
+}
+
 /// Keychain-backed storage for [`GatewayCredentials`].
 #[derive(Clone)]
 pub struct CredentialVault {
@@ -557,6 +568,13 @@ impl GatewayConnection {
             vault,
             token_motion: Mutex::new(()),
         }
+    }
+
+    /// The underlying auth client, for flows that operate before a session
+    /// exists (starting a browser sign-in).
+    #[must_use]
+    pub fn auth(&self) -> &GatewayAuth {
+        &self.auth
     }
 
     /// Persist a completed sign-in as the connection's stored credentials.

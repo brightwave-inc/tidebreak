@@ -35,6 +35,9 @@ pub struct AnthropicProvider {
     client: reqwest::Client,
     api_key: String,
     base_url: String,
+    /// Per-request credential supplier for gateways that mint short-lived
+    /// tokens. Takes precedence over `api_key` when present.
+    token_source: Option<std::sync::Arc<dyn crate::BearerTokenSource>>,
 }
 
 impl AnthropicProvider {
@@ -44,6 +47,7 @@ impl AnthropicProvider {
             client: reqwest::Client::new(),
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
+            token_source: None,
         }
     }
 
@@ -52,6 +56,17 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Fetch the credential from `source` at each request instead of using a
+    /// static key. For gateways whose tokens rotate under the adapter.
+    #[must_use]
+    pub fn with_token_source(
+        mut self,
+        source: std::sync::Arc<dyn crate::BearerTokenSource>,
+    ) -> Self {
+        self.token_source = Some(source);
         self
     }
 }
@@ -65,6 +80,10 @@ impl ModelProvider for AnthropicProvider {
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let body = build_request_json(&req)?;
         let url = format!("{}/v1/messages", self.base_url);
+        let api_key = match &self.token_source {
+            Some(source) => source.bearer_token().await?,
+            None => self.api_key.clone(),
+        };
 
         // Setup failures (connection, auth, 4xx/5xx) surface here as `Err` so the
         // router can classify and fail over; the returned stream only yields
@@ -72,7 +91,7 @@ impl ModelProvider for AnthropicProvider {
         let response = self
             .client
             .post(url)
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", &api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
             .json(&body)

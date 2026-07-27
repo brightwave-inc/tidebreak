@@ -40,6 +40,7 @@ vec-lance = ["openwave-retrieval/vec-lance"]
 [dependencies]
 openwave-code-execution = { path = "../openwave-code-execution" }
 openwave-core = { path = "../openwave-core", default-features = false, features = ["sqlite", "tools", "keychain", "blob-fs"] }
+openwave-connectors = { path = "../openwave-connectors" }
 openwave-mcp = { path = "../openwave-mcp" }
 openwave-router = { path = "../openwave-router" }
 openwave-retrieval = { path = "../openwave-retrieval" }

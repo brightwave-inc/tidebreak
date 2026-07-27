@@ -21,4 +21,4 @@ pub mod openai_compat;
 pub use anthropic::AnthropicProvider;
 #[cfg(feature = "openai-compat")]
 pub use openai_compat::OpenAiCompatProvider;
-pub use router::{Route, RouteKind, Router};
+pub use router::{BearerTokenSource, Route, RouteKind, Router};

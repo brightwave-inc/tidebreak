@@ -23,9 +23,14 @@ export function ProvidersPanel({
       title="Providers"
       description="Keys stay on this machine. Enable a provider, then save a credential."
     >
-      {providers.map((p) => (
-        <ProviderRow key={p.kind} info={p} client={client} onChanged={onChanged} />
-      ))}
+      {providers
+        // The gateway signs in with OAuth, not a pasted key; its whole
+        // surface (connect, identity, entitled models) lives in the
+        // dedicated Model Gateway settings panel.
+        .filter((p) => p.kind !== "model_gateway")
+        .map((p) => (
+          <ProviderRow key={p.kind} info={p} client={client} onChanged={onChanged} />
+        ))}
     </SettingsPanel>
   );
 }
