@@ -1,0 +1,116 @@
+[
+  {
+    "type": "turn_started",
+    "turn_id": "00000000-0000-0000-0000-000000000001"
+  },
+  {
+    "type": "text_delta",
+    "text": "assistant text"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "reasoning text"
+  },
+  {
+    "type": "stream_interrupted"
+  },
+  {
+    "type": "tool_call_started",
+    "call_id": "00000000-0000-0000-0000-000000000002",
+    "name": "exec"
+  },
+  {
+    "type": "tool_call_args_delta",
+    "call_id": "00000000-0000-0000-0000-000000000002",
+    "fragment": "{\"command\":"
+  },
+  {
+    "type": "user_questions_asked",
+    "call_id": "00000000-0000-0000-0000-000000000003",
+    "turn_id": "00000000-0000-0000-0000-000000000001"
+  },
+  {
+    "type": "approval_required",
+    "call_id": "00000000-0000-0000-0000-000000000002",
+    "tool_name": "exec",
+    "class": "sensitive",
+    "kind": "exec_may_run_networked_command",
+    "preview": {
+      "tool": "exec",
+      "command": "git",
+      "args": [
+        "status"
+      ],
+      "cwd": "."
+    },
+    "summary": "Run a command"
+  },
+  {
+    "type": "approval_decided",
+    "call_id": "00000000-0000-0000-0000-000000000002",
+    "approved": true
+  },
+  {
+    "type": "tool_call_completed",
+    "call_id": "00000000-0000-0000-0000-000000000002",
+    "output": {
+      "content": "on branch main",
+      "data": {
+        "exit_code": 0
+      },
+      "is_error": false
+    },
+    "action": {
+      "tool": "exec",
+      "command": "git",
+      "args": [
+        "status"
+      ],
+      "cwd": "."
+    },
+    "result": {
+      "tool": "exec",
+      "exit_code": 0,
+      "timed_out": false,
+      "output_truncated": false,
+      "stdout": "on branch main",
+      "stderr": ""
+    }
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 11,
+      "output_tokens": 22,
+      "cache_read_input_tokens": 33,
+      "cache_creation_input_tokens": 44
+    },
+    "stop_reason": "end_turn"
+  },
+  {
+    "type": "turn_failed",
+    "error": {
+      "kind": "config",
+      "message": "configuration error: no provider"
+    }
+  },
+  {
+    "type": "turn_cancelled",
+    "usage": {
+      "input_tokens": 5,
+      "output_tokens": 6,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    }
+  },
+  {
+    "type": "user_steered",
+    "message_id": "00000000-0000-0000-0000-000000000004",
+    "content": "steered text"
+  },
+  {
+    "type": "context_truncated",
+    "original_tokens": 100000,
+    "fitted_tokens": 60000
+  }
+]
