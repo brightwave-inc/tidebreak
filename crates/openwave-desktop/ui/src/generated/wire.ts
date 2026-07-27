@@ -9,6 +9,69 @@
 // which a type can express. See docs/wire-types.md.
 
 /**
+ * Fixed, renderer-safe names for supported live work.
+ *
+ * Adding a durable tool does not automatically expose it to a renderer: it
+ * must be deliberately admitted here with a safe label.
+ */
+export type AgentActivityKind = "web_search" | "read_delegated_file" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file";
+
+/**
+ * Renderer-safe projection of one live supported checkpoint.
+ */
+export type AgentActivitySnapshot = { kind: AgentActivityKind, status: AgentActivityStatus, };
+
+/**
+ * Coarse checkpoint lifecycle suitable for display.
+ *
+ * This intentionally does not mirror all durable executor states; only live
+ * work is represented, and terminal checkpoints produce no activity.
+ */
+export type AgentActivityStatus = "waiting" | "running";
+
+/**
+ * Closed renderer-safe acknowledgement for sandbox cancellation.
+ */
+export type AgentRunCancellationSnapshot = { id: AgentRunId, status: AgentRunCancellationStatus, };
+
+export type AgentRunCancellationStatus = "cancelling" | "cancelled";
+
+/**
+ * Execution boundary for an [`AgentRun`].
+ */
+export type AgentRunExecution = "foreground" | "sandbox";
+
+/**
+ * Identifies one durable foreground or sandboxed background agent run.
+ */
+export type AgentRunId = string;
+
+/**
+ * Renderer-safe state for one agent run.
+ *
+ * Worker lease tokens, delegated inputs, scheduling budgets, and other
+ * executor-facing fields intentionally remain inside the server/store boundary.
+ */
+export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, execution: AgentRunExecution, status: AgentRunStatus, started_at: string | null, finished_at: string | null, 
+/**
+ * Stable, bounded classification suitable for renderer display.
+ */
+last_error_code: string | null, 
+/**
+ * The currently checkpointed, renderer-safe activity, if any.
+ *
+ * This is intentionally a small fixed vocabulary. It never exposes tool
+ * arguments, results, provider call identities, executor leases, or raw
+ * executor diagnostics.
+ */
+activity: AgentActivitySnapshot | null, created_at: string, updated_at: string, };
+
+/**
+ * Durable lifecycle of an [`AgentRun`].
+ */
+export type AgentRunStatus = "active" | "queued" | "running" | "cancelling" | "waiting" | "retry_wait" | "completed" | "failed" | "cancelled";
+
+/**
  * The approval policy class a tool declares for itself.
  *
  * Policy maps class → auto-approve / ask / deny. In v1: `ReadOnly` and
@@ -33,10 +96,68 @@ export type AssistantCitationSnapshot = { id: AssistantCitationId, ordinal: numb
 export type CallId = string;
 
 /**
+ * A persistent conversation with an exact, ordered host-root projection.
+ */
+export type Chat = { 
+/**
+ * Stable identifier.
+ */
+id: ChatId, 
+/**
+ * The project this chat belongs to, or `None` for a loose (projectless) chat.
+ */
+project_id: ProjectId | null, 
+/**
+ * Human-facing title; `None` until one is set or derived.
+ */
+title: string | null, 
+/**
+ * The model this chat runs against, or `None` to use the configured default.
+ */
+model: string | null, 
+/**
+ * Reasoning-effort override for this chat, honored only by models that
+ * expose the control; `None` leaves the provider's default in force.
+ */
+reasoning_effort: ReasoningEffort | null, 
+/**
+ * CAS revision of this conversation's exact root projection.
+ */
+attachment_revision: number, 
+/**
+ * Ordered opaque roots available for future broker-backed operations.
+ * Live broker authorization remains mandatory and may revoke access at any
+ * time, regardless of this projection.
+ */
+root_attachments: Array<ChatRootAttachment>, 
+/**
+ * When the chat was created.
+ */
+created_at: string, };
+
+/**
+ * Identifies a persistent conversation.
+ */
+export type ChatId = string;
+
+/**
  * A renderer-safe durable transcript entry. Internal routing and tool state
  * deliberately remain behind the server boundary.
  */
 export type ChatMessageSnapshot = { id: MessageId, role: TranscriptRole, content: string, created_at: string, citations: Array<AssistantCitationSnapshot>, };
+
+/**
+ * One pathless root in a conversation's exact ordered projection.
+ */
+export type ChatRootAttachment = { 
+/**
+ * Opaque broker root identity. This value grants no authority by itself.
+ */
+root_id: HostRootId, 
+/**
+ * Product-level provenance for ordering and future management UI.
+ */
+origin: RootAttachmentOrigin, };
 
 /**
  * A completed tool invocation with no results, tool identity, provider
@@ -70,9 +191,153 @@ action?: ToolActionPreview, status: ChatToolActivityStatus, started_at: string, 
 export type ChatToolActivityStatus = "completed" | "failed" | "cancelled";
 
 /**
+ * One visible transcript plus the durable journal watermark that produced it.
+ * The renderer uses the watermark to subscribe only to future events, avoiding
+ * duplicate text when reopening a completed conversation.
+ */
+export type ChatTranscript = { messages: Array<ChatMessageSnapshot>, 
+/**
+ * Finished tool activity from terminal turns, projected through a fixed
+ * renderer-safe allowlist. Canonical tool records never cross this API.
+ */
+tool_activity: Array<ChatToolActivitySnapshot>, last_event_seq: number, };
+
+/**
+ * Renderer-safe configuration and readiness.
+ */
+export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, };
+
+/**
+ * A configured code-execution backend.
+ */
+export type CodeExecutionProviderKind = "local";
+
+/**
+ * Conservative, user-inspectable capabilities for one model served by an
+ * OpenAI-compatible endpoint.
+ */
+export type CustomModelConfig = { 
+/**
+ * Exact model id sent to the endpoint.
+ */
+id: string, 
+/**
+ * Optional human-facing label.
+ */
+display_name?: string | null, 
+/**
+ * Context limit used by OpenWave's reducer.
+ */
+context_window: number, 
+/**
+ * Maximum output sent to the endpoint.
+ */
+max_output_tokens: number, };
+
+/**
+ * Opaque identifier for a folder registered with a host broker.
+ *
+ * This is product projection data, not authority: possession of an id never
+ * grants access to the corresponding host path. The broker independently
+ * validates live attachments, consent, capabilities, and revocation.
+ */
+export type HostRootId = string;
+
+/**
+ * An input modality a model accepts.
+ *
+ * `snake_case` matches the strings `as_str` has always produced, so the enum
+ * serializes exactly as the hand-built list of strings it replaces on the wire.
+ */
+export type InputModality = "text" | "image";
+
+/**
+ * Renderer-safe connection lifecycle.
+ */
+export type McpHealth = "initializing" | "healthy" | "degraded" | "reconnecting" | "disabled";
+
+/**
+ * One local stdio MCP process definition.
+ */
+export type McpServerDefinition = { name: string, command: string, args: Array<string>, 
+/**
+ * Explicit literal values. The UI labels these as non-secret.
+ */
+env: { [key in string]: string }, 
+/**
+ * Parent environment names to forward. Their values never enter this type.
+ */
+env_from: Array<string>, cwd: string | null, request_timeout_ms: number, enabled: boolean, };
+
+/**
+ * One renderer-safe server projection. Resolved `env_from` values and child
+ * process details are intentionally absent.
+ */
+export type McpServerInfo = { health: McpHealth, tool_count: number, diagnostic: string | null, name: string, command: string, args: Array<string>, 
+/**
+ * Explicit literal values. The UI labels these as non-secret.
+ */
+env: { [key in string]: string }, 
+/**
+ * Parent environment names to forward. Their values never enter this type.
+ */
+env_from: Array<string>, cwd: string | null, request_timeout_ms: number, enabled: boolean, };
+
+export type McpServersInfo = { servers: Array<McpServerInfo>, };
+
+/**
  * Identifies a persisted message within a chat.
  */
 export type MessageId = string;
+
+/**
+ * A selectable model in the catalog.
+ */
+export type ModelInfo = { 
+/**
+ * Stable provider-qualified selection key used by settings and chats.
+ */
+key: string, 
+/**
+ * The identifier passed to the provider and stored as `chat.model`.
+ */
+id: string, 
+/**
+ * Human-readable label for the selector (e.g. `"Claude Opus 4.8"`).
+ */
+display_name: string, 
+/**
+ * The provider that serves the model.
+ */
+provider: ProviderKind, 
+/**
+ * Whether the provider is enabled, configured, and credentialed.
+ */
+available: boolean, 
+/**
+ * Approximate context window in tokens.
+ */
+context_window: number, 
+/**
+ * Maximum model output in tokens.
+ */
+max_output_tokens: number, 
+/**
+ * Input modalities accepted by the model.
+ */
+input_modalities: Array<InputModality>, 
+/**
+ * Whether the model can produce an internal reasoning stream.
+ */
+supports_reasoning: boolean, 
+/**
+ * Whether the model exposes a reasoning-effort control.
+ */
+supports_reasoning_effort: boolean, 
+/**
+ * Whether the model accepts image input alongside text.
+ */
+multimodal: boolean, };
 
 /**
  * Closed renderer-safe pending approval projection. Canonical arguments,
@@ -101,6 +366,79 @@ export type PendingFolderAccessRequest = { call_id: CallId, turn_id: TurnId, rea
  * behind the server boundary.
  */
 export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions: Array<UserQuestion>, asked_at: string, };
+
+/**
+ * An optional grouping of chats that share project context and a document
+ * corpus. A chat may belong to a project or stand alone — unlike some designs
+ * that make a project mandatory, OpenWave keeps loose, projectless chats.
+ */
+export type Project = { 
+/**
+ * Stable identifier.
+ */
+id: ProjectId, 
+/**
+ * Human-facing title.
+ */
+title: string | null, 
+/**
+ * CAS revision of the ordered root projection.
+ */
+attachment_revision: number, 
+/**
+ * Ordered opaque root defaults for conversations created in this project.
+ * These ids are product state, never host authorization.
+ */
+root_attachments: Array<HostRootId>, 
+/**
+ * When the project was created.
+ */
+created_at: string, };
+
+/**
+ * Identifies a project: an optional grouping a chat may belong to.
+ */
+export type ProjectId = string;
+
+/**
+ * Public view of a provider — never includes the credential itself.
+ */
+export type ProviderInfo = { 
+/**
+ * Provider kind.
+ */
+kind: ProviderKind, 
+/**
+ * Whether the provider is enabled for routing.
+ */
+enabled: boolean, 
+/**
+ * Configured base URL, if any.
+ */
+base_url?: string, 
+/**
+ * Whether a credential is stored (never the credential itself).
+ */
+has_credential: boolean, 
+/**
+ * Explicit custom model entries for this endpoint.
+ */
+models: Array<CustomModelConfig>, };
+
+/**
+ * The known provider kinds. `#[non_exhaustive]` so new kinds can land without
+ * breaking wire clients that match on the string form.
+ */
+export type ProviderKind = "anthropic" | "openai" | "openai_compatible";
+
+/**
+ * How hard a reasoning-capable model should think before answering.
+ *
+ * A hint honored only by providers whose models expose it (OpenAI's o-series);
+ * other providers ignore it. Persisted per chat and threaded into the model
+ * request for each turn.
+ */
+export type ReasoningEffort = "low" | "medium" | "high";
 
 export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta" } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**
@@ -142,6 +480,25 @@ export type RendererToolStatus = "completed" | "failed";
  * (or whether) to map it to a local picker location.
  */
 export type RequestedFolderHint = "documents" | "downloads";
+
+/**
+ * Why a root appears in one conversation's exact ordered projection.
+ */
+export type RootAttachmentOrigin = "project_default" | "conversation";
+
+/**
+ * Runtime settings a client can read. The API key itself is never returned —
+ * it lives in the `SecretProvider`, not the store — only whether one is set.
+ */
+export type Settings = { 
+/**
+ * The model turns run against, or `None` to use the server's default.
+ */
+model: string | null, 
+/**
+ * Whether a model API key is configured (never the key itself).
+ */
+has_api_key: boolean, };
 
 /**
  * The action a call will take, in a form a human can inspect.
@@ -239,6 +596,25 @@ export type UserQuestion = { id: string, header: string, question: string, optio
  * One mutually exclusive answer choice.
  */
 export type UserQuestionOption = { id: string, label: string, description: string, };
+
+/**
+ * Public state returned by the local API. It intentionally reports only
+ * selection and credential presence — key material never crosses the secret
+ * boundary.
+ */
+export type WebSearchConfigInfo = { provider?: WebSearchProviderKind, timeout_ms: number, has_credential: boolean, };
+
+/**
+ * Credential readiness for one fixed web-search provider. This public shape
+ * deliberately carries no secret material.
+ */
+export type WebSearchCredentialReadiness = { provider: WebSearchProviderKind, has_credential: boolean, };
+
+/**
+ * A configured web-search backend. The stable string also selects its secret
+ * reference; it is intentionally not a model-controlled argument.
+ */
+export type WebSearchProviderKind = "exa" | "tavily";
 
 /**
  * Every tool name the renderer will accept, at runtime.

@@ -110,7 +110,7 @@ pub const MAX_PROJECT_METADATA_BODY_BYTES: usize = 1_024;
 
 /// Runtime settings a client can read. The API key itself is never returned —
 /// it lives in the `SecretProvider`, not the store — only whether one is set.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
 pub struct Settings {
     /// The model turns run against, or `None` to use the server's default.
     #[serde(default)]
@@ -446,7 +446,7 @@ pub async fn delete_provider_credential(
 }
 
 /// A selectable model in the catalog.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 pub struct ModelInfo {
     /// Stable provider-qualified selection key used by settings and chats.
     pub key: String,
@@ -463,7 +463,7 @@ pub struct ModelInfo {
     /// Maximum model output in tokens.
     pub max_output_tokens: u32,
     /// Input modalities accepted by the model.
-    pub input_modalities: Vec<String>,
+    pub input_modalities: Vec<crate::model_registry::InputModality>,
     /// Whether the model can produce an internal reasoning stream.
     pub supports_reasoning: bool,
     /// Whether the model exposes a reasoning-effort control.
@@ -495,12 +495,7 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
             available: entry.available,
             context_window: entry.policy.context_window,
             max_output_tokens: entry.policy.max_output_tokens,
-            input_modalities: entry
-                .policy
-                .input_modalities
-                .iter()
-                .map(|modality| modality.as_str().to_string())
-                .collect(),
+            input_modalities: entry.policy.input_modalities.clone(),
             supports_reasoning: entry.policy.supports_reasoning,
             supports_reasoning_effort: entry.policy.supports_reasoning_effort,
             multimodal: entry
@@ -743,7 +738,7 @@ pub struct ChatMessageSnapshot {
 /// One visible transcript plus the durable journal watermark that produced it.
 /// The renderer uses the watermark to subscribe only to future events, avoiding
 /// duplicate text when reopening a completed conversation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 pub struct ChatTranscript {
     pub messages: Vec<ChatMessageSnapshot>,
     /// Finished tool activity from terminal turns, projected through a fixed
@@ -946,7 +941,7 @@ fn remove_private_chat_scratch(root: &FsPath, id: ChatId) -> std::io::Result<()>
 ///
 /// Worker lease tokens, delegated inputs, scheduling budgets, and other
 /// executor-facing fields intentionally remain inside the server/store boundary.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 pub struct AgentRunSnapshot {
     pub id: openwave_core::AgentRunId,
     pub parent_id: Option<openwave_core::AgentRunId>,
@@ -987,7 +982,7 @@ impl AgentRunSnapshot {
 ///
 /// Adding a durable tool does not automatically expose it to a renderer: it
 /// must be deliberately admitted here with a safe label.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentActivityKind {
     WebSearch,
@@ -1002,7 +997,7 @@ pub enum AgentActivityKind {
 ///
 /// This intentionally does not mirror all durable executor states; only live
 /// work is represented, and terminal checkpoints produce no activity.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentActivityStatus {
     Waiting,
@@ -1010,7 +1005,7 @@ pub enum AgentActivityStatus {
 }
 
 /// Renderer-safe projection of one live supported checkpoint.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
 pub struct AgentActivitySnapshot {
     pub kind: AgentActivityKind,
     pub status: AgentActivityStatus,
@@ -1102,13 +1097,13 @@ pub async fn list_agent_runs(
 }
 
 /// Closed renderer-safe acknowledgement for sandbox cancellation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 pub struct AgentRunCancellationSnapshot {
     pub id: openwave_core::AgentRunId,
     pub status: AgentRunCancellationStatus,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunCancellationStatus {
     Cancelling,

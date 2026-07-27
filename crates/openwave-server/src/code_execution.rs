@@ -69,9 +69,10 @@ const fn default_timeout_ms() -> u64 {
 }
 
 /// Renderer-safe configuration and readiness.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct CodeExecutionConfigInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub provider: Option<CodeExecutionProviderKind>,
     pub timeout_ms: u64,
     pub available: bool,

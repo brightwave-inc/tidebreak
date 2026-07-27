@@ -114,7 +114,7 @@ pub const MAX_ROOT_ATTACHMENTS: usize = 32;
 pub const MAX_ATTACHMENT_REVISION: i64 = 9_007_199_254_740_991;
 
 /// Why a root appears in one conversation's exact ordered projection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum RootAttachmentOrigin {
     /// Snapshotted from project defaults when the conversation was created.
@@ -124,7 +124,7 @@ pub enum RootAttachmentOrigin {
 }
 
 /// One pathless root in a conversation's exact ordered projection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct ChatRootAttachment {
     /// Opaque broker root identity. This value grants no authority by itself.
     pub root_id: HostRootId,
@@ -476,7 +476,7 @@ impl RootAttachmentChange {
 /// An optional grouping of chats that share project context and a document
 /// corpus. A chat may belong to a project or stand alone — unlike some designs
 /// that make a project mandatory, OpenWave keeps loose, projectless chats.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct Project {
     /// Stable identifier.
     pub id: ProjectId,
@@ -1107,7 +1107,7 @@ pub enum Role {
 /// A hint honored only by providers whose models expose it (OpenAI's o-series);
 /// other providers ignore it. Persisted per chat and threaded into the model
 /// request for each turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
     /// Minimize reasoning tokens for the fastest, cheapest response.
@@ -1146,7 +1146,7 @@ impl ReasoningEffort {
 }
 
 /// A persistent conversation with an exact, ordered host-root projection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct Chat {
     /// Stable identifier.
     pub id: ChatId,
@@ -1563,7 +1563,7 @@ impl AgentRunInboxStatus {
 }
 
 /// Execution boundary for an [`AgentRun`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentRunExecution {
@@ -1585,7 +1585,7 @@ impl AgentRunExecution {
 }
 
 /// Durable lifecycle of an [`AgentRun`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentRunStatus {

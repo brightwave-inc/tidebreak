@@ -88,7 +88,7 @@ pub(crate) struct McpServersConfig {
 }
 
 /// One local stdio MCP process definition.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct McpServerDefinition {
     pub(crate) name: String,
@@ -167,7 +167,7 @@ const fn enabled_by_default() -> bool {
 }
 
 /// Renderer-safe connection lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum McpHealth {
     Initializing,
@@ -179,7 +179,7 @@ pub(crate) enum McpHealth {
 
 /// One renderer-safe server projection. Resolved `env_from` values and child
 /// process details are intentionally absent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub(crate) struct McpServerInfo {
     #[serde(flatten)]
     pub(crate) definition: McpServerDefinition,
@@ -188,7 +188,7 @@ pub(crate) struct McpServerInfo {
     pub(crate) diagnostic: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 pub(crate) struct McpServersInfo {
     pub(crate) servers: Vec<McpServerInfo>,
 }

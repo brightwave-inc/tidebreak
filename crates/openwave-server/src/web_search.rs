@@ -72,9 +72,10 @@ const fn default_timeout_ms() -> u64 {
 /// Public state returned by the local API. It intentionally reports only
 /// selection and credential presence — key material never crosses the secret
 /// boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct WebSearchConfigInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub provider: Option<WebSearchProviderKind>,
     pub timeout_ms: u64,
     pub has_credential: bool,
@@ -82,7 +83,7 @@ pub struct WebSearchConfigInfo {
 
 /// Credential readiness for one fixed web-search provider. This public shape
 /// deliberately carries no secret material.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct WebSearchCredentialReadiness {
     pub provider: WebSearchProviderKind,
     pub has_credential: bool,

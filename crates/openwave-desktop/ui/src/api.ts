@@ -4,6 +4,27 @@ import {
   type AssistantCitationSnapshot,
   type ChatMessageSnapshot,
   type PendingApprovalSnapshot,
+  type AgentActivitySnapshot,
+  type AgentRunCancellationSnapshot,
+  type AgentRunSnapshot,
+  type Chat as WireChat,
+  type ChatTranscript as WireChatTranscript,
+  type CodeExecutionConfigInfo as WireCodeExecutionConfigInfo,
+  type CodeExecutionProviderKind as WireCodeExecutionProviderKind,
+  type CustomModelConfig as WireCustomModelConfig,
+  type McpHealth as WireMcpHealth,
+  type McpServerDefinition as WireMcpServerDefinition,
+  type McpServerInfo as WireMcpServerInfo,
+  type McpServersInfo as WireMcpServersInfo,
+  type ModelInfo as WireModelInfo,
+  type Project as WireProject,
+  type ProviderInfo as WireProviderInfo,
+  type ProviderKind as WireProviderKind,
+  type ReasoningEffort as WireReasoningEffort,
+  type Settings,
+  type WebSearchConfigInfo as WireWebSearchConfigInfo,
+  type WebSearchCredentialReadiness as WireWebSearchCredentialReadiness,
+  type WebSearchProviderKind as WireWebSearchProviderKind,
   type PendingFolderAccessRequest as WirePendingFolderAccessRequest,
   type PendingUserQuestions as WirePendingUserQuestions,
   type UserQuestion as WireUserQuestion,
@@ -46,139 +67,61 @@ export type ServerInfo = {
   token: string;
 };
 
-export type ProviderKind = "anthropic" | "openai" | "openai_compatible";
+export type ProviderKind = WireProviderKind;
 /** Stable provider-scoped key used for new settings and chat overrides. */
 export type ModelSelectionKey = `${ProviderKind}::${string}`;
 
 /** How hard a reasoning-capable model should think before answering. */
-export type ReasoningEffort = "low" | "medium" | "high";
+export type ReasoningEffort = WireReasoningEffort;
 
-export type ProviderInfo = {
-  kind: ProviderKind;
-  enabled: boolean;
-  has_credential: boolean;
-  /** Absent, not null, when unset — the server skips serializing `None`. */
-  base_url?: string;
-  models: CustomModelConfig[];
-};
+export type ProviderInfo = WireProviderInfo;
 
-export type CustomModelConfig = {
-  id: string;
-  /** Absent, not null, when unset — the server skips serializing `None`. */
-  display_name?: string;
-  context_window: number;
-  max_output_tokens: number;
-};
+export type CustomModelConfig = WireCustomModelConfig;
 
-export type ModelInfo = {
-  /** Stable provider-qualified selection key. */
+/**
+ * A model the picker may offer.
+ *
+ * `key` is re-branded rather than taken from the wire: the server sends a plain
+ * string, and `ModelSelectionKey` is the refinement the app relies on to keep a
+ * provider-qualified key distinct from a bare model id. Written out with `Omit`
+ * so the one divergence from the generated type is visible.
+ */
+export type ModelInfo = Omit<WireModelInfo, "key"> & {
   key: ModelSelectionKey;
-  id: string;
-  /** Human-readable label for the selector (e.g. "Claude Opus 4.8"). */
-  display_name: string;
-  provider: ProviderKind;
-  /** Provider is enabled, configured, and credentialed. */
-  available: boolean;
-  /** Approximate context window in tokens. */
-  context_window: number;
-  /** Maximum response size in tokens. */
-  max_output_tokens: number;
-  /** Input modalities accepted by the model. */
-  input_modalities: Array<"text" | "image">;
-  /** Whether the model can produce an internal reasoning stream. */
-  supports_reasoning: boolean;
-  /** Whether the model exposes a reasoning-effort control. */
-  supports_reasoning_effort: boolean;
-  /** Whether the model accepts image input alongside text. */
-  multimodal: boolean;
 };
 
 /** Global runtime settings (`GET/PUT /settings`). */
-export type RuntimeSettings = {
-  /** The default model, or `null` when the server default is in effect. */
-  model: string | null;
-  has_api_key: boolean;
-};
+/** Global runtime settings (`GET/PUT /settings`). */
+export type RuntimeSettings = Settings;
 
-export type Project = {
-  id: string;
-  title: string | null;
-  attachment_revision: number;
-  root_attachments: string[];
-  created_at: string;
-};
+export type Project = WireProject;
 
 /** The fixed, host-owned search providers supported by this build. */
-export type WebSearchProviderKind = "exa" | "tavily";
+export type WebSearchProviderKind = WireWebSearchProviderKind;
 
 /** Non-secret web-search policy and readiness for its selected provider. */
-export type WebSearchConfigInfo = {
-  provider?: WebSearchProviderKind;
-  timeout_ms: number;
-  has_credential: boolean;
-};
+export type WebSearchConfigInfo = WireWebSearchConfigInfo;
 
 /** Readiness only: the API never returns an existing provider key. */
-export type WebSearchCredentialReadiness = {
-  provider: WebSearchProviderKind;
-  has_credential: boolean;
-};
+export type WebSearchCredentialReadiness = WireWebSearchCredentialReadiness;
 
 /** The fixed, host-owned code-execution providers supported by this build. */
-export type CodeExecutionProviderKind = "local";
+export type CodeExecutionProviderKind = WireCodeExecutionProviderKind;
 
 /** Non-secret code-execution selection, timeout policy, and host readiness. */
-export type CodeExecutionConfigInfo = {
-  provider?: CodeExecutionProviderKind;
-  timeout_ms: number;
-  available: boolean;
-};
+export type CodeExecutionConfigInfo = WireCodeExecutionConfigInfo;
 
-export type McpHealth =
-  | "initializing"
-  | "healthy"
-  | "degraded"
-  | "reconnecting"
-  | "disabled";
+export type McpHealth = WireMcpHealth;
 
 /** Typed stdio process data. Values are argv entries, never shell source. */
-export type McpServerDefinition = {
-  name: string;
-  command: string;
-  args: string[];
-  /** Literal values must be non-secret; credentials use `env_from` names. */
-  env: Record<string, string>;
-  env_from: string[];
-  cwd: string | null;
-  request_timeout_ms: number;
-  enabled: boolean;
-};
+export type McpServerDefinition = WireMcpServerDefinition;
 
 /** Renderer-safe health projection. Resolved `env_from` values are never sent. */
-export type McpServerInfo = McpServerDefinition & {
-  health: McpHealth;
-  tool_count: number;
-  diagnostic: string | null;
-};
+export type McpServerInfo = WireMcpServerInfo;
 
-export type McpServersInfo = {
-  servers: McpServerInfo[];
-};
+export type McpServersInfo = WireMcpServersInfo;
 
-export type Chat = {
-  id: string;
-  title: string | null;
-  model: string | null;
-  /** Reasoning-effort override, or `null` to use the provider default. */
-  reasoning_effort: ReasoningEffort | null;
-  attachment_revision: number;
-  root_attachments: Array<{
-    root_id: string;
-    origin: "project_default" | "conversation";
-  }>;
-  project_id: string | null;
-  created_at: string;
-};
+export type Chat = WireChat;
 
 /**
  * One visible, durable transcript entry in conversation order.
@@ -212,57 +155,27 @@ export type ChatMessageCitation = AssistantCitationSnapshot;
  */
 export type ChatToolActivity = ChatToolActivitySnapshot;
 
-export type ChatTranscript = {
-  messages: ChatMessage[];
-  tool_activity: ChatToolActivity[];
-  last_event_seq: number;
-};
+export type ChatTranscript = WireChatTranscript;
 
 /** A durable foreground coordinator or sandboxed background run. */
-export type AgentRun = {
-  id: string;
-  parent_id: string | null;
-  execution: "foreground" | "sandbox";
-  status:
-    | "active"
-    | "queued"
-    | "running"
-    | "cancelling"
-    | "waiting"
-    | "retry_wait"
-    | "completed"
-    | "failed"
-    | "cancelled";
-  started_at: string | null;
-  finished_at: string | null;
-  last_error_code: string | null;
-  /** A fixed, renderer-safe description of the currently live agent task. */
-  activity: AgentActivity | null;
-  created_at: string;
-  updated_at: string;
-};
+/** A durable foreground coordinator or sandboxed background run. */
+export type AgentRun = AgentRunSnapshot;
 
 /** The complete renderer projection returned by one sandbox stop request. */
-export type SandboxAgentCancellation = {
-  id: string;
-  status: "cancelling" | "cancelled";
-};
+/** The complete renderer projection returned by one sandbox stop request. */
+export type SandboxAgentCancellation = AgentRunCancellationSnapshot;
 
 /**
  * Live agent activity is intentionally a closed vocabulary. The server never
  * sends tool inputs, results, host paths, grants, executor identities, leases,
  * provider identities, or diagnostics.
  */
-export type AgentActivity = {
-  kind:
-    | "web_search"
-    | "read_delegated_file"
-    | "list_connected_folders"
-    | "list_folder"
-    | "read_connected_file"
-    | "import_connected_file";
-  status: "waiting" | "running";
-};
+/**
+ * Live agent activity is intentionally a closed vocabulary. The server never
+ * sends tool inputs, results, host paths, grants, executor identities, leases,
+ * provider identities, or diagnostics.
+ */
+export type AgentActivity = AgentActivitySnapshot;
 
 
 

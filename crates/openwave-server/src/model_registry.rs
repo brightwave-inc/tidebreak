@@ -7,7 +7,11 @@
 use crate::providers::ProviderKind;
 
 /// An input modality a model accepts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `snake_case` matches the strings `as_str` has always produced, so the enum
+/// serializes exactly as the hand-built list of strings it replaces on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
 pub enum InputModality {
     /// Plain text and structured text content.
     Text,
@@ -16,7 +20,14 @@ pub enum InputModality {
 }
 
 impl InputModality {
-    /// Stable wire representation used by `GET /models`.
+    /// The wire spelling this modality has always had.
+    ///
+    /// Serde owns the wire form now that `ModelInfo` carries the enum, so this is
+    /// no longer what produces it — it is the independently written expectation
+    /// that the move did not change it, checked by the test below. Test-only,
+    /// because a second live spelling of the same strings is the duplication this
+    /// replaced.
+    #[cfg(test)]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
@@ -441,5 +452,24 @@ mod tests {
         // A retired curated id no longer resolves; the picker surfaces it as
         // unavailable rather than silently routing it somewhere else.
         assert!(migrate_curated_selection("gpt-4o").is_none());
+    }
+
+    /// `ModelInfo.input_modalities` used to be a hand-built `Vec<String>` filled
+    /// from `as_str`; it now carries the enum so the generated TypeScript is a
+    /// union rather than `Array<string>`. That is only safe if serde produces the
+    /// same strings, so this pins the two together instead of assuming.
+    ///
+    /// It is also what keeps `as_str` honest: with serde owning the wire form,
+    /// an unchecked second spelling of it would be exactly the kind of duplicate
+    /// that drifts.
+    #[test]
+    fn a_modality_serializes_as_the_string_it_has_always_been() {
+        for modality in [InputModality::Text, InputModality::Image] {
+            assert_eq!(
+                serde_json::to_value(modality).expect("a modality serializes"),
+                serde_json::json!(modality.as_str()),
+                "{modality:?} changed its wire spelling"
+            );
+        }
     }
 }
