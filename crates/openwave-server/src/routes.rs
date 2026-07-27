@@ -75,6 +75,46 @@ pub async fn put_mcp_servers(
     ))
 }
 
+/// `GET /gateway/status` — renderer-safe model-gateway connection state.
+pub async fn get_gateway_status(
+    State(state): State<AppState>,
+) -> Result<Json<crate::gateway_runtime::GatewayStatus>, ServerError> {
+    Ok(Json(state.gateway.status().await?))
+}
+
+/// `POST /gateway/sign-in` — start the browser sign-in and return the URL the
+/// renderer should open. The exchange completes in the background; poll
+/// `GET /gateway/status` for the outcome.
+pub async fn post_gateway_sign_in(
+    State(state): State<AppState>,
+) -> Result<Json<GatewaySignInStarted>, ServerError> {
+    let authorization_url = state.gateway.begin_sign_in().await?;
+    Ok(Json(GatewaySignInStarted { authorization_url }))
+}
+
+#[derive(Serialize)]
+pub struct GatewaySignInStarted {
+    authorization_url: String,
+}
+
+/// `POST /gateway/sign-out` — revoke at the gateway (best-effort) and clear
+/// local session state and the synced model snapshot.
+pub async fn post_gateway_sign_out(
+    State(state): State<AppState>,
+) -> Result<Json<crate::gateway_runtime::GatewayStatus>, ServerError> {
+    state.gateway.sign_out().await?;
+    Ok(Json(state.gateway.status().await?))
+}
+
+/// `POST /gateway/models/sync` — refetch the entitled models into the
+/// provider's model set.
+pub async fn post_gateway_models_sync(
+    State(state): State<AppState>,
+) -> Result<Json<crate::gateway_runtime::GatewayStatus>, ServerError> {
+    state.gateway.sync_models().await?;
+    Ok(Json(state.gateway.status().await?))
+}
+
 /// `POST /mcp/servers/{name}/view-session` — trade the API bearer for a
 /// single-use frame token addressing one prefetched MCP Apps view.
 ///

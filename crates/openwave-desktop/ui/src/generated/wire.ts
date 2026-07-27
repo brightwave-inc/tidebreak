@@ -235,6 +235,12 @@ context_window: number,
 max_output_tokens: number, };
 
 /**
+ * Renderer-safe projection of the gateway connection state. Never carries
+ * token material — only what the settings surface displays.
+ */
+export type GatewayStatus = { configured: boolean, enabled: boolean, base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number, sign_in: SignInProgress, };
+
+/**
  * Opaque identifier for a folder registered with a host broker.
  *
  * This is product projection data, not authority: possession of an id never
@@ -461,7 +467,7 @@ models: Array<CustomModelConfig>, };
  * The known provider kinds. `#[non_exhaustive]` so new kinds can land without
  * breaking wire clients that match on the string form.
  */
-export type ProviderKind = "anthropic" | "openai" | "openai_compatible";
+export type ProviderKind = "anthropic" | "openai" | "openai_compatible" | "model_gateway";
 
 /**
  * How hard a reasoning-capable model should think before answering.
@@ -545,6 +551,11 @@ model: string | null,
  * Whether a model API key is configured (never the key itself).
  */
 has_api_key: boolean, };
+
+/**
+ * Renderer-safe progress of the current sign-in attempt.
+ */
+export type SignInProgress = { "state": "idle" } | { "state": "pending", authorization_url: string, } | { "state": "failed", message: string, };
 
 /**
  * The action a call will take, in a form a human can inspect.

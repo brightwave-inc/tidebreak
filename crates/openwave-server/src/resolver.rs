@@ -49,16 +49,22 @@ pub trait ProviderResolver: Send + Sync {
 pub struct ConfiguredResolver {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
+    gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
     cached: Mutex<CachedProvider>,
 }
 
 impl ConfiguredResolver {
     /// A resolver that reads provider config from `store` and credentials from
-    /// `secrets`.
-    pub fn new(store: Arc<dyn Store>, secrets: Arc<dyn SecretProvider>) -> Self {
+    /// `secrets`, with `gateway` supplying the model-gateway token source.
+    pub fn new(
+        store: Arc<dyn Store>,
+        secrets: Arc<dyn SecretProvider>,
+        gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+    ) -> Self {
         Self {
             store,
             secrets,
+            gateway,
             cached: Mutex::new(None),
         }
     }
@@ -70,7 +76,8 @@ pub type KeyedResolver = ConfiguredResolver;
 #[async_trait]
 impl ProviderResolver for ConfiguredResolver {
     async fn resolve(&self) -> Arc<dyn ModelProvider> {
-        let routes = providers::collect_routes(&*self.store, &*self.secrets).await;
+        let gateway_tokens = self.gateway.route_token_source().await;
+        let routes = providers::collect_routes(&*self.store, &*self.secrets, gateway_tokens).await;
         let router = Router::build(routes);
         let fingerprint = router.fingerprint().to_string();
 

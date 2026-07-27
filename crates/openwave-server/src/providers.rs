@@ -38,6 +38,10 @@ pub enum ProviderKind {
     Openai,
     /// Any OpenAI-compatible Chat Completions gateway (OpenRouter, vLLM, …).
     OpenaiCompatible,
+    /// A signed-in model-gateway deployment: entitled models synced from the
+    /// gateway, inference through its Anthropic-compatible surface with
+    /// short-lived OAuth tokens.
+    ModelGateway,
 }
 
 impl ProviderKind {
@@ -46,6 +50,7 @@ impl ProviderKind {
         ProviderKind::Anthropic,
         ProviderKind::Openai,
         ProviderKind::OpenaiCompatible,
+        ProviderKind::ModelGateway,
     ];
 
     /// Wire/path form (`anthropic`, `openai`, `openai_compatible`).
@@ -54,6 +59,7 @@ impl ProviderKind {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Openai => "openai",
             ProviderKind::OpenaiCompatible => "openai_compatible",
+            ProviderKind::ModelGateway => "model_gateway",
         }
     }
 
@@ -63,6 +69,7 @@ impl ProviderKind {
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::Openai),
             "openai_compatible" => Some(Self::OpenaiCompatible),
+            "model_gateway" => Some(Self::ModelGateway),
             _ => None,
         }
     }
@@ -98,6 +105,10 @@ pub enum ProviderCredential {
         /// The secret key material.
         key: String,
     },
+    /// An OAuth-backed provider. A marker, not the tokens: the token set lives
+    /// in its own keychain entry managed by `openwave-connectors`, so the
+    /// rotating material never rides the provider settings surface.
+    Oauth {},
 }
 
 impl ProviderCredential {
@@ -110,6 +121,7 @@ impl ProviderCredential {
     pub fn as_api_key(&self) -> Option<&str> {
         match self {
             Self::ApiKey { key } => Some(key.as_str()),
+            Self::Oauth {} => None,
         }
     }
 }
@@ -119,6 +131,7 @@ impl std::fmt::Debug for ProviderCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ApiKey { .. } => f.debug_struct("ApiKey").field("key", &"***").finish(),
+            Self::Oauth {} => f.debug_struct("Oauth").finish(),
         }
     }
 }
@@ -216,15 +229,15 @@ impl ResolvedModelPolicy {
         }
     }
 
-    fn custom(model: &CustomModelConfig) -> Self {
+    fn custom_for(provider: ProviderKind, model: &CustomModelConfig) -> Self {
         Self {
-            key: model_registry::selection_key(ProviderKind::OpenaiCompatible, &model.id),
+            key: model_registry::selection_key(provider, &model.id),
             id: model.id.clone(),
             display_name: model
                 .display_name
                 .clone()
                 .unwrap_or_else(|| model_registry::display_name_for(&model.id)),
-            provider: ProviderKind::OpenaiCompatible,
+            provider,
             context_window: model.context_window,
             max_output_tokens: model.max_output_tokens,
             input_modalities: vec![InputModality::Text],
@@ -236,12 +249,15 @@ impl ResolvedModelPolicy {
     }
 
     fn legacy_custom(id: &str) -> Self {
-        Self::custom(&CustomModelConfig {
-            id: id.to_owned(),
-            display_name: None,
-            context_window: default_custom_context_window(),
-            max_output_tokens: default_custom_max_output_tokens(),
-        })
+        Self::custom_for(
+            ProviderKind::OpenaiCompatible,
+            &CustomModelConfig {
+                id: id.to_owned(),
+                display_name: None,
+                context_window: default_custom_context_window(),
+                max_output_tokens: default_custom_max_output_tokens(),
+            },
+        )
     }
 }
 
@@ -403,6 +419,8 @@ pub async fn has_credential(secrets: &dyn SecretProvider, kind: ProviderKind) ->
         ProviderKind::Anthropic => std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.is_empty()),
         ProviderKind::Openai => std::env::var("OPENAI_API_KEY").is_ok_and(|k| !k.is_empty()),
         ProviderKind::OpenaiCompatible => false,
+        // The gateway's credential is its stored OAuth session, not a key.
+        ProviderKind::ModelGateway => openwave_connectors::has_stored_credentials(secrets).await,
     }
 }
 
@@ -465,6 +483,16 @@ pub async fn update_provider(
     }
 
     if let Some(credential) = update.credential {
+        // The gateway's only credential is its OAuth session, managed by the
+        // sign-in flow; accepting a pasted key here would light up
+        // has_credential with nothing the router can use.
+        if kind == ProviderKind::ModelGateway
+            && matches!(credential, ProviderCredential::ApiKey { .. })
+        {
+            return Err(ServerError::bad_request(
+                "model_gateway signs in with OAuth; api keys are not accepted",
+            ));
+        }
         match &credential {
             ProviderCredential::ApiKey { key } if key.is_empty() => {
                 return Err(ServerError::bad_request("credential key must not be empty"));
@@ -485,7 +513,9 @@ pub async fn update_provider(
     })
 }
 
-fn validate_custom_models(models: &[CustomModelConfig]) -> std::result::Result<(), ServerError> {
+pub(crate) fn validate_custom_models(
+    models: &[CustomModelConfig],
+) -> std::result::Result<(), ServerError> {
     validate_custom_models_against(models, |id| {
         model_registry::find_for(ProviderKind::OpenaiCompatible, id).is_some()
     })
@@ -574,6 +604,9 @@ pub async fn resolve_api_key(secrets: &dyn SecretProvider, kind: ProviderKind) -
             .ok()
             .filter(|k| !k.is_empty()),
         ProviderKind::OpenaiCompatible => None,
+        // Gateway tokens rotate; they are supplied per request by the route's
+        // token source, never resolved into a static key.
+        ProviderKind::ModelGateway => None,
     }
 }
 
@@ -589,6 +622,7 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
         ProviderKind::Anthropic => openwave_router::RouteKind::Anthropic,
         ProviderKind::Openai => openwave_router::RouteKind::Openai,
         ProviderKind::OpenaiCompatible => openwave_router::RouteKind::OpenaiCompatible,
+        ProviderKind::ModelGateway => openwave_router::RouteKind::ModelGateway,
     }
 }
 
@@ -600,6 +634,7 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
 pub async fn collect_routes(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
+    gateway_tokens: Option<std::sync::Arc<dyn openwave_router::BearerTokenSource>>,
 ) -> Vec<openwave_router::Route> {
     let mut routes = Vec::new();
     for &kind in ProviderKind::ALL {
@@ -608,6 +643,27 @@ pub async fn collect_routes(
             Err(_) => continue,
         };
         if !config.enabled {
+            continue;
+        }
+        if kind == ProviderKind::ModelGateway {
+            // The gateway route rides its live token source; without a signed-in
+            // session there is nothing to route to.
+            let Some(source) = gateway_tokens.clone() else {
+                continue;
+            };
+            let Some(base) = config.base_url.as_deref() else {
+                continue;
+            };
+            if !(base.starts_with("https://") || base.starts_with("http://")) {
+                continue;
+            }
+            routes.push(openwave_router::Route {
+                kind: route_kind(kind),
+                api_key: String::new(),
+                base_url: Some(format!("{}/compat/anthropic", base.trim_end_matches('/'))),
+                curated_models: config.models.into_iter().map(|model| model.id).collect(),
+                token_source: Some(source),
+            });
             continue;
         }
         let Some(api_key) = resolve_api_key(secrets, kind).await else {
@@ -630,6 +686,7 @@ pub async fn collect_routes(
                 .map(|spec| spec.id.to_string())
                 .chain(config.models.into_iter().map(|model| model.id))
                 .collect(),
+            token_source: None,
         });
     }
     routes
@@ -682,7 +739,10 @@ pub async fn resolve_model_policy(
         if let Some(spec) = model_registry::find_for(provider, id) {
             return Ok(Some(ResolvedModelPolicy::curated(spec)));
         }
-        if provider != ProviderKind::OpenaiCompatible {
+        if !matches!(
+            provider,
+            ProviderKind::OpenaiCompatible | ProviderKind::ModelGateway
+        ) {
             return Ok(None);
         }
         let config = read_config(store, provider).await?;
@@ -690,7 +750,7 @@ pub async fn resolve_model_policy(
             .models
             .iter()
             .find(|model| model.id == id)
-            .map(ResolvedModelPolicy::custom));
+            .map(|model| ResolvedModelPolicy::custom_for(provider, model)));
     }
 
     let config = read_config(store, ProviderKind::OpenaiCompatible).await?;
@@ -702,7 +762,7 @@ pub async fn resolve_model_policy(
             .models
             .iter()
             .filter(|model| model.id == value)
-            .map(ResolvedModelPolicy::custom),
+            .map(|model| ResolvedModelPolicy::custom_for(ProviderKind::OpenaiCompatible, model)),
     );
     match owners.len() {
         1 => return Ok(owners.pop()),
@@ -722,7 +782,10 @@ pub async fn provider_is_usable(
     if !config.enabled || !has_credential(secrets, kind).await {
         return Ok(false);
     }
-    if kind == ProviderKind::OpenaiCompatible {
+    if matches!(
+        kind,
+        ProviderKind::OpenaiCompatible | ProviderKind::ModelGateway
+    ) {
         let Some(base) = config.base_url.as_deref() else {
             return Ok(false);
         };
@@ -747,9 +810,12 @@ pub async fn catalog_models(
             policy: ResolvedModelPolicy::curated(spec),
             available,
         }));
-        if kind == ProviderKind::OpenaiCompatible {
+        if matches!(
+            kind,
+            ProviderKind::OpenaiCompatible | ProviderKind::ModelGateway
+        ) {
             models.extend(config.models.iter().map(|model| CatalogModel {
-                policy: ResolvedModelPolicy::custom(model),
+                policy: ResolvedModelPolicy::custom_for(kind, model),
                 available,
             }));
         }
@@ -770,6 +836,16 @@ mod tests {
         let back: ProviderCredential = serde_json::from_str(&json).unwrap();
         assert_eq!(back.as_api_key(), Some("sk-secret"));
         assert!(!format!("{cred:?}").contains("sk-secret"));
+
+        // The OAuth marker is additive on the same tagged wire and carries no
+        // key material of its own.
+        let oauth: ProviderCredential = serde_json::from_str(r#"{"type":"oauth"}"#).unwrap();
+        assert_eq!(oauth, ProviderCredential::Oauth {});
+        assert_eq!(oauth.as_api_key(), None);
+        assert_eq!(
+            serde_json::to_string(&oauth).unwrap(),
+            r#"{"type":"oauth"}"#
+        );
     }
 
     #[test]
@@ -894,12 +970,15 @@ mod tests {
         // requested effort is dropped rather than sent to something that would
         // reject it.
         let mut config = AgentConfig::default();
-        let custom = ResolvedModelPolicy::custom(&CustomModelConfig {
-            id: "local-model".into(),
-            display_name: None,
-            context_window: 32_768,
-            max_output_tokens: 4_096,
-        });
+        let custom = ResolvedModelPolicy::custom_for(
+            ProviderKind::OpenaiCompatible,
+            &CustomModelConfig {
+                id: "local-model".into(),
+                display_name: None,
+                context_window: 32_768,
+                max_output_tokens: 4_096,
+            },
+        );
         apply_model_policy(&mut config, &custom, Some(ReasoningEffort::High)).unwrap();
         assert_eq!(config.provider, Some(ProviderId::new("openai_compatible")));
         assert_eq!(config.context_window, 32_768);

@@ -411,6 +411,7 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
         Arc::new(resolver::ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
+            crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
         )),
         secrets,
         Arc::new(ToolRegistry::new()),

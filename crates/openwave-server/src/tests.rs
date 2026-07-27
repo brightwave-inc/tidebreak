@@ -10309,6 +10309,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
         Arc::new(resolver::ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
+            crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
         )),
         secrets,
         Arc::new(ToolRegistry::new()),
@@ -10514,7 +10515,11 @@ async fn resolver_builds_a_router_from_enabled_providers() {
     .await
     .unwrap();
 
-    let resolver = resolver::KeyedResolver::new(store.clone(), secrets.clone());
+    let resolver = resolver::KeyedResolver::new(
+        store.clone(),
+        secrets.clone(),
+        crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+    );
     let resolved = resolver.resolve().await;
     // Composite router — selection happens on stream from req.model.
     assert_eq!(resolved.id().0, "router");
@@ -10581,11 +10586,15 @@ async fn resolver_includes_openai_when_enabled() {
     .await
     .unwrap();
 
-    let routes = providers::collect_routes(&*store, &*secrets).await;
+    let routes = providers::collect_routes(&*store, &*secrets, None).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, openwave_router::RouteKind::Openai);
 
-    let resolver = resolver::KeyedResolver::new(store, secrets);
+    let resolver = resolver::KeyedResolver::new(
+        store.clone(),
+        secrets.clone(),
+        crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+    );
     let provider = resolver.resolve().await;
     assert_eq!(provider.id().0, "router");
 
@@ -10630,7 +10639,7 @@ async fn openai_compatible_route_is_free_form_fallback() {
     .await
     .unwrap();
 
-    let routes = providers::collect_routes(&*store, &*secrets).await;
+    let routes = providers::collect_routes(&*store, &*secrets, None).await;
     let router = openwave_router::Router::build(routes);
     assert_eq!(
         router.select("llama-3-local"),

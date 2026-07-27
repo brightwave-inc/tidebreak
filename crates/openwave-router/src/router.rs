@@ -22,6 +22,18 @@ use crate::AnthropicProvider;
 #[cfg(feature = "openai-compat")]
 use crate::OpenAiCompatProvider;
 
+/// A per-request credential supplier for routes whose token is short-lived.
+///
+/// A static key is snapshotted into the adapter for the lifetime of a cached
+/// router; a governed endpoint minting ten-minute tokens needs the opposite —
+/// the adapter asks this source at each request and the source refreshes
+/// behind its own lock. Implementations must never log or echo the token.
+#[async_trait]
+pub trait BearerTokenSource: Send + Sync {
+    /// A currently valid token, refreshing if the cached one is near expiry.
+    async fn bearer_token(&self) -> Result<String>;
+}
+
 /// Which concrete adapter a [`Route`] builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -32,6 +44,9 @@ pub enum RouteKind {
     Openai,
     /// Any OpenAI-compatible Chat Completions gateway.
     OpenaiCompatible,
+    /// A model-gateway deployment's Anthropic-compatible surface, authenticated
+    /// with short-lived resource-scoped tokens instead of a static key.
+    ModelGateway,
 }
 
 impl RouteKind {
@@ -41,6 +56,7 @@ impl RouteKind {
             RouteKind::Anthropic => "anthropic",
             RouteKind::Openai => "openai",
             RouteKind::OpenaiCompatible => "openai_compatible",
+            RouteKind::ModelGateway => "model_gateway",
         }
     }
 
@@ -49,6 +65,7 @@ impl RouteKind {
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::Openai),
             "openai_compatible" => Some(Self::OpenaiCompatible),
+            "model_gateway" => Some(Self::ModelGateway),
             _ => None,
         }
     }
@@ -59,13 +76,16 @@ impl RouteKind {
 pub struct Route {
     /// Which adapter to build.
     pub kind: RouteKind,
-    /// API key / bearer token.
+    /// API key / bearer token. Empty when `token_source` supplies credentials.
     pub api_key: String,
     /// Optional base URL override (required in practice for `OpenaiCompatible`).
     pub base_url: Option<String>,
     /// Curated model ids this route claims. Used for preferential selection;
     /// `OpenaiCompatible` typically passes an empty list (free-form fallback).
     pub curated_models: Vec<String>,
+    /// Per-request credential supplier for short-lived tokens. Takes
+    /// precedence over `api_key` when present.
+    pub token_source: Option<Arc<dyn BearerTokenSource>>,
 }
 
 impl std::fmt::Debug for Route {
@@ -75,6 +95,7 @@ impl std::fmt::Debug for Route {
             .field("api_key", &"***")
             .field("base_url", &self.base_url)
             .field("curated_models", &self.curated_models)
+            .field("token_source", &self.token_source.is_some())
             .finish()
     }
 }
@@ -136,6 +157,7 @@ impl Router {
         for kind in [
             RouteKind::Anthropic,
             RouteKind::Openai,
+            RouteKind::ModelGateway,
             RouteKind::OpenaiCompatible,
         ] {
             if self
@@ -204,7 +226,7 @@ impl ModelProvider for Router {
 }
 
 fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
-    if route.api_key.is_empty() {
+    if route.api_key.is_empty() && route.token_source.is_none() {
         return None;
     }
     match route.kind {
@@ -218,6 +240,25 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         }
         #[cfg(not(feature = "anthropic"))]
         RouteKind::Anthropic => None,
+
+        #[cfg(feature = "anthropic")]
+        RouteKind::ModelGateway => {
+            // A gateway route is only usable with its base URL and a live
+            // token source; a static key cannot follow the gateway's
+            // ten-minute rotation.
+            let base = route.base_url.as_deref()?;
+            if !(base.starts_with("https://") || base.starts_with("http://")) {
+                return None;
+            }
+            let source = route.token_source.clone()?;
+            Some(Arc::new(
+                AnthropicProvider::new(String::new())
+                    .with_base_url(base.to_string())
+                    .with_token_source(source),
+            ))
+        }
+        #[cfg(not(feature = "anthropic"))]
+        RouteKind::ModelGateway => None,
 
         #[cfg(feature = "openai-compat")]
         RouteKind::Openai => {
@@ -252,9 +293,16 @@ fn fingerprint_routes(routes: &[Route]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "{}|{:x}|{}|{}",
+                "{}|{}|{}|{}",
                 r.kind.as_str(),
-                fnv1a64(&r.api_key),
+                // A rotating token must not thrash the cached router; the
+                // fingerprint tracks *whether* a live source exists, and the
+                // source itself refreshes per request.
+                if r.token_source.is_some() {
+                    "oauth".to_string()
+                } else {
+                    format!("{:x}", fnv1a64(&r.api_key))
+                },
                 r.base_url.as_deref().unwrap_or(""),
                 {
                     let mut models = r.curated_models.clone();
@@ -290,6 +338,7 @@ mod tests {
             api_key: key.into(),
             base_url: base.map(str::to_owned),
             curated_models: models.iter().map(|m| (*m).to_string()).collect(),
+            token_source: None,
         }
     }
 
@@ -355,6 +404,69 @@ mod tests {
             Some("file:///etc/passwd"),
         )]);
         assert_eq!(router.select("anything"), None);
+    }
+
+    struct StaticSource(&'static str);
+
+    #[async_trait]
+    impl BearerTokenSource for StaticSource {
+        async fn bearer_token(&self) -> Result<String> {
+            Ok(self.0.to_string())
+        }
+    }
+
+    #[test]
+    fn a_model_gateway_route_requires_a_live_token_source() {
+        // No source ⇒ no adapter, even with a base URL: a static key cannot
+        // follow the gateway's rotation, so there is nothing to build.
+        let without = Router::build(vec![route(
+            RouteKind::ModelGateway,
+            "",
+            &["claude-fable-5"],
+            Some("http://127.0.0.1:28081/compat/anthropic"),
+        )]);
+        assert_eq!(without.select("claude-fable-5"), None);
+
+        let mut gateway = route(
+            RouteKind::ModelGateway,
+            "",
+            &["claude-fable-5"],
+            Some("http://127.0.0.1:28081/compat/anthropic"),
+        );
+        gateway.token_source = Some(Arc::new(StaticSource("mg_at_x")));
+        let with = Router::build(vec![gateway]);
+        assert_eq!(with.select("claude-fable-5"), Some(RouteKind::ModelGateway));
+        // Only claimed (synced) models route to the gateway; it is not a
+        // free-form fallback.
+        assert_eq!(with.select("unknown"), None);
+        assert_eq!(
+            with.select_for(Some(&ProviderId::new("model_gateway")), "claude-fable-5"),
+            Some(RouteKind::ModelGateway)
+        );
+        assert_eq!(
+            with.select_for(Some(&ProviderId::new("model_gateway")), "unknown"),
+            None
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_stable_across_token_rotation() {
+        let build = |token: &'static str| {
+            let mut r = route(
+                RouteKind::ModelGateway,
+                "",
+                &["m"],
+                Some("http://127.0.0.1:1/compat/anthropic"),
+            );
+            r.token_source = Some(Arc::new(StaticSource(token)));
+            Router::build(vec![r])
+        };
+        // The token value must not enter the fingerprint: a rotation would
+        // otherwise rebuild the cached router every ten minutes.
+        assert_eq!(
+            build("mg_at_one").fingerprint(),
+            build("mg_at_two").fingerprint()
+        );
     }
 
     #[test]

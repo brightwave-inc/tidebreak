@@ -6800,6 +6800,7 @@ dependencies = [
  "futures",
  "image",
  "openwave-code-execution",
+ "openwave-connectors",
  "openwave-core",
  "openwave-mcp",
  "openwave-retrieval",
