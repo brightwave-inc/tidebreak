@@ -60,7 +60,9 @@ impl ModelSpec {
     }
 }
 
-/// Curated models in picker display order.
+/// Curated models in picker display order: each provider's current generation
+/// first, then the previous generations a chat can pin when the newest one
+/// regresses on its workload.
 const MODEL_REGISTRY: &[ModelSpec] = &[
     ModelSpec {
         id: "claude-opus-4-8",
@@ -88,8 +90,16 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_reasoning_effort: false,
     },
     ModelSpec {
-        // The previous Opus generation, kept so a chat can pin it when 4.8
-        // regresses on that chat's workload.
+        id: "claude-haiku-4-5-20251001",
+        display_name: "Claude Haiku 4.5",
+        provider: ProviderKind::Anthropic,
+        context_window: 200_000,
+        max_output_tokens: 64_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        supports_reasoning_effort: false,
+    },
+    ModelSpec {
         id: "claude-opus-4-7",
         display_name: "Claude Opus 4.7",
         provider: ProviderKind::Anthropic,
@@ -100,11 +110,21 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_reasoning_effort: false,
     },
     ModelSpec {
-        id: "claude-haiku-4-5-20251001",
-        display_name: "Claude Haiku 4.5",
+        id: "claude-opus-4-6",
+        display_name: "Claude Opus 4.6",
         provider: ProviderKind::Anthropic,
-        context_window: 200_000,
-        max_output_tokens: 64_000,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        supports_reasoning_effort: false,
+    },
+    ModelSpec {
+        id: "claude-sonnet-4-6",
+        display_name: "Claude Sonnet 4.6",
+        provider: ProviderKind::Anthropic,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
         supports_reasoning_effort: false,
@@ -117,8 +137,8 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
-        // The whole GPT-5.6 family reasons on a caller-selected effort, which
-        // the OpenAI-compatible adapter already sends alongside
+        // The whole GPT-5 line reasons on a caller-selected effort, which the
+        // OpenAI-compatible adapter already sends alongside
         // `max_completion_tokens`.
         supports_reasoning_effort: true,
     },
@@ -137,6 +157,36 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         display_name: "GPT-5.6 Luna",
         provider: ProviderKind::Openai,
         context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        supports_reasoning_effort: true,
+    },
+    ModelSpec {
+        id: "gpt-5.5",
+        display_name: "GPT-5.5",
+        provider: ProviderKind::Openai,
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        supports_reasoning_effort: true,
+    },
+    ModelSpec {
+        id: "gpt-5.4-mini",
+        display_name: "GPT-5.4 mini",
+        provider: ProviderKind::Openai,
+        context_window: 400_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_ONLY,
+        supports_reasoning: true,
+        supports_reasoning_effort: true,
+    },
+    ModelSpec {
+        id: "gpt-5.4-nano",
+        display_name: "GPT-5.4 nano",
+        provider: ProviderKind::Openai,
+        context_window: 400_000,
         max_output_tokens: 128_000,
         input_modalities: TEXT_ONLY,
         supports_reasoning: true,
@@ -293,8 +343,8 @@ mod tests {
         for &provider in ProviderKind::ALL {
             assert!(models_for(provider).all(|spec| spec.provider == provider));
         }
-        assert_eq!(models_for(ProviderKind::Anthropic).count(), 4);
-        assert_eq!(models_for(ProviderKind::Openai).count(), 3);
+        assert_eq!(models_for(ProviderKind::Anthropic).count(), 6);
+        assert_eq!(models_for(ProviderKind::Openai).count(), 6);
         assert_eq!(models_for(ProviderKind::OpenaiCompatible).count(), 0);
     }
 
@@ -323,8 +373,11 @@ mod tests {
                 "{} is curated on the OpenAI route without the reasoning shape that route sends",
                 spec.id
             );
-            assert_eq!(spec.context_window, 1_050_000);
-            assert_eq!(spec.max_output_tokens, 128_000);
+            assert_eq!(
+                spec.max_output_tokens, 128_000,
+                "{} carries an output cap the GPT-5 line does not have",
+                spec.id
+            );
         }
     }
 
