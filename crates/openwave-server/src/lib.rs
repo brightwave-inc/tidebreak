@@ -100,6 +100,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::get_chat_document).delete(routes::delete_chat_document),
         )
         .route(
+            "/chats/{chat_id}/documents/{document_id}/file-content",
+            get(routes::get_chat_document_file_content),
+        )
+        .route(
             "/chats/{chat_id}/documents/{document_id}/retry",
             post(routes::retry_chat_document),
         )
@@ -121,6 +125,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::get_project_document).delete(routes::delete_project_document),
         )
         .route(
+            "/projects/{project_id}/documents/{document_id}/file-content",
+            get(routes::get_project_document_file_content),
+        )
+        .route(
             "/projects/{project_id}/documents/{document_id}/retry",
             post(routes::retry_project_document),
         )
@@ -139,6 +147,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/documents/{id}",
             get(routes::get_document).delete(routes::delete_document),
+        )
+        .route(
+            "/documents/{id}/file-content",
+            get(routes::get_document_file_content),
         )
         .route("/documents/{id}/retry", post(routes::retry_document))
         .route("/search", post(routes::search_documents))
@@ -334,7 +346,18 @@ pub fn app(state: AppState) -> Router {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT]);
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            header::IF_RANGE,
+            header::RANGE,
+        ])
+        .expose_headers([
+            header::ACCEPT_RANGES,
+            header::CONTENT_LENGTH,
+            header::CONTENT_RANGE,
+        ]);
 
     Router::new()
         .route("/healthz", get(healthz))
