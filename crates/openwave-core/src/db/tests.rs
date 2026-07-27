@@ -27,6 +27,34 @@ async fn temp_store() -> (tempfile::TempDir, DbStore) {
     (dir, store)
 }
 
+#[tokio::test]
+async fn bundled_sqlite_supports_fts5() {
+    let (_dir, store) = temp_store().await;
+    store
+        .conn
+        .execute_unprepared("CREATE VIRTUAL TABLE fts_probe USING fts5(content)")
+        .await
+        .unwrap();
+    store
+        .conn
+        .execute_unprepared("INSERT INTO fts_probe(content) VALUES ('hybrid retrieval')")
+        .await
+        .unwrap();
+    let row = store
+        .conn
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT content FROM fts_probe WHERE fts_probe MATCH 'hybrid'",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.try_get::<String>("", "content").unwrap(),
+        "hybrid retrieval"
+    );
+}
+
 async fn set_turn_max_attempts(store: &DbStore, turn_id: TurnId, max_attempts: i32) {
     entities::turn_run::Entity::update_many()
         .col_expr(
