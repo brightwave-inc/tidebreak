@@ -80,6 +80,14 @@ reading the code. They all run in existing lanes; nothing needs a new job.
 | Ids generate as bare strings | `#[serde(transparent)]` being ignored in a way that stops coinciding with the right answer |
 | The journal event shape is pinned | A rename in a persisted type, which stops existing chats loading |
 
+Several of those are backstops rather than the primary defence, and it is worth
+knowing which, so nobody weakens the real guard thinking a test still covers it.
+The strongest protection is **not deriving `TS` on types that must not reach the
+renderer**: `serde_json::Value` and the stored four-variant `Role` both fail to
+compile if a generated type tries to carry them, which no assertion can match.
+The tests catch the cases that would compile — a new field, or a type swapped
+along with its call sites.
+
 The fixture check is the one worth understanding, because it closes the failure
 this document opens with. The validators are a trust boundary and stay
 hand-written, so generation cannot check them — but their *tests* used to build

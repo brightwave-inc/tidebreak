@@ -40,7 +40,7 @@ pub struct ParsedAssistantCitations {
 }
 
 /// Renderer-safe historical citation projected from immutable evidence.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
 pub struct AssistantCitationSnapshot {
     pub id: AssistantCitationId,
     #[serde(skip)]
