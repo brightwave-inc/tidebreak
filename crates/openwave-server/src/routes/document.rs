@@ -1,8 +1,9 @@
 //! Document ingestion, catalog, lifecycle, and search HTTP handlers.
 
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use unicode_general_category::{get_general_category, GeneralCategory};
@@ -668,6 +669,253 @@ pub async fn get_chat_document(
         .map(DocumentDetail::from)
         .map(Json)
         .ok_or_else(|| ServerError::not_found(format!("document {document_id} not found")))
+}
+
+/// `GET /documents/{id}/file-content` — serve the original bytes for one
+/// explicitly unscoped document.
+pub async fn get_document_file_content(
+    State(state): State<AppState>,
+    Path(id): Path<DocumentId>,
+    headers: HeaderMap,
+) -> Result<Response, ServerError> {
+    serve_document_file_content(&state, id, None, None, &headers).await
+}
+
+/// `GET /projects/{project_id}/documents/{document_id}/file-content` — serve
+/// original bytes only when the path project owns the document.
+pub async fn get_project_document_file_content(
+    State(state): State<AppState>,
+    Path((project_id, document_id)): Path<(ProjectId, DocumentId)>,
+    headers: HeaderMap,
+) -> Result<Response, ServerError> {
+    require_project(&state, project_id).await?;
+    serve_document_file_content(&state, document_id, None, Some(project_id), &headers).await
+}
+
+/// `GET /chats/{chat_id}/documents/{document_id}/file-content` — serve original
+/// bytes only when the path conversation owns the document.
+pub async fn get_chat_document_file_content(
+    State(state): State<AppState>,
+    Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
+    headers: HeaderMap,
+) -> Result<Response, ServerError> {
+    require_chat(&state, chat_id).await?;
+    serve_document_file_content(&state, document_id, Some(chat_id), None, &headers).await
+}
+
+async fn serve_document_file_content(
+    state: &AppState,
+    document_id: DocumentId,
+    chat_id: Option<ChatId>,
+    project_id: Option<ProjectId>,
+    headers: &HeaderMap,
+) -> Result<Response, ServerError> {
+    let Some(document) = state
+        .store
+        .get_document(document_id)
+        .await?
+        .filter(|document| document.chat_id == chat_id && document.project_id == project_id)
+    else {
+        return Err(ServerError::not_found(format!(
+            "document {document_id} not found"
+        )));
+    };
+    let Some(source_blob) = document.source_blob else {
+        return Err(ServerError::not_found(format!(
+            "original bytes for document {document_id} not found"
+        )));
+    };
+    let bytes = state.blobs.get(source_blob.id).await?.ok_or_else(|| {
+        ServerError::internal(format!(
+            "original bytes for document {document_id} are missing from blob storage"
+        ))
+    })?;
+    let actual_len = u64::try_from(bytes.len())
+        .map_err(|_| ServerError::internal("document byte length exceeds u64"))?;
+    if actual_len != source_blob.byte_len {
+        return Err(ServerError::internal(format!(
+            "original byte length for document {document_id} does not match its descriptor"
+        )));
+    }
+    let content_type = HeaderValue::from_str(&document.media_type).map_err(|_| {
+        ServerError::internal(format!(
+            "document {document_id} has an invalid stored media type"
+        ))
+    })?;
+
+    let requested_range = match requested_byte_range(headers, actual_len) {
+        Ok(range) => range,
+        Err(()) => return Ok(range_not_satisfiable_response(actual_len)),
+    };
+    let (status, content_range, body) = match requested_range {
+        Some(range) => {
+            let start = usize::try_from(range.start)
+                .map_err(|_| ServerError::internal("document range start exceeds usize"))?;
+            let end_exclusive = usize::try_from(range.end_inclusive + 1)
+                .map_err(|_| ServerError::internal("document range end exceeds usize"))?;
+            (
+                StatusCode::PARTIAL_CONTENT,
+                Some(format!(
+                    "bytes {}-{}/{}",
+                    range.start, range.end_inclusive, actual_len
+                )),
+                bytes[start..end_exclusive].to_vec(),
+            )
+        }
+        None => (StatusCode::OK, None, bytes),
+    };
+
+    let mut response = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, body.len().to_string());
+    if let Some(content_range) = content_range {
+        response = response.header(header::CONTENT_RANGE, content_range);
+    }
+    response.body(Body::from(body)).map_err(|error| {
+        ServerError::internal(format!("failed to build document response: {error}"))
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ByteRange {
+    start: u64,
+    end_inclusive: u64,
+}
+
+fn requested_byte_range(headers: &HeaderMap, full_len: u64) -> Result<Option<ByteRange>, ()> {
+    // This route does not expose an HTTP validator in this slice. Treat
+    // conditional ranges as a request for the complete representation so a
+    // stale validator can never produce bytes from the wrong generation.
+    if headers.contains_key(header::IF_RANGE) {
+        return Ok(None);
+    }
+    let mut values = headers.get_all(header::RANGE).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(());
+    }
+    let value = value.to_str().map_err(|_| ())?.trim();
+    let (unit, range) = value.split_once('=').ok_or(())?;
+    if !unit.trim().eq_ignore_ascii_case("bytes") || range.contains(',') {
+        return Err(());
+    }
+    let (start, end) = range.trim().split_once('-').ok_or(())?;
+    if start.is_empty() {
+        let suffix_len = end.parse::<u64>().map_err(|_| ())?;
+        if suffix_len == 0 || full_len == 0 {
+            return Err(());
+        }
+        return Ok(Some(ByteRange {
+            start: full_len.saturating_sub(suffix_len),
+            end_inclusive: full_len - 1,
+        }));
+    }
+
+    let start = start.parse::<u64>().map_err(|_| ())?;
+    if start >= full_len {
+        return Err(());
+    }
+    let end_inclusive = if end.is_empty() {
+        full_len - 1
+    } else {
+        let requested_end = end.parse::<u64>().map_err(|_| ())?;
+        if requested_end < start {
+            return Err(());
+        }
+        requested_end.min(full_len - 1)
+    };
+    Ok(Some(ByteRange {
+        start,
+        end_inclusive,
+    }))
+}
+
+fn range_not_satisfiable_response(full_len: u64) -> Response {
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_RANGE, format!("bytes */{full_len}"))
+        .header(header::CONTENT_LENGTH, "0")
+        .body(Body::empty())
+        .expect("fixed range response headers are valid")
+}
+
+#[cfg(test)]
+mod byte_range_tests {
+    use super::*;
+
+    fn parse(value: &str, full_len: u64) -> Result<Option<ByteRange>, ()> {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_str(value).unwrap());
+        requested_byte_range(&headers, full_len)
+    }
+
+    #[test]
+    fn parses_bounded_open_ended_and_suffix_ranges() {
+        assert_eq!(
+            parse("bytes=2-5", 10),
+            Ok(Some(ByteRange {
+                start: 2,
+                end_inclusive: 5,
+            }))
+        );
+        assert_eq!(
+            parse("bytes=7-", 10),
+            Ok(Some(ByteRange {
+                start: 7,
+                end_inclusive: 9,
+            }))
+        );
+        assert_eq!(
+            parse("bytes=-3", 10),
+            Ok(Some(ByteRange {
+                start: 7,
+                end_inclusive: 9,
+            }))
+        );
+        assert_eq!(
+            parse("bytes=8-99", 10),
+            Ok(Some(ByteRange {
+                start: 8,
+                end_inclusive: 9,
+            }))
+        );
+        assert_eq!(
+            parse("bytes=-99", 10),
+            Ok(Some(ByteRange {
+                start: 0,
+                end_inclusive: 9,
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_unsatisfiable_and_multi_ranges() {
+        for value in [
+            "bytes=10-",
+            "bytes=5-2",
+            "bytes=-0",
+            "bytes=",
+            "bytes=one-two",
+            "items=0-1",
+            "bytes=0-1,3-4",
+        ] {
+            assert_eq!(parse(value, 10), Err(()), "{value}");
+        }
+        assert_eq!(parse("bytes=0-", 0), Err(()));
+    }
+
+    #[test]
+    fn ignores_range_when_if_range_cannot_be_validated() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_static("bytes=2-5"));
+        headers.insert(header::IF_RANGE, HeaderValue::from_static("\"old-etag\""));
+        assert_eq!(requested_byte_range(&headers, 10), Ok(None));
+    }
 }
 
 /// `DELETE /documents/{id}` — atomically delete authoritative source/jobs and

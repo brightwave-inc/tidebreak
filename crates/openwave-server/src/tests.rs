@@ -4613,6 +4613,404 @@ async fn post_raw(
         .unwrap()
 }
 
+async fn request_document_file_content(
+    router: &Router,
+    method: axum::http::Method,
+    uri: &str,
+    bearer: Option<&str>,
+    range: Option<&str>,
+    if_range: Option<&str>,
+) -> axum::response::Response {
+    let mut request = Request::builder().method(method).uri(uri);
+    if let Some(bearer) = bearer {
+        request = request.header(header::AUTHORIZATION, bearer);
+    }
+    if let Some(range) = range {
+        request = request.header(header::RANGE, range);
+    }
+    if let Some(if_range) = if_range {
+        request = request.header(header::IF_RANGE, if_range);
+    }
+    router
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn document_file_content_supports_full_head_and_single_range_responses() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let raw = b"0123456789".to_vec();
+    let accepted: serde_json::Value = json_body(
+        post_raw(
+            &router,
+            &bearer,
+            "/documents/raw?title=sample.pdf",
+            Some("application/pdf"),
+            raw.clone(),
+        )
+        .await,
+    )
+    .await;
+    let uri = format!(
+        "/documents/{}/file-content",
+        accepted["document_id"].as_str().unwrap()
+    );
+
+    assert_eq!(
+        request_document_file_content(&router, axum::http::Method::GET, &uri, None, None, None,)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let full = request_document_file_content(
+        &router,
+        axum::http::Method::GET,
+        &uri,
+        Some(&bearer),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(
+        full.headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/pdf"
+    );
+    assert_eq!(
+        full.headers()
+            .get(header::CONTENT_LENGTH)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "10"
+    );
+    assert_eq!(
+        full.headers()
+            .get(header::ACCEPT_RANGES)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "bytes"
+    );
+    assert_eq!(
+        to_bytes(full.into_body(), usize::MAX).await.unwrap(),
+        raw.as_slice()
+    );
+
+    let head = request_document_file_content(
+        &router,
+        axum::http::Method::HEAD,
+        &uri,
+        Some(&bearer),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(
+        head.headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/pdf"
+    );
+    assert_eq!(
+        head.headers()
+            .get(header::CONTENT_LENGTH)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "10"
+    );
+    assert!(to_bytes(head.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .is_empty());
+
+    for (range, expected_range, expected) in [
+        ("bytes=2-5", "bytes 2-5/10", &b"2345"[..]),
+        ("bytes=7-", "bytes 7-9/10", &b"789"[..]),
+        ("bytes=-3", "bytes 7-9/10", &b"789"[..]),
+        ("bytes=8-99", "bytes 8-9/10", &b"89"[..]),
+    ] {
+        let response = request_document_file_content(
+            &router,
+            axum::http::Method::GET,
+            &uri,
+            Some(&bearer),
+            Some(range),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT, "{range}");
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_RANGE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            expected_range,
+            "{range}"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            expected.len().to_string(),
+            "{range}"
+        );
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            expected,
+            "{range}"
+        );
+    }
+
+    let conditional = request_document_file_content(
+        &router,
+        axum::http::Method::GET,
+        &uri,
+        Some(&bearer),
+        Some("bytes=2-5"),
+        Some("\"unsupported-validator\""),
+    )
+    .await;
+    assert_eq!(conditional.status(), StatusCode::OK);
+    assert!(conditional.headers().get(header::CONTENT_RANGE).is_none());
+    assert_eq!(
+        to_bytes(conditional.into_body(), usize::MAX).await.unwrap(),
+        raw.as_slice()
+    );
+
+    for range in [
+        "bytes=10-",
+        "bytes=5-2",
+        "bytes=-0",
+        "bytes=0-1,3-4",
+        "items=0-1",
+        "malformed",
+    ] {
+        let response = request_document_file_content(
+            &router,
+            axum::http::Method::GET,
+            &uri,
+            Some(&bearer),
+            Some(range),
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "{range}"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_RANGE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "bytes */10",
+            "{range}"
+        );
+        assert!(to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[tokio::test]
+async fn document_file_content_preserves_document_scope_before_blob_access() {
+    let (router, token, store, dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let project = make_project(&router, &bearer).await;
+    let other_project = make_project(&router, &bearer).await;
+    let chat = make_chat(&router, &bearer).await;
+    let other_chat = make_chat(&router, &bearer).await;
+
+    let project_document: serde_json::Value = json_body(
+        post_raw(
+            &router,
+            &bearer,
+            &format!("/projects/{}/documents/raw", project.id),
+            Some("text/plain"),
+            b"project original".to_vec(),
+        )
+        .await,
+    )
+    .await;
+    let project_document_id: openwave_core::DocumentId = project_document["document_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let project_uri = format!(
+        "/projects/{}/documents/{project_document_id}/file-content",
+        project.id
+    );
+    let project_response = request_document_file_content(
+        &router,
+        axum::http::Method::GET,
+        &project_uri,
+        Some(&bearer),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(project_response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(project_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+        &b"project original"[..]
+    );
+
+    for uri in [
+        format!("/documents/{project_document_id}/file-content"),
+        format!(
+            "/projects/{}/documents/{project_document_id}/file-content",
+            other_project.id
+        ),
+        format!(
+            "/chats/{}/documents/{project_document_id}/file-content",
+            chat.id
+        ),
+    ] {
+        assert_eq!(
+            request_document_file_content(
+                &router,
+                axum::http::Method::GET,
+                &uri,
+                Some(&bearer),
+                None,
+                None,
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND,
+            "{uri}"
+        );
+    }
+
+    let chat_document: serde_json::Value = json_body(
+        post_raw(
+            &router,
+            &bearer,
+            &format!("/chats/{}/documents/raw", chat.id),
+            Some("text/markdown"),
+            b"# chat original".to_vec(),
+        )
+        .await,
+    )
+    .await;
+    let chat_document_id: openwave_core::DocumentId = chat_document["document_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let chat_uri = format!(
+        "/chats/{}/documents/{chat_document_id}/file-content",
+        chat.id
+    );
+    let chat_response = request_document_file_content(
+        &router,
+        axum::http::Method::GET,
+        &chat_uri,
+        Some(&bearer),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(chat_response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(chat_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+        &b"# chat original"[..]
+    );
+    assert_eq!(
+        request_document_file_content(
+            &router,
+            axum::http::Method::GET,
+            &format!(
+                "/chats/{}/documents/{chat_document_id}/file-content",
+                other_chat.id
+            ),
+            Some(&bearer),
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let source_blob = store
+        .get_document(project_document_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .source_blob
+        .unwrap();
+    openwave_core::FsBlobStore::new(dir.path().join("blobs"))
+        .delete(source_blob.id)
+        .unwrap();
+    assert_eq!(
+        request_document_file_content(
+            &router,
+            axum::http::Method::GET,
+            &project_uri,
+            None,
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request_document_file_content(
+            &router,
+            axum::http::Method::GET,
+            &format!("/documents/{project_document_id}/file-content"),
+            Some(&bearer),
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request_document_file_content(
+            &router,
+            axum::http::Method::GET,
+            &project_uri,
+            Some(&bearer),
+            None,
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+}
+
 #[tokio::test]
 async fn raw_ingest_retains_exact_bytes_and_runs_the_async_pipeline() {
     let (router, token, store, dir, worker) = test_app_with_worker().await;
@@ -12566,7 +12964,7 @@ async fn cors_preflight_allows_localhost_origin() {
         .header(reqwest::header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
         .header(
             reqwest::header::ACCESS_CONTROL_REQUEST_HEADERS,
-            "authorization",
+            "authorization,range,if-range",
         )
         .send()
         .await
@@ -12577,6 +12975,19 @@ async fn cors_preflight_allows_localhost_origin() {
         .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
         .and_then(|v| v.to_str().ok());
     assert_eq!(allow_origin, Some("http://localhost:1420"));
+    let allow_headers = preflight
+        .headers()
+        .get(reqwest::header::ACCESS_CONTROL_ALLOW_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .unwrap();
+    for expected in ["authorization", "range", "if-range"] {
+        assert!(
+            allow_headers
+                .split(',')
+                .any(|header| header.trim().eq_ignore_ascii_case(expected)),
+            "missing {expected} in {allow_headers}"
+        );
+    }
 }
 
 // --- WebSocket event stream ---
