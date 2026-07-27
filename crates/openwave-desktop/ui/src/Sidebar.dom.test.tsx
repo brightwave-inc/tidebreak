@@ -79,7 +79,13 @@ describe("Sidebar", () => {
     seedStores({ deletingChatId: "chat-2" });
     await renderSidebar();
     expect(screen.getByRole("button", { name: "Roadmap" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Deleting…" })).toBeDisabled();
+    // An untitled conversation is also labelled "New chat", so the action has
+    // to be picked out from the list rows that share its name.
+    const recentList = screen.getByLabelText("Chats");
+    const [startChat] = screen
+      .getAllByRole("button", { name: "New chat" })
+      .filter((button) => !recentList.contains(button));
+    expect(startChat).toBeDisabled();
   });
 
   it("re-renders when the store's chat list changes", async () => {

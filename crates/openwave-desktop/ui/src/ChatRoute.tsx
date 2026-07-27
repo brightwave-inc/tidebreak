@@ -18,6 +18,8 @@ import {
   loadCurrentTerminalTranscript,
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
+import { ChatsPanel } from "./ChatsPanel";
+import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
 import { DeliverablesView } from "./DeliverablesView";
 import { DocumentsView } from "./DocumentsView";
@@ -53,6 +55,7 @@ const sessionDeps = {
 };
 
 const chatListActions = useChatListStore.getState();
+const firstMessageActions = useFirstMessage.getState();
 const { signal: signalRefresh } = useRefreshSignals.getState();
 const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
 
@@ -66,7 +69,7 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
  */
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
-  const { client, models, status, setStatus } = useApp();
+  const { client, models, status, setStatus, newChat } = useApp();
   const { layout } = usePanelNav();
   const chats = useChatListStore((state) => state.chats);
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
@@ -98,6 +101,15 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   useEffect(() => {
     setStatus(`chat ${chatId.slice(0, 8)}…`);
   }, [chatId, setStatus]);
+
+  // A conversation opened from the home composer arrives with its first message
+  // already written. `take` clears it, so a re-render cannot send it twice.
+  useEffect(() => {
+    if (!chat) return;
+    const pending = firstMessageActions.take(chatId);
+    if (pending) void sendMessage(pending);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chat, chatId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -217,8 +229,16 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   async function onSend() {
-    if (!chat || !draft.trim() || busy || deletingChatId !== null) return;
-    const content = draft.trim();
+    await sendMessage(draft.trim());
+  }
+
+  /**
+   * The one path a message takes. Home writes the first message of a new chat
+   * but does not post it, so this has to be reachable with text that was never
+   * in this route's draft.
+   */
+  async function sendMessage(content: string) {
+    if (!chat || !content || busy || deletingChatId !== null) return;
     const turnId = crypto.randomUUID();
     terminalHydrationGenerationRef.current += 1;
     setComposerDraft("");
@@ -321,6 +341,12 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
     const side = position === "right" ? "right" : "left";
     switch (panel.type) {
+      case "chats":
+        return (
+          <PanelFrame position={side} spaceBetween>
+            <ChatsPanel activeChatId={chatId} onNewChat={newChat} />
+          </PanelFrame>
+        );
       case "sources":
         return (
           <PanelFrame position={side} spaceBetween>

@@ -241,6 +241,7 @@ export function AppShell() {
         refreshCatalog,
         status,
         setStatus,
+        newChat: () => void onNewChat(),
         themeMode,
         setThemeMode,
         updateState: desktopUpdates.state,
@@ -248,11 +249,7 @@ export function AppShell() {
         restartForUpdate: onRestartForUpdate,
       }}
     >
-      <div
-        className={`app-shell${hasMacOverlayTitlebar() ? " with-titlebar" : ""}${
-          sidebarCollapsed ? " sidebar-collapsed" : ""
-        }`}
-      >
+      <div className={`app-shell${hasMacOverlayTitlebar() ? " with-titlebar" : ""}`}>
         {confirmDialog}
         {hasMacOverlayTitlebar() && (
           <div className="titlebar" data-tauri-drag-region>
@@ -268,32 +265,18 @@ export function AppShell() {
           </div>
         )}
         <div className="app-body">
-          {!hasMacOverlayTitlebar() && sidebarCollapsed && (
-            <button
-              type="button"
-              className="sidebar-expand"
-              aria-label="Show sidebar"
-              title="Show sidebar"
-              onClick={() => useUiStore.getState().toggleSidebar()}
-            >
-              <PanelLeftOpen size={15} />
-            </button>
-          )}
-          {!sidebarCollapsed && (
-            <Sidebar
-              collapseControl={!hasMacOverlayTitlebar()}
-              themeMode={themeMode}
-              updateReady={desktopUpdates.state.status === "ready"}
-              updateVersion={desktopUpdates.state.version ?? null}
-              onCycleTheme={cycleTheme}
-              onNewChat={() => void onNewChat()}
-              onStartRename={startChatRename}
-              onCommitRename={(target) => void commitChatRename(target)}
-              onCancelRename={cancelChatRename}
-              onDeleteChat={(target) => void onDeleteChat(target)}
-              onRestartForUpdate={() => void onRestartForUpdate()}
-            />
-          )}
+          <Sidebar
+            themeMode={themeMode}
+            updateReady={desktopUpdates.state.status === "ready"}
+            updateVersion={desktopUpdates.state.version ?? null}
+            onCycleTheme={cycleTheme}
+            onNewChat={() => void onNewChat()}
+            onStartRename={startChatRename}
+            onCommitRename={(target) => void commitChatRename(target)}
+            onCancelRename={cancelChatRename}
+            onDeleteChat={(target) => void onDeleteChat(target)}
+            onRestartForUpdate={() => void onRestartForUpdate()}
+          />
           <div className="main">
             <Outlet />
           </div>

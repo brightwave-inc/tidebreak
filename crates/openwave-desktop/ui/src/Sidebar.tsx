@@ -1,13 +1,13 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import type { Chat } from "./api";
-import { Logomark } from "./Logomark";
 import {
   Ellipsis,
   FolderOpen,
   Library,
+  MessageCircleMore,
   Monitor,
-  PanelLeftClose,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   RotateCw,
   Settings,
@@ -16,6 +16,9 @@ import {
   Sun,
   Trash2,
 } from "lucide-react";
+
+import type { Chat } from "./api";
+import { useChatListStore } from "./ChatListStore";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,15 +27,25 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
-import type { ThemeMode } from "./theme";
-import { useChatListStore } from "./ChatListStore";
+import { Logomark } from "./Logomark";
+import type { PanelContent, PanelType } from "./panel/panelTypes";
 import { usePanelNav } from "./panel/usePanelNav";
-import type { PanelContent } from "./panel/panelTypes";
+import {
+  Sidebar as SidebarRail,
+  SidebarButton,
+  SidebarContent,
+  SidebarFooter,
+  SidebarHeader,
+  SidebarSectionTitle,
+  useSidebarWidth,
+} from "./sidebar/primitives";
+import type { ThemeMode } from "./theme";
 import { useUiStore } from "./UiStore";
 
+/** How many conversations the rail shows before deferring to the Chats panel. */
+export const RECENT_CHAT_LIMIT = 8;
+
 export type SidebarProps = {
-  /** Render the in-sidebar hide control (off when the titlebar owns it). */
-  collapseControl?: boolean;
   themeMode: ThemeMode;
   updateReady: boolean;
   updateVersion: string | null;
@@ -46,8 +59,8 @@ export type SidebarProps = {
 };
 
 /**
- * The navigation aside: brand and theme, the panels of the open conversation,
- * the chat list, and footer actions.
+ * The navigation rail: the way home, the panels of the open conversation, the
+ * conversations themselves, and the app's own controls.
  *
  * List state comes straight from the chat-list store; the callback props are
  * the mutations whose orchestration (fences, confirm dialog, chat lifecycle)
@@ -55,7 +68,6 @@ export type SidebarProps = {
  * selecting a chat or a panel here is navigation rather than a store write.
  */
 export function Sidebar({
-  collapseControl = true,
   themeMode,
   updateReady,
   updateVersion,
@@ -67,6 +79,7 @@ export function Sidebar({
   onDeleteChat,
   onRestartForUpdate,
 }: SidebarProps) {
+  const navigate = useNavigate();
   const chats = useChatListStore((state) => state.chats);
   const activeChatId = useChatListStore((state) => state.selected?.id ?? null);
   const chatsError = useChatListStore((state) => state.chatsError);
@@ -77,232 +90,286 @@ export function Sidebar({
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const setRenameDraft = useChatListStore((state) => state.setRenameDraft);
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
-  const navigate = useNavigate();
-  const settingsOpen = useRouterState({
-    select: (state) => state.location.pathname === "/settings",
-  });
+  const isCompact = useSidebarWidth() === "compact";
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { layout, openPanel } = usePanelNav();
 
-  const openPanelTypes = new Set(
-    layout.mode === "split" ? [layout.left.type, layout.right.type] : ["chat"],
-  );
+  const onChatRoute = pathname.startsWith("/c/");
+  const openPanelTypes: Set<PanelType> =
+    onChatRoute && layout.mode === "split"
+      ? new Set([layout.left.type, layout.right.type])
+      : new Set<PanelType>(["chat"]);
 
   function showPanel(panel: PanelContent) {
-    if (settingsOpen && activeChatId) {
-      void navigate({ to: "/c/$chatId", params: { chatId: activeChatId } });
+    // The panels belong to a conversation, so reaching one from home or from
+    // settings has to arrive at the conversation first.
+    if (!onChatRoute && activeChatId) {
+      void navigate({
+        to: "/c/$chatId",
+        params: { chatId: activeChatId },
+        search: { left: panel.type, right: "chat" },
+      });
+      return;
     }
     openPanel(panel);
   }
 
-  function openChat(chat: Chat) {
-    void navigate({ to: "/c/$chatId", params: { chatId: chat.id } });
-  }
+  // Sources, outputs and folders belong to a conversation. With none open —
+  // a first run, before anything has been started — there is nothing for them
+  // to show, so they read as unavailable rather than as a dead click.
+  const hasConversation = activeChatId !== null;
+
+  const recentChats = chats.slice(0, RECENT_CHAT_LIMIT);
+
   return (
-    <aside className="sidebar">
-      <div className="sidebar-brand">
-        <Logomark />
-        <span>OpenWave</span>
-        {collapseControl && (
-          <WithTooltip label="Hide sidebar" side="bottom">
+    <SidebarRail>
+      <SidebarHeader>
+        <button
+          type="button"
+          className="inline-flex min-w-0 cursor-pointer items-center gap-2 rounded-md p-1 transition-colors hover:bg-muted"
+          aria-label="Home"
+          onClick={() => void navigate({ to: "/" })}
+        >
+          <Logomark />
+          {!isCompact && <span className="truncate text-sm font-medium">OpenWave</span>}
+        </button>
+        <span className="grow" />
+        {!isCompact && (
+          <WithTooltip label="Collapse sidebar" side="bottom">
             <button
               type="button"
-              className="theme-toggle"
-              aria-label="Hide sidebar"
+              className="cursor-pointer rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              aria-label="Collapse sidebar"
               onClick={toggleSidebar}
             >
               <PanelLeftClose size={15} />
             </button>
           </WithTooltip>
         )}
-        <WithTooltip
-          label={`Theme: ${themeMode} — click to change`}
-          side="bottom"
-        >
-          <button
-            type="button"
-            className="theme-toggle"
-            aria-label={`Theme: ${themeMode}. Click to change.`}
-            onClick={onCycleTheme}
-          >
-            {themeMode === "light" ? (
-              <Sun size={15} />
-            ) : themeMode === "dark" ? (
-              <Moon size={15} />
-            ) : (
-              <Monitor size={15} />
-            )}
-          </button>
-        </WithTooltip>
-      </div>
+      </SidebarHeader>
 
-      <button
-        type="button"
-        className="new-chat"
-        onClick={onNewChat}
-        disabled={creatingChat || deletingChatId !== null}
-      >
-        <SquarePen size={15} />
-        {creatingChat
-          ? "Starting…"
-          : deletingChatId
-            ? "Deleting…"
-            : "New chat"}
-      </button>
+      <SidebarContent className="gap-1 overflow-y-auto px-2">
+        {isCompact && (
+          <SidebarButton aria-label="Expand sidebar" onClick={toggleSidebar}>
+            <PanelLeftOpen />
+            <span>Expand sidebar</span>
+          </SidebarButton>
+        )}
 
-      <div className="sidebar-section">
-        <div className="conversation-list" aria-label="Workspace">
-          <SidebarPanelButton
-            label="Sources"
-            icon={<Library size={15} />}
-            active={!settingsOpen && openPanelTypes.has("sources")}
-            onClick={() => showPanel({ type: "sources" })}
-          />
-          <SidebarPanelButton
-            label="Outputs"
-            icon={<Shapes size={15} />}
-            active={!settingsOpen && openPanelTypes.has("outputs")}
-            onClick={() => showPanel({ type: "outputs" })}
-          />
-          <SidebarPanelButton
-            label="Folders"
-            icon={<FolderOpen size={15} />}
-            active={!settingsOpen && openPanelTypes.has("folders")}
-            onClick={() => showPanel({ type: "folders" })}
-          />
+        <SidebarButton onClick={onNewChat} disabled={creatingChat || deletingChatId !== null}>
+          <SquarePen />
+          <span>{creatingChat ? "Starting…" : "New chat"}</span>
+        </SidebarButton>
+
+        <WorkspacePanelButton
+          label="Sources"
+          icon={<Library />}
+          active={openPanelTypes.has("sources")}
+          disabled={!hasConversation}
+          onClick={() => showPanel({ type: "sources" })}
+        />
+        <WorkspacePanelButton
+          label="Outputs"
+          icon={<Shapes />}
+          active={openPanelTypes.has("outputs")}
+          disabled={!hasConversation}
+          onClick={() => showPanel({ type: "outputs" })}
+        />
+        <WorkspacePanelButton
+          label="Folders"
+          icon={<FolderOpen />}
+          active={openPanelTypes.has("folders")}
+          disabled={!hasConversation}
+          onClick={() => showPanel({ type: "folders" })}
+        />
+        <WorkspacePanelButton
+          label="All chats"
+          icon={<MessageCircleMore />}
+          active={openPanelTypes.has("chats")}
+          disabled={!hasConversation}
+          onClick={() => showPanel({ type: "chats" })}
+        />
+
+        <SidebarSectionTitle className="mt-4">Recent</SidebarSectionTitle>
+        <div className={isCompact ? "hidden" : "flex flex-col gap-0.5"} aria-label="Chats">
+          {recentChats.map((chat) => (
+            <RecentChatRow
+              key={chat.id}
+              chat={chat}
+              active={onChatRoute && chat.id === activeChatId}
+              renaming={renamingChatId === chat.id}
+              renameDraft={renameChatDraft}
+              savingTitle={savingTitle}
+              mutating={deletingChatId !== null || creatingChat}
+              onRenameDraftChange={setRenameDraft}
+              onOpen={() => void navigate({ to: "/c/$chatId", params: { chatId: chat.id } })}
+              onStartRename={() => onStartRename(chat)}
+              onCommitRename={() => onCommitRename(chat)}
+              onCancelRename={onCancelRename}
+              onDelete={() => onDeleteChat(chat)}
+            />
+          ))}
+          {chats.length > RECENT_CHAT_LIMIT && (
+            <button
+              type="button"
+              className="cursor-pointer rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              onClick={() => showPanel({ type: "chats" })}
+            >
+              More…
+            </button>
+          )}
+          {chatsError && <p className="px-2 py-1 text-xs text-critical">{chatsError}</p>}
         </div>
-      </div>
+      </SidebarContent>
 
-      <div className="sidebar-section">
-        <span className="sidebar-label">Chats</span>
-        <div className="conversation-list" aria-label="Chats">
-          {chats.map((item) => {
-            const chatTitle = item.title?.trim() || "New chat";
-            const isActive = !settingsOpen && item.id === activeChatId;
-            const mutating = deletingChatId !== null || creatingChat;
-
-            if (renamingChatId === item.id) {
-              return (
-                <div key={item.id} className="conversation-row is-renaming">
-                  <input
-                    className="conversation-rename-input"
-                    autoFocus
-                    aria-label="Chat title"
-                    value={renameChatDraft}
-                    disabled={savingTitle}
-                    onChange={(event) => setRenameDraft(event.target.value)}
-                    onBlur={() => onCommitRename(item)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        event.currentTarget.blur();
-                      }
-                      if (event.key === "Escape") {
-                        event.preventDefault();
-                        onCancelRename();
-                      }
-                    }}
-                  />
-                </div>
-              );
-            }
-
-            return (
-              <div
-                key={item.id}
-                className={`conversation-row${isActive ? " is-active" : ""}`}
-              >
-                <button
-                  type="button"
-                  className="conversation-item"
-                  aria-current={isActive ? "page" : undefined}
-                  disabled={mutating}
-                  onClick={() => openChat(item)}
-                >
-                  <span className="conversation-title">{chatTitle}</span>
-                </button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      type="button"
-                      className="conversation-menu"
-                      aria-label={`Actions for ${chatTitle}`}
-                      title="Chat actions"
-                      disabled={mutating}
-                    >
-                      <Ellipsis size={15} />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" side="right">
-                    <DropdownMenuItem onSelect={() => onStartRename(item)}>
-                      <Pencil />
-                      Rename
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      variant="destructive"
-                      onSelect={() => onDeleteChat(item)}
-                    >
-                      <Trash2 />
-                      Delete
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            );
-          })}
-        </div>
-        {chatsError && <p className="sidebar-error">{chatsError}</p>}
-      </div>
-
-      <div className="sidebar-footer">
+      <SidebarFooter className="flex flex-col gap-0.5">
         {updateReady && (
-          <button
-            type="button"
-            className="sidebar-action sidebar-update"
-            onClick={onRestartForUpdate}
-          >
-            <RotateCw size={16} />
+          <SidebarButton onClick={onRestartForUpdate}>
+            <RotateCw />
             <span>Restart to update</span>
             {updateVersion && (
-              <span className="sidebar-update-version">v{updateVersion}</span>
+              <span className="ml-auto text-xs text-muted-foreground">v{updateVersion}</span>
             )}
-          </button>
+          </SidebarButton>
         )}
-        <button
-          type="button"
-          className={`sidebar-action${settingsOpen ? " is-active" : ""}`}
+        <SidebarButton aria-label={`Theme: ${themeMode}. Click to change.`} onClick={onCycleTheme}>
+          {themeMode === "light" ? <Sun /> : themeMode === "dark" ? <Moon /> : <Monitor />}
+          <span>Theme</span>
+        </SidebarButton>
+        <SidebarButton
+          aria-current={pathname === "/settings" ? "page" : undefined}
+          data-active={pathname === "/settings" || undefined}
+          className="data-[active]:bg-muted"
           onClick={() => void navigate({ to: "/settings" })}
         >
-          <Settings size={16} />
-          Settings
-        </button>
-      </div>
-    </aside>
+          <Settings />
+          <span>Settings</span>
+        </SidebarButton>
+      </SidebarFooter>
+    </SidebarRail>
   );
 }
 
-function SidebarPanelButton({
+function WorkspacePanelButton({
   label,
   icon,
   active,
+  disabled,
   onClick,
 }: {
   label: string;
   icon: React.ReactNode;
   active: boolean;
+  disabled?: boolean;
   onClick: () => void;
 }) {
   return (
-    <div className={`conversation-row${active ? " is-active" : ""}`}>
+    <SidebarButton
+      aria-current={active ? "page" : undefined}
+      data-active={active || undefined}
+      className="data-[active]:bg-muted"
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {icon}
+      <span>{label}</span>
+    </SidebarButton>
+  );
+}
+
+function RecentChatRow({
+  chat,
+  active,
+  renaming,
+  renameDraft,
+  savingTitle,
+  mutating,
+  onRenameDraftChange,
+  onOpen,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+  onDelete,
+}: {
+  chat: Chat;
+  active: boolean;
+  renaming: boolean;
+  renameDraft: string;
+  savingTitle: boolean;
+  mutating: boolean;
+  onRenameDraftChange: (draft: string) => void;
+  onOpen: () => void;
+  onStartRename: () => void;
+  onCommitRename: () => void;
+  onCancelRename: () => void;
+  onDelete: () => void;
+}) {
+  const title = chat.title?.trim() || "New chat";
+
+  if (renaming) {
+    return (
+      <input
+        className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        autoFocus
+        aria-label="Chat title"
+        value={renameDraft}
+        disabled={savingTitle}
+        onChange={(event) => onRenameDraftChange(event.target.value)}
+        onBlur={onCommitRename}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            event.currentTarget.blur();
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancelRename();
+          }
+        }}
+      />
+    );
+  }
+
+  return (
+    <div
+      className={`group flex items-center rounded-md transition-colors hover:bg-muted ${
+        active ? "bg-muted" : ""
+      }`}
+    >
       <button
         type="button"
-        className="conversation-item sidebar-panel-item"
+        className="min-w-0 flex-1 cursor-pointer truncate px-2 py-1.5 text-left text-sm disabled:pointer-events-none disabled:opacity-50"
         aria-current={active ? "page" : undefined}
-        onClick={onClick}
+        disabled={mutating}
+        onClick={onOpen}
       >
-        {icon}
-        <span className="conversation-title">{label}</span>
+        {title}
       </button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            // Revealed on hover, but kept in the layout so the row does not
+            // reflow under the cursor.
+            className="mr-1 cursor-pointer rounded p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 disabled:pointer-events-none"
+            aria-label={`Actions for ${title}`}
+            disabled={mutating}
+          >
+            <Ellipsis size={15} />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" side="right">
+          <DropdownMenuItem onSelect={onStartRename}>
+            <Pencil />
+            Rename
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem variant="destructive" onSelect={onDelete}>
+            <Trash2 />
+            Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

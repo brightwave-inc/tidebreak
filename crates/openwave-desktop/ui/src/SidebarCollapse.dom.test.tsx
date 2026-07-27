@@ -34,7 +34,7 @@ describe("sidebar collapse", () => {
   it("collapses from the sidebar control and persists the preference", async () => {
     const user = userEvent.setup();
     await renderSidebar();
-    await user.click(screen.getByRole("button", { name: "Hide sidebar" }));
+    await user.click(screen.getByRole("button", { name: "Collapse sidebar" }));
     expect(useUiStore.getState().sidebarCollapsed).toBe(true);
     expect(window.localStorage.getItem("openwave.sidebar-collapsed")).toBe(
       "true",
