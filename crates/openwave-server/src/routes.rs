@@ -1738,7 +1738,7 @@ fn default_pending_approvals_limit() -> u64 {
 pub(crate) struct PendingApprovalSnapshot {
     pub call_id: CallId,
     pub turn_id: TurnId,
-    pub action: crate::event_projection::RendererToolName,
+    pub action: openwave_core::RendererToolName,
     pub approval: openwave_core::ToolApprovalKind,
     pub class: openwave_core::ApprovalClass,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1753,7 +1753,7 @@ impl PendingApprovalSnapshot {
         Self {
             call_id: approval.call_id,
             turn_id: approval.turn_id,
-            action: crate::event_projection::RendererToolName::from(approval.tool_name.as_str()),
+            action: openwave_core::RendererToolName::from(approval.tool_name.as_str()),
             approval: kind,
             class: approval.class,
             preview: approval.preview,

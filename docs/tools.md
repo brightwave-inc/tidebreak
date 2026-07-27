@@ -63,11 +63,15 @@ union and its runtime guard are now generated from `RendererToolName`, and its
 copy and icon tables are keyed on the generated union, so a missing entry is a
 compile error. [Wire types](wire-types.md) covers the generator and how to run it.
 
-Two places still hold the vocabulary by hand, because both map *tool* names onto
-it rather than restating it: the `From<&str>` fold in `event_projection.rs`, for
-live calls, and `historical_tool_name` in the store, for names read back from the
-journal. Their sets agree today; folding them into the enum is tracked
-separately.
+There is now one copy of the vocabulary: `RendererToolName` in `openwave-core`,
+which owns the enum and the single `From<&str>` fold that maps a registered tool
+name onto it. The live event projection, the history lookup that rebuilds a
+terminal card from the journal, and `ChatToolActivitySnapshot`'s own field type
+all use it.
+
+They did not always. The history lookup was a second 20-arm match, and `exec` was
+missing from it, so a command read as "Ran a command" while streaming and "Used a
+tool" after a reload — with its own command card still visible underneath.
 
 Normal foreground turns also receive a
 [host-owned operating prompt](agent-operating-prompt.md). It composes fixed

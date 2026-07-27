@@ -706,7 +706,7 @@ fn tool_activity_from_call(call: ToolCallRecord) -> ChatToolActivitySnapshot {
         }
     };
     ChatToolActivitySnapshot {
-        tool: historical_tool_name(&call.name),
+        tool: crate::RendererToolName::from(call.name.as_str()),
         action: crate::preview::ToolActionPreview::build(&call.name, &call.arguments),
         status,
         started_at: call.created_at,
@@ -723,32 +723,6 @@ fn tool_activity_from_call(call: ToolCallRecord) -> ChatToolActivitySnapshot {
 /// owns the wording for a live call, so sending prose here meant maintaining a
 /// second copy of it plus an inverse lookup to get back to a name — and a copy
 /// change on either side silently broke hydration.
-fn historical_tool_name(name: &str) -> &'static str {
-    match name {
-        "search" => "search",
-        "list_sources" => "list_sources",
-        "read_source" => "read_source",
-        "read_tool_result" => "read_tool_result",
-        "web_search" => "web_search",
-        crate::SANDBOX_READ_DELEGATED_FILE_TOOL => "read_delegated_file",
-        "read_file" => "read_file",
-        "read_connected_file" => "read_connected_file",
-        "list_dir" => "list_dir",
-        "write_file" => "write_file",
-        "create_deliverable" => "create_deliverable",
-        "request_folder_access" => "request_folder_access",
-        "connect_folder" => "connect_folder",
-        "list_connected_folders" => "list_connected_folders",
-        "list_folder" => "list_folder",
-        "import_connected_file" => "import_connected_file",
-        crate::ASK_USER_QUESTIONS_TOOL => "ask_user_questions",
-        "spawn_sandbox_agent" => "spawn_sandbox_agent",
-        "wait_for_agents" => "wait_for_agents",
-        "exec" => "exec",
-        _ => "other",
-    }
-}
-
 async fn terminal_event_cursor_on<C>(conn: &C, chat_id: ChatId) -> Result<i64>
 where
     C: ConnectionTrait,
@@ -1159,67 +1133,5 @@ fn role_from_db(text: &str) -> Result<Role> {
         "assistant" => Ok(Role::Assistant),
         "tool" => Ok(Role::Tool),
         other => Err(AgentError::Store(format!("unknown role: {other}"))),
-    }
-}
-
-#[cfg(test)]
-mod historical_tool_name_tests {
-    use super::historical_tool_name;
-
-    #[test]
-    fn a_private_tool_name_never_reaches_the_renderer() {
-        assert_eq!(
-            historical_tool_name(crate::SANDBOX_READ_DELEGATED_FILE_TOOL),
-            "read_delegated_file"
-        );
-        // The allowlist is the point: an unrecognized name folds rather than
-        // travelling, so it cannot leak a provider or extension detail.
-        assert_eq!(historical_tool_name("private_read_variant"), "other");
-        assert_eq!(historical_tool_name("mcp__vendor__search"), "other");
-        assert_eq!(historical_tool_name("search"), "search");
-        assert_eq!(
-            historical_tool_name(crate::ASK_USER_QUESTIONS_TOOL),
-            "ask_user_questions"
-        );
-    }
-
-    /// A tool the renderer can name live must survive the round trip.
-    ///
-    /// `exec` used to be absent here, so a command read as "Ran a command"
-    /// while streaming and "Used a tool" after a reload — with its own command
-    /// card still visible underneath.
-    #[test]
-    fn every_renderer_visible_tool_keeps_its_name_through_history() {
-        for name in [
-            "search",
-            "list_sources",
-            "read_source",
-            "read_tool_result",
-            "web_search",
-            crate::SANDBOX_READ_DELEGATED_FILE_TOOL,
-            "read_file",
-            "list_dir",
-            "write_file",
-            "create_deliverable",
-            "request_folder_access",
-            "connect_folder",
-            "list_connected_folders",
-            "list_folder",
-            "read_connected_file",
-            "import_connected_file",
-            "spawn_sandbox_agent",
-            "wait_for_agents",
-            crate::ASK_USER_QUESTIONS_TOOL,
-            "exec",
-        ] {
-            // Round-trips as itself, except the one private name that is
-            // deliberately renamed for the renderer.
-            let projected = historical_tool_name(name);
-            assert_ne!(projected, "other", "{name} does not survive history");
-            if name != crate::SANDBOX_READ_DELEGATED_FILE_TOOL {
-                assert_eq!(projected, name);
-            }
-        }
-        assert_eq!(historical_tool_name("other"), "other");
     }
 }

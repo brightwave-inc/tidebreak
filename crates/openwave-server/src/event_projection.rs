@@ -6,8 +6,8 @@
 //! projection instead.
 
 use openwave_core::{
-    AgentEvent, ApprovalClass, CallId, MessageId, SequencedEvent, ToolActionPreview,
-    ToolApprovalKind, ToolResultPreview, TurnId,
+    AgentEvent, ApprovalClass, CallId, MessageId, RendererToolName, SequencedEvent,
+    ToolActionPreview, ToolApprovalKind, ToolResultPreview, TurnId,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -89,72 +89,11 @@ pub(crate) enum RendererAgentEvent {
     EventOmitted,
 }
 
-/// Tool names are model-controlled. Only names with fixed renderer
-/// presentations cross the boundary; everything else becomes `other`.
-///
-/// This enum is the renderer's tool vocabulary. The desktop's union, its
-/// runtime guard, its copy table, and its icon table all derive from the
-/// TypeScript generated here, so adding a variant cannot leave one of them
-/// behind — see `docs/wire-types.md`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum RendererToolName {
-    Search,
-    ListSources,
-    ReadSource,
-    ReadToolResult,
-    WebSearch,
-    ReadDelegatedFile,
-    ReadFile,
-    ListDir,
-    WriteFile,
-    CreateDeliverable,
-    RequestFolderAccess,
-    ConnectFolder,
-    ListConnectedFolders,
-    ListFolder,
-    ReadConnectedFile,
-    ImportConnectedFile,
-    SpawnSandboxAgent,
-    WaitForAgents,
-    AskUserQuestions,
-    Exec,
-    Other,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RendererToolStatus {
     Completed,
     Failed,
-}
-
-impl From<&str> for RendererToolName {
-    fn from(name: &str) -> Self {
-        match name {
-            "search" => Self::Search,
-            crate::source_tools::LIST_SOURCES_TOOL => Self::ListSources,
-            crate::source_tools::READ_SOURCE_TOOL => Self::ReadSource,
-            crate::source_tools::READ_TOOL_RESULT_TOOL => Self::ReadToolResult,
-            "web_search" => Self::WebSearch,
-            openwave_core::SANDBOX_READ_DELEGATED_FILE_TOOL => Self::ReadDelegatedFile,
-            "read_file" => Self::ReadFile,
-            "list_dir" => Self::ListDir,
-            "write_file" => Self::WriteFile,
-            "create_deliverable" => Self::CreateDeliverable,
-            "request_folder_access" => Self::RequestFolderAccess,
-            "connect_folder" => Self::ConnectFolder,
-            "list_connected_folders" => Self::ListConnectedFolders,
-            "list_folder" => Self::ListFolder,
-            "read_connected_file" => Self::ReadConnectedFile,
-            "import_connected_file" => Self::ImportConnectedFile,
-            "spawn_sandbox_agent" => Self::SpawnSandboxAgent,
-            "wait_for_agents" => Self::WaitForAgents,
-            openwave_core::ASK_USER_QUESTIONS_TOOL => Self::AskUserQuestions,
-            "exec" => Self::Exec,
-            _ => Self::Other,
-        }
-    }
 }
 
 impl From<&SequencedEvent> for RendererSequencedEvent {

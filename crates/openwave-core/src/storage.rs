@@ -96,7 +96,7 @@ pub enum DeleteProjectOutcome {
 }
 
 /// Fixed lifecycle vocabulary exposed for a historical tool card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatToolActivityStatus {
     Completed,
@@ -107,18 +107,24 @@ pub enum ChatToolActivityStatus {
 /// A completed tool invocation with no results, tool identity, provider
 /// metadata, executor identity, lease, or diagnostic detail. The only arguments
 /// it can carry are the ones a tool explicitly projects for display.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct ChatToolActivitySnapshot {
     /// Allowlisted renderer tool name, never a provider-supplied one.
     ///
     /// A name rather than display copy: the renderer already derives a live
     /// call's wording from its name, and sending prose here made a copy change
     /// silently break history hydration.
-    pub tool: &'static str,
+    ///
+    /// Typed as the vocabulary rather than a string so the generated TypeScript
+    /// stays a union. As `&'static str` it generated as `string`, which compiles
+    /// on both sides while silently dropping the allowlist the renderer's copy
+    /// and icon tables are keyed on.
+    pub tool: crate::RendererToolName,
     /// Closed projection of what the call did, when its tool has one. Rebuilt
     /// from the arguments it ran with, so history describes the same action
     /// the live stream did.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub action: Option<crate::preview::ToolActionPreview>,
     pub status: ChatToolActivityStatus,
     pub started_at: chrono::DateTime<chrono::Utc>,

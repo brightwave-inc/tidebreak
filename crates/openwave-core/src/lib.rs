@@ -45,6 +45,7 @@ pub mod keychain;
 pub mod model;
 pub mod preview;
 pub mod provider;
+mod renderer_tool;
 pub mod steer;
 pub mod storage;
 pub mod tool;
@@ -138,6 +139,7 @@ pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
     Usage,
 };
+pub use renderer_tool::RendererToolName;
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
     AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptSandboxAgentRunAndParkTurnOutcome,
