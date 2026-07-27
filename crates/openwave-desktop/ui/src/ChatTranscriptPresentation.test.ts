@@ -181,6 +181,7 @@ describe("terminal transcript presentation", () => {
           role: "assistant",
           content: "",
           created_at: "2026-07-19T10:00:00Z",
+          citations: [],
           refusal: { category: "cyber", partial_output: false },
         },
         {
@@ -188,6 +189,7 @@ describe("terminal transcript presentation", () => {
           role: "assistant",
           content: "Visible partial",
           created_at: "2026-07-19T10:01:00Z",
+          citations: [],
           refusal: { category: "general_harms", partial_output: true },
         },
       ],
