@@ -9,7 +9,8 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
-use crate::id::{ChatId, OutputId, OutputRevisionId, TurnId};
+use crate::citation::AssistantCitationReference;
+use crate::id::{ChatId, OutputCitationId, OutputId, OutputRevisionId, TurnId};
 
 /// Private-scratch directory holding the output files in use today.
 ///
@@ -36,6 +37,11 @@ pub const MAX_DELIVERABLE_NAME_CHARS: usize = 120;
 /// Reaching the bound is a product decision rather than a storage failure: the
 /// store refuses a further revision so no caller can silently lose history.
 pub const MAX_OUTPUT_REVISIONS: u32 = 100;
+/// Most distinct source-evidence rows one output revision may cite.
+///
+/// An output can only cite evidence shown to the turn that produced it, so the
+/// same retrieval-result bound used for assistant messages is sufficient.
+pub const MAX_OUTPUT_CITATIONS: usize = crate::citation::MAX_ASSISTANT_CITATIONS;
 
 /// Private-scratch location of one immutable revision's bytes.
 ///
@@ -95,6 +101,18 @@ pub struct OutputRevision {
     pub created_at: DateTime<Utc>,
 }
 
+/// Renderer-safe historical citation projected from immutable output evidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+pub struct OutputCitationSnapshot {
+    pub id: OutputCitationId,
+    #[serde(skip)]
+    pub output_revision_id: OutputRevisionId,
+    pub ordinal: u16,
+    pub excerpt: String,
+    pub heading: Option<String>,
+    pub pages: Vec<u32>,
+}
+
 /// Content-identifying fields of a revision the caller has already written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewOutputRevision {
@@ -107,6 +125,11 @@ pub struct NewOutputRevision {
     pub sha256: [u8; 32],
     /// Turn that produced the revision, when it came from an agent turn.
     pub turn_id: Option<TurnId>,
+    /// Ordered evidence references selected while producing this revision.
+    ///
+    /// References only resolve against the revision's chat and producing turn;
+    /// a cited revision therefore always has a producing turn.
+    pub citations: Vec<AssistantCitationReference>,
     /// Host-stamped creation time.
     pub created_at: DateTime<Utc>,
 }

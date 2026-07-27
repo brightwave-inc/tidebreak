@@ -20,7 +20,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::approval::{ApprovalDecision, ApprovalRequest, ToolApproval};
-use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
+use crate::deliverable::{
+    CreateOutput, NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision,
+};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{
@@ -1453,6 +1455,14 @@ pub trait Store: Send + Sync {
 
     /// Fetch one revision by opaque id.
     async fn get_output_revision(&self, _id: OutputRevisionId) -> Result<Option<OutputRevision>> {
+        output_storage_unavailable()
+    }
+
+    /// List renderer-safe source citations for one immutable output revision.
+    async fn list_output_revision_citations(
+        &self,
+        _revision_id: OutputRevisionId,
+    ) -> Result<Vec<OutputCitationSnapshot>> {
         output_storage_unavailable()
     }
 

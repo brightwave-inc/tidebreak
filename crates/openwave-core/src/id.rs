@@ -75,6 +75,11 @@ id_type!(
     AssistantCitationId
 );
 
+id_type!(
+    /// Opaque renderer identity for one output-revision citation.
+    OutputCitationId
+);
+
 impl AssistantCitationId {
     const NAMESPACE: Uuid = Uuid::from_u128(0x2b74_9531_8d6e_4e11_a80b_8f50_413e_927c);
 
@@ -84,6 +89,20 @@ impl AssistantCitationId {
         let message_namespace = Uuid::new_v5(&Self::NAMESPACE, message_id.as_uuid().as_bytes());
         Self(Uuid::new_v5(
             &message_namespace,
+            ordinal.to_string().as_bytes(),
+        ))
+    }
+}
+
+impl OutputCitationId {
+    const NAMESPACE: Uuid = Uuid::from_u128(0x9c4e_74f0_3198_40bd_8acd_3e09_83b5_c6d7);
+
+    /// Derive one stable citation identity from its revision and one-based ordinal.
+    #[must_use]
+    pub fn derive(revision_id: OutputRevisionId, ordinal: u16) -> Self {
+        let revision_namespace = Uuid::new_v5(&Self::NAMESPACE, revision_id.as_uuid().as_bytes());
+        Self(Uuid::new_v5(
+            &revision_namespace,
             ordinal.to_string().as_bytes(),
         ))
     }

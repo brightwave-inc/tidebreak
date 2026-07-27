@@ -1,8 +1,13 @@
 use super::*;
+use crate::citation::AssistantCitationReference;
 use crate::deliverable::{
     CreateOutput, NewOutputRevision, OutputRecord, MAX_DELIVERABLE_BYTES, MAX_OUTPUT_REVISIONS,
 };
-use crate::id::{OutputId, OutputRevisionId};
+use crate::id::{CallId, DocumentId, OutputId, OutputRevisionId};
+use crate::model::{
+    ByteSpan, DocumentGeneration, RetrievalEvidenceInput, RetrievalEvidenceSource,
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
+};
 
 fn at(second: i64) -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(1_710_000_000 + second, 0).unwrap()
@@ -18,6 +23,7 @@ fn revision(seed: u8, second: i64) -> NewOutputRevision {
         byte_len: u64::from(seed) + 1,
         sha256: digest(seed),
         turn_id: None,
+        citations: Vec::new(),
         created_at: at(second),
     }
 }
@@ -36,6 +42,65 @@ async fn store_with_chat() -> (tempfile::TempDir, DbStore, Chat) {
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
     (dir, store, chat)
+}
+
+async fn persist_evidence(
+    store: &DbStore,
+    chat_id: ChatId,
+    turn_id: TurnId,
+    source_token: uuid::Uuid,
+    rank: u16,
+    snippet: &str,
+) {
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id,
+        turn_id,
+        provider_id: format!("search_{rank}"),
+        name: "search".into(),
+        arguments: serde_json::json!({"query": "citation"}),
+        execution: ToolCallExecution::Server,
+        status: ToolCallStatus::Pending,
+        result: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: at(i64::from(rank)),
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    let span = ByteSpan::new(0, snippet.len());
+    let document_id = DocumentId::new();
+    let evidence = RetrievalEvidenceInput {
+        rank,
+        source_token,
+        document_id,
+        generation: DocumentGeneration {
+            content_revision: 1,
+            revision_token: uuid::Uuid::new_v4(),
+        },
+        chunk_id: crate::ChunkId::derive(document_id, span.start, span.end),
+        span,
+        snippet: snippet.into(),
+        heading_path: vec![format!("Section {rank}")],
+        source_regions: Vec::new(),
+        source: RetrievalEvidenceSource::Inline,
+    };
+    assert_eq!(
+        store
+            .resolve_server_tool_call_with_evidence(
+                call.id,
+                &ToolCallResolution::Completed {
+                    result: "found source".into(),
+                },
+                at(i64::from(rank) + 10),
+                &[evidence],
+            )
+            .await
+            .unwrap(),
+        ResolveToolCallOutcome::Resolved
+    );
 }
 
 #[tokio::test]
@@ -304,4 +369,125 @@ async fn a_revision_records_the_turn_that_produced_it() {
         .unwrap()
         .unwrap();
     assert_eq!(stored.turn_id, Some(turn_id));
+}
+
+#[tokio::test]
+async fn output_revisions_retain_ordered_scoped_citations_and_retry_them_exactly() {
+    let (_dir, store, chat) = store_with_chat().await;
+    let turn_id = TurnId::new();
+    let first = uuid::Uuid::new_v4();
+    let second = uuid::Uuid::new_v4();
+    persist_evidence(&store, chat.id, turn_id, first, 1, "first source").await;
+    persist_evidence(&store, chat.id, turn_id, second, 1, "second source").await;
+    let mut request = create_request(chat.id, "brief.md", 1);
+    request.revision.turn_id = Some(turn_id);
+    request.revision.citations = vec![
+        AssistantCitationReference {
+            source_token: uuid::Uuid::new_v4(),
+        },
+        AssistantCitationReference {
+            source_token: second,
+        },
+        AssistantCitationReference {
+            source_token: first,
+        },
+    ];
+
+    let created = store.create_output(&request).await.unwrap();
+    assert_eq!(store.create_output(&request).await.unwrap(), created);
+    let citations = store
+        .list_output_revision_citations(created.current_revision)
+        .await
+        .unwrap();
+    assert_eq!(citations.len(), 2, "unknown source tokens are not retained");
+    assert_eq!(citations[0].ordinal, 1);
+    assert_eq!(citations[0].excerpt, "second source");
+    assert_eq!(citations[0].heading.as_deref(), Some("Section 1"));
+    assert_eq!(citations[1].ordinal, 2);
+    assert_eq!(citations[1].excerpt, "first source");
+
+    let mut conflicting_retry = request.clone();
+    conflicting_retry.revision.citations.reverse();
+    assert!(store.create_output(&conflicting_retry).await.is_err());
+
+    let mut appended = revision(2, 30);
+    appended.turn_id = Some(turn_id);
+    appended.citations = vec![AssistantCitationReference {
+        source_token: first,
+    }];
+    store
+        .append_output_revision(created.id, &appended)
+        .await
+        .unwrap();
+    assert!(store
+        .append_output_revision(
+            created.id,
+            &NewOutputRevision {
+                citations: vec![AssistantCitationReference {
+                    source_token: second,
+                }],
+                ..appended
+            },
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn output_citations_cannot_cross_turn_or_conversation_boundaries() {
+    let (_dir, store, chat) = store_with_chat().await;
+    let other_chat = sample_chat();
+    store.create_chat(&other_chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let same_turn = uuid::Uuid::new_v4();
+    let other_turn = uuid::Uuid::new_v4();
+    let other_chat_token = uuid::Uuid::new_v4();
+    persist_evidence(&store, chat.id, turn_id, same_turn, 1, "same turn").await;
+    persist_evidence(&store, chat.id, TurnId::new(), other_turn, 1, "other turn").await;
+    persist_evidence(
+        &store,
+        other_chat.id,
+        TurnId::new(),
+        other_chat_token,
+        1,
+        "other chat",
+    )
+    .await;
+    let mut request = create_request(chat.id, "brief.md", 1);
+    request.revision.turn_id = Some(turn_id);
+    request.revision.citations = vec![
+        AssistantCitationReference {
+            source_token: other_turn,
+        },
+        AssistantCitationReference {
+            source_token: other_chat_token,
+        },
+        AssistantCitationReference {
+            source_token: same_turn,
+        },
+    ];
+
+    let created = store.create_output(&request).await.unwrap();
+    let citations = store
+        .list_output_revision_citations(created.current_revision)
+        .await
+        .unwrap();
+    assert_eq!(citations.len(), 1);
+    assert_eq!(citations[0].excerpt, "same turn");
+
+    let mut invalid = revision(2, 30);
+    invalid.citations = vec![AssistantCitationReference {
+        source_token: same_turn,
+    }];
+    assert!(store
+        .append_output_revision(created.id, &invalid)
+        .await
+        .is_err());
+
+    store.delete_chat(chat.id).await.unwrap();
+    assert!(store
+        .list_output_revision_citations(created.current_revision)
+        .await
+        .unwrap()
+        .is_empty());
 }

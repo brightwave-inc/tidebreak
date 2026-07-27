@@ -99,15 +99,16 @@ pub use config::{Config, Profile};
 pub use db::DbStore;
 pub use deliverable::{
     deliverable_media_type, output_revision_relative_path, validate_deliverable_name, CreateOutput,
-    NewOutputRevision, OutputRecord, OutputRevision, DELIVERABLES_DIRECTORY, MAX_DELIVERABLE_BYTES,
-    MAX_DELIVERABLE_NAME_CHARS, MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
+    NewOutputRevision, OutputCitationSnapshot, OutputRecord, OutputRevision,
+    DELIVERABLES_DIRECTORY, MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
+    MAX_OUTPUT_CITATIONS, MAX_OUTPUT_REVISIONS, OUTPUTS_DIRECTORY,
 };
 pub use error::{AgentError, AgentErrorInfo, Result};
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{
     AgentRunId, AssistantCitationId, CallId, ChatId, ChunkId, DocumentId, DocumentJobId,
-    HostRootId, HostRootIdError, MessageId, OutputId, OutputRevisionId, ProjectId,
-    RootAttachmentChangeId, RootAttachmentChangeIdError, StepId, TurnId, TurnSteerId,
+    HostRootId, HostRootIdError, MessageId, OutputCitationId, OutputId, OutputRevisionId,
+    ProjectId, RootAttachmentChangeId, RootAttachmentChangeIdError, StepId, TurnId, TurnSteerId,
 };
 pub use image::{
     ImageAttachments, ImageData, ImageMediaType, ImageRef, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,

@@ -5309,11 +5309,52 @@ async fn m0013_adds_outputs_to_an_existing_conversation_store() {
             byte_len: 7,
             sha256: [3; 32],
             turn_id: None,
+            citations: Vec::new(),
             created_at: DateTime::<Utc>::from_timestamp(1_710_000_000, 0).unwrap(),
         },
     };
     let created = store.create_output(&request).await.unwrap();
     assert_eq!(store.list_outputs(chat.id, 10).await.unwrap(), [created]);
+}
+
+#[tokio::test]
+async fn m0015_adds_output_citations_without_changing_existing_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("output-citation-upgrade.db").display()
+    );
+    let conn = Database::connect(&url).await.unwrap();
+    conn.execute_unprepared("PRAGMA foreign_keys=ON;")
+        .await
+        .unwrap();
+    migration::Migrator::up(&conn, Some(14)).await.unwrap();
+    let store = DbStore { conn: conn.clone() };
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let request = crate::deliverable::CreateOutput {
+        id: crate::id::OutputId::new(),
+        chat_id: chat.id,
+        filename: "brief.md".into(),
+        revision: crate::deliverable::NewOutputRevision {
+            id: crate::id::OutputRevisionId::new(),
+            byte_len: 7,
+            sha256: [3; 32],
+            turn_id: None,
+            citations: Vec::new(),
+            created_at: DateTime::<Utc>::from_timestamp(1_710_000_000, 0).unwrap(),
+        },
+    };
+    let created = store.create_output(&request).await.unwrap();
+
+    migration::Migrator::up(&conn, None).await.unwrap();
+
+    assert_eq!(store.get_output(created.id).await.unwrap(), Some(created));
+    assert!(store
+        .list_output_revision_citations(request.revision.id)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
