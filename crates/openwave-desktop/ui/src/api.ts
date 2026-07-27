@@ -1,6 +1,28 @@
-import { RENDERER_TOOL_NAMES, type RendererToolName } from "./generated/wire";
+import {
+  RENDERER_TOOL_NAMES,
+  type ApprovalClass,
+  type RendererAgentEvent,
+  type RendererSequencedEvent,
+  type RendererToolName,
+  type ToolActionPreview,
+  type ToolApprovalKind,
+  type ToolResultPreview as WireToolResultPreview,
+} from "./generated/wire";
 
-export type { RendererToolName };
+export type { ApprovalClass, RendererToolName, ToolActionPreview };
+
+/**
+ * The WebSocket frame and the events it carries, generated from the server's
+ * renderer projection.
+ *
+ * Named for the renderer on the Rust side; the shorter names are what the app
+ * has always used, so they are aliased rather than renamed everywhere.
+ */
+export type SequencedEvent = RendererSequencedEvent;
+export type AgentEvent = RendererAgentEvent;
+
+/** Generated from `ToolApprovalKind`. */
+export type RendererApprovalKind = ToolApprovalKind;
 
 /** Connection details from the Tauri host (`server_info` command). */
 export type ServerInfo = {
@@ -242,61 +264,7 @@ export type AgentActivity = {
   status: "waiting" | "running";
 };
 
-export type SequencedEvent = {
-  seq: number;
-  event: AgentEvent;
-};
 
-export type AgentEvent =
-  | { type: "turn_started"; turn_id: string }
-  | { type: "text_delta"; text: string }
-  | { type: "reasoning_delta" }
-  | { type: "stream_interrupted" }
-  | { type: "tool_call_started"; call_id: string; name: RendererToolName }
-  | { type: "tool_call_args_delta"; call_id: string }
-  | { type: "user_questions_asked"; call_id: string; turn_id: string }
-  | {
-      type: "approval_required";
-      call_id: string;
-      action: RendererToolName;
-      approval: RendererApprovalKind;
-      class: "read_only" | "workspace" | "sensitive";
-      preview?: ToolActionPreview;
-    }
-  | { type: "approval_decided"; call_id: string; approved: boolean }
-  | {
-      type: "tool_call_completed";
-      call_id: string;
-      status: "completed" | "failed";
-      action?: ToolActionPreview;
-      result?: ToolResultPreview;
-    }
-  | { type: "turn_completed" }
-  | { type: "turn_failed" }
-  | { type: "turn_cancelled" }
-  | { type: "user_steered"; message_id: string; text: string }
-  | { type: "context_truncated" }
-  | { type: "event_omitted" };
-
-/**
- * The action a call will take, in a form a human can inspect.
- *
- * The renderer boundary otherwise carries no tool arguments. This is one of two
- * exceptions: a tool may project a closed, field-by-field view of what it is
- * about to do, because consent to an action you cannot see is not consent, and
- * because a result is unreadable without knowing what produced it.
- */
-export type ToolActionPreview =
-  | {
-      tool: "exec";
-      command: string;
-      args: string[];
-      cwd: string;
-    }
-  /** A search of this conversation's own sources. */
-  | { tool: "search"; query: string }
-  /** A public web search, whose query leaves the device. */
-  | { tool: "web_search"; query: string };
 
 /**
  * What a call produced.
@@ -304,6 +272,12 @@ export type ToolActionPreview =
  * The other exception. A command's output is the whole reason to run it;
  * withholding it leaves the transcript asserting that something happened
  * without ever showing what.
+ *
+ * Hand-written and camelCase, unlike its snake_case wire form. The Rust type is
+ * carried in the journal, so renaming its fields would stop existing chats from
+ * loading — the remap in `parseToolResultPreview` is the cheaper side to keep.
+ * That remap reads the generated wire type, so a field renamed in Rust breaks
+ * there at compile time rather than silently producing `undefined`.
  */
 export type ToolResultPreview = {
   tool: "exec";
@@ -314,12 +288,6 @@ export type ToolResultPreview = {
   stderr: string;
 };
 
-export type RendererApprovalKind =
-  | "search_may_share_query_and_excerpts"
-  | "web_search_may_share_query"
-  | "exec_may_run_networked_command"
-  | "external_mcp_may_call_server"
-  | "unsupported";
 
 /** Approval kinds a human may approve from the renderer. */
 export function isApprovableKind(kind: RendererApprovalKind): boolean {
@@ -1054,6 +1022,19 @@ export function parseToolActionPreview(
 }
 
 /**
+ * The wire shape this validator reads, with every value still unverified.
+ *
+ * Keyed on the generated type rather than on `string`, because the destructuring
+ * below is the one place the snake_case wire form is written out by hand. If a
+ * field is renamed in Rust, the name disappears from `keyof` and this fails to
+ * compile — instead of quietly destructuring to `undefined` and dropping every
+ * result preview at runtime, which no test would have caught.
+ */
+type UncheckedExecResult = Partial<
+  Record<keyof Extract<WireToolResultPreview, { tool: "exec" }>, unknown>
+>;
+
+/**
  * Validate a result field by field, on the same terms as an action: anything
  * that cannot be fully verified is dropped rather than half-rendered.
  */
@@ -1062,7 +1043,7 @@ export function parseToolResultPreview(
 ): ToolResultPreview | null {
   if (value === undefined || value === null) return null;
   if (!isRecord(value) || value.tool !== "exec") return null;
-  const { exit_code, timed_out, output_truncated, stdout, stderr } = value;
+  const { exit_code, timed_out, output_truncated, stdout, stderr }: UncheckedExecResult = value;
   if (
     (exit_code !== null && typeof exit_code !== "number") ||
     typeof timed_out !== "boolean" ||

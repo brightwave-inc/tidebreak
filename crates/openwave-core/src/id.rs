@@ -7,13 +7,14 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use ts_rs::TS;
 use uuid::Uuid;
 
 /// Declares a UUID-backed identifier newtype with the common impls.
 macro_rules! id_type {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
         #[serde(transparent)]
         pub struct $name(pub Uuid);
 

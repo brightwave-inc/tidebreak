@@ -40,6 +40,7 @@ mod state;
 mod turn_worker;
 /// Host-owned, inert web-search configuration and provider selection.
 pub mod web_search;
+mod wire_types;
 
 use std::fs::{OpenOptions, TryLockError};
 use std::net::{Ipv4Addr, SocketAddr};

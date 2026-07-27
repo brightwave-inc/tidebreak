@@ -31,7 +31,13 @@ chrono = { version = "=0.4.45", features = ["serde"] }
 # `serde-compat` is what makes the output trustworthy: ts-rs reads the same
 # `tag`, `rename_all`, and `skip` attributes serde does, so the generated type
 # describes the bytes that actually go out. See docs/wire-types.md.
-ts-rs = { version = "=12.0.1", features = ["chrono-impl", "uuid-impl"] }
+#
+# `no-serde-warnings` silences one specific piece of noise: ts-rs cannot parse
+# `#[serde(transparent)]`, which every id newtype carries, so it printed a
+# warning per id on every build. It reaches the right answer anyway, because a
+# single-field tuple struct already renders as its inner type — and that is
+# pinned by a test rather than left to coincidence.
+ts-rs = { version = "=12.0.1", features = ["chrono-impl", "uuid-impl", "no-serde-warnings"] }
 windows-sys = "=0.61.2"
 sea-orm = { version = "=2.0.0", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
 sea-orm-migration = { version = "=2.0.0", default-features = false, features = ["runtime-tokio-rustls"] }

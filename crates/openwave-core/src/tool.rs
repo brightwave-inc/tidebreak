@@ -17,6 +17,7 @@ use cap_std::fs::Dir;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use ts_rs::TS;
 
 use crate::error::Result;
 use crate::id::{CallId, ChatId, ProjectId};
@@ -56,7 +57,7 @@ impl ToolScratch {
 /// Policy maps class → auto-approve / ask / deny. In v1: `ReadOnly` and
 /// `Workspace` auto-approve; `Sensitive` parks on the approval gate unless a
 /// matching standing grant covers the call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalClass {
     /// Never mutates anything (e.g. `read_file`, `list_dir`, `search`).

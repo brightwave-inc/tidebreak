@@ -18,6 +18,7 @@ use crate::id::{CallId, ChatId, TurnId};
 use crate::preview::ToolActionPreview;
 use crate::tool::ApprovalClass;
 use chrono::{DateTime, Utc};
+use ts_rs::TS;
 
 /// The human's decision on a parked tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +69,7 @@ pub enum ToolApprovalStatus {
 /// renderer can describe the action without ever seeing the model-authored
 /// summary or arguments. `Unsupported` is the fail-closed default: a Sensitive
 /// action the server can only reject, never approve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolApprovalKind {
     /// A library search may share the query and matched excerpts with the
