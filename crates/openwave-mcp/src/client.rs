@@ -861,18 +861,24 @@ fn validate_remote_tool(server_name: &str, tool: &RemoteTool) -> Result<usize> {
     // connection instead of silently dropping the view. Unrelated `_meta`
     // stays ignored.
     if let Some(meta) = &tool.meta {
-        let declares_ui = meta.contains_key("ui/resourceUri")
-            || meta
-                .get("ui")
-                .is_some_and(|ui| ui.get("resourceUri").is_some());
-        if declares_ui {
-            let Some(uri) = tool.declared_ui_resource() else {
+        // Every present spelling is held to the contract, not only the one
+        // that wins precedence: a declaration is either wholly valid or the
+        // connection fails.
+        for declared in [
+            meta.get("ui").and_then(|ui| ui.get("resourceUri")),
+            meta.get("ui/resourceUri"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let Some(uri) = declared.as_str() else {
                 return Err(mcp_message(
                     "external server declared a non-string UI resource",
                 ));
             };
             if uri.len() > MAX_UI_RESOURCE_URI_BYTES
                 || !uri.starts_with("ui://")
+                || uri.len() == "ui://".len()
                 || uri.bytes().any(|byte| byte.is_ascii_control())
             {
                 return Err(mcp_message(
@@ -1190,6 +1196,12 @@ mod tests {
                 "invalid ui://",
             ),
             (json!({"ui/resourceUri": 7}), "non-string UI resource"),
+            // A malformed losing spelling still fails the connection.
+            (
+                json!({"ui": {"resourceUri": "ui://docs/ok.html"}, "ui/resourceUri": 7}),
+                "non-string UI resource",
+            ),
+            (json!({"ui": {"resourceUri": "ui://"}}), "invalid ui://"),
             (
                 json!({"ui": {"resourceUri": format!("ui://{}", "x".repeat(MAX_UI_RESOURCE_URI_BYTES))}}),
                 "invalid ui://",
