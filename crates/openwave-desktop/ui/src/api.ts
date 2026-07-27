@@ -11,6 +11,7 @@ import {
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
   type RendererAgentEvent,
+  type RendererRefusal,
   type RendererSequencedEvent,
   type RendererToolName,
   type ToolActionPreview,
@@ -25,6 +26,7 @@ export type {
   TranscriptRole,
   RendererToolName,
   ToolActionPreview,
+  RendererRefusal,
 };
 
 /**

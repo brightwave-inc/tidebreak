@@ -18,6 +18,22 @@ pub(crate) struct RendererSequencedEvent {
     pub event: RendererAgentEvent,
 }
 
+/// Bounded refusal metadata safe to present in the desktop transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub(crate) struct RendererRefusal {
+    pub category: Option<String>,
+    pub partial_output: bool,
+}
+
+impl From<&openwave_core::RefusalOutcome> for RendererRefusal {
+    fn from(value: &openwave_core::RefusalOutcome) -> Self {
+        Self {
+            category: value.category().map(str::to_owned),
+            partial_output: value.partial_output(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum RendererAgentEvent {
@@ -75,6 +91,9 @@ pub(crate) enum RendererAgentEvent {
         result: Option<ToolResultPreview>,
     },
     TurnCompleted,
+    TurnRefused {
+        refusal: RendererRefusal,
+    },
     TurnFailed,
     TurnCancelled,
     /// The message body is available through the transcript endpoint. Keeping
@@ -154,6 +173,9 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 result: result.clone(),
             },
             AgentEvent::TurnCompleted { .. } => RendererAgentEvent::TurnCompleted,
+            AgentEvent::TurnRefused { refusal, .. } => RendererAgentEvent::TurnRefused {
+                refusal: refusal.into(),
+            },
             AgentEvent::TurnFailed { .. } => RendererAgentEvent::TurnFailed,
             AgentEvent::TurnCancelled { .. } => RendererAgentEvent::TurnCancelled,
             AgentEvent::UserSteered {
@@ -176,9 +198,43 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
 
 #[cfg(test)]
 mod tests {
-    use openwave_core::{AgentError, ToolOutput};
+    use openwave_core::{AgentError, RefusalDetails, RefusalOutcome, ToolOutput, Usage};
 
     use super::*;
+
+    #[test]
+    fn refusal_projection_exposes_only_bounded_presentation_metadata() {
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 12,
+            event: AgentEvent::TurnRefused {
+                usage: Usage {
+                    input_tokens: 42,
+                    output_tokens: 7,
+                    ..Usage::default()
+                },
+                refusal: RefusalOutcome::new(
+                    RefusalDetails::from_category(Some("general_harms")),
+                    true,
+                ),
+            },
+        });
+
+        assert_eq!(
+            projected,
+            RendererSequencedEvent {
+                seq: 12,
+                event: RendererAgentEvent::TurnRefused {
+                    refusal: RendererRefusal {
+                        category: Some("general_harms".into()),
+                        partial_output: true,
+                    },
+                },
+            }
+        );
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(!json.contains("input_tokens"), "{json}");
+        assert!(!json.contains("output_tokens"), "{json}");
+    }
 
     #[test]
     fn projection_redacts_internal_payloads_and_unknown_tool_names() {

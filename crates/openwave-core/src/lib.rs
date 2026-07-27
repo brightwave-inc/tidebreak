@@ -136,8 +136,8 @@ pub use model::{
 };
 pub use preview::{ToolActionPreview, ToolResultPreview};
 pub use provider::{
-    ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, StopReason,
-    Usage,
+    ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId,
+    RefusalDetails, RefusalOutcome, StopReason, Usage,
 };
 pub use renderer_tool::RendererToolName;
 pub use steer::{SteerInbox, SteerMessage};
@@ -145,8 +145,9 @@ pub use storage::{
     AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptSandboxAgentRunAndParkTurnOutcome,
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
     AnswerUserQuestionsOutcome, AppendClaimedMessageOutcome, ApplyTurnSteerOutcome,
-    BeginRootAttachmentChangeOutcome, BlobStore, ChatToolActivitySnapshot, ChatToolActivityStatus,
-    ChatTranscriptSnapshot, CheckpointSandboxSpawnOutcome, ClaimAgentRunInboxOutcome,
+    BeginRootAttachmentChangeOutcome, BlobStore, ChatRefusalSnapshot, ChatToolActivitySnapshot,
+    ChatToolActivityStatus, ChatTranscriptSnapshot, CheckpointSandboxSpawnOutcome,
+    ClaimAgentRunInboxOutcome,
     ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome,
     ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim, CompleteTurnRunOutcome,
     ConsumeAgentRunInboxAndResumeTurnOutcome, ConsumeAgentRunInboxOutcome,

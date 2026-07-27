@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AgentErrorInfo;
 use crate::id::{CallId, MessageId, TurnId};
-use crate::provider::{StopReason, Usage};
+use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::tool::{ApprovalClass, ToolOutput};
 
 /// One event in a turn's lifecycle, streamed to every client surface.
@@ -112,6 +112,13 @@ pub enum AgentEvent {
         usage: Usage,
         /// Why the final model call stopped.
         stop_reason: StopReason,
+    },
+    /// The turn completed with a model refusal rather than a complete answer.
+    TurnRefused {
+        /// Token accounting up to the refusal.
+        usage: Usage,
+        /// Category detail and whether visible output is incomplete.
+        refusal: RefusalOutcome,
     },
     /// The turn failed and was abandoned.
     TurnFailed {
@@ -236,10 +243,11 @@ mod tests {
             AgentEvent::ApprovalDecided { .. } => 8,
             AgentEvent::ToolCallCompleted { .. } => 9,
             AgentEvent::TurnCompleted { .. } => 10,
-            AgentEvent::TurnFailed { .. } => 11,
-            AgentEvent::TurnCancelled { .. } => 12,
-            AgentEvent::UserSteered { .. } => 13,
-            AgentEvent::ContextTruncated { .. } => 14,
+            AgentEvent::TurnRefused { .. } => 11,
+            AgentEvent::TurnFailed { .. } => 12,
+            AgentEvent::TurnCancelled { .. } => 13,
+            AgentEvent::UserSteered { .. } => 14,
+            AgentEvent::ContextTruncated { .. } => 15,
         }
     }
 
@@ -319,6 +327,18 @@ mod tests {
                     cache_creation_input_tokens: 44,
                 },
                 stop_reason: StopReason::EndTurn,
+            },
+            AgentEvent::TurnRefused {
+                usage: Usage {
+                    input_tokens: 12,
+                    output_tokens: 3,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                refusal: RefusalOutcome::new(
+                    crate::provider::RefusalDetails::from_category(Some("cyber")),
+                    true,
+                ),
             },
             AgentEvent::TurnFailed {
                 error: (&AgentError::config("no provider")).into(),

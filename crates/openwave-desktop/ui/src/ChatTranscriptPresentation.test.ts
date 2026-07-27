@@ -4,6 +4,7 @@ import {
   loadCurrentTerminalTranscript,
   presentChatTranscript,
 } from "./ChatTranscriptPresentation";
+import { refusalCopy } from "./MessageList";
 
 const transcript: ChatTranscript = {
   messages: [
@@ -170,5 +171,72 @@ describe("terminal transcript presentation", () => {
         ],
       },
     ]);
+  });
+
+  it("hydrates empty and partial refusals beside their durable assistant output", () => {
+    const presented = presentChatTranscript({
+      messages: [
+        {
+          id: "empty-refusal",
+          role: "assistant",
+          content: "",
+          created_at: "2026-07-19T10:00:00Z",
+          refusal: { category: "cyber", partial_output: false },
+        },
+        {
+          id: "partial-refusal",
+          role: "assistant",
+          content: "Visible partial",
+          created_at: "2026-07-19T10:01:00Z",
+          refusal: { category: "general_harms", partial_output: true },
+        },
+      ],
+      tool_activity: [],
+      last_event_seq: 14,
+    });
+
+    expect(presented.messages).toEqual([
+      {
+        id: "empty-refusal",
+        role: "assistant",
+        text: "",
+        createdAt: "2026-07-19T10:00:00Z",
+        sources: [],
+      },
+      {
+        id: "refusal:empty-refusal",
+        role: "refusal",
+        category: "cyber",
+        partialOutput: false,
+      },
+      {
+        id: "partial-refusal",
+        role: "assistant",
+        text: "Visible partial",
+        createdAt: "2026-07-19T10:01:00Z",
+        sources: [],
+      },
+      {
+        id: "refusal:partial-refusal",
+        role: "refusal",
+        category: "general_harms",
+        partialOutput: true,
+      },
+    ]);
+    expect(presented.messageIds).toEqual(
+      new Set(["empty-refusal", "partial-refusal"]),
+    );
+  });
+
+  it("uses renderer-owned copy that distinguishes an incomplete refusal", () => {
+    expect(refusalCopy("cyber", false)).toBe(
+      "The model declined this response because it matched the cyber safety category.",
+    );
+    expect(refusalCopy("general_harms", true)).toBe(
+      "The response above is incomplete. The model declined this response because it matched the general safety category.",
+    );
+    expect(refusalCopy(null, false)).toBe(
+      "The model declined this response because it matched a safety policy.",
+    );
   });
 });

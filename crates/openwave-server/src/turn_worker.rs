@@ -738,6 +738,7 @@ impl TurnWorker {
                     citations,
                     usage,
                     stop_reason,
+                    refusal,
                     steer_revision,
                     model_steps,
                 }) => {
@@ -804,25 +805,51 @@ impl TurnWorker {
                             turn.id
                         ))
                     })?;
-                    let terminal_event = AgentEvent::TurnCompleted {
-                        usage: total_usage,
-                        stop_reason,
+                    if (stop_reason == openwave_core::StopReason::Refusal) != refusal.is_some() {
+                        return Err(AgentError::msg(format!(
+                            "turn {} returned inconsistent refusal metadata",
+                            turn.id
+                        )));
+                    }
+                    let terminal_event = match refusal.clone() {
+                        Some(refusal) => AgentEvent::TurnRefused {
+                            usage: total_usage,
+                            refusal,
+                        },
+                        None => AgentEvent::TurnCompleted {
+                            usage: total_usage,
+                            stop_reason,
+                        },
                     };
                     let continue_after_steer = loop {
-                        match self
-                            .store
-                            .complete_turn_run_with_citations_and_append_event(
-                                turn.id,
-                                lease_token,
-                                expected_steer_revision,
-                                Utc::now(),
-                                &output,
-                                &citations,
-                                total_usage,
-                                stop_reason,
-                            )
-                            .await
-                        {
+                        let completion = if let Some(refusal) = refusal.clone() {
+                            self.store
+                                .complete_refused_turn_run_with_citations_and_append_event(
+                                    turn.id,
+                                    lease_token,
+                                    expected_steer_revision,
+                                    Utc::now(),
+                                    &output,
+                                    &citations,
+                                    total_usage,
+                                    refusal,
+                                )
+                                .await
+                        } else {
+                            self.store
+                                .complete_turn_run_with_citations_and_append_event(
+                                    turn.id,
+                                    lease_token,
+                                    expected_steer_revision,
+                                    Utc::now(),
+                                    &output,
+                                    &citations,
+                                    total_usage,
+                                    stop_reason,
+                                )
+                                .await
+                        };
+                        match completion {
                             Ok(Some(resolution)) => match resolution.outcome {
                                 CompleteTurnRunOutcome::Completed(_)
                                 | CompleteTurnRunOutcome::Existing(_) => {

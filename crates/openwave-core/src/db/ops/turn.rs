@@ -44,7 +44,8 @@ pub(in crate::db) use multi_agent_run_wait::{
 };
 
 pub(in crate::db) use resolution::{
-    complete_turn_run, complete_turn_run_and_append_event,
+    complete_refused_turn_run_with_citations_and_append_event, complete_turn_run,
+    complete_turn_run_and_append_event,
     complete_turn_run_with_citations_and_append_event, finish_turn_cancellation,
     finish_turn_cancellation_and_append_event, record_turn_run_failure,
     record_turn_run_failure_and_append_event, recover_exact_completed_turn_event,

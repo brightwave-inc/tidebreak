@@ -1054,6 +1054,11 @@ async fn complete_sandbox_task(
                         "sandbox agent did not produce a final result",
                     ));
                 }
+                if matches!(reason, StopReason::Refusal) {
+                    return Err(AgentError::Refusal(
+                        "sandbox agent model declined the request (category: unspecified)".into(),
+                    ));
+                }
                 if reason == StopReason::ToolUse {
                     if !text.is_empty() || calls.len() != 1 {
                         return Err(AgentError::msg(
@@ -1122,6 +1127,14 @@ async fn complete_sandbox_task(
                     ));
                 }
                 return Ok(SandboxCompletion::Final(text));
+            }
+            ProviderEvent::Refusal { details } => {
+                let category = details
+                    .category()
+                    .map_or_else(|| "unspecified".to_owned(), str::to_owned);
+                return Err(AgentError::Refusal(format!(
+                    "sandbox agent model declined the request (category: {category})"
+                )));
             }
             ProviderEvent::ReasoningDelta { .. } | ProviderEvent::Usage(_) => {}
             // The stream broke mid-flight, so `text` and `arguments` are both
@@ -1729,6 +1742,59 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sandbox_completion_treats_bare_and_structured_refusals_as_failures() {
+        let request = ChatRequest {
+            provider: None,
+            model: "m".into(),
+            reasoning_model: false,
+            system: None,
+            messages: vec![],
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            reasoning_effort: None,
+            images: openwave_core::ImageAttachments::new(),
+        };
+
+        let bare = match complete_sandbox_task(
+            Arc::new(EventProvider(vec![ProviderEvent::Stop {
+                reason: StopReason::Refusal,
+            }])),
+            request.clone(),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("bare refusal must not complete a sandbox run"),
+        };
+        assert!(
+            matches!(bare, AgentError::Refusal(ref detail) if detail.contains("unspecified")),
+            "{bare}"
+        );
+
+        let structured = match complete_sandbox_task(
+            Arc::new(EventProvider(vec![
+                ProviderEvent::TextDelta {
+                    text: "unsafe partial".into(),
+                },
+                ProviderEvent::Refusal {
+                    details: openwave_core::RefusalDetails::from_category(Some("cyber")),
+                },
+            ])),
+            request,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("structured refusal must not complete a sandbox run"),
+        };
+        assert!(
+            matches!(structured, AgentError::Refusal(ref detail) if detail.contains("cyber")),
+            "{structured}"
+        );
     }
 
     #[tokio::test]

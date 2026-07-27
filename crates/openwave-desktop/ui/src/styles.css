@@ -997,6 +997,14 @@ body {
   text-align: left;
 }
 
+.message-notice.is-refusal {
+  align-self: stretch;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--line));
+  color: var(--warning-foreground);
+  background: var(--warning-background);
+  text-align: left;
+}
+
 /* ---------- Working indicator ---------- */
 
 .assistant-working {

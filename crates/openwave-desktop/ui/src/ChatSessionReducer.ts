@@ -343,6 +343,37 @@ export function reduceChatSessionEvent(
       };
     }
 
+    case "turn_refused": {
+      state = flushMarkerTail(state, deps);
+      effects.push(
+        { type: "turn_resolved" },
+        { type: "refresh_user_questions" },
+        { type: "hydrate_terminal_transcript" },
+      );
+      return {
+        state: {
+          ...state,
+          busy: false,
+          activeTurnId: null,
+          reasoningActive: false,
+          provisionalToolCallIds: new Set(),
+          messages: [
+            ...discardToolCalls(
+              state.messages,
+              state.provisionalToolCallIds,
+            ),
+            {
+              id: deps.nextId(),
+              role: "refusal",
+              category: event.refusal.category,
+              partialOutput: event.refusal.partial_output,
+            },
+          ],
+        },
+        effects,
+      };
+    }
+
     case "turn_cancelled": {
       state = flushMarkerTail(state, deps);
       effects.push(

@@ -370,6 +370,62 @@ describe("terminal events", () => {
     ]);
   });
 
+  it("turn_refused renders a reason even when the model emitted no text", () => {
+    const { state, effects } = play([
+      TURN,
+      {
+        type: "turn_refused",
+        refusal: { category: "cyber", partial_output: false },
+      },
+    ]);
+
+    expect(state.busy).toBe(false);
+    expect(state.activeTurnId).toBeNull();
+    expect(state.messages).toEqual([
+      { id: "t1", role: "assistant", text: "", sources: [], createdAt: NOW },
+      {
+        id: "t2",
+        role: "refusal",
+        category: "cyber",
+        partialOutput: false,
+      },
+    ]);
+    expect(effects).toEqual([
+      { type: "turn_resolved" },
+      { type: "refresh_user_questions" },
+      { type: "hydrate_terminal_transcript" },
+    ]);
+  });
+
+  it("turn_refused retains partial text and labels it as incomplete", () => {
+    const { state } = play([
+      TURN,
+      { type: "text_delta", text: "Visible partial" },
+      { type: "tool_call_started", call_id: "unsafe", name: "search" },
+      {
+        type: "turn_refused",
+        refusal: { category: "general_harms", partial_output: true },
+      },
+    ]);
+
+    expect(state.messages).toEqual([
+      {
+        id: "t1",
+        role: "assistant",
+        text: "Visible partial",
+        sources: [],
+        createdAt: NOW,
+      },
+      {
+        id: "t3",
+        role: "refusal",
+        category: "general_harms",
+        partialOutput: true,
+      },
+    ]);
+    expect(state.provisionalToolCallIds.size).toBe(0);
+  });
+
   it("turn_cancelled settles active tools, resolves their cards, and notes it", () => {
     const { state, effects } = play([
       TURN,

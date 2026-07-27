@@ -10300,6 +10300,92 @@ async fn document_chat_scope_is_isolated_and_mutually_exclusive_with_project_sco
 }
 
 #[tokio::test]
+async fn refused_turn_metadata_hydrates_with_its_exact_durable_output() {
+    use crate::event::AgentEvent;
+    use crate::provider::{RefusalDetails, RefusalOutcome, Usage};
+
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    let mut expected = Vec::new();
+    for (content, category, partial_output) in [
+        ("", "cyber", false),
+        ("Visible partial", "general_harms", true),
+    ] {
+        let turn_id = TurnId::new();
+        let accepted = match store
+            .accept_turn(turn_id, chat.id, "claude", "question")
+            .await
+            .unwrap()
+        {
+            AcceptTurnOutcome::Accepted(turn) => turn,
+            outcome => panic!("unexpected acceptance: {outcome:?}"),
+        };
+        let lease_token = uuid::Uuid::new_v4();
+        store
+            .claim_turn_run(
+                lease_token,
+                accepted.available_at,
+                accepted.available_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .turn
+            .expect("accepted turn is claimable");
+        let output = Message {
+            id: MessageId::new(),
+            chat_id: chat.id,
+            turn_id,
+            role: Role::Assistant,
+            content: content.into(),
+            created_at: accepted.available_at,
+        };
+        let refusal = RefusalOutcome::new(
+            RefusalDetails::from_category(Some(category)),
+            partial_output,
+        );
+        let completed = store
+            .complete_refused_turn_run_with_citations_and_append_event(
+                turn_id,
+                lease_token,
+                0,
+                output.created_at,
+                &output,
+                &[],
+                Usage::default(),
+                refusal.clone(),
+            )
+            .await
+            .unwrap()
+            .expect("live refusal completion");
+        assert!(matches!(
+            completed.terminal_event.as_ref().map(|event| &event.event),
+            Some(AgentEvent::TurnRefused {
+                refusal: journaled,
+                ..
+            }) if journaled == &refusal
+        ));
+        expected.push((output, refusal));
+    }
+
+    let transcript = store.get_chat_transcript(chat.id).await.unwrap().unwrap();
+    assert_eq!(transcript.refusals.len(), 2);
+    for (output, refusal) in expected {
+        let stored = transcript
+            .messages
+            .iter()
+            .find(|message| message.id == output.id)
+            .expect("refused output remains a normal durable assistant message");
+        assert_eq!(stored.content, output.content);
+        assert!(transcript
+            .refusals
+            .iter()
+            .any(|snapshot| { snapshot.message_id == output.id && snapshot.refusal == refusal }));
+    }
+}
+
+#[tokio::test]
 async fn event_journal_assigns_per_chat_seq_and_replays_after_cursor() {
     use crate::event::AgentEvent;
     use crate::id::TurnId;

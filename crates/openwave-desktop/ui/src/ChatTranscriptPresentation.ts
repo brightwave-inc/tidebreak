@@ -29,30 +29,49 @@ export function presentChatTranscript(
       .filter((entry) => entry.kind === "message")
       .map((entry) => entry.id),
   );
-  const messages: ChatMessage[] = hydrated.map((entry) =>
-    entry.kind === "tool"
-      ? {
+  const messages = hydrated.flatMap(
+    (entry): ChatMessage[] => {
+      if (entry.kind === "tool") {
+        return [
+          {
+            id: entry.id,
+            role: "tool",
+            callId: entry.id,
+            name: entry.name,
+            status: entry.status,
+            preview: entry.preview,
+          } satisfies ChatMessage,
+        ];
+      }
+      if (entry.role === "assistant") {
+        const assistant = {
           id: entry.id,
-          role: "tool",
-          callId: entry.id,
-          name: entry.name,
-          status: entry.status,
-          preview: entry.preview,
-        }
-      : entry.role === "assistant"
-        ? {
-            id: entry.id,
-            role: "assistant",
-            text: entry.text,
-            sources: entry.sources,
-            createdAt: entry.createdAt,
-          }
-        : {
-            id: entry.id,
-            role: "user",
-            text: entry.text,
-            createdAt: entry.createdAt,
-          },
+          role: "assistant",
+          text: entry.text,
+          sources: entry.sources,
+          createdAt: entry.createdAt,
+        } satisfies ChatMessage;
+        return entry.refusal
+          ? [
+              assistant,
+              {
+                id: `refusal:${entry.id}`,
+                role: "refusal",
+                category: entry.refusal.category,
+                partialOutput: entry.refusal.partial_output,
+              } satisfies ChatMessage,
+            ]
+          : [assistant];
+      }
+      return [
+        {
+          id: entry.id,
+          role: "user",
+          text: entry.text,
+          createdAt: entry.createdAt,
+        } satisfies ChatMessage,
+      ];
+    },
   );
 
   return {

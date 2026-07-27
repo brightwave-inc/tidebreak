@@ -51,7 +51,8 @@ use crate::model::{
 };
 use crate::preview::{ToolActionPreview, ToolResultPreview};
 use crate::provider::{
-    ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, StopReason, Usage,
+    ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, RefusalDetails,
+    RefusalOutcome, StopReason, Usage,
 };
 use crate::steer::SteerInbox;
 use crate::storage::{
@@ -393,6 +394,8 @@ pub enum AgentTurnOutcome {
         usage: Usage,
         /// Provider stop reason for the eventual terminal event.
         stop_reason: StopReason,
+        /// Structured refusal metadata when `stop_reason` is `Refusal`.
+        refusal: Option<RefusalOutcome>,
         /// Durable steering epoch captured immediately before the final model call.
         steer_revision: Option<i64>,
         /// Model-call steps consumed from the turn-wide execution budget.
@@ -1204,6 +1207,7 @@ impl Agent {
             let mut calls: Vec<PendingCall> = Vec::new();
             let mut by_index: HashMap<u32, usize> = HashMap::new();
             let mut stop_reason = StopReason::EndTurn;
+            let mut refusal_details: Option<RefusalDetails> = None;
 
             // Race each stream item against cancel and interrupt-steer so a long
             // model call is preempted promptly. Cancel ends the turn; interrupt
@@ -1265,6 +1269,10 @@ impl Agent {
                         progress.usage = total_usage;
                     }
                     ProviderEvent::Stop { reason } => stop_reason = reason,
+                    ProviderEvent::Refusal { details } => {
+                        stop_reason = StopReason::Refusal;
+                        refusal_details = Some(details);
+                    }
                     ProviderEvent::Failed { message } => break StreamEnd::Failed(message),
                 }
             };
@@ -1301,12 +1309,22 @@ impl Agent {
                 continue;
             }
 
+            let refused = stop_reason == StopReason::Refusal;
+            if refused {
+                // A refusal terminalizes the candidate. Tool arguments emitted
+                // before it are incomplete and must never execute.
+                calls.clear();
+            }
+
             let parsed = parse_assistant_citations(&text);
             let candidate = AssistantCandidate {
                 content: parsed.content,
                 citations: parsed.references,
             };
             let text = &candidate.content;
+            let refusal = refused.then(|| {
+                RefusalOutcome::new(refusal_details.unwrap_or_default(), !text.is_empty())
+            });
 
             let unavailable_foreground_client = calls.iter().any(|call| {
                 self.tools.is_foreground_client(&call.name) && !self.agent_orchestration_active()
@@ -1733,16 +1751,24 @@ impl Agent {
                             citations: candidate.citations.clone(),
                             usage: total_usage,
                             stop_reason,
+                            refusal: refusal.clone(),
                             steer_revision: generation_steer_revision,
                             model_steps: step + 1,
                         });
                     }
                     if self.steer.try_complete(|| {
                         if publish_terminal {
-                            events.send(AgentEvent::TurnCompleted {
-                                usage: total_usage,
-                                stop_reason,
-                            });
+                            if let Some(refusal) = refusal.clone() {
+                                events.send(AgentEvent::TurnRefused {
+                                    usage: total_usage,
+                                    refusal,
+                                });
+                            } else {
+                                events.send(AgentEvent::TurnCompleted {
+                                    usage: total_usage,
+                                    stop_reason,
+                                });
+                            }
                         }
                     }) {
                         return Ok(AgentTurnOutcome::Completed {
@@ -1750,6 +1776,7 @@ impl Agent {
                             citations: candidate.citations.clone(),
                             usage: total_usage,
                             stop_reason,
+                            refusal: refusal.clone(),
                             steer_revision: generation_steer_revision,
                             model_steps: step + 1,
                         });
@@ -5838,6 +5865,139 @@ mod tests {
             ])
             .boxed())
         }
+    }
+
+    struct RefusalProvider(Vec<ProviderEvent>);
+
+    #[async_trait]
+    impl ModelProvider for RefusalProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("refusal")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            Ok(stream::iter(self.0.clone()).boxed())
+        }
+    }
+
+    async fn run_claimed_refusal(events: Vec<ProviderEvent>) -> AgentTurnOutcome {
+        let db = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                db.path().join("refusal.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        let accepted = match store
+            .accept_turn(turn_id, chat.id, "fake", "question")
+            .await
+            .unwrap()
+        {
+            crate::storage::AcceptTurnOutcome::Accepted(turn) => turn,
+            outcome => panic!("unexpected acceptance: {outcome:?}"),
+        };
+        let lease_token = uuid::Uuid::new_v4();
+        store
+            .claim_turn_run(
+                lease_token,
+                accepted.available_at,
+                accepted.available_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap()
+            .turn
+            .expect("accepted turn is claimable");
+        let agent = Agent::new(
+            Arc::new(RefusalProvider(events)),
+            Arc::new(ToolRegistry::new()),
+            store,
+            AgentConfig {
+                model: "fake".into(),
+                ..Default::default()
+            },
+        )
+        .with_durable_steer(lease_token);
+        let (tx, rx) = unbounded();
+        let outcome = agent
+            .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+            .await
+            .unwrap();
+        drop(tx);
+        let _ = rx.collect::<Vec<_>>().await;
+        outcome
+    }
+
+    #[tokio::test]
+    async fn foreground_refusal_distinguishes_empty_partial_and_bare_events() {
+        let empty = run_claimed_refusal(vec![ProviderEvent::Refusal {
+            details: RefusalDetails::from_category(Some("cyber")),
+        }])
+        .await;
+        let AgentTurnOutcome::Completed {
+            output,
+            stop_reason: StopReason::Refusal,
+            refusal: Some(refusal),
+            ..
+        } = empty
+        else {
+            panic!("structured empty refusal should complete as refused");
+        };
+        assert_eq!(output.content, "");
+        assert_eq!(refusal.category(), Some("cyber"));
+        assert!(!refusal.partial_output());
+
+        let partial = run_claimed_refusal(vec![
+            ProviderEvent::TextDelta {
+                text: "A partial answer".into(),
+            },
+            ProviderEvent::Refusal {
+                details: RefusalDetails::from_category(Some("general_harms")),
+            },
+        ])
+        .await;
+        let AgentTurnOutcome::Completed {
+            output,
+            stop_reason: StopReason::Refusal,
+            refusal: Some(refusal),
+            ..
+        } = partial
+        else {
+            panic!("structured mid-stream refusal should complete as refused");
+        };
+        assert_eq!(output.content, "A partial answer");
+        assert_eq!(refusal.category(), Some("general_harms"));
+        assert!(refusal.partial_output());
+
+        let bare = run_claimed_refusal(vec![ProviderEvent::Stop {
+            reason: StopReason::Refusal,
+        }])
+        .await;
+        let AgentTurnOutcome::Completed {
+            output,
+            stop_reason: StopReason::Refusal,
+            refusal: Some(refusal),
+            ..
+        } = bare
+        else {
+            panic!("bare refusal stop should use default metadata");
+        };
+        assert_eq!(output.content, "");
+        assert_eq!(refusal.category(), None);
+        assert!(!refusal.partial_output());
     }
 
     #[tokio::test]
