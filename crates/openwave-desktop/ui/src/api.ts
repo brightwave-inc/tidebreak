@@ -15,6 +15,8 @@ import {
   type McpHealth as WireMcpHealth,
   type McpServerDefinition as WireMcpServerDefinition,
   type McpViewSession,
+  type GatewayStatus as WireGatewayStatus,
+  type SignInProgress,
   type McpServerInfo as WireMcpServerInfo,
   type McpServersInfo as WireMcpServersInfo,
   type ModelInfo as WireModelInfo,
@@ -217,6 +219,12 @@ export type ExecResultPreview = Extract<ToolResultPreview, { tool: "exec" }>;
 
 /** A single-use frame address for one MCP Apps view. */
 export type McpViewSessionInfo = McpViewSession;
+
+/** Progress of the one in-flight gateway browser sign-in. */
+export type GatewaySignInProgress = SignInProgress;
+
+/** Renderer-safe model-gateway connection state; never token material. */
+export type GatewayStatus = WireGatewayStatus;
 
 /**
  * Opaque envelope for a sandboxed MCP App view; never rendered directly.
@@ -495,6 +503,31 @@ export class ApiClient {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ uri }),
+    });
+  }
+
+  getGatewayStatus(): Promise<GatewayStatus> {
+    return this.json("/gateway/status", { headers: this.headers() });
+  }
+
+  gatewaySignIn(): Promise<{ authorization_url: string }> {
+    return this.json("/gateway/sign-in", {
+      method: "POST",
+      headers: this.headers(),
+    });
+  }
+
+  gatewaySignOut(): Promise<GatewayStatus> {
+    return this.json("/gateway/sign-out", {
+      method: "POST",
+      headers: this.headers(),
+    });
+  }
+
+  syncGatewayModels(): Promise<GatewayStatus> {
+    return this.json("/gateway/models/sync", {
+      method: "POST",
+      headers: this.headers(),
     });
   }
 
