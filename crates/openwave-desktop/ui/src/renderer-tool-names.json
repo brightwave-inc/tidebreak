@@ -1,0 +1,26 @@
+{
+  "comment": "Generated from RendererToolName. Regenerate with UPDATE_RENDERER_CONTRACT=1 cargo test -p openwave-server.",
+  "tools": [
+    "search",
+    "list_sources",
+    "read_source",
+    "read_tool_result",
+    "web_search",
+    "read_delegated_file",
+    "read_file",
+    "list_dir",
+    "write_file",
+    "create_deliverable",
+    "request_folder_access",
+    "connect_folder",
+    "list_connected_folders",
+    "list_folder",
+    "read_connected_file",
+    "import_connected_file",
+    "spawn_sandbox_agent",
+    "wait_for_agents",
+    "ask_user_questions",
+    "exec",
+    "other"
+  ]
+}
