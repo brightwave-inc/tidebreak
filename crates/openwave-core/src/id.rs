@@ -198,6 +198,8 @@ impl DocumentId {
     /// Namespace UUID for URI-derived document ids. This value is part of the
     /// persisted identity contract and must remain stable.
     const NAMESPACE: Uuid = Uuid::from_u128(0x1d0c_7a44_9e21_4b83_bc55_6677_8899_aabb);
+    /// Separate namespace for identities derived from immutable source content.
+    const CONTENT_NAMESPACE: Uuid = Uuid::from_u128(0x6e85_4dfa_94e0_45bb_a48a_65f7_25b9_3056);
 
     /// Derive a legacy stable id from only a source URI.
     ///
@@ -220,6 +222,16 @@ impl DocumentId {
     pub fn derive_for_chat(chat_id: ChatId, uri: &str) -> Self {
         let chat_namespace = Uuid::new_v5(&Self::NAMESPACE, chat_id.as_uuid().as_bytes());
         Self(Uuid::new_v5(&chat_namespace, uri.as_bytes()))
+    }
+
+    /// Derive a stable conversation-local id from an exact source digest.
+    ///
+    /// This keeps a content re-import idempotent without making one chat's
+    /// document record own the same source in every other conversation.
+    #[must_use]
+    pub fn derive_for_chat_content(chat_id: ChatId, sha256: [u8; 32]) -> Self {
+        let chat_namespace = Uuid::new_v5(&Self::CONTENT_NAMESPACE, chat_id.as_uuid().as_bytes());
+        Self(Uuid::new_v5(&chat_namespace, &sha256))
     }
 }
 id_type!(
@@ -480,6 +492,20 @@ mod tests {
         assert_ne!(
             DocumentId::derive_for_chat(chat_a, "file:///a.txt"),
             DocumentId::derive("file:///a.txt")
+        );
+
+        let digest = [0x55; 32];
+        assert_eq!(
+            DocumentId::derive_for_chat_content(chat_a, digest),
+            DocumentId::derive_for_chat_content(chat_a, digest)
+        );
+        assert_ne!(
+            DocumentId::derive_for_chat_content(chat_a, digest),
+            DocumentId::derive_for_chat_content(chat_b, digest)
+        );
+        assert_ne!(
+            DocumentId::derive_for_chat_content(chat_a, digest),
+            DocumentId::derive_for_chat_content(chat_a, [0x56; 32])
         );
     }
 }
