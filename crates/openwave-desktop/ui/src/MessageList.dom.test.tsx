@@ -3,6 +3,8 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./ApprovalCard";
+import { AppContextProvider, type AppContextValue } from "./AppContext";
+import type { ApiClient } from "./api";
 import { MessageBubble, MessageList, type ChatMessage } from "./MessageList";
 
 const noop = () => undefined;
@@ -523,5 +525,55 @@ describe("command output", () => {
     await user.click(screen.getByRole("button", { name: /cargo build/ }));
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     expect(screen.getByText(/cargo build/, { selector: "pre" })).toBeInTheDocument();
+  });
+});
+
+describe("mcp app views", () => {
+  it("surfaces a sandboxed app card for an mcp_app result", async () => {
+    const client = {
+      baseUrl: "http://127.0.0.1:7777",
+      createMcpViewFrame: vi
+        .fn()
+        .mockResolvedValue({ frame_path: "/mcp/view-frames/token-1" }),
+    };
+    render(
+      <AppContextProvider
+        value={{ client: client as unknown as ApiClient } as AppContextValue}
+      >
+        <MessageList
+          messages={[
+            {
+              id: "t1",
+              role: "tool",
+              callId: "c1",
+              name: "other",
+              status: "completed",
+              result: {
+                tool: "mcp_app",
+                server: "gateway",
+                resourceUri: "ui://gateway/app.html",
+              },
+            },
+          ]}
+          folderAccessRequests={[]}
+          nativeHost={false}
+          nativeBusy={false}
+          resolvingFolderCalls={new Set()}
+          folderAccessErrors={{}}
+          decidingApprovalCalls={new Set()}
+          approvalErrors={{}}
+          busy={false}
+          scrollRef={{ current: null }}
+          onScroll={noop}
+          onApproval={noop}
+          onFolderAccessDecision={noop}
+          onFolderAccessCancel={noop}
+        />
+      </AppContextProvider>,
+    );
+
+    expect(
+      await screen.findByTitle("MCP App view from gateway"),
+    ).toBeInTheDocument();
   });
 });

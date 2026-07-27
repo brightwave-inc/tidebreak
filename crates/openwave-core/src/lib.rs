@@ -164,7 +164,7 @@ pub use storage::{
 };
 pub use tool::{
     input_schema_for, ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolScratch,
-    ToolSpec,
+    ToolSpec, ToolUiView,
 };
 #[cfg(feature = "tools")]
 pub use tools::{CreateDeliverable, ListDir, ReadFile, WriteFile};

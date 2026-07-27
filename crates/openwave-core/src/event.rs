@@ -304,6 +304,13 @@ mod tests {
                     data: Some(serde_json::json!({"exit_code": 0})),
                     is_error: false,
                     error_category: None,
+                    // Populated to pin the field and `ToolUiView`'s shape; a
+                    // real exec output never carries a view. The `McpApp`
+                    // result variant is pinned by the server wire fixtures.
+                    ui_view: Some(Box::new(crate::tool::ToolUiView {
+                        server: "gateway".into(),
+                        resource_uri: "ui://gateway/app.html".into(),
+                    })),
                     private_evidence: Vec::new(),
                 },
                 action: Some(crate::preview::ToolActionPreview::Exec {

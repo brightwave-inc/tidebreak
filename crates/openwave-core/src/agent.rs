@@ -1658,6 +1658,7 @@ impl Agent {
                     // Recovered from a durable row, whose category is already
                     // recorded there; re-deriving one here would be a guess.
                     error_category: None,
+                    ui_view: None,
                     private_evidence: Vec::new(),
                 }))
             }
@@ -1700,7 +1701,7 @@ impl Agent {
             call_id: call.call_id,
             output: self.tool_output_for_event(&output, call.call_id),
             action: call_action_preview(call),
-            result: ToolResultPreview::build(&call.name, output.data.as_ref()),
+            result: ToolResultPreview::build(&call.name, &output),
         });
         if needs_resolution {
             let resolution = if output.is_error {
@@ -1757,7 +1758,7 @@ impl Agent {
             call_id: call.call_id,
             output: self.tool_output_for_event(&output, call.call_id),
             action: call_action_preview(call),
-            result: ToolResultPreview::build(&call.name, output.data.as_ref()),
+            result: ToolResultPreview::build(&call.name, &output),
         });
         output
     }
@@ -2565,7 +2566,7 @@ impl Agent {
                     call_id: call.call_id,
                     output: self.tool_output_for_event(&output, call.call_id),
                     action: call_action_preview(&call),
-                    result: ToolResultPreview::build(&call.name, output.data.as_ref()),
+                    result: ToolResultPreview::build(&call.name, &output),
                 });
                 transcript.push(ChatMessage {
                     role: Role::User,
@@ -2640,7 +2641,7 @@ impl Agent {
                 call_id: call.call_id,
                 output: self.tool_output_for_event(&output, call.call_id),
                 action: call_action_preview(&call),
-                result: ToolResultPreview::build(&call.name, output.data.as_ref()),
+                result: ToolResultPreview::build(&call.name, &output),
             });
             transcript.push(ChatMessage {
                 role: Role::User,

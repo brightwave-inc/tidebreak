@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { ToolResultPreview } from "./api";
+import type { ExecResultPreview } from "./api";
 import { toolPreviewPresentation } from "./ToolPreview";
 import {
   ToolCommandCard,
@@ -222,7 +222,7 @@ describe("command output", () => {
 });
 
 describe("outcome badges", () => {
-  const ran: ToolResultPreview = {
+  const ran: ExecResultPreview = {
     tool: "exec",
     exitCode: 0,
     timedOut: false,
@@ -233,7 +233,7 @@ describe("outcome badges", () => {
 
   it("prefers the most specific thing it can say about a failure", () => {
     const badge = (
-      result: ToolResultPreview | null,
+      result: ExecResultPreview | null,
       status: "completed" | "failed",
     ) =>
       visibleText(

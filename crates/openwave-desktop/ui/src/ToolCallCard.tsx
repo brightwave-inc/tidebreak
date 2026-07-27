@@ -2,9 +2,9 @@ import { useId, useState } from "react";
 import { Check, ChevronDown, Clock, Loader2, Terminal, X } from "lucide-react";
 import {
   isRendererToolName,
+  type ExecResultPreview,
   type RendererToolName,
   type ToolActionPreview,
-  type ToolResultPreview,
 } from "./api";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -31,7 +31,7 @@ type ToolCommandCardProps = {
    */
   preview: Extract<ToolActionPreview, { tool: "exec" }>;
   /** What the command produced, once it has produced anything. */
-  result: ToolResultPreview | null;
+  result: ExecResultPreview | null;
 };
 
 type ToolPresentation = {
@@ -314,7 +314,7 @@ export function ToolCommandCard({
  * `null` means nothing was captured — which for a finished command is a fact
  * worth stating by omission rather than by an empty pane.
  */
-export function commandOutput(result: ToolResultPreview | null): string | null {
+export function commandOutput(result: ExecResultPreview | null): string | null {
   if (!result) return null;
   // Streams almost always end in a newline of their own; joining those with a
   // blank line would open a three-line gap between the two sections.
@@ -334,7 +334,7 @@ function ToolStatusBadge({
   result,
 }: {
   presentation: ToolCallPresentation;
-  result: ToolResultPreview | null;
+  result: ExecResultPreview | null;
 }) {
   if (presentation.tone === "running") {
     return (

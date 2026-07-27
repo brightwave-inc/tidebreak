@@ -147,6 +147,14 @@ workspace and process boundary, every mounted proxy is classified `Sensitive`.
 Each call needs one explicit approval; MCP approval is never remembered by tool
 name because Settings can replace the process behind a stable namespace.
 
+The renderer boundary has one deliberate MCP opening: a tool that declared an
+MCP Apps view projects a typed `mcp_app` result reference — the configured
+server namespace plus its validated `ui://` URI, never markup — and the
+document itself reaches the renderer only through a dedicated view route, to
+be rendered inside a sandboxed, non-same-origin frame. Everything else about
+an external tool (its remote name, arguments, and output) stays behind the
+boundary exactly as before.
+
 The desktop Settings page manages external servers at runtime. Each entry
 declares a unique namespace, one transport — an executable with argument array,
 optional working directory, explicit non-secret environment, and selected

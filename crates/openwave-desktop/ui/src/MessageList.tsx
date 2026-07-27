@@ -15,6 +15,7 @@ import type { FolderAccessDecision } from "./host";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { MessageFooter } from "./MessageFooter";
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
+import { McpAppCard } from "./McpAppCard";
 import { ToolCommandCard, type ToolCallStatus } from "./ToolCallCard";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ToolActivityGroup } from "./ToolActivityGroup";
@@ -337,6 +338,19 @@ function surfacedCards(
       continue;
     }
     if (entry.role !== "tool") continue;
+    // An MCP App view is keyed on the *result*: the tool has no action
+    // preview, and its card exists to show what the server's declared view
+    // renders — inside the sandbox — not to restate arguments or output.
+    if (entry.result?.tool === "mcp_app" && !parked.has(entry.callId)) {
+      cards.push(
+        <McpAppCard
+          key={entry.id}
+          server={entry.result.server}
+          resourceUri={entry.result.resourceUri}
+        />,
+      );
+      continue;
+    }
     // The approval card already shows this command and owns the decision.
     if (!entry.preview || parked.has(entry.callId)) continue;
     // A card earns its place by carrying something the rail cannot: a command
@@ -350,7 +364,7 @@ function surfacedCards(
         name={entry.name}
         status={entry.status}
         preview={entry.preview}
-        result={entry.result ?? null}
+        result={entry.result?.tool === "exec" ? entry.result : null}
       />,
     );
   }

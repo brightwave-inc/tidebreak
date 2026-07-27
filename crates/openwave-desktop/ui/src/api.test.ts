@@ -6,6 +6,7 @@ import {
   parsePendingToolApproval,
   parseSandboxAgentCancellation,
   parseToolActionPreview,
+  parseToolResultPreview,
 } from "./api";
 
 afterEach(() => {
@@ -665,5 +666,33 @@ describe("sandbox agent cancellation", () => {
     await expect(client.cancelAgentRun("chat-1", "run-1")).rejects.toThrow(
       "expected 202, received 200",
     );
+  });
+});
+
+describe("parseToolResultPreview mcp_app references", () => {
+  it("accepts a validated reference and remaps it to the app shape", () => {
+    expect(
+      parseToolResultPreview({
+        tool: "mcp_app",
+        server: "gateway",
+        resource_uri: "ui://gateway/app.html",
+      }),
+    ).toEqual({
+      tool: "mcp_app",
+      server: "gateway",
+      resourceUri: "ui://gateway/app.html",
+    });
+  });
+
+  it("drops references that are not fully verifiable", () => {
+    for (const value of [
+      { tool: "mcp_app", server: "gateway" },
+      { tool: "mcp_app", server: "", resource_uri: "ui://x" },
+      { tool: "mcp_app", server: "gateway", resource_uri: "https://evil" },
+      { tool: "mcp_app", server: "gateway", resource_uri: 7 },
+      { tool: "mcp_app", server: 7, resource_uri: "ui://x" },
+    ]) {
+      expect(parseToolResultPreview(value)).toBeNull();
+    }
   });
 });
