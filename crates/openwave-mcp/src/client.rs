@@ -32,6 +32,8 @@ const MAX_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_TOOL_METADATA_BYTES: usize = 512 * 1024;
 const MAX_TOOL_LIST_PAGES: usize = 64;
 const MAX_CURSOR_BYTES: usize = 4 * 1024;
+const MAX_UI_RESOURCE_URI_BYTES: usize = 2 * 1024;
+const MAX_RESOURCE_CONTENT_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_JSON_RPC_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
 /// Default maximum time to wait for one external MCP request.
@@ -261,6 +263,62 @@ impl McpClient {
     /// The model-visible specs that this connection can mount.
     pub fn tools(&self) -> impl Iterator<Item = &ToolSpec> {
         self.tools.iter().map(|tool| &tool.spec)
+    }
+
+    /// The validated `ui://` view declared for one mounted tool, if any.
+    pub fn ui_resource_uri(&self, mounted_tool_name: &str) -> Option<&str> {
+        self.tools
+            .iter()
+            .find(|tool| tool.spec.name == mounted_tool_name)
+            .and_then(|tool| tool.ui_resource_uri.as_deref())
+    }
+
+    /// Read one resource the server declared through a mounted tool's
+    /// `_meta` UI declaration. Undeclared URIs are refused before any
+    /// request is sent, so a caller cannot be steered into fetching
+    /// arbitrary server-chosen content.
+    pub async fn read_resource(&self, uri: &str) -> Result<ResourceContent> {
+        if !self
+            .tools
+            .iter()
+            .any(|tool| tool.ui_resource_uri.as_deref() == Some(uri))
+        {
+            return Err(mcp_message(
+                "resource URI was not declared by any mounted tool",
+            ));
+        }
+        let result = self
+            .session
+            .lock()
+            .await
+            .request("resources/read", json!({"uri": uri}))
+            .await?;
+        let response: ReadResourceResponse = decode_result("resources/read", result)?;
+        let content = response
+            .contents
+            .into_iter()
+            .find(|content| content.uri == uri)
+            .ok_or_else(|| {
+                mcp_message("external server resources/read result did not contain the URI")
+            })?;
+        let (text_bytes, blob_bytes) = (
+            content.text.as_ref().map_or(0, String::len),
+            content.blob.as_ref().map_or(0, String::len),
+        );
+        if content.text.is_some() == content.blob.is_some() {
+            return Err(mcp_message(
+                "external server resource must contain exactly one of text or blob",
+            ));
+        }
+        if text_bytes.max(blob_bytes) > MAX_RESOURCE_CONTENT_BYTES {
+            return Err(mcp_message("external server resource exceeds the limit"));
+        }
+        Ok(ResourceContent {
+            uri: content.uri,
+            mime_type: content.mime_type,
+            text: content.text,
+            blob: content.blob,
+        })
     }
 
     /// Check that an idle session still responds and report whether the server
@@ -573,6 +631,38 @@ async fn read_bounded_line(reader: &mut BoxReader) -> Result<Option<Vec<u8>>> {
     }
 }
 
+/// One resource document returned by `resources/read`.
+///
+/// Exactly one of `text` or `blob` is present; `blob` is the base64 encoding
+/// the MCP resource contract uses for binary data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceContent {
+    /// The URI the document was read from.
+    pub uri: String,
+    /// The server-reported MIME type, when given.
+    pub mime_type: Option<String>,
+    /// UTF-8 document body.
+    pub text: Option<String>,
+    /// Base64 document body.
+    pub blob: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReadResourceResponse {
+    contents: Vec<RawResourceContent>,
+}
+
+#[derive(Deserialize)]
+struct RawResourceContent {
+    uri: String,
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    blob: Option<String>,
+}
+
 /// Result of one non-mutating MCP health probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpProbe {
@@ -623,6 +713,23 @@ struct RemoteTool {
     description: String,
     #[serde(rename = "inputSchema")]
     input_schema: Map<String, Value>,
+    /// Open extension metadata. Only the MCP Apps UI declaration is read;
+    /// everything else is bounded and dropped.
+    #[serde(default, rename = "_meta")]
+    meta: Option<Map<String, Value>>,
+}
+
+impl RemoteTool {
+    /// The declared MCP Apps view for this tool, under either published
+    /// spelling: nested `_meta.ui.resourceUri` wins over the legacy flat
+    /// `_meta["ui/resourceUri"]` key some hosts still require.
+    fn declared_ui_resource(&self) -> Option<&str> {
+        let meta = self.meta.as_ref()?;
+        meta.get("ui")
+            .and_then(|ui| ui.get("resourceUri"))
+            .or_else(|| meta.get("ui/resourceUri"))
+            .and_then(Value::as_str)
+    }
 }
 
 #[derive(Deserialize)]
@@ -685,6 +792,8 @@ async fn discover_tools(server_name: &str, session: &mut Session) -> Result<Vec<
 struct MountedTool {
     spec: ToolSpec,
     remote_name: String,
+    /// Validated `ui://` view declared through `_meta`, if any.
+    ui_resource_uri: Option<String>,
 }
 
 fn build_mounted_tools(server_name: &str, tools: Vec<RemoteTool>) -> Result<Vec<MountedTool>> {
@@ -709,6 +818,7 @@ fn build_mounted_tools(server_name: &str, tools: Vec<RemoteTool>) -> Result<Vec<
                     "external server advertised duplicate tool names",
                 ));
             }
+            let ui_resource_uri = tool.declared_ui_resource().map(str::to_string);
             Ok(MountedTool {
                 spec: ToolSpec {
                     name: format!("mcp__{server_name}__{}", tool.name),
@@ -716,6 +826,7 @@ fn build_mounted_tools(server_name: &str, tools: Vec<RemoteTool>) -> Result<Vec<
                     input_schema: Value::Object(tool.input_schema),
                 },
                 remote_name: tool.name,
+                ui_resource_uri,
             })
         })
         .collect()
@@ -742,10 +853,39 @@ fn validate_remote_tool(server_name: &str, tool: &RemoteTool) -> Result<usize> {
     if schema_bytes > MAX_TOOL_SCHEMA_BYTES {
         return Err(mcp_message("external server tool schema exceeds the limit"));
     }
+    let meta_bytes = match &tool.meta {
+        Some(meta) => serde_json::to_vec(meta)?.len(),
+        None => 0,
+    };
+    // A declared view is a contract, so a malformed declaration fails the
+    // connection instead of silently dropping the view. Unrelated `_meta`
+    // stays ignored.
+    if let Some(meta) = &tool.meta {
+        let declares_ui = meta.contains_key("ui/resourceUri")
+            || meta
+                .get("ui")
+                .is_some_and(|ui| ui.get("resourceUri").is_some());
+        if declares_ui {
+            let Some(uri) = tool.declared_ui_resource() else {
+                return Err(mcp_message(
+                    "external server declared a non-string UI resource",
+                ));
+            };
+            if uri.len() > MAX_UI_RESOURCE_URI_BYTES
+                || !uri.starts_with("ui://")
+                || uri.bytes().any(|byte| byte.is_ascii_control())
+            {
+                return Err(mcp_message(
+                    "external server declared an invalid ui:// resource URI",
+                ));
+            }
+        }
+    }
     mounted_name
         .len()
         .checked_add(tool.description.len())
         .and_then(|size| size.checked_add(schema_bytes))
+        .and_then(|size| size.checked_add(meta_bytes))
         .ok_or_else(|| mcp_message("external server tool metadata exceeds the limit"))
 }
 
@@ -905,6 +1045,28 @@ mod tests {
         assert_eq!(output.content, "found waves");
         assert_eq!(output.data, Some(json!({"matches": 1})));
         assert!(!output.is_error);
+
+        assert_eq!(
+            client.ui_resource_uri("mcp__private_docs__search"),
+            Some("ui://fixture/app.html")
+        );
+        assert_eq!(client.ui_resource_uri("mcp__private_docs__metadata"), None);
+        let resource = client.read_resource("ui://fixture/app.html").await.unwrap();
+        assert_eq!(resource.uri, "ui://fixture/app.html");
+        assert_eq!(
+            resource.mime_type.as_deref(),
+            Some("text/html;profile=mcp-app")
+        );
+        assert_eq!(resource.text.as_deref(), Some("<html>view</html>"));
+        assert!(resource.blob.is_none());
+        // An undeclared URI is refused before any request reaches the server;
+        // the fixture would panic on an unexpected resources/read.
+        let undeclared = client
+            .read_resource("ui://somewhere/else.html")
+            .await
+            .expect_err("undeclared URI must fail");
+        assert!(undeclared.to_string().contains("not declared"));
+
         let probe = client.probe().await.unwrap();
         assert_eq!(
             probe,
@@ -957,7 +1119,101 @@ mod tests {
             name: name.into(),
             description: "fixture".to_string(),
             input_schema: json!({"type": "object"}).as_object().unwrap().clone(),
+            meta: None,
         }
+    }
+
+    fn remote_tool_with_meta(name: impl Into<String>, meta: Value) -> RemoteTool {
+        let mut tool = remote_tool(name);
+        tool.meta = Some(meta.as_object().unwrap().clone());
+        tool
+    }
+
+    #[test]
+    fn ui_declarations_are_validated_and_bounded() {
+        // Nested spelling, flat spelling, and nested-wins precedence.
+        let nested = build_mounted_tools(
+            "docs",
+            vec![remote_tool_with_meta(
+                "viewer",
+                json!({"ui": {"resourceUri": "ui://docs/app.html"}}),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            nested[0].ui_resource_uri.as_deref(),
+            Some("ui://docs/app.html")
+        );
+
+        let flat = build_mounted_tools(
+            "docs",
+            vec![remote_tool_with_meta(
+                "viewer",
+                json!({"ui/resourceUri": "ui://docs/flat.html"}),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            flat[0].ui_resource_uri.as_deref(),
+            Some("ui://docs/flat.html")
+        );
+
+        let both = build_mounted_tools(
+            "docs",
+            vec![remote_tool_with_meta(
+                "viewer",
+                json!({
+                    "ui": {"resourceUri": "ui://docs/nested.html"},
+                    "ui/resourceUri": "ui://docs/flat.html"
+                }),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            both[0].ui_resource_uri.as_deref(),
+            Some("ui://docs/nested.html")
+        );
+
+        // Unrelated extension metadata stays ignored.
+        let unrelated = build_mounted_tools(
+            "docs",
+            vec![remote_tool_with_meta("plain", json!({"vendor": {"x": 1}}))],
+        )
+        .unwrap();
+        assert!(unrelated[0].ui_resource_uri.is_none());
+
+        // A declared view is a contract: wrong scheme, wrong type, and
+        // oversized URIs fail the connection.
+        for (meta, fragment) in [
+            (
+                json!({"ui": {"resourceUri": "https://evil.example/app"}}),
+                "invalid ui://",
+            ),
+            (json!({"ui/resourceUri": 7}), "non-string UI resource"),
+            (
+                json!({"ui": {"resourceUri": format!("ui://{}", "x".repeat(MAX_UI_RESOURCE_URI_BYTES))}}),
+                "invalid ui://",
+            ),
+        ] {
+            let error = build_mounted_tools("docs", vec![remote_tool_with_meta("viewer", meta)])
+                .err()
+                .expect("invalid declaration must fail");
+            assert!(error.to_string().contains(fragment), "{error}");
+        }
+    }
+
+    #[test]
+    fn meta_counts_against_the_aggregate_metadata_budget() {
+        let error = build_mounted_tools(
+            "docs",
+            vec![remote_tool_with_meta(
+                "viewer",
+                json!({"vendor": "x".repeat(MAX_TOOL_METADATA_BYTES)}),
+            )],
+        )
+        .err()
+        .expect("oversized meta must fail");
+        assert!(error.to_string().contains("metadata exceeds"));
     }
 
     #[test]
@@ -1196,7 +1452,11 @@ mod tests {
                         "tools": [{
                             "name": "search",
                             "description": "Search private docs",
-                            "inputSchema": {"type": "object"}
+                            "inputSchema": {"type": "object"},
+                            "_meta": {
+                                "ui": {"resourceUri": "ui://fixture/app.html"},
+                                "ui/resourceUri": "ui://fixture/app.html"
+                            }
                         }],
                         "nextCursor": "page-2"
                     })
@@ -1220,6 +1480,16 @@ mod tests {
                         "isError": false
                     })
                 }
+                "resources/read" => {
+                    assert_eq!(request["params"], json!({"uri": "ui://fixture/app.html"}));
+                    json!({
+                        "contents": [{
+                            "uri": "ui://fixture/app.html",
+                            "mimeType": "text/html;profile=mcp-app",
+                            "text": "<html>view</html>"
+                        }]
+                    })
+                }
                 "ping" => {
                     let mut notification = serde_json::to_vec(&json!({
                         "jsonrpc": "2.0",
@@ -1231,6 +1501,76 @@ mod tests {
                     writer.flush().await.unwrap();
                     json!({})
                 }
+                method => panic!("unexpected method: {method}"),
+            };
+            let mut response = serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": result
+            }))
+            .unwrap();
+            response.push(b'\n');
+            writer.write_all(&response).await.unwrap();
+            writer.flush().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_reads_are_bounded_and_shape_checked() {
+        const URI: &str = "ui://fixture/app.html";
+        let cases = [
+            (
+                json!([{"uri": URI, "text": "x", "blob": "eA=="}]),
+                "exactly one of text or blob",
+            ),
+            (
+                json!([{"uri": URI, "text": "x".repeat(MAX_RESOURCE_CONTENT_BYTES + 1)}]),
+                "resource exceeds the limit",
+            ),
+            (
+                json!([{"uri": "ui://fixture/other.html", "text": "x"}]),
+                "did not contain the URI",
+            ),
+            (json!([]), "did not contain the URI"),
+        ];
+        for (contents, fragment) in cases {
+            let (client_stream, server_stream) = duplex(4 * 1024 * 1024);
+            let (reader, writer) = split(client_stream);
+            let server = tokio::spawn(resource_server(server_stream, contents));
+            let client = McpClient::connect("docs", reader, writer).await.unwrap();
+            let error = client
+                .read_resource(URI)
+                .await
+                .expect_err("malformed resource must fail");
+            assert!(error.to_string().contains(fragment), "{error}");
+            drop(client);
+            server.await.unwrap();
+        }
+    }
+
+    async fn resource_server(stream: tokio::io::DuplexStream, contents: Value) {
+        let (reader, mut writer) = split(stream);
+        let mut lines = BufReader::new(reader).lines();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let Some(id) = request.get("id").cloned() else {
+                continue;
+            };
+            let result = match request["method"].as_str().unwrap() {
+                "initialize" => json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "resource-fixture", "version": "1"}
+                }),
+                "tools/list" => json!({
+                    "tools": [{
+                        "name": "viewer",
+                        "description": "Tool with a declared view",
+                        "inputSchema": {"type": "object"},
+                        "_meta": {"ui": {"resourceUri": "ui://fixture/app.html"}}
+                    }]
+                }),
+                "resources/read" => json!({"contents": contents}),
                 method => panic!("unexpected method: {method}"),
             };
             let mut response = serde_json::to_vec(&json!({
