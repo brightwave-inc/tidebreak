@@ -13,6 +13,16 @@ authors = ["Brightwave, Inc."]
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
+# Keep local build artifacts compact while retaining file-and-line panic
+# backtraces. Cargo's test profile inherits this dev setting.
+[profile.dev]
+debug = "line-tables-only"
+
+# Keep tests' correctness checks explicit even as the dev profile evolves.
+[profile.test]
+debug-assertions = true
+overflow-checks = true
+
 # Shared dependency versions. Crates opt in with `dep.workspace = true` so the
 # whole workspace resolves one version of each.
 [workspace.dependencies]
