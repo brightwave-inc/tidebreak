@@ -46,6 +46,7 @@ use crate::model::{
     TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{RefusalOutcome, StopReason, Usage};
+use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
 use crate::{AnswerUserQuestionsRequest, PendingUserQuestions};
 
 /// Largest pending attachment-reconciliation page accepted by [`Store`].
@@ -921,6 +922,12 @@ fn output_storage_unavailable<T>() -> Result<T> {
     ))
 }
 
+fn context_checkpoint_storage_unavailable<T>() -> Result<T> {
+    Err(AgentError::Store(
+        "durable context-checkpoint storage is not implemented by this Store".into(),
+    ))
+}
+
 fn turn_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "durable turn storage is not implemented by this Store".into(),
@@ -1490,6 +1497,28 @@ pub trait Store: Send + Sync {
         _deleted_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
         output_storage_unavailable()
+    }
+
+    /// Persist the next versioned context checkpoint for one conversation.
+    ///
+    /// Implementations verify that the inclusive source-message boundary
+    /// belongs to `checkpoint.chat_id`, and serialize writes per chat. An exact
+    /// retry recovers the durable record; stale and conflicting rewrites are
+    /// returned as typed outcomes instead of replacing newer context.
+    async fn save_context_checkpoint(
+        &self,
+        _checkpoint: &ContextCheckpoint,
+    ) -> Result<SaveContextCheckpointOutcome> {
+        context_checkpoint_storage_unavailable()
+    }
+
+    /// Fetch the one current semantic checkpoint for a conversation.
+    ///
+    /// This record is intentionally distinct from visible messages. Consumers
+    /// that later project it into a provider request must treat it as bounded,
+    /// untrusted historical data rather than as a capability grant.
+    async fn get_context_checkpoint(&self, _chat_id: ChatId) -> Result<Option<ContextCheckpoint>> {
+        context_checkpoint_storage_unavailable()
     }
 
     /// Atomically begin one exact broker-backed attachment change.

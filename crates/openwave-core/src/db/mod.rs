@@ -44,6 +44,7 @@ use crate::model::{
     TurnSteerStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::provider::{StopReason, Usage};
+use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
 use crate::storage::{
     AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptSandboxAgentRunAndParkTurnOutcome,
     AcceptToolCallOutcome, AcceptTurnOutcome, AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome,
@@ -1853,6 +1854,17 @@ impl Store for DbStore {
 
     async fn delete_output(&self, id: OutputId, deleted_at: chrono::DateTime<Utc>) -> Result<bool> {
         ops::output::delete_output(self, id, deleted_at).await
+    }
+
+    async fn save_context_checkpoint(
+        &self,
+        checkpoint: &ContextCheckpoint,
+    ) -> Result<SaveContextCheckpointOutcome> {
+        ops::context_checkpoint::save_context_checkpoint(self, checkpoint).await
+    }
+
+    async fn get_context_checkpoint(&self, chat_id: ChatId) -> Result<Option<ContextCheckpoint>> {
+        ops::context_checkpoint::get_context_checkpoint(self, chat_id).await
     }
 
     async fn begin_root_attachment_change(

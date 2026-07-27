@@ -591,6 +591,14 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
+    // A context checkpoint references its inclusive source message. It is
+    // provider-only state, so delete it before the source message rather than
+    // leaving a checkpoint that could outlive this conversation's history.
+    entities::context_checkpoint::Entity::delete_many()
+        .filter(entities::context_checkpoint::Column::ChatId.eq(chat_id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
     entities::message::Entity::delete_many()
         .filter(entities::message::Column::ChatId.eq(chat_id.0))
         .exec(&transaction)

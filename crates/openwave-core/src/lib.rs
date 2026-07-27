@@ -46,6 +46,7 @@ pub mod model;
 pub mod preview;
 pub mod provider;
 mod renderer_tool;
+pub mod semantic_checkpoint;
 pub mod steer;
 pub mod storage;
 pub mod tool;
@@ -142,6 +143,10 @@ pub use provider::{
     RefusalDetails, RefusalOutcome, StopReason, Usage,
 };
 pub use renderer_tool::RendererToolName;
+pub use semantic_checkpoint::{
+    ContextCheckpoint, SaveContextCheckpointOutcome, CONTEXT_CHECKPOINT_FORMAT_V1,
+    MAX_CONTEXT_CHECKPOINT_BYTES,
+};
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
     AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptSandboxAgentRunAndParkTurnOutcome,
