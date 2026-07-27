@@ -2,8 +2,8 @@
 //!
 //! A provider is `{ kind, enabled, base_url? }` plus a credential held in the
 //! [`SecretProvider`](openwave_core::SecretProvider) (never the DB). Credentials
-//! are a typed JSON blob (`{"type":"api_key","key":"…"}` today; `oauth` later)
-//! so new auth shapes don't force a schema redesign.
+//! are a typed JSON blob (`api_key`, `oauth`, or `service_account`) so new auth
+//! shapes don't force a schema redesign.
 //!
 //! Non-secret config lives in the [`Store`](openwave_core::Store) under
 //! `provider.<kind>`. The legacy `provider.anthropic.api_key` secret and the
@@ -86,6 +86,15 @@ impl ProviderKind {
             self.as_str()
         )
     }
+
+    /// Whether this provider can use `credential` today.
+    ///
+    /// Service-account storage is provider-neutral, but no current provider
+    /// has a request path for it yet. Keep the public settings route honest
+    /// until a provider adds that path.
+    fn accepts_credential(self, credential: &ProviderCredential) -> bool {
+        matches!(credential, ProviderCredential::ApiKey { .. })
+    }
 }
 
 impl std::fmt::Display for ProviderKind {
@@ -96,6 +105,10 @@ impl std::fmt::Display for ProviderKind {
 
 /// A credential stored in the keychain. Tagged so new auth types (`oauth`, …)
 /// are additive.
+///
+/// Every field in every variant is secret material. This type intentionally
+/// does not implement `Display`, and its `Debug` implementation redacts each
+/// payload before it can reach a log or error message.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -109,6 +122,11 @@ pub enum ProviderCredential {
     /// in its own keychain entry managed by `openwave-connectors`, so the
     /// rotating material never rides the provider settings surface.
     Oauth {},
+    /// A service-account key file, kept verbatim for the future token exchange.
+    ServiceAccount {
+        /// The raw JSON key-file contents.
+        json: String,
+    },
 }
 
 impl ProviderCredential {
@@ -122,6 +140,21 @@ impl ProviderCredential {
         match self {
             Self::ApiKey { key } => Some(key.as_str()),
             Self::Oauth {} => None,
+            Self::ServiceAccount { .. } => None,
+        }
+    }
+
+    /// Validate a credential before it is written to the keychain.
+    ///
+    /// Error messages name only malformed fields, never their values: a
+    /// service-account file contains its private key.
+    pub fn validate(&self) -> std::result::Result<(), ServerError> {
+        match self {
+            Self::ApiKey { key } if key.is_empty() => {
+                Err(ServerError::bad_request("credential key must not be empty"))
+            }
+            Self::ApiKey { .. } | Self::Oauth {} => Ok(()),
+            Self::ServiceAccount { json } => validate_service_account(json),
         }
     }
 }
@@ -132,8 +165,51 @@ impl std::fmt::Debug for ProviderCredential {
         match self {
             Self::ApiKey { .. } => f.debug_struct("ApiKey").field("key", &"***").finish(),
             Self::Oauth {} => f.debug_struct("Oauth").finish(),
+            Self::ServiceAccount { .. } => f
+                .debug_struct("ServiceAccount")
+                .field("json", &"***")
+                .finish(),
         }
     }
+}
+
+/// The required, non-secret shape of a service-account key file.
+///
+/// This is only a validation view. The original JSON is what is stored, so a
+/// future token exchange can use fields introduced after this version.
+#[derive(Deserialize)]
+struct ServiceAccountKey {
+    #[serde(rename = "type")]
+    key_type: String,
+    client_email: String,
+    private_key: String,
+    project_id: String,
+}
+
+fn validate_service_account(json: &str) -> std::result::Result<(), ServerError> {
+    let key: ServiceAccountKey = serde_json::from_str(json).map_err(|_| {
+        // serde's parse error can quote the input, which includes the private key.
+        ServerError::bad_request(
+            "service account key must be JSON with `type`, `client_email`, `private_key`, and `project_id`",
+        )
+    })?;
+    if key.key_type != "service_account" {
+        return Err(ServerError::bad_request(
+            "service account key `type` must be `service_account`",
+        ));
+    }
+    for (field, value) in [
+        ("client_email", &key.client_email),
+        ("private_key", &key.private_key),
+        ("project_id", &key.project_id),
+    ] {
+        if value.trim().is_empty() {
+            return Err(ServerError::bad_request(format!(
+                "service account key `{field}` must not be empty"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Non-secret provider configuration persisted in the store.
@@ -387,14 +463,19 @@ pub async fn read_credential(
     Ok(None)
 }
 
-/// Store a typed credential for `kind`.
+/// Store a validated typed credential for `kind`.
 pub async fn write_credential(
     secrets: &dyn SecretProvider,
     kind: ProviderKind,
     credential: &ProviderCredential,
-) -> Result<()> {
-    let raw = serde_json::to_string(credential)?;
-    secrets.set_secret(&kind.credential_key(), &raw).await
+) -> std::result::Result<(), ServerError> {
+    credential.validate()?;
+    let raw = serde_json::to_string(credential)
+        .map_err(|_| ServerError::internal("failed to serialize provider credential"))?;
+    secrets
+        .set_secret(&kind.credential_key(), &raw)
+        .await
+        .map_err(ServerError::from)
 }
 
 /// Delete the credential for `kind` (new key + legacy Anthropic key).
@@ -493,11 +574,12 @@ pub async fn update_provider(
                 "model_gateway signs in with OAuth; api keys are not accepted",
             ));
         }
-        match &credential {
-            ProviderCredential::ApiKey { key } if key.is_empty() => {
-                return Err(ServerError::bad_request("credential key must not be empty"));
-            }
-            _ => {}
+        if matches!(credential, ProviderCredential::ServiceAccount { .. })
+            && !kind.accepts_credential(&credential)
+        {
+            return Err(ServerError::bad_request(format!(
+                "{kind} does not support service_account credentials"
+            )));
         }
         write_credential(secrets, kind, &credential).await?;
     }
@@ -826,9 +908,34 @@ pub async fn catalog_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestSecrets(Mutex<HashMap<String, String>>);
+
+    #[async_trait::async_trait]
+    impl SecretProvider for TestSecrets {
+        async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+
+        async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        async fn delete_secret(&self, key: &str) -> Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
 
     #[test]
-    fn credential_roundtrips_and_redacts_debug() {
+    fn api_key_credential_roundtrips_and_redacts_debug() {
         let cred = ProviderCredential::api_key("sk-secret");
         let json = serde_json::to_string(&cred).unwrap();
         assert!(json.contains("api_key"));
@@ -845,6 +952,93 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&oauth).unwrap(),
             r#"{"type":"oauth"}"#
+        );
+    }
+
+    #[test]
+    fn service_account_credential_validates_roundtrips_and_redacts_debug() {
+        let key_file = r#"{
+            "type": "service_account",
+            "project_id": "test-project",
+            "private_key": "test-private-key",
+            "client_email": "service-account@example.test"
+        }"#;
+        let cred = ProviderCredential::ServiceAccount {
+            json: key_file.to_owned(),
+        };
+
+        cred.validate().expect("a complete key file is valid");
+        let stored = serde_json::to_string(&cred).unwrap();
+        let roundtrip: ProviderCredential = serde_json::from_str(&stored).unwrap();
+        assert_eq!(roundtrip, cred);
+
+        let debug = format!("{cred:?}");
+        assert!(!debug.contains("test-private-key"));
+        assert!(!debug.contains("service-account@example.test"));
+    }
+
+    #[test]
+    fn service_account_validation_never_echoes_key_material() {
+        let key_file = r#"{
+            "type": "service_account",
+            "client_email": "service-account@example.test",
+            "private_key": "test-private-key"
+        }"#;
+        let error = ProviderCredential::ServiceAccount {
+            json: key_file.to_owned(),
+        }
+        .validate()
+        .expect_err("a key file missing project_id is invalid");
+
+        assert!(!format!("{error:?}").contains("test-private-key"));
+        assert!(!format!("{error:?}").contains("service-account@example.test"));
+    }
+
+    #[tokio::test]
+    async fn credentials_roundtrip_through_secret_storage() {
+        let secrets = TestSecrets::default();
+        let credentials = [
+            (
+                ProviderKind::Anthropic,
+                ProviderCredential::api_key("existing-api-key"),
+            ),
+            (
+                ProviderKind::Openai,
+                ProviderCredential::ServiceAccount {
+                    json: r#"{"type":"service_account","client_email":"service-account@example.test","private_key":"test-private-key","project_id":"test-project"}"#.to_owned(),
+                },
+            ),
+        ];
+
+        for (kind, credential) in credentials {
+            write_credential(&secrets, kind, &credential)
+                .await
+                .expect("a valid credential writes to secret storage");
+            assert_eq!(
+                read_credential(&secrets, kind).await.unwrap(),
+                Some(credential)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_api_key_blob_deserializes_unchanged() {
+        let secrets = TestSecrets::default();
+        secrets
+            .set_secret(
+                &ProviderKind::Openai.credential_key(),
+                r#"{"type":"api_key","key":"existing-api-key"}"#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            read_credential(&secrets, ProviderKind::Openai)
+                .await
+                .unwrap()
+                .unwrap()
+                .as_api_key(),
+            Some("existing-api-key")
         );
     }
 
