@@ -65,6 +65,32 @@ actually is:
 3. Regenerate, and read the diff. A change here is a change to what the server
    promises.
 
+## What CI checks, and which mistake each check catches
+
+Every one of these is a class of mistake that previously had to be caught by
+reading the code. They all run in existing lanes; nothing needs a new job.
+
+| Check | Catches |
+|---|---|
+| The generated file matches the Rust types | Any wire change that was not regenerated |
+| A field serde omits is declared optional | `skip_serializing_if` rendering as `T \| null`, the mismatch that shipped twice |
+| Precision-critical fields generate as unions | A field loosened to a string, silently dropping an allowlist the renderer's tables are keyed on |
+| No `any`, `bigint`, or `unknown` in the output | A type reaching the roots that cannot be expressed, or an integer rendered as `bigint` |
+| Validators run against generated fixtures | A field renamed server-side under a hand-written validator — the case where both suites stayed green |
+| Ids generate as bare strings | `#[serde(transparent)]` being ignored in a way that stops coinciding with the right answer |
+| The journal event shape is pinned | A rename in a persisted type, which stops existing chats loading |
+
+The fixture check is the one worth understanding, because it closes the failure
+this document opens with. The validators are a trust boundary and stay
+hand-written, so generation cannot check them — but their *tests* used to build
+their own inputs, which encoded what the author believed the wire looked like. A
+field renamed server-side left both suites green and the app broken. Those tests
+now consume `generated/fixtures.ts`, serialized from real server values, so a
+rename changes the fixture and the renderer test fails.
+
+Rejection cases stay hand-authored: malformed input is not something the server
+can produce, so there is nothing to generate from.
+
 ## Two things the generator gets wrong by default
 
 Both are configured or annotated, and both are pinned by tests, but they are

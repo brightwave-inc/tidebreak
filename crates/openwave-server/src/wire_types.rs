@@ -227,6 +227,41 @@ pub(crate) mod generate {
         spans
     }
 
+    /// Render a TypeScript module of real serialized server values.
+    ///
+    /// The renderer's validators are a trust boundary and stay hand-written, so
+    /// generation cannot check them. What it can do is stop them being *tested*
+    /// against hand-authored objects: until now every validator test built its
+    /// own input from the TypeScript author's belief about the wire, so a field
+    /// renamed server-side left both suites green and the app broken. That is
+    /// the failure this closes.
+    ///
+    /// Each entry is serialized from a real Rust value, so the fixture is the
+    /// server's actual output rather than a description of it.
+    pub(crate) fn render_fixtures(entries: &[(&str, serde_json::Value)]) -> String {
+        let body = entries
+            .iter()
+            .map(|(name, value)| {
+                let json = serde_json::to_string_pretty(value).expect("a fixture serializes");
+                format!("export const {name} = {json} as const;\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "// Generated from Rust. Do not edit.\n\
+             //\n\
+             // Regenerate: UPDATE_WIRE_TYPES=1 cargo test -p openwave-server\n\
+             //\n\
+             // Real serialized output from the server's own types, for the renderer's\n\
+             // validator tests to consume. Hand-authored inputs encode what the author\n\
+             // believed the wire looked like, which is how a rename can leave both test\n\
+             // suites green and the app broken. These cannot drift from the server\n\
+             // without this file changing. See docs/wire-types.md.\n\
+             \n\
+             {body}"
+        )
+    }
+
     /// Compare `rendered` against the checked-in file, or rewrite it when
     /// `UPDATE_WIRE_TYPES` is set.
     pub(crate) fn check_or_update(relative_path: &str, rendered: &str, regenerate_with: &str) {
@@ -432,6 +467,192 @@ mod tests {
             }
         "#;
         assert!(generate::omittable_fields_missing_optional(not_generated).is_empty());
+    }
+
+    /// Path of the generated validator fixtures, relative to this crate.
+    const FIXTURES: &str = "../openwave-desktop/ui/src/generated/fixtures.ts";
+
+    /// Fixed ids, so the fixture does not change on every run.
+    fn id(n: u128) -> uuid::Uuid {
+        uuid::Uuid::from_u128(n)
+    }
+
+    /// Real server values for the shapes the renderer validates by hand.
+    ///
+    /// These are the five camelCase types whose TypeScript describes the
+    /// *validator's output* rather than the wire, so their remaps cannot be
+    /// generated away. Serializing the real value is what ties them to the
+    /// server: a field renamed here changes this file, and the renderer test
+    /// that consumes it fails.
+    fn validator_fixtures() -> Vec<(&'static str, serde_json::Value)> {
+        let approval = crate::routes::PendingApprovalSnapshot {
+            call_id: openwave_core::CallId(id(1)),
+            turn_id: openwave_core::TurnId(id(2)),
+            action: openwave_core::RendererToolName::Exec,
+            approval: openwave_core::ToolApprovalKind::ExecMayRunNetworkedCommand,
+            class: openwave_core::ApprovalClass::Sensitive,
+            preview: Some(openwave_core::ToolActionPreview::Exec {
+                command: "git".into(),
+                args: vec!["status".into()],
+                cwd: ".".into(),
+            }),
+            can_approve: true,
+            can_remember: true,
+        };
+        // The same shape with the omittable field absent, because "the key is
+        // missing" is a distinct case the validator has to survive and the one
+        // that hand-authored inputs habitually get wrong.
+        let approval_without_preview = crate::routes::PendingApprovalSnapshot {
+            call_id: openwave_core::CallId(id(5)),
+            turn_id: openwave_core::TurnId(id(2)),
+            action: openwave_core::RendererToolName::AskUserQuestions,
+            approval: openwave_core::ToolApprovalKind::Unsupported,
+            class: openwave_core::ApprovalClass::ReadOnly,
+            preview: None,
+            can_approve: false,
+            can_remember: false,
+        };
+
+        let folder_access = crate::routes::client_execution::PendingFolderAccessRequest {
+            call_id: openwave_core::CallId(id(3)),
+            turn_id: openwave_core::TurnId(id(4)),
+            reason: crate::routes::client_execution::RENDERER_FOLDER_ACCESS_REASON.to_owned(),
+            folder_hint: Some(openwave_core::RequestedFolderHint::Documents),
+            claimed: true,
+        };
+
+        vec![
+            (
+                "PENDING_APPROVAL",
+                serde_json::to_value(&approval).expect("an approval serializes"),
+            ),
+            (
+                "PENDING_APPROVAL_WITHOUT_PREVIEW",
+                serde_json::to_value(&approval_without_preview).expect("an approval serializes"),
+            ),
+            (
+                "PENDING_FOLDER_ACCESS_REQUEST",
+                serde_json::to_value(&folder_access).expect("a folder request serializes"),
+            ),
+        ]
+    }
+
+    /// The renderer's validators are tested against these exact bytes.
+    ///
+    /// Regenerate with `UPDATE_WIRE_TYPES=1 cargo test -p openwave-server`. A diff
+    /// here means the wire changed under a hand-written validator, which is the
+    /// one thing generation cannot check for us.
+    #[test]
+    fn the_validator_fixtures_are_current() {
+        let rendered = generate::render_fixtures(&validator_fixtures());
+        generate::check_or_update(FIXTURES, &rendered, REGENERATE);
+    }
+
+    /// A fixture that silently lost its interesting field would still pass the
+    /// diff check, so assert the two properties the renderer tests depend on.
+    #[test]
+    fn the_fixtures_cover_the_omitted_key_case() {
+        let fixtures = validator_fixtures();
+        let with = &fixtures
+            .iter()
+            .find(|(name, _)| *name == "PENDING_APPROVAL")
+            .expect("the approval fixture exists")
+            .1;
+        let without = &fixtures
+            .iter()
+            .find(|(name, _)| *name == "PENDING_APPROVAL_WITHOUT_PREVIEW")
+            .expect("the no-preview approval fixture exists")
+            .1;
+        assert!(
+            with.get("preview").is_some(),
+            "the approval fixture should carry a preview"
+        );
+        assert!(
+            without.get("preview").is_none(),
+            "serde omits an absent preview, so the fixture must not contain the key"
+        );
+    }
+
+    /// Shapes that must never appear in generated output.
+    ///
+    /// Each one is a whole class of mistake rather than a named case, which is
+    /// the point: the named hazards were found by reading the code, and reading
+    /// does not scale. These fail on the *next* one.
+    ///
+    /// This is a backstop, not the primary defence. `serde_json::Value` cannot
+    /// reach a generated type at all today, because `serde-json-impl` is
+    /// deliberately off and so `Value` does not implement `TS` — a field holding
+    /// one is a compile error, which is stronger than any assertion here. This
+    /// test is what catches it if that feature is ever switched on.
+    #[test]
+    fn the_generated_types_contain_no_imprecise_shapes() {
+        let generated = rendered_bindings();
+        for (shape, why) in [
+            (
+                ": any",
+                "a Rust type reached the roots that ts-rs cannot express — most \
+                 likely serde_json::Value, which means the serde-json-impl \
+                 feature was enabled. Restrict the roots or give the field a \
+                 concrete type; `any` disables checking for every consumer",
+            ),
+            (
+                "bigint",
+                "an integer rendered as bigint. These types describe what \
+                 JSON.parse produces, which is a number, so a bigint \
+                 declaration is false about every value received. The generator \
+                 sets large_int to number — check it is being used",
+            ),
+            (
+                ": unknown",
+                "a field rendered as unknown, which tells a consumer nothing \
+                 and forces a cast at every use",
+            ),
+            ("Record<string, any>", "an untyped map reached the output"),
+        ] {
+            assert!(
+                !generated.contains(shape),
+                "generated wire types contain `{shape}`: {why}"
+            );
+        }
+    }
+
+    /// Fields whose precision the renderer depends on, and which would silently
+    /// widen to `string` if their Rust type were loosened.
+    ///
+    /// A short, purposeful list rather than a copy of any vocabulary: each entry
+    /// is a field where a compile-time guarantee elsewhere is keyed on the union.
+    /// `ChatToolActivitySnapshot.tool` was `&'static str` and generated as
+    /// `string`, which compiled on both sides while deleting the totality check
+    /// that makes a tool without an icon a compile error.
+    ///
+    /// Also a backstop rather than the only defence: now that those fields hold
+    /// enums, loosening one back to a string breaks the code that assigns to it.
+    /// This catches the case where a change is consistent enough to compile —
+    /// a new field, or a type swapped along with its call sites.
+    #[test]
+    fn precision_critical_fields_generate_as_unions() {
+        let generated = rendered_bindings();
+        for (field, expected) in [
+            ("tool", "RendererToolName"),
+            ("name", "RendererToolName"),
+            ("action", "RendererToolName"),
+            ("status", "RendererToolStatus"),
+            ("approval", "ToolApprovalKind"),
+            ("class", "ApprovalClass"),
+        ] {
+            assert!(
+                generated.contains(&format!("{field}: {expected}")),
+                "expected `{field}: {expected}` in the generated types. If the \
+                 Rust field was loosened to a String it now generates as \
+                 `string`, which compiles everywhere and silently drops the \
+                 allowlist the renderer's tables are keyed on"
+            );
+            assert!(
+                !generated.contains(&format!("{field}: string")),
+                "`{field}` generates as a bare string, losing the {expected} \
+                 union the renderer depends on"
+            );
+        }
     }
 
     /// Ids serialize as a bare UUID string, and must generate as one.

@@ -23,7 +23,9 @@ use crate::extract::{Json, Path};
 use crate::state::AppState;
 
 const CLIENT_EXECUTION_LEASE: Duration = Duration::seconds(60);
-const RENDERER_FOLDER_ACCESS_REASON: &str =
+/// Frozen consent prose. The renderer pins this byte-for-byte so no
+/// server-authored text can reach a consent prompt.
+pub(crate) const RENDERER_FOLDER_ACCESS_REASON: &str =
     "The assistant needs read access to files outside the folders connected to this conversation.";
 
 /// Caller-owned claim identity. The lease token is a secret capability and

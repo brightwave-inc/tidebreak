@@ -37,7 +37,7 @@ use crate::web_search::{
     WebSearchCredentialsInfo,
 };
 
-mod client_execution;
+pub(crate) mod client_execution;
 mod delegated_file_execution;
 mod document;
 pub(crate) mod image_attachment;

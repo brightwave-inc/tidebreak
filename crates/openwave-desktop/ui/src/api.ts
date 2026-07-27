@@ -367,7 +367,15 @@ export type UserQuestionAnswer = {
   freeForm?: string;
 };
 
-const RENDERER_FOLDER_ACCESS_REASON =
+/**
+ * The only consent prose a folder-access prompt will render.
+ *
+ * `parseFolderAccessRequest` rejects any request whose `reason` is not
+ * byte-identical to this, so no server-authored text can reach a consent prompt.
+ * The server holds the same literal; exported so a test can compare the two
+ * across the language boundary rather than trusting they match.
+ */
+export const RENDERER_FOLDER_ACCESS_REASON =
   "The assistant needs read access to files outside the folders connected to this conversation.";
 
 const WS_HANDSHAKE = "openwave-v1";
