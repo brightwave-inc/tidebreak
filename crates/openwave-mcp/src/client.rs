@@ -1443,6 +1443,37 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn redirects_are_not_followed_with_a_credential_in_hand() {
+            // A redirecting endpoint must surface as an error, not as a
+            // silently relocated (and re-credentialed) request.
+            let app = Router::new().route(
+                "/mcp",
+                post(|| async {
+                    (
+                        StatusCode::FOUND,
+                        [("location", "http://127.0.0.1:1/elsewhere")],
+                    )
+                        .into_response()
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+
+            let error = McpClient::connect_http(
+                "gateway",
+                &format!("http://{address}/mcp"),
+                Some(TEST_TOKEN),
+            )
+            .await
+            .err()
+            .expect("redirect must fail");
+            assert!(error.to_string().contains("HTTP status 302"), "{error}");
+        }
+
+        #[tokio::test]
         async fn an_unreachable_server_fails_with_a_bounded_error() {
             let error = McpClient::connect_http_with_timeouts(
                 "gateway",

@@ -64,6 +64,10 @@ impl HttpWire {
         }
         Ok(Self {
             client: reqwest::Client::builder()
+                // A credentialed client must not follow redirects: reqwest
+                // strips Authorization cross-host, but a same-host https→http
+                // downgrade would resend the bearer in cleartext.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|error| mcp_error("could not build HTTP client", error))?,
             url,
@@ -84,7 +88,6 @@ impl HttpWire {
         tools_list_changed: &mut bool,
     ) -> Result<Value> {
         let response = self.post(message).await?;
-        self.absorb_session_id(&response)?;
         let status = response.status();
         if status == reqwest::StatusCode::ACCEPTED {
             return Err(mcp_message(
@@ -92,6 +95,8 @@ impl HttpWire {
             ));
         }
         check_status(status)?;
+        // Only a successful exchange may (re)bind the session.
+        self.absorb_session_id(&response)?;
 
         let content_type = response
             .headers()
@@ -124,8 +129,8 @@ impl HttpWire {
     /// empty 202; any success status is accepted and the body is ignored.
     pub(crate) async fn notify(&mut self, message: &Value) -> Result<()> {
         let response = self.post(message).await?;
-        self.absorb_session_id(&response)?;
-        check_status(response.status())
+        check_status(response.status())?;
+        self.absorb_session_id(&response)
     }
 
     async fn post(&self, message: &Value) -> Result<reqwest::Response> {
