@@ -1,6 +1,8 @@
 import {
   RENDERER_TOOL_NAMES,
   type ApprovalClass,
+  type ChatToolActivitySnapshot,
+  type ChatToolActivityStatus,
   type RendererAgentEvent,
   type RendererSequencedEvent,
   type RendererToolName,
@@ -9,7 +11,12 @@ import {
   type ToolResultPreview as WireToolResultPreview,
 } from "./generated/wire";
 
-export type { ApprovalClass, RendererToolName, ToolActionPreview };
+export type {
+  ApprovalClass,
+  ChatToolActivityStatus,
+  RendererToolName,
+  ToolActionPreview,
+};
 
 /**
  * The WebSocket frame and the events it carries, generated from the server's
@@ -194,23 +201,15 @@ export type ChatMessageCitation = {
   pages: number[];
 };
 
-/** A fixed, terminal tool-card projection with no canonical tool data. */
-export type ChatToolActivity = {
-  /** What the call did, when its tool projects it. */
-  action?: ToolActionPreview;
-  /**
-   * Allowlisted renderer tool name, folded server-side.
-   *
-   * A name rather than display copy: the renderer derives a live call's
-   * wording from its name, and carrying prose here meant a second copy of it
-   * plus an inverse lookup, where a change on either side silently broke
-   * hydration.
-   */
-  tool: RendererToolName;
-  status: "completed" | "failed" | "cancelled";
-  started_at: string;
-  finished_at: string | null;
-};
+/**
+ * A fixed, terminal tool-card projection with no canonical tool data.
+ *
+ * `tool` is the allowlisted renderer name rather than display copy: the renderer
+ * derives a live call's wording from its name, and carrying prose here meant a
+ * second copy of it plus an inverse lookup, where a change on either side
+ * silently broke hydration.
+ */
+export type ChatToolActivity = ChatToolActivitySnapshot;
 
 export type ChatTranscript = {
   messages: ChatMessage[];

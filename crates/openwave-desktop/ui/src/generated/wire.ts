@@ -23,6 +23,37 @@ export type ApprovalClass = "read_only" | "workspace" | "sensitive";
 export type CallId = string;
 
 /**
+ * A completed tool invocation with no results, tool identity, provider
+ * metadata, executor identity, lease, or diagnostic detail. The only arguments
+ * it can carry are the ones a tool explicitly projects for display.
+ */
+export type ChatToolActivitySnapshot = { 
+/**
+ * Allowlisted renderer tool name, never a provider-supplied one.
+ *
+ * A name rather than display copy: the renderer already derives a live
+ * call's wording from its name, and sending prose here made a copy change
+ * silently break history hydration.
+ *
+ * Typed as the vocabulary rather than a string so the generated TypeScript
+ * stays a union. As `&'static str` it generated as `string`, which compiles
+ * on both sides while silently dropping the allowlist the renderer's copy
+ * and icon tables are keyed on.
+ */
+tool: RendererToolName, 
+/**
+ * Closed projection of what the call did, when its tool has one. Rebuilt
+ * from the arguments it ran with, so history describes the same action
+ * the live stream did.
+ */
+action?: ToolActionPreview, status: ChatToolActivityStatus, started_at: string, finished_at: string | null, };
+
+/**
+ * Fixed lifecycle vocabulary exposed for a historical tool card.
+ */
+export type ChatToolActivityStatus = "completed" | "failed" | "cancelled";
+
+/**
  * Identifies a persisted message within a chat.
  */
 export type MessageId = string;
@@ -50,13 +81,11 @@ result?: ToolResultPreview, } | { "type": "turn_completed" } | { "type": "turn_f
 export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, };
 
 /**
- * Tool names are model-controlled. Only names with fixed renderer
- * presentations cross the boundary; everything else becomes `other`.
+ * A tool name the renderer is allowed to present.
  *
- * This enum is the renderer's tool vocabulary. The desktop's union, its
- * runtime guard, its copy table, and its icon table all derive from the
- * TypeScript generated here, so adding a variant cannot leave one of them
- * behind — see `docs/wire-types.md`.
+ * The desktop's union, its runtime guard, its copy table, and its icon table
+ * are all generated from this enum, so a variant added here cannot leave one of
+ * them behind — see `docs/wire-types.md`.
  */
 export type RendererToolName = "search" | "list_sources" | "read_source" | "read_tool_result" | "web_search" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "create_deliverable" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exec" | "other";
 

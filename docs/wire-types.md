@@ -88,12 +88,17 @@ the frame, the event union, the tool previews, and the approval kinds. The event
 surface mattered most because the renderer parses each frame with a bare cast and
 no runtime validation, so the generated type is the only contract on that path.
 
+Also generated: `ChatToolActivitySnapshot`, the terminal tool card rebuilt from
+the journal. It shares the vocabulary and the action preview with the live stream,
+so it belongs with them rather than with the rest of the REST surface. Its `tool`
+field was `&'static str`, which generated as `string` and silently dropped the
+allowlist the copy and icon tables are keyed on; it is now typed as the enum.
+
 Not yet generated: the ~37 REST snapshot DTOs. A naive derive sweep over them
-would cause two silent regressions — `ChatToolActivity.tool` would widen from an
-allowlist to `string`, and `ChatMessage.role` would widen from two variants to
-four, making a `system` message render as a user bubble. Neither produces a
-compile error. Those and five other hazards are enumerated on the tracking issue;
-do not sweep without reading it.
+would still widen `ChatMessage.role` from two variants to four — `Role` has
+`System` and `Tool` — making a `system` message render as a user bubble, with no
+compile error. That and the remaining hazards are enumerated on the tracking
+issue; do not sweep without reading it.
 
 `ChatMessageSnapshot.citations` is deliberately wider in TypeScript than on the
 wire: the server always sends it, but the transcript is not validated, so the `?`

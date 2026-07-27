@@ -463,8 +463,8 @@ impl Tool for ReadToolResultTool {
 /// The tool's own name is model-supplied in principle, so a result header uses
 /// the same closed vocabulary the rest of the renderer boundary does.
 fn historical_safe_name(name: &str) -> &'static str {
-    match crate::event_projection::RendererToolName::from(name) {
-        crate::event_projection::RendererToolName::Other => "a tool",
+    match openwave_core::RendererToolName::from(name) {
+        openwave_core::RendererToolName::Other => "a tool",
         _ => "the tool call",
     }
 }

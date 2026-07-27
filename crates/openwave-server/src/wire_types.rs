@@ -264,6 +264,10 @@ mod tests {
         // One root. Everything the event stream can carry is reachable from it,
         // including the shared preview and approval types the REST surface uses.
         generate::collect_from::<crate::event_projection::RendererSequencedEvent>(&cfg, &mut out);
+        // The terminal tool card rebuilt from the journal. Shares the tool
+        // vocabulary and the action preview with the live stream, which is why
+        // it belongs with them rather than with the rest of the REST surface.
+        generate::collect_from::<openwave_core::ChatToolActivitySnapshot>(&cfg, &mut out);
         out
     }
 
