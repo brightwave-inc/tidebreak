@@ -273,6 +273,10 @@ pub fn app(state: AppState) -> Router {
             "/mcp/servers/{name}/view-session",
             post(routes::post_mcp_view_session),
         )
+        .route(
+            "/chats/{chat_id}/calls/{call_id}/mcp-app-payload",
+            get(routes::get_mcp_app_payload),
+        )
         .route("/gateway/status", get(routes::get_gateway_status))
         .route("/gateway/sign-in", post(routes::post_gateway_sign_in))
         .route("/gateway/sign-out", post(routes::post_gateway_sign_out))

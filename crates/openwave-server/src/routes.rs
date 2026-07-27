@@ -75,6 +75,71 @@ pub async fn put_mcp_servers(
     ))
 }
 
+/// `GET /chats/{chat_id}/calls/{call_id}/mcp-app-payload` — the completed
+/// call's result, packaged for its declared MCP Apps view.
+///
+/// Only calls whose output carried a validated view declaration answer here,
+/// and the payload is handed to the renderer as an opaque envelope for the
+/// sandboxed frame — the transcript presentation itself never reads it.
+pub async fn get_mcp_app_payload(
+    State(state): State<AppState>,
+    Path((chat_id, call_id)): Path<(ChatId, CallId)>,
+) -> Result<Json<McpAppPayload>, ServerError> {
+    let events = state.store.list_events(chat_id, 0).await?;
+    mcp_app_payload_from_events(&events, call_id)
+        .map(Json)
+        .ok_or_else(|| ServerError::not_found("no MCP App payload for this call"))
+}
+
+/// The MCP `CallToolResult` fields the view consumes, plus the call's
+/// model-authored arguments for the `tool-input` notification.
+///
+/// Deliberately not a generated wire type: `arguments` and
+/// `structured_content` are opaque passthrough JSON for the sandboxed view,
+/// and the generator's precision guard rightly refuses `any`-shaped fields.
+/// The renderer never reads them; the hand-written TS twin documents the
+/// same opacity.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct McpAppPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arguments: Option<serde_json::Value>,
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    structured_content: Option<serde_json::Value>,
+    is_error: bool,
+}
+
+fn mcp_app_payload_from_events(
+    events: &[SequencedEvent],
+    call_id: CallId,
+) -> Option<McpAppPayload> {
+    let mut fragments = String::new();
+    let mut completed = None;
+    for event in events {
+        match &event.event {
+            openwave_core::AgentEvent::ToolCallArgsDelta {
+                call_id: id,
+                fragment,
+            } if *id == call_id => fragments.push_str(fragment),
+            openwave_core::AgentEvent::ToolCallCompleted {
+                call_id: id,
+                output,
+                ..
+            } if *id == call_id => completed = Some(output),
+            _ => {}
+        }
+    }
+    // Mirror the preview filter: an error output never renders a card, so
+    // it serves no payload either.
+    let output = completed.filter(|output| output.ui_view.is_some() && !output.is_error)?;
+    Some(McpAppPayload {
+        arguments: serde_json::from_str(&fragments).ok(),
+        content: output.content.clone(),
+        structured_content: output.data.clone(),
+        is_error: output.is_error,
+    })
+}
+
 /// `GET /gateway/status` — renderer-safe model-gateway connection state.
 pub async fn get_gateway_status(
     State(state): State<AppState>,
@@ -2152,4 +2217,86 @@ async fn send_event(socket: &mut WebSocket, event: &SequencedEvent) -> Result<()
         return Ok(());
     };
     socket.send(Message::Text(json.into())).await
+}
+
+#[cfg(test)]
+mod mcp_app_payload_tests {
+    use openwave_core::{AgentEvent, ToolOutput, ToolUiView};
+
+    use super::*;
+
+    fn sequenced(seq: i64, event: AgentEvent) -> SequencedEvent {
+        SequencedEvent { seq, event }
+    }
+
+    #[test]
+    fn assembles_arguments_and_result_for_a_view_declaring_call() {
+        let call = CallId::new();
+        let other = CallId::new();
+        let events = vec![
+            sequenced(
+                1,
+                AgentEvent::ToolCallArgsDelta {
+                    call_id: call,
+                    fragment: "{\"operation\":".into(),
+                },
+            ),
+            sequenced(
+                2,
+                AgentEvent::ToolCallArgsDelta {
+                    call_id: other,
+                    fragment: "{\"unrelated\":true}".into(),
+                },
+            ),
+            sequenced(
+                3,
+                AgentEvent::ToolCallArgsDelta {
+                    call_id: call,
+                    fragment: "\"list\"}".into(),
+                },
+            ),
+            sequenced(
+                4,
+                AgentEvent::ToolCallCompleted {
+                    call_id: call,
+                    output: ToolOutput::text("{\"status\":200}")
+                        .with_data(serde_json::json!({"status": 200}))
+                        .with_ui_view(ToolUiView {
+                            server: "gateway".into(),
+                            resource_uri: "ui://gateway/app.html".into(),
+                        }),
+                    action: None,
+                    result: None,
+                },
+            ),
+        ];
+
+        let payload = mcp_app_payload_from_events(&events, call).expect("payload exists");
+        assert_eq!(
+            payload.arguments,
+            Some(serde_json::json!({"operation": "list"}))
+        );
+        assert_eq!(payload.content, "{\"status\":200}");
+        assert_eq!(
+            payload.structured_content,
+            Some(serde_json::json!({"status": 200}))
+        );
+        assert!(!payload.is_error);
+    }
+
+    #[test]
+    fn calls_without_a_view_declaration_expose_no_payload() {
+        let call = CallId::new();
+        let events = vec![sequenced(
+            1,
+            AgentEvent::ToolCallCompleted {
+                call_id: call,
+                output: ToolOutput::text("plain result"),
+                action: None,
+                result: None,
+            },
+        )];
+        assert!(mcp_app_payload_from_events(&events, call).is_none());
+        assert!(mcp_app_payload_from_events(&events, CallId::new()).is_none());
+    }
 }

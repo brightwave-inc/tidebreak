@@ -66,6 +66,8 @@ export type ChatMessage =
 
 type MessageListProps = {
   messages: ChatMessage[];
+  /** Enables MCP App cards to fetch their call's result envelope. */
+  chatId?: string;
   folderAccessRequests: PendingFolderAccessRequest[];
   userQuestionRequests?: PendingUserQuestions[];
   nativeHost: boolean;
@@ -101,6 +103,7 @@ type MessageListProps = {
 
 export function MessageList({
   messages,
+  chatId,
   folderAccessRequests,
   userQuestionRequests = [],
   nativeHost,
@@ -134,6 +137,7 @@ export function MessageList({
     busy,
     onApproval,
     approvalState,
+    chatId,
   );
   // Only greet a genuinely empty, fully-hydrated conversation. While an
   // existing chat's transcript is still loading it is transiently empty; showing
@@ -213,6 +217,7 @@ export function groupMessageItems(
     decidingApprovalCalls: Set<string>;
     approvalErrors: Record<string, string>;
   },
+  chatId?: string,
 ) {
   const items: ReactNode[] = [];
   let index = 0;
@@ -269,7 +274,7 @@ export function groupMessageItems(
       (entry): entry is ToolMessage =>
         entry.role === "tool" && !parked.has(entry.callId),
     );
-    const cards = surfacedCards(phase, parked, onApproval, approvalState);
+    const cards = surfacedCards(phase, parked, onApproval, approvalState, chatId);
 
     // A tool row renders model-influenced data through several defensive
     // parsers. If one of them is ever wrong, the throw should cost this phase
@@ -313,6 +318,7 @@ function surfacedCards(
     decidingApprovalCalls: Set<string>;
     approvalErrors: Record<string, string>;
   },
+  chatId?: string,
 ): ReactNode[] {
   const cards: ReactNode[] = [];
   // In the order the calls happened, so the cards read as a sequence rather
@@ -347,6 +353,8 @@ function surfacedCards(
           key={entry.id}
           server={entry.result.server}
           resourceUri={entry.result.resourceUri}
+          chatId={chatId}
+          callId={entry.callId}
         />,
       );
       continue;

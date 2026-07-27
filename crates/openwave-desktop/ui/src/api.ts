@@ -218,6 +218,19 @@ export type ExecResultPreview = Extract<ToolResultPreview, { tool: "exec" }>;
 /** A single-use frame address for one MCP Apps view. */
 export type McpViewSessionInfo = McpViewSession;
 
+/**
+ * Opaque envelope for a sandboxed MCP App view; never rendered directly.
+ *
+ * Hand-written on purpose: the payload's JSON fields are untyped passthrough
+ * for the view, which the wire-type generator's precision guard refuses.
+ */
+export type McpAppPayload = {
+  arguments?: unknown;
+  content: string;
+  structured_content?: unknown;
+  is_error: boolean;
+};
+
 
 /** Approval kinds a human may approve from the renderer. */
 export function isApprovableKind(kind: RendererApprovalKind): boolean {
@@ -483,6 +496,13 @@ export class ApiClient {
       headers: this.headers(true),
       body: JSON.stringify({ uri }),
     });
+  }
+
+  getMcpAppPayload(chatId: string, callId: string): Promise<McpAppPayload> {
+    return this.json(
+      `/chats/${encodeURIComponent(chatId)}/calls/${encodeURIComponent(callId)}/mcp-app-payload`,
+      { headers: this.headers() },
+    );
   }
 
   createProject(title: string): Promise<Project> {
