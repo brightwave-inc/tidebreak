@@ -60,6 +60,45 @@ agent sessions can see where things stand without reading commit logs.
 - **Bump versions deliberately.** Dependabot edits the pin in its own PR; that's
   the intended upgrade path, not `cargo update` / `pnpm update` drift.
 
+## Tests earn their place or come out
+
+Build time is a first-class cost here — the workspace is large and the Rust lanes
+dominate CI. A test that would never change what we do is not free; it is paid
+for on every build, by everyone, forever. Write fewer, better tests.
+
+The bar for adding one: **would this failing tell us something we'd act on?**
+
+Worth writing, and worth defending in review:
+
+- **Contracts that cross a boundary** — wire types, persisted shapes, migration
+  compatibility. Breaking these silently is expensive to discover.
+- **Decisions that are easy to reverse by accident** — the model registry's
+  honesty invariants, the guard that no model advertises image input before the
+  path carries it, the check that the default model is curated and current.
+- **Reproductions of bugs we actually hit.** These are the highest-value tests
+  in the repo.
+- **Behavior, driven end to end.** One test that runs a real turn and reads the
+  journal beats ten that assert on intermediate structs.
+
+Not worth writing, and fair game to delete on sight:
+
+- Tests that assert the code *exists* — constructing a struct and reading its
+  fields back, or checking a constant equals itself.
+- Duplicate coverage: several tests walking one path with cosmetically different
+  inputs. Keep the one that best localizes a regression.
+- Assertions pinned to internals that break on every refactor without ever
+  catching a defect. These tax exactly the changes we want to be cheap.
+- Over-specified assertions — matching a whole serialized payload when the test
+  is about one field. They fail for unrelated reasons and train people to update
+  expectations without reading them.
+- Setup-heavy tests whose assertion is trivial next to the scaffolding.
+
+When you delete tests, justify each one in the PR body in a line. "Removed 14
+tests" is not reviewable; "removed 14 that re-asserted serde round-tripping
+already covered by the wire-type fixtures" is.
+
+Coverage percentage is not a goal and is not tracked. Confidence is.
+
 ## Verify locally — CI does not cover every change
 
 CI has a change-scope gate that **skips** the heavy Rust build/test/clippy lanes
