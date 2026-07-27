@@ -1,0 +1,55 @@
+// @vitest-environment jsdom
+import { act, cleanup, renderHook } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { useStreamingTypewriter } from "./useStreamingTypewriter";
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+describe("useStreamingTypewriter", () => {
+  it("shows historical transcript content immediately", () => {
+    const { result, rerender } = renderHook(
+      ({ text }) => useStreamingTypewriter(text, false),
+      { initialProps: { text: "Searched the web" } },
+    );
+
+    expect(result.current).toBe("Searched the web");
+    rerender({ text: "Read a file" });
+    expect(result.current).toBe("Read a file");
+  });
+
+  it("types a later live update", async () => {
+    vi.useFakeTimers();
+    const { result, rerender } = renderHook(
+      ({ text, live }) => useStreamingTypewriter(text, live),
+      { initialProps: { text: "Searching the web", live: true } },
+    );
+
+    rerender({ text: "Searching the web and 1 other task", live: true });
+    expect(result.current).not.toBe("Searching the web and 1 other task");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(result.current).toBe("Searching the web and 1 other task");
+  });
+
+  it("finishes immediately when a live step settles", async () => {
+    vi.useFakeTimers();
+    const { result, rerender } = renderHook(
+      ({ text, live }) => useStreamingTypewriter(text, live),
+      { initialProps: { text: "Searching the web", live: true } },
+    );
+
+    rerender({ text: "Searching the web and 1 other task", live: true });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+    });
+    rerender({ text: "Searched the web and 1 other task", live: false });
+
+    expect(result.current).toBe("Searched the web and 1 other task");
+  });
+});
