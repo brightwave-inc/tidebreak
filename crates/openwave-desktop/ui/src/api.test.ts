@@ -5,6 +5,7 @@ import {
   parsePendingUserQuestions,
   parsePendingToolApproval,
   parseSandboxAgentCancellation,
+  parseToolActionPreview,
 } from "./api";
 
 afterEach(() => {
@@ -370,6 +371,43 @@ describe("pending approval recovery", () => {
         /pending approval response/,
       );
     }
+  });
+});
+
+describe("parseToolActionPreview", () => {
+  const filtered = {
+    tool: "web_search",
+    query: "quarterly filings",
+    domains: ["sec.gov"],
+    start_published_at: "2024-01-01T00:00:00Z",
+    end_published_at: null,
+  };
+
+  it("keeps the filters that go to the provider with the query", () => {
+    expect(parseToolActionPreview(filtered)).toEqual(filtered);
+  });
+
+  it("drops a preview whose filters it cannot verify", () => {
+    // A card that describes the wrong action is worse than one that describes
+    // no action, and the filters are part of the action being consented to.
+    for (const broken of [
+      { ...filtered, domains: "sec.gov" },
+      { ...filtered, domains: [7] },
+      { ...filtered, domains: undefined },
+      { ...filtered, start_published_at: 20240101 },
+      { ...filtered, end_published_at: undefined },
+    ]) {
+      expect(parseToolActionPreview(broken)).toBeNull();
+    }
+  });
+
+  it("leaves a source search to its query alone", () => {
+    // The private-source search has no filters to show, and inventing keys for
+    // it would put a web search's copy on a local one.
+    expect(parseToolActionPreview({ tool: "search", query: "revenue" })).toEqual({
+      tool: "search",
+      query: "revenue",
+    });
   });
 });
 

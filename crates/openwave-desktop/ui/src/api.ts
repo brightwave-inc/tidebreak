@@ -307,7 +307,7 @@ export function isApprovableKind(kind: RendererApprovalKind): boolean {
  * action than the one the human was shown.
  */
 export type ApprovalGrantRung =
-  | "exact_command"
+  | "exact_action"
   | "any_args_for_command"
   | "whole_tool";
 
@@ -1046,10 +1046,30 @@ export function parseToolActionPreview(
 ): ToolActionPreview | null {
   if (value === undefined || value === null) return null;
   if (!isRecord(value)) return null;
-  if (value.tool === "search" || value.tool === "web_search") {
+  if (value.tool === "search") {
     const { query } = value;
     if (typeof query !== "string" || query.length === 0) return null;
-    return { tool: value.tool, query };
+    return { tool: "search", query };
+  }
+  if (value.tool === "web_search") {
+    const { query, domains, start_published_at, end_published_at } = value;
+    if (
+      typeof query !== "string" ||
+      query.length === 0 ||
+      !Array.isArray(domains) ||
+      !domains.every((domain): domain is string => typeof domain === "string") ||
+      !isOptionalString(start_published_at) ||
+      !isOptionalString(end_published_at)
+    ) {
+      return null;
+    }
+    return {
+      tool: "web_search",
+      query,
+      domains,
+      start_published_at,
+      end_published_at,
+    };
   }
   if (value.tool !== "exec") return null;
   const { command, args, cwd } = value;
@@ -1135,4 +1155,14 @@ function isRendererApprovalKind(value: unknown): value is RendererApprovalKind {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A field the server sends as `null` when the model did not set it.
+ *
+ * `undefined` is not accepted: a missing key on this surface means the payload
+ * is not the shape it claims to be, which is what the validator is for.
+ */
+function isOptionalString(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && value.length > 0);
 }

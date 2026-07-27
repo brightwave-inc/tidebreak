@@ -18,14 +18,26 @@ export function toolPreviewPresentation(
   preview: ToolActionPreview,
   result: ToolResultPreview | null = null,
 ): ToolPreviewPresentation {
-  if (preview.tool === "search" || preview.tool === "web_search") {
-    // The query is the whole action. For a web search it is also the thing
-    // that leaves the device, which is what the reader is being asked about.
+  if (preview.tool === "search") {
     const headline = preview.query;
-    const detail =
-      preview.tool === "web_search"
-        ? `${headline}\n# sent to the configured web search provider`
-        : `${headline}\n# searched against this conversation's sources`;
+    return {
+      headline,
+      detail: `${headline}\n# searched against this conversation's sources`,
+    };
+  }
+  if (preview.tool === "web_search") {
+    // The query leads because it is the action, but the filters go to the
+    // provider with it. Leaving them off described part of the thing the card
+    // was asking about.
+    const headline = preview.query;
+    const detail = [
+      headline,
+      preview.domains.length > 0 && `# limited to ${preview.domains.join(", ")}`,
+      publishedWindow(preview),
+      "# sent to the configured web search provider",
+    ]
+      .filter((line): line is string => typeof line === "string")
+      .join("\n");
     return { headline, detail };
   }
   const headline = [preview.command, ...preview.args]
@@ -46,6 +58,22 @@ export function toolPreviewPresentation(
     .filter((line): line is string => typeof line === "string")
     .join("\n");
   return { headline, detail };
+}
+
+/**
+ * The publication window a web search will accept, or nothing when it is open
+ * at both ends. Dates are shown as the model wrote them, because what the card
+ * is for is showing what the provider is told.
+ */
+function publishedWindow(
+  preview: Extract<ToolActionPreview, { tool: "web_search" }>,
+): string | null {
+  const from = preview.start_published_at;
+  const to = preview.end_published_at;
+  if (from && to) return `# published between ${from} and ${to}`;
+  if (from) return `# published on or after ${from}`;
+  if (to) return `# published on or before ${to}`;
+  return null;
 }
 
 /**

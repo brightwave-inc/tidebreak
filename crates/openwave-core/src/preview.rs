@@ -44,9 +44,20 @@ pub enum ToolActionPreview {
     /// A search of this conversation's own sources. The query is the whole
     /// action, and it is what the excerpts returned will be chosen to match.
     Search { query: String },
-    /// A public web search. The query leaves the device, which is the entire
-    /// reason this call asks first — so the card has to be able to show it.
-    WebSearch { query: String },
+    /// A public web search. What leaves the device is the entire reason this
+    /// call asks first, so the card has to be able to show all of it — the
+    /// filters are told to the provider too, not just the query.
+    WebSearch {
+        query: String,
+        /// Sites the search is confined to, empty when the model named none.
+        domains: Vec<String>,
+        /// Earliest publication date the search will accept, as the model
+        /// wrote it. Kept verbatim rather than reformatted: the card's job is
+        /// to show what the provider is actually told.
+        start_published_at: Option<String>,
+        /// Latest publication date the search will accept.
+        end_published_at: Option<String>,
+    },
 }
 
 impl ToolActionPreview {
@@ -62,24 +73,8 @@ impl ToolActionPreview {
             // the closed mapping from tool name to consent semantics.
             "exec" => {
                 let command = clamp(arguments.get("command")?.as_str()?, MAX_ACTION_FIELD_CHARS)?;
-                let args = arguments
-                    .get("args")
-                    .and_then(Value::as_array)
-                    .map(|args| {
-                        args.iter()
-                            .take(MAX_ACTION_ARGS)
-                            .filter_map(|arg| {
-                                arg.as_str()
-                                    .and_then(|arg| clamp(arg, MAX_ACTION_FIELD_CHARS))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let cwd = arguments
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .and_then(|cwd| clamp(cwd, MAX_ACTION_FIELD_CHARS))
-                    .unwrap_or_else(|| ".".into());
+                let args = clamped_list(arguments.get("args"));
+                let cwd = clamped_field(arguments.get("cwd")).unwrap_or_else(|| ".".into());
                 Some(Self::Exec { command, args, cwd })
             }
             // Approving a search without seeing its query is not consent to
@@ -91,6 +86,9 @@ impl ToolActionPreview {
             }),
             "web_search" => Some(Self::WebSearch {
                 query: search_query(arguments)?,
+                domains: clamped_list(arguments.get("domains")),
+                start_published_at: clamped_field(arguments.get("start_published_at")),
+                end_published_at: clamped_field(arguments.get("end_published_at")),
             }),
             _ => None,
         }
@@ -113,40 +111,33 @@ impl ToolActionPreview {
     pub fn describes_exactly(tool_name: &str, arguments: &Value) -> bool {
         match tool_name {
             "exec" => {
-                let Some(command) = arguments.get("command").and_then(Value::as_str) else {
-                    return false;
-                };
-                if !survives_clamp(command) {
-                    return false;
-                }
-                // An absent `args` is faithfully the empty vector; a present one
-                // must be an array whose every element survives intact, since a
-                // dropped element silently changes the call's arity.
-                match arguments.get("args") {
-                    None => {}
-                    Some(Value::Array(args)) => {
-                        if args.len() > MAX_ACTION_ARGS {
-                            return false;
-                        }
-                        if !args
-                            .iter()
-                            .all(|arg| arg.as_str().is_some_and(survives_clamp))
-                        {
-                            return false;
-                        }
-                    }
-                    Some(_) => return false,
-                }
-                // An absent `cwd` is faithfully the default the preview shows.
-                match arguments.get("cwd") {
-                    None => true,
-                    Some(Value::String(cwd)) => survives_clamp(cwd),
-                    Some(_) => false,
-                }
+                arguments
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(survives_clamp)
+                    // A dropped or elided argument silently changes the call's
+                    // arity, and an absent `cwd` is faithfully the default the
+                    // preview shows.
+                    && list_survives_clamp(arguments.get("args"))
+                    && field_survives_clamp(arguments.get("cwd"))
             }
-            // Only `exec` has a scope narrower than the whole tool, so no
-            // other action needs to be exactly describable — and claiming it
-            // was would invite a narrow grant with nothing to narrow to.
+            // A search's action is its query, so a grant may name that query.
+            // `k` is not part of it: it bounds how many passages come back and
+            // changes nothing about what leaves the machine.
+            "search" => query_survives_clamp(arguments),
+            // `max_results` bounds the response the same way, but the domain
+            // and date filters are told to the provider alongside the query.
+            // They are on the card for that reason, and a grant may only be
+            // built from a call the card showed in full.
+            "web_search" => {
+                query_survives_clamp(arguments)
+                    && list_survives_clamp(arguments.get("domains"))
+                    && field_survives_clamp(arguments.get("start_published_at"))
+                    && field_survives_clamp(arguments.get("end_published_at"))
+            }
+            // A tool with no variant projects nothing, so there is nothing a
+            // narrower scope could name — and claiming otherwise would invite a
+            // narrow grant with nothing to narrow to.
             _ => false,
         }
     }
@@ -228,14 +219,78 @@ fn stream(value: Option<&Value>) -> String {
         .unwrap_or_default()
 }
 
-/// Bound one single-line preview field, dropping control characters that could
-/// forge card structure. An empty or all-control field is not presentable.
 /// The query a search will actually run, as the card should show it.
 fn search_query(arguments: &Value) -> Option<String> {
     clamp(
         arguments.get("query")?.as_str()?.trim(),
         MAX_ACTION_FIELD_CHARS,
     )
+}
+
+/// Bound one optional single-line preview field, dropping control characters
+/// that could forge card structure. An absent, empty, or all-control field is
+/// not presentable.
+fn clamped_field(value: Option<&Value>) -> Option<String> {
+    clamp(value?.as_str()?, MAX_ACTION_FIELD_CHARS)
+}
+
+/// Bound a list of single-line preview fields: surplus entries elided,
+/// unreadable ones dropped.
+fn clamped_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .take(MAX_ACTION_ARGS)
+                .filter_map(|value| {
+                    value
+                        .as_str()
+                        .and_then(|value| clamp(value, MAX_ACTION_FIELD_CHARS))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a query reaches the preview intact.
+///
+/// The trim is not a loss. Both search tools trim before searching, so padding
+/// is not a difference between two calls; anything the clamp would actually
+/// remove is.
+fn query_survives_clamp(arguments: &Value) -> bool {
+    arguments
+        .get("query")
+        .and_then(Value::as_str)
+        .is_some_and(|query| survives_clamp(query.trim()))
+}
+
+/// Whether an optional single-line argument reaches the preview intact. An
+/// absent one is faithfully the absence the preview shows.
+fn field_survives_clamp(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::String(text)) => survives_clamp(text),
+        Some(_) => false,
+    }
+}
+
+/// Whether a list argument reaches the preview intact.
+///
+/// An absent list is faithfully the empty one; a present one must be an array
+/// whose every element survives, since a dropped or elided element silently
+/// changes what the call does.
+fn list_survives_clamp(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(values)) => {
+            values.len() <= MAX_ACTION_ARGS
+                && values
+                    .iter()
+                    .all(|value| value.as_str().is_some_and(survives_clamp))
+        }
+        Some(_) => false,
+    }
 }
 
 /// Whether [`clamp`] would return this string unchanged.
@@ -261,15 +316,26 @@ fn clamp(value: &str, max_chars: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A `web_search` action with no filters, which is the common shape.
+    fn plain_web_search(query: &str) -> ToolActionPreview {
+        ToolActionPreview::WebSearch {
+            query: query.into(),
+            domains: Vec::new(),
+            start_published_at: None,
+            end_published_at: None,
+        }
+    }
+
     #[test]
     fn a_search_shows_the_query_it_is_asking_permission_for() {
         // Approving `web_search` used to show nothing about the query, which is
         // the one thing that actually leaves the machine.
         assert_eq!(
             ToolActionPreview::build("web_search", &json!({ "query": "quarterly filings" })),
-            Some(ToolActionPreview::WebSearch {
-                query: "quarterly filings".into()
-            })
+            Some(plain_web_search("quarterly filings"))
         );
         assert_eq!(
             ToolActionPreview::build("search", &json!({ "query": "revenue" })),
@@ -280,9 +346,7 @@ mod tests {
         // Trimmed, because the tool trims before searching.
         assert_eq!(
             ToolActionPreview::build("web_search", &json!({ "query": "  spaced  " })),
-            Some(ToolActionPreview::WebSearch {
-                query: "spaced".into()
-            })
+            Some(plain_web_search("spaced"))
         );
         // Extra arguments are not part of the action under review.
         assert_eq!(
@@ -304,24 +368,78 @@ mod tests {
     }
 
     #[test]
-    fn only_a_command_is_exactly_describable() {
-        // `exec` is the only action with a scope narrower than the whole tool,
-        // so it is the only one that may claim exactness. A search claiming it
-        // would invite a narrow grant with nothing to narrow to.
+    fn a_web_search_shows_the_filters_that_go_out_with_the_query() {
+        // The consent copy promises the query "and its explicit filters", and
+        // the filters reach the provider too — a card that showed only the
+        // query was describing part of the action it asked about.
+        assert_eq!(
+            ToolActionPreview::build(
+                "web_search",
+                &json!({
+                    "query": "quarterly filings",
+                    "max_results": 10,
+                    "domains": ["sec.gov", "ft.com"],
+                    "start_published_at": "2024-01-01T00:00:00Z",
+                }),
+            ),
+            Some(ToolActionPreview::WebSearch {
+                query: "quarterly filings".into(),
+                domains: vec!["sec.gov".into(), "ft.com".into()],
+                start_published_at: Some("2024-01-01T00:00:00Z".into()),
+                end_published_at: None,
+            })
+        );
+    }
+
+    #[test]
+    fn an_action_is_exactly_describable_only_when_the_card_showed_all_of_it() {
         assert!(ToolActionPreview::describes_exactly(
             "exec",
             &json!({ "command": "cargo", "args": ["test"] })
         ));
+        // A search names its query exactly, which is what lets an approval
+        // offer a grant narrower than every search in the chat.
         for tool in ["search", "web_search"] {
-            assert!(!ToolActionPreview::describes_exactly(
+            assert!(ToolActionPreview::describes_exactly(
                 tool,
                 &json!({ "query": "anything" })
             ));
         }
+        // Result counts bound the response, not the disclosure, so they are not
+        // part of the action a grant names.
+        assert!(ToolActionPreview::describes_exactly(
+            "search",
+            &json!({ "query": "anything", "k": 8 })
+        ));
+        assert!(ToolActionPreview::describes_exactly(
+            "web_search",
+            &json!({ "query": "anything", "max_results": 10 })
+        ));
+        // Filters are disclosure, and the card carries them, so a filtered
+        // search is exact too.
+        assert!(ToolActionPreview::describes_exactly(
+            "web_search",
+            &json!({ "query": "anything", "domains": ["sec.gov"] })
+        ));
+        // A filter the card could not show is a filter nobody consented to.
+        for arguments in [
+            json!({ "query": "anything", "domains": ["se\u{0}c.gov"] }),
+            json!({ "query": "anything", "domains": [7] }),
+            json!({ "query": "anything", "domains": "sec.gov" }),
+            json!({ "query": "anything", "end_published_at": 20_240_101 }),
+            json!({ "query": "any\u{0}thing" }),
+        ] {
+            assert!(!ToolActionPreview::describes_exactly(
+                "web_search",
+                &arguments
+            ));
+        }
+        // A tool with no variant has nothing to be exact about.
+        assert!(!ToolActionPreview::describes_exactly(
+            "mcp__server__tool",
+            &json!({ "query": "anything" })
+        ));
     }
-
-    use super::*;
-    use serde_json::json;
 
     #[test]
     fn exec_action_carries_the_argument_vector_and_defaults_its_directory() {

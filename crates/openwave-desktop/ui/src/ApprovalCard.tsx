@@ -279,9 +279,10 @@ function declineOption(): ApprovalOption {
 /**
  * The standing grants on offer, narrowest first.
  *
- * A command names itself, so consent can be about that command rather than
- * about commands in general. A tool with nothing to describe can only be
- * granted wholesale — there is no narrower thing to name.
+ * An action that names itself can be consented to as itself, rather than as
+ * the class of things its tool does — "always allow this query" rather than
+ * "allow every web search in this chat". A tool with nothing to describe can
+ * only be granted wholesale, because there is no narrower thing to name.
  */
 export function grantLadder(preview: ToolActionPreview | null): ApprovalOption[] {
   const wholeTool: ApprovalOption = {
@@ -294,29 +295,50 @@ export function grantLadder(preview: ToolActionPreview | null): ApprovalOption[]
     decision: "approve",
     grant: "whole_tool",
   };
-  if (preview?.tool !== "exec") return [wholeTool];
+  if (!preview) return [wholeTool];
 
-  const spoken = [preview.command, ...preview.args].join(" ");
+  const exact: ApprovalOption = {
+    kind: "decide",
+    key: "exact",
+    label: `Yes, and always allow exactly \u201c${spokenAction(preview)}\u201d`,
+    decision: "approve",
+    grant: "exact_action",
+  };
+  // A command is the one action with a rung between itself and its whole tool:
+  // the executable it runs. With no arguments even that would be the same
+  // grant as the exact one.
+  if (preview.tool !== "exec" || preview.args.length === 0) {
+    return [exact, wholeTool];
+  }
   return [
+    exact,
     {
       kind: "decide",
-      key: "exact",
-      label: `Yes, and always allow exactly \u201c${spoken}\u201d`,
+      key: "any-args",
+      label: `Yes, and always allow any \u201c${preview.command}\u201d command`,
       decision: "approve",
-      grant: "exact_command",
+      grant: "any_args_for_command",
     },
-    // With no arguments this would be the same grant as the exact one.
-    ...(preview.args.length > 0
-      ? [
-          {
-            kind: "decide" as const,
-            key: "any-args",
-            label: `Yes, and always allow any \u201c${preview.command}\u201d command`,
-            decision: "approve" as const,
-            grant: "any_args_for_command" as const,
-          },
-        ]
-      : []),
     wholeTool,
   ];
+}
+
+/** How much of an action fits in one row of the option list. */
+const SPOKEN_ACTION_CHARS = 48;
+
+/**
+ * The action as the grant label names it.
+ *
+ * Bounded, because this is one row of a keyboard-driven list and a
+ * natural-language query runs to hundreds of characters. The unabridged action
+ * is in the block above the list, which is where someone reads it.
+ */
+function spokenAction(preview: ToolActionPreview): string {
+  const spoken =
+    preview.tool === "exec"
+      ? [preview.command, ...preview.args].join(" ")
+      : preview.query;
+  return spoken.length > SPOKEN_ACTION_CHARS
+    ? `${spoken.slice(0, SPOKEN_ACTION_CHARS).trimEnd()}\u2026`
+    : spoken;
 }
