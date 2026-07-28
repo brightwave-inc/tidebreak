@@ -8,6 +8,31 @@ import type { ApiClient } from "@/api";
 const PdfViewer = lazy(() =>
   import("@/document/PdfViewer").then((m) => ({ default: m.PdfViewer })),
 );
+// The spreadsheet and word-document engines are larger still, and split apart
+// so that opening a workbook does not also fetch the document renderer.
+const UniverSpreadsheetViewer = lazy(
+  () => import("@/document/UniverSpreadsheetViewer"),
+);
+const UniverDocumentViewer = lazy(
+  () => import("@/document/UniverDocumentViewer"),
+);
+
+const SPREADSHEET_MEDIA_TYPES = new Set([
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+]);
+
+/**
+ * Delimited text is a spreadsheet with one sheet and no styling — the same
+ * viewer renders it, with the workbook style pass skipped.
+ */
+const DELIMITED_TEXT_MEDIA_TYPES = new Set([
+  "text/csv",
+  "text/tab-separated-values",
+]);
+
+const WORD_DOCUMENT_MEDIA_TYPE =
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 /**
  * Which viewer renders a source in its original form, chosen by media type.
@@ -18,7 +43,13 @@ const PdfViewer = lazy(() =>
  * extracted text, which is a better floor than refusing to open the source.
  */
 export function hasOriginalViewer(mediaType: string): boolean {
-  return normalizeMediaType(mediaType) === "application/pdf";
+  const type = normalizeMediaType(mediaType);
+  return (
+    type === "application/pdf" ||
+    type === WORD_DOCUMENT_MEDIA_TYPE ||
+    SPREADSHEET_MEDIA_TYPES.has(type) ||
+    DELIMITED_TEXT_MEDIA_TYPES.has(type)
+  );
 }
 
 interface DocumentViewerProps {
@@ -37,27 +68,63 @@ export function DocumentViewer({
   targetPage,
   className,
 }: DocumentViewerProps) {
-  switch (normalizeMediaType(mediaType)) {
-    case "application/pdf":
-      return (
-        <Suspense
-          fallback={
-            <div className="flex grow items-center justify-center">
-              <Loader2Icon className="size-6 animate-spin text-muted-foreground" />
-            </div>
-          }
-        >
-          <PdfViewer
-            client={client}
-            documentId={documentId}
-            targetPage={targetPage}
-            className={className}
-          />
-        </Suspense>
-      );
-    default:
-      return null;
+  const type = normalizeMediaType(mediaType);
+
+  if (type === "application/pdf") {
+    return (
+      <ViewerBoundary>
+        <PdfViewer
+          client={client}
+          documentId={documentId}
+          targetPage={targetPage}
+          className={className}
+        />
+      </ViewerBoundary>
+    );
   }
+
+  if (SPREADSHEET_MEDIA_TYPES.has(type) || DELIMITED_TEXT_MEDIA_TYPES.has(type)) {
+    return (
+      <ViewerBoundary>
+        <UniverSpreadsheetViewer
+          key={documentId}
+          client={client}
+          documentId={documentId}
+          isCsv={DELIMITED_TEXT_MEDIA_TYPES.has(type)}
+          className={className}
+        />
+      </ViewerBoundary>
+    );
+  }
+
+  if (type === WORD_DOCUMENT_MEDIA_TYPE) {
+    return (
+      <ViewerBoundary>
+        <UniverDocumentViewer
+          key={documentId}
+          client={client}
+          documentId={documentId}
+          className={className}
+        />
+      </ViewerBoundary>
+    );
+  }
+
+  return null;
+}
+
+function ViewerBoundary({ children }: { children: React.ReactNode }) {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex grow items-center justify-center">
+          <Loader2Icon className="size-6 animate-spin text-muted-foreground" />
+        </div>
+      }
+    >
+      {children}
+    </Suspense>
+  );
 }
 
 /** Media types arrive with parameters (`application/pdf; charset=binary`). */

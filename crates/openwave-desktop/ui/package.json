@@ -25,8 +25,14 @@
     "@radix-ui/react-tooltip": "1.2.13",
     "@tanstack/react-router": "1.170.18",
     "@tauri-apps/api": "2.11.1",
+    "@univerjs/core": "0.25.1",
+    "@univerjs/preset-docs-core": "0.25.1",
+    "@univerjs/preset-sheets-core": "0.25.1",
+    "@univerjs/presets": "0.25.1",
+    "@univerjs/sheets": "0.25.1",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
+    "jszip": "3.10.1",
     "lucide-react": "1.25.0",
     "pdfjs-dist": "4.8.69",
     "react": "19.2.7",
@@ -40,6 +46,7 @@
     "sonner": "2.0.7",
     "tailwind-merge": "3.6.0",
     "tailwindcss-animate": "1.0.7",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zustand": "5.0.14"
   },
   "devDependencies": {
