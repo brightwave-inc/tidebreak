@@ -130,6 +130,18 @@ pub struct GatewayModel {
     pub supports_vision: bool,
 }
 
+/// One entitled connected app from `/api/v1/cli/apps`: the apps the user
+/// reaches through team grants, and the slugs of the MCP endpoints that
+/// aggregate each one (the `mcp:<slug>` resources a client may request).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GatewayApp {
+    pub id: String,
+    pub name: String,
+    pub app_kind: String,
+    pub enabled: bool,
+    pub mcp_endpoint_slugs: Vec<String>,
+}
+
 /// One minted access/refresh pair, resource-bound.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TokenSet {
@@ -380,6 +392,23 @@ impl GatewayAuth {
             .map_err(|error| gateway_error("model request", error.without_url()))?;
         let list: ModelListResponse = decode_json(response, "model request").await?;
         Ok(list.models)
+    }
+
+    /// The connected apps the authenticated user is entitled to, or `None`
+    /// against a gateway that predates the JSON apps surface.
+    pub async fn apps(&self, access_token: &str) -> Result<Option<Vec<GatewayApp>>> {
+        let response = self
+            .http
+            .get(self.endpoint("/api/v1/cli/apps")?)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|error| gateway_error("app request", error.without_url()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let list: AppListResponse = decode_json(response, "app request").await?;
+        Ok(Some(list.apps))
     }
 
     async fn exchange_code(
@@ -650,6 +679,13 @@ impl GatewayConnection {
         self.auth.models(&token, protocol).await
     }
 
+    /// Entitled connected apps with a `control` token; `None` when the
+    /// gateway predates the apps surface.
+    pub async fn apps(&self) -> Result<Option<Vec<GatewayApp>>> {
+        let token = self.access_token(RESOURCE_CONTROL).await?;
+        self.auth.apps(&token).await
+    }
+
     /// Revoke the session at the gateway (best-effort) and always clear the
     /// local vault. A gateway that is unreachable cannot hold local sign-out
     /// hostage; its server-side session still dies at refresh-token expiry.
@@ -742,6 +778,11 @@ struct OAuthErrorResponse {
 #[derive(Deserialize)]
 struct ModelListResponse {
     models: Vec<GatewayModel>,
+}
+
+#[derive(Deserialize)]
+struct AppListResponse {
+    apps: Vec<GatewayApp>,
 }
 
 async fn decode_json<T: for<'de> Deserialize<'de>>(

@@ -22,7 +22,7 @@
 mod gateway;
 
 pub use gateway::{
-    has_stored_credentials, is_sign_in_required, AuthorizedSession, CredentialVault, GatewayAuth,
-    GatewayAuthConfig, GatewayConnection, GatewayCredentials, GatewayIdentity, GatewayMeta,
-    GatewayModel, PendingSignIn, TokenSet, RESOURCE_CONTROL, RESOURCE_LLM,
+    has_stored_credentials, is_sign_in_required, AuthorizedSession, CredentialVault, GatewayApp,
+    GatewayAuth, GatewayAuthConfig, GatewayConnection, GatewayCredentials, GatewayIdentity,
+    GatewayMeta, GatewayModel, PendingSignIn, TokenSet, RESOURCE_CONTROL, RESOURCE_LLM,
 };

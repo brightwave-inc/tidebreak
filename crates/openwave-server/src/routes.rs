@@ -171,6 +171,15 @@ pub async fn post_gateway_sign_out(
     Ok(Json(state.gateway.status().await?))
 }
 
+/// `GET /gateway/apps` — the signed-in user's entitled connected apps,
+/// fetched live from the gateway. Fails when no gateway is configured or no
+/// session is stored; the renderer only asks while signed in.
+pub async fn get_gateway_apps(
+    State(state): State<AppState>,
+) -> Result<Json<crate::gateway_runtime::GatewayApps>, ServerError> {
+    Ok(Json(state.gateway.apps().await?))
+}
+
 /// `POST /gateway/models/sync` — refetch the entitled models into the
 /// provider's model set.
 pub async fn post_gateway_models_sync(

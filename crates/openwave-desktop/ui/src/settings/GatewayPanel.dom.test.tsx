@@ -30,6 +30,7 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
       .mockResolvedValue({ authorization_url: "http://gw/oauth/authorize?x=1" }),
     gatewaySignOut: vi.fn().mockResolvedValue(signedOut),
     syncGatewayModels: vi.fn().mockResolvedValue(signedIn),
+    getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
     putProvider: vi.fn().mockResolvedValue({}),
     ...overrides,
   } as unknown as ApiClient;
@@ -135,6 +136,40 @@ describe("GatewayPanel", () => {
     });
     expect(screen.getByText("Signed in")).toBeInTheDocument();
     expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("lists entitled connected apps, and hides the section on an older gateway", async () => {
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+      getGatewayApps: vi.fn().mockResolvedValue({
+        supported: true,
+        apps: [
+          {
+            id: "app-1",
+            name: "Incident API",
+            app_kind: "rest_api",
+            enabled: true,
+            mcp_endpoint_slugs: ["example-security-tools"],
+          },
+        ],
+      }),
+    });
+    render(<GatewayPanel client={client} onChanged={() => undefined} />);
+
+    expect(await screen.findByText("Incident API")).toBeInTheDocument();
+    expect(screen.getByText(/example-security-tools/)).toBeInTheDocument();
+
+    cleanup();
+    // A gateway that predates the JSON apps surface: no section, no error.
+    const older = api({
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+      getGatewayApps: vi
+        .fn()
+        .mockResolvedValue({ supported: false, apps: [] }),
+    });
+    render(<GatewayPanel client={older} onChanged={() => undefined} />);
+    expect(await screen.findByText("Signed in")).toBeInTheDocument();
+    expect(screen.queryByText("Connected apps")).not.toBeInTheDocument();
   });
 
   it("surfaces a failed sign-in with its bounded message", async () => {
