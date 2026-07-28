@@ -102,22 +102,43 @@ already covered by the wire-type fixtures" is.
 
 Coverage percentage is not a goal and is not tracked. Confidence is.
 
-## Verify locally — CI does not cover every change
+## Let CI do the heavy verification
 
-CI has a change-scope gate that **skips** the heavy Rust build/test/clippy lanes
-for many PRs (docs-only, dependency-only, and some server/desktop changes). A
-green "mergeable / no checks failed" is **not** proof the code compiles. Before
-opening a PR that touches Rust, run what CI would have run:
+CI is the gate, and for anything it runs at all it runs *more* than you can
+locally. Re-running the full workspace suite before every push buys nothing and
+costs minutes on each iteration. Push early and let the lanes work while you
+keep going.
 
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace
-cargo check --workspace --locked
-```
+The change-scope gate in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+is the whole rule, and it is coarse on purpose:
 
-For the desktop UI, run `tsc`, the vitest suite, and a production build under
-`crates/openwave-desktop/ui`.
+- Any changed file outside `*.md`, `docs/`, `assets/`, `LICENSE`, `NOTICE`, and
+  `crates/openwave-desktop/ui/` marks the change **Rust** — including
+  `Cargo.toml` and `Cargo.lock`. That runs rustfmt, clippy (`--all-targets
+  -D warnings`), the desktop tests, the headless workspace tests, the
+  LanceDB-backed lane, and the PostgreSQL turn-state lane. Every cargo
+  invocation passes `--locked`, so a lockfile drift fails there too.
+- Any file under `crates/openwave-desktop/ui/` marks it **UI**, which runs
+  `pnpm test` and `pnpm build`.
+- The aggregate `fmt · clippy · build · test` check asserts each lane either
+  succeeded or was legitimately skipped, and branch protection requires it. A
+  lane is skipped only when the change could not have affected it.
+
+So a scoped skip is not a coverage hole, and duplicating those lanes locally is
+wasted time. Run a cheap subset for fast feedback on what you actually touched —
+`cargo check -p <crate>`, the one test module you changed, `tsc` — and push.
+
+**The real trap is a PR that got no CI at all.** A conflicting PR runs nothing
+but the trivial policy checks, so "no checks failed" reads green while nothing
+was verified. Judge by whether the required aggregate check ran and passed, not
+by the absence of red. `gh pr checks <n>` shows the truth; rebase a conflicting
+PR before believing anything about it.
+
+Enable auto-merge (`gh pr merge <n> --squash --auto --delete-branch`) so a PR
+lands the moment its lanes go green instead of waiting for you to come back.
+
+Driving the running app to confirm behavior is not expected — say what you
+could not verify and hand it over.
 
 ## Commits and PRs
 
