@@ -484,13 +484,27 @@ impl ToolOutput {
     /// project nothing — see [`crate::ToolResultPreview::Entries`], which
     /// clamps every row before it crosses.
     #[must_use]
-    pub fn with_entries(mut self, entries: Vec<crate::ResultEntry>) -> Self {
-        let entries = serde_json::json!(entries);
+    pub fn with_entries(self, entries: Vec<crate::ResultEntry>) -> Self {
+        self.with_projected("entries", serde_json::json!(entries))
+    }
+
+    /// Report what this call could not do, beside what it did.
+    ///
+    /// A batch tool that lists only its successes is not reporting. Carried
+    /// alongside [`Self::with_entries`] rather than instead of it — a call that
+    /// imported three files and failed two has both to say.
+    #[must_use]
+    pub fn with_failures(self, failures: Vec<crate::ResultFailure>) -> Self {
+        self.with_projected("failures", serde_json::json!(failures))
+    }
+
+    /// Merge one renderer-projected key into this output's structured data.
+    fn with_projected(mut self, key: &str, value: Value) -> Self {
         match self.data.as_mut().and_then(Value::as_object_mut) {
             Some(data) => {
-                data.insert("entries".into(), entries);
+                data.insert(key.into(), value);
             }
-            None => self.data = Some(serde_json::json!({ "entries": entries })),
+            None => self.data = Some(serde_json::json!({ key: value })),
         }
         self
     }

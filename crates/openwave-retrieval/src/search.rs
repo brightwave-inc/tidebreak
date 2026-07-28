@@ -625,6 +625,7 @@ mod tests {
                     openwave_core::ResultEntryKind::Passage,
                     "Jupiter is the largest planet in the Solar System, a gas giant.",
                 )],
+                failures: Vec::new(),
                 elided: 0,
             })
         );

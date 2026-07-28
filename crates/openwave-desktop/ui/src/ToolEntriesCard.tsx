@@ -11,7 +11,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import type { EntriesResultPreview, ResultEntry, ResultEntryKind } from "./api";
+import type {
+  EntriesResultPreview,
+  ResultEntry,
+  ResultEntryKind,
+  ResultFailure,
+} from "./api";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { ToolCardShell } from "./ToolCardShell";
@@ -54,7 +59,7 @@ const ENTRY_ICONS: Record<ResultEntryKind, LucideIcon> = {
  */
 export function ToolEntriesCard({ name, status, result }: ToolEntriesCardProps) {
   const presentation = toolCallPresentation(name, status);
-  const { entries, elided } = result;
+  const { entries, failures, elided } = result;
   const total = entries.length + elided;
 
   return (
@@ -62,25 +67,63 @@ export function ToolEntriesCard({ name, status, result }: ToolEntriesCardProps) 
       label={`${presentation.label}: ${presentation.statusLabel}`}
       icon={<ToolIcon name={name} className="size-3.5 shrink-0" />}
       title={presentation.title}
-      badge={<EntriesBadge presentation={presentation} total={total} />}
+      badge={
+        <EntriesBadge
+          presentation={presentation}
+          total={total}
+          failureCount={failures.length}
+        />
+      }
     >
-      {entries.length === 0 ? (
+      {entries.length === 0 && failures.length === 0 ? (
         <p className="text-muted-foreground px-2.5 py-2 text-xs">
           {emptyMessage(presentation.tone)}
         </p>
-      ) : (
+      ) : null}
+      {entries.length > 0 && (
         <div className="flex max-h-56 flex-col gap-0.5 overflow-auto p-1">
           {entries.map((entry, index) => (
             <EntryRow key={`${entry.kind}:${entry.label}:${index}`} entry={entry} />
           ))}
         </div>
       )}
+      <FailureRows failures={failures} />
       {elided > 0 && (
         <p className="text-muted-foreground border-t px-2.5 py-1.5 text-xs">
           {elided} more not shown
         </p>
       )}
     </ToolCardShell>
+  );
+}
+
+/**
+ * What the call could not do, below what it did and divided from it.
+ *
+ * Its own section rather than rows mixed into the list: a failure is not a
+ * result with a bad outcome, it is the absence of one, and a reader scanning
+ * for what they got should not have to check each row for whether it counted.
+ */
+function FailureRows({ failures }: { failures: ResultFailure[] }) {
+  if (failures.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-0.5 border-t p-1">
+      {failures.map((failure, index) => (
+        <div
+          key={`${failure.label ?? ""}:${index}`}
+          className="flex items-start gap-2 rounded p-1 px-1.5 text-sm"
+        >
+          <X
+            className="text-destructive mt-0.5 size-4 shrink-0"
+            aria-hidden="true"
+          />
+          <span className="truncate">{failure.label ?? "Item"}</span>
+          <span className="text-destructive ml-auto min-w-0 truncate text-right text-xs">
+            {failure.error}
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -112,9 +155,11 @@ function EntryRow({ entry }: { entry: ResultEntry }) {
 function EntriesBadge({
   presentation,
   total,
+  failureCount,
 }: {
   presentation: { tone: string; badgeLabel: string };
   total: number;
+  failureCount: number;
 }) {
   if (presentation.tone === "running") {
     return (
@@ -125,6 +170,15 @@ function EntriesBadge({
     );
   }
   if (presentation.tone === "completed") {
+    // A partial success is not a success. The badge carries the failure count
+    // so a collapsed card cannot read as "12 results" when two of them failed.
+    if (failureCount > 0) {
+      return (
+        <Badge variant="warning" className="shrink-0 gap-1">
+          {total} {total === 1 ? "result" : "results"} · {failureCount} failed
+        </Badge>
+      );
+    }
     return (
       <Badge
         variant={total === 0 ? "outline" : "success"}

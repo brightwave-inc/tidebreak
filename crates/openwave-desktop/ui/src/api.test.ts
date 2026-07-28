@@ -819,21 +819,32 @@ describe("parseToolResultPreview closed results", () => {
           { kind: "file", label: "" },
           { kind: "folder", label: "reports" },
         ],
+        failures: [
+          { label: "q4.md", error: "unreadable" },
+          // No reason to show, so no row — but still counted.
+          { label: "q5.md" },
+        ],
       }),
     ).toEqual({
       tool: "entries",
-      elided: 4,
+      elided: 5,
       entries: [
         { kind: "file", label: "notes.md", detail: "scratch", meta: "1.2 KB" },
         { kind: "folder", label: "reports", detail: null, meta: null },
       ],
+      failures: [{ label: "q4.md", error: "unreadable" }],
     });
   });
 
   it("keeps an empty list, which is a result and not the absence of one", () => {
     expect(
-      parseToolResultPreview({ tool: "entries", entries: [], elided: 0 }),
-    ).toEqual({ tool: "entries", entries: [], elided: 0 });
+      parseToolResultPreview({
+        tool: "entries",
+        entries: [],
+        failures: [],
+        elided: 0,
+      }),
+    ).toEqual({ tool: "entries", entries: [], failures: [], elided: 0 });
   });
 });
 

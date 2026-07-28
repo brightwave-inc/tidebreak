@@ -141,8 +141,8 @@ pub use model::{
     MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
 };
 pub use preview::{
-    format_bytes, ResultEntry, ResultEntryKind, ToolActionPreview, ToolResultPreview,
-    MAX_RESULT_ENTRIES, MAX_RESULT_ENTRY_CHARS,
+    format_bytes, ResultEntry, ResultEntryKind, ResultFailure, ToolActionPreview,
+    ToolResultPreview, MAX_RESULT_ENTRIES, MAX_RESULT_ENTRY_CHARS,
 };
 pub use provider::{
     ChatMessage, ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId,
