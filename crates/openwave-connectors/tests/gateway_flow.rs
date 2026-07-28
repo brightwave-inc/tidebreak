@@ -63,6 +63,8 @@ struct FakeGateway {
     revoked: Mutex<Vec<String>>,
     token_requests: AtomicUsize,
     corrupt_state: AtomicBool,
+    /// Serve 404 for `/api/v1/cli/apps`, like a gateway that predates it.
+    apps_unsupported: AtomicBool,
 }
 
 impl FakeGateway {
@@ -250,6 +252,25 @@ async fn models(State(gateway): State<Arc<FakeGateway>>, headers: HeaderMap) -> 
     .into_response()
 }
 
+async fn apps(State(gateway): State<Arc<FakeGateway>>, headers: HeaderMap) -> Response {
+    if gateway.apps_unsupported.load(Ordering::SeqCst) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if bearer_resource(&gateway, &headers).as_deref() != Some("control") {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(json!({
+        "apps": [{
+            "id": "app-incident",
+            "name": "Incident API",
+            "app_kind": "rest_api",
+            "enabled": true,
+            "mcp_endpoint_slugs": ["example-security-tools"],
+        }]
+    }))
+    .into_response()
+}
+
 async fn serve_fake_gateway(gateway: Arc<FakeGateway>) -> SocketAddr {
     let app = Router::new()
         .route("/api/v1/meta", get(meta))
@@ -258,6 +279,7 @@ async fn serve_fake_gateway(gateway: Arc<FakeGateway>) -> SocketAddr {
         .route("/oauth/revoke", post(revoke))
         .route("/api/v1/cli/me", get(me))
         .route("/api/v1/cli/models", get(models))
+        .route("/api/v1/cli/apps", get(apps))
         .with_state(gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -398,4 +420,21 @@ async fn sign_out_revokes_remotely_and_clears_the_vault() {
         .await
         .expect_err("signed-out connection must fail");
     assert!(is_sign_in_required(&error), "{error}");
+}
+
+#[tokio::test]
+async fn apps_lists_entitlements_and_degrades_when_the_surface_is_missing() {
+    let (gateway, connection) = signed_in_connection().await;
+
+    let apps = connection.apps().await.unwrap().unwrap();
+    assert_eq!(apps.len(), 1);
+    assert_eq!(apps[0].name, "Incident API");
+    assert_eq!(apps[0].app_kind, "rest_api");
+    assert!(apps[0].enabled);
+    assert_eq!(apps[0].mcp_endpoint_slugs, ["example-security-tools"]);
+
+    // An older gateway without the JSON apps surface is "unsupported", not an
+    // error and not an empty entitlement list.
+    gateway.apps_unsupported.store(true, Ordering::SeqCst);
+    assert_eq!(connection.apps().await.unwrap(), None);
 }

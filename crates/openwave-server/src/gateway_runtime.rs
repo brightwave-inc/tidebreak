@@ -70,6 +70,28 @@ pub(crate) struct GatewayStatus {
     pub(crate) sign_in: SignInProgress,
 }
 
+/// Renderer-safe list of the connected apps the signed-in user is entitled
+/// to, fetched live from the gateway (never cached: a revoked grant is gone
+/// on the next request).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+pub(crate) struct GatewayApps {
+    /// False when the connected gateway predates the JSON apps surface; the
+    /// renderer hides the section instead of showing an empty list as "none".
+    pub(crate) supported: bool,
+    pub(crate) apps: Vec<GatewayAppInfo>,
+}
+
+/// One entitled connected app, with the slugs of the MCP endpoints that
+/// aggregate it — the `mcp:<slug>` resources a mount would request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+pub(crate) struct GatewayAppInfo {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) app_kind: String,
+    pub(crate) enabled: bool,
+    pub(crate) mcp_endpoint_slugs: Vec<String>,
+}
+
 impl GatewayRuntime {
     pub(crate) fn new(store: Arc<dyn Store>, secrets: Arc<dyn SecretProvider>) -> Arc<Self> {
         Arc::new(Self {
@@ -101,6 +123,35 @@ impl GatewayRuntime {
                 .map(|credentials| credentials.installation_id.clone()),
             model_count: config.models.len(),
             sign_in: self.sign_in.lock().await.clone(),
+        })
+    }
+
+    /// The entitled connected apps, fetched live from the gateway with the
+    /// stored session. Requires a configured gateway and a signed-in session;
+    /// a gateway without the JSON apps surface reports `supported: false`.
+    pub(crate) async fn apps(&self) -> Result<GatewayApps> {
+        let connection = self
+            .connection()
+            .await?
+            .ok_or_else(|| AgentError::config("no model gateway is configured"))?;
+        Ok(match connection.apps().await? {
+            Some(apps) => GatewayApps {
+                supported: true,
+                apps: apps
+                    .into_iter()
+                    .map(|app| GatewayAppInfo {
+                        id: app.id,
+                        name: app.name,
+                        app_kind: app.app_kind,
+                        enabled: app.enabled,
+                        mcp_endpoint_slugs: app.mcp_endpoint_slugs,
+                    })
+                    .collect(),
+            },
+            None => GatewayApps {
+                supported: false,
+                apps: Vec::new(),
+            },
         })
     }
 

@@ -282,6 +282,7 @@ pub fn app(state: AppState) -> Router {
             get(routes::get_mcp_app_payload),
         )
         .route("/gateway/status", get(routes::get_gateway_status))
+        .route("/gateway/apps", get(routes::get_gateway_apps))
         .route("/gateway/sign-in", post(routes::post_gateway_sign_in))
         .route("/gateway/sign-out", post(routes::post_gateway_sign_out))
         .route(

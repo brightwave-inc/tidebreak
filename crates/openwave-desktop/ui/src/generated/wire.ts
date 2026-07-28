@@ -241,6 +241,24 @@ context_window: number,
 max_output_tokens: number, };
 
 /**
+ * One entitled connected app, with the slugs of the MCP endpoints that
+ * aggregate it — the `mcp:<slug>` resources a mount would request.
+ */
+export type GatewayAppInfo = { id: string, name: string, app_kind: string, enabled: boolean, mcp_endpoint_slugs: Array<string>, };
+
+/**
+ * Renderer-safe list of the connected apps the signed-in user is entitled
+ * to, fetched live from the gateway (never cached: a revoked grant is gone
+ * on the next request).
+ */
+export type GatewayApps = { 
+/**
+ * False when the connected gateway predates the JSON apps surface; the
+ * renderer hides the section instead of showing an empty list as "none".
+ */
+supported: boolean, apps: Array<GatewayAppInfo>, };
+
+/**
  * Renderer-safe projection of the gateway connection state. Never carries
  * token material — only what the settings surface displays.
  */

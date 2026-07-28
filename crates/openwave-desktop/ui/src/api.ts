@@ -15,6 +15,8 @@ import {
   type McpHealth as WireMcpHealth,
   type McpServerDefinition as WireMcpServerDefinition,
   type McpViewSession,
+  type GatewayApps as WireGatewayApps,
+  type GatewayAppInfo as WireGatewayAppInfo,
   type GatewayStatus as WireGatewayStatus,
   type SignInProgress,
   type McpServerInfo as WireMcpServerInfo,
@@ -234,6 +236,12 @@ export type GatewaySignInProgress = SignInProgress;
 
 /** Renderer-safe model-gateway connection state; never token material. */
 export type GatewayStatus = WireGatewayStatus;
+
+/** The signed-in user's entitled connected apps, fetched live per request. */
+export type GatewayApps = WireGatewayApps;
+
+/** One entitled connected app and the MCP endpoint slugs that carry it. */
+export type GatewayAppInfo = WireGatewayAppInfo;
 
 /**
  * Opaque envelope for a sandboxed MCP App view; never rendered directly.
@@ -538,6 +546,10 @@ export class ApiClient {
       method: "POST",
       headers: this.headers(),
     });
+  }
+
+  getGatewayApps(): Promise<GatewayApps> {
+    return this.json("/gateway/apps", { headers: this.headers() });
   }
 
   syncGatewayModels(): Promise<GatewayStatus> {

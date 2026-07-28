@@ -339,6 +339,7 @@ mod tests {
         generate::collect_from::<crate::mcp_config::McpServerDefinition>(&cfg, &mut out);
         generate::collect_from::<crate::routes::McpViewSession>(&cfg, &mut out);
         generate::collect_from::<crate::gateway_runtime::GatewayStatus>(&cfg, &mut out);
+        generate::collect_from::<crate::gateway_runtime::GatewayApps>(&cfg, &mut out);
         generate::collect_from::<openwave_core::Project>(&cfg, &mut out);
         generate::collect_from::<openwave_core::Chat>(&cfg, &mut out);
         generate::collect_from::<crate::routes::AgentRunSnapshot>(&cfg, &mut out);

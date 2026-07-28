@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, LogOut, RefreshCw } from "lucide-react";
-import type { ApiClient, GatewayStatus } from "../api";
+import type { ApiClient, GatewayApps, GatewayStatus } from "../api";
 import { openExternal } from "../host";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,6 +37,7 @@ export function GatewayPanel({
   onChanged: () => void;
 }) {
   const [status, setStatus] = useState<GatewayStatus | null>(null);
+  const [apps, setApps] = useState<GatewayApps | null>(null);
   const [baseUrl, setBaseUrl] = useState("");
   const [dirty, setDirty] = useState(false);
   const [working, setWorking] = useState(false);
@@ -62,6 +63,28 @@ export function GatewayPanel({
   useEffect(() => {
     reload().catch((err) => setError(String(err)));
   }, [reload]);
+
+  // Entitled apps are never cached server-side (a revoked grant disappears on
+  // the next request), so fetch them fresh whenever the signed-in state turns
+  // on. A fetch failure only hides the section; models keep working.
+  useEffect(() => {
+    if (!status?.signed_in) {
+      setApps(null);
+      return;
+    }
+    let cancelled = false;
+    client
+      .getGatewayApps()
+      .then((next) => {
+        if (!cancelled) setApps(next);
+      })
+      .catch(() => {
+        if (!cancelled) setApps(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, status?.signed_in]);
 
   // While the browser flow is pending, watch for its outcome.
   useEffect(() => {
@@ -250,6 +273,39 @@ export function GatewayPanel({
           </>
         )}
       </SettingsSection>
+
+      {status.signed_in && apps?.supported && (
+        <SettingsSection title="Connected apps">
+          {apps.apps.length === 0 ? (
+            <p className="text-muted-foreground text-sm">
+              No connected apps are granted to your teams yet.
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {apps.apps.map((app) => (
+                <li key={app.id} className="rounded-md border px-3 py-2 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{app.name}</span>
+                    <span className="text-muted-foreground text-xs">
+                      {app.app_kind}
+                    </span>
+                    {!app.enabled && (
+                      <span className="text-muted-foreground text-xs">
+                        disabled
+                      </span>
+                    )}
+                  </div>
+                  {app.mcp_endpoint_slugs.length > 0 && (
+                    <p className="text-muted-foreground text-xs">
+                      via {app.mcp_endpoint_slugs.join(", ")}
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </SettingsSection>
+      )}
 
       <p className="text-sm leading-relaxed text-muted-foreground">
         Sign-in happens in your browser against the gateway itself; OpenWave
