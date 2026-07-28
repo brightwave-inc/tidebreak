@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { Outlet, useNavigate } from "@tanstack/react-router";
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import {
   ApiClient,
@@ -18,6 +17,7 @@ import { hasMacOverlayTitlebar } from "./host";
 import { Logomark } from "./Logomark";
 import { resolvedRoleKey } from "./ModelSelection";
 import { useTheme } from "./theme";
+import { Titlebar } from "./Titlebar";
 import { useActiveChatId } from "./useActiveChatId";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
 import { useShellShortcuts } from "./ShellShortcuts";
@@ -57,7 +57,6 @@ export function AppShell() {
   const [defaultModelKey, setDefaultModelKey] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [status, setStatus] = useState("starting…");
-  const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
   const openChatId = useActiveChatId();
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
@@ -285,19 +284,7 @@ export function AppShell() {
     >
       <div className={`app-shell${hasMacOverlayTitlebar() ? " with-titlebar" : ""}`}>
         {confirmDialog}
-        {hasMacOverlayTitlebar() && (
-          <div className="titlebar" data-tauri-drag-region>
-            <button
-              type="button"
-              className="titlebar-panel-toggle"
-              aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
-              title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
-              onClick={() => useUiStore.getState().toggleSidebar()}
-            >
-              {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
-            </button>
-          </div>
-        )}
+        {hasMacOverlayTitlebar() && <Titlebar />}
         {/* Each route renders its own rail beside its content — see RouteFrame. */}
         <div className="app-body">
           <Outlet />

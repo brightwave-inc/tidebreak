@@ -1,5 +1,7 @@
 import type { ComponentPropsWithoutRef } from "react";
 
+import { cn } from "@/lib/utils";
+
 /** OpenWave mark geometry, shared with the packaged desktop app icon. */
 const LOGOMARK_VIEWBOX = "127 217 757 407";
 const LOGOMARK_PATH = `
@@ -9,7 +11,32 @@ const LOGOMARK_PATH = `
   M6860 2005l-115-116 345-341c190-188 460-456 602-596l256-254 10 3c5 2 159 150 341 328l331 324v22l-745 745h-910l-115-115z
 `;
 
-/** Logomark only — used in the shell chrome. */
+/**
+ * The boxed lockup — the mark on its tile, the same shape as the packaged app
+ * icon and the form the brand is recognized in.
+ *
+ * The bare mark is four thin chevrons; at rail size it reads as an ornament
+ * rather than as the app. The tile is what makes it a logo, so anywhere the
+ * logo stands for the app this is the one to use.
+ */
+export function BoxedLogomark({
+  className,
+  ...props
+}: ComponentPropsWithoutRef<"span">) {
+  return (
+    <span
+      className={cn(
+        "inline-flex size-6 shrink-0 items-center justify-center rounded-[7px] bg-foreground text-background",
+        className,
+      )}
+      {...props}
+    >
+      <Logomark width="15" height="8" />
+    </span>
+  );
+}
+
+/** The bare mark. Prefer {@link BoxedLogomark} where the logo stands alone. */
 export function Logomark(props: ComponentPropsWithoutRef<"svg">) {
   return (
     <svg
