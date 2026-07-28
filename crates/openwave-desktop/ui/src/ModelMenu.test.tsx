@@ -107,13 +107,16 @@ describe("visibleModelGroups", () => {
   });
 
   it("keeps a partially available provider intact", () => {
-    const models = withAvailability({ anthropic: true, openai: true }).map(
-      (model, index) => ({ ...model, available: index === 0 }),
+    const [sonnet] = MODELS;
+    const haiku = {
+      ...sonnet,
+      key: "anthropic::claude-haiku" as const,
+      id: "claude-haiku",
+      available: false,
+    };
+    const anthropic = visibleModelGroups([sonnet, haiku], null).find(
+      (group) => group.provider === "anthropic",
     );
-    const anthropic = visibleModelGroups(
-      [...models, { ...models[0], key: "anthropic::claude-haiku", id: "claude-haiku", available: false }],
-      null,
-    ).find((group) => group.provider === "anthropic");
     expect(anthropic?.models).toHaveLength(2);
   });
 });
