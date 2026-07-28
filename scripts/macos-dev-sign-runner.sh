@@ -22,12 +22,13 @@
 #   1. $OPENWAVE_DEV_SIGNING_IDENTITY (set to opt out with an empty value)
 #   2. an "openwave-dev" self-signed certificate, if one exists
 #   3. the first "Apple Development" identity in the keychain
-# With no identity available the binary runs unsigned, exactly as before.
+#   4. a local-only "openwave-dev" identity bootstrapped in its own keychain
 
 set -euo pipefail
 
 bin="$1"
 shift
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 find_identity() {
   local identities
@@ -43,7 +44,23 @@ find_identity() {
   done
 }
 
-identity="${OPENWAVE_DEV_SIGNING_IDENTITY-$(find_identity)}"
+if [[ -n "${OPENWAVE_DEV_SIGNING_IDENTITY+x}" ]]; then
+  identity="$OPENWAVE_DEV_SIGNING_IDENTITY"
+elif "$script_dir/setup-macos-dev-signing.sh" --existing-only; then
+  # The bootstrapped certificate is intentionally self-signed and untrusted,
+  # so `security find-identity -p codesigning` does not list it even though
+  # codesign can use it. Check its dedicated keychain first.
+  identity="openwave-dev"
+else
+  identity="$(find_identity)"
+  if [[ -z "$identity" ]]; then
+    if "$script_dir/setup-macos-dev-signing.sh"; then
+      identity="openwave-dev"
+    else
+      echo "warning: could not set up durable macOS dev signing; running unsigned" >&2
+    fi
+  fi
+fi
 
 identifier="openwave-dev"
 

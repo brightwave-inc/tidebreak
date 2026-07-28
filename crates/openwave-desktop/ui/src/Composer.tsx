@@ -324,6 +324,9 @@ export function Composer({
             active ? "Guide the active response…" : "Message OpenWave…"
           }
           aria-label="Message"
+          // A stable hook for the shell's focus-composer shortcut, which has to
+          // find the field without a ref threaded up through every route.
+          data-composer-input=""
           disabled={inputDisabled}
           onChange={onChange}
           onPaste={onPaste}

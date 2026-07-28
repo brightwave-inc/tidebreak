@@ -149,6 +149,19 @@ by both `GET /models` and model-to-provider routing. The host applies that
 metadata to the runtime request; clients cannot override token or capability
 policy.
 
+Models are chosen per *role*, not once globally. `chat` is the model a
+foreground turn runs on: the chat's override, then the global default, then the
+boot default. `utility` is the model for background work the user did not ask
+for, such as compacting a long transcript, so maintenance is not billed at the
+model and reasoning effort chosen for the conversation. Each role can be pinned
+to one model (`PUT /models/roles/{role}`, stored under `model.<role>`); left
+automatic, it resolves against an ordered list of curated defaults and takes the
+first entry whose provider is enabled and credentialed. That happens on read, so
+enabling a provider changes the answer without a restart, and it degrades rather
+than fails: when nothing resolves for `utility`, the work that would have used
+it is skipped instead of falling back to the conversation's model. `GET /models`
+reports what each role resolves to so a client can label the automatic choice.
+
 OpenAI-compatible endpoints can register custom model IDs and their context and
 output limits in provider settings. Those models enter the same catalog with
 conservative text-only, non-reasoning capabilities. Existing unqualified model
@@ -198,6 +211,16 @@ as a temporary claim ticket:
 The turn worker can process up to four different chats concurrently. A turn is
 currently configured for one execution attempt because arbitrary tool side
 effects are not yet checkpointed well enough to replay safely after a crash.
+
+Claiming a turn on a chat that has no title also starts a background titling
+call on the `utility` model, deduplicated per chat and awaited by nothing: it
+reads that chat's user messages only, and a constrained answer either names the
+conversation or reports that there is nothing to name yet. The name is written
+only while the title is still unset, so a rename by hand always wins and is also
+how a user opts out of being renamed for. A failed or skipped call leaves the
+chat untitled for the next turn to retry. Because the title is chat metadata
+rather than turn history, it is not journaled and does not reach the event
+socket; the client picks it up by re-reading the chat when a turn resolves.
 
 ### 3. The agent drives model and tool steps
 

@@ -1,0 +1,252 @@
+//! Named model roles.
+//!
+//! A role names a job the product needs a model for, so "use something cheap
+//! for this" has somewhere to live. [`ModelRole::Chat`] is the model a
+//! foreground turn runs on — the user's choice, unchanged by this module.
+//! [`ModelRole::Utility`] is for work the user did not ask for: compacting a
+//! transcript today, and other maintenance later. Two roles is deliberate;
+//! adding a third is an entry in the tables below rather than a refactor.
+//!
+//! Each role's explicit selection is stored under `model.<role>`, matching the
+//! `provider.<kind>` convention — except `chat`, whose selection has lived under
+//! a bare `model` key since before roles existed and keeps it.
+//!
+//! A role also carries an ordered list of curated defaults, where order is both
+//! preference and failover: [`resolve`] walks it and takes the first entry whose
+//! provider is enabled and credentialed, so an Anthropic-only install and an
+//! OpenAI-only install each get a sensible model without configuring one.
+//! Resolution reads settings and credentials on every call rather than at boot,
+//! so enabling a provider takes effect on the next turn instead of the next
+//! launch. And it degrades instead of failing: no resolvable model means the
+//! caller skips its work, never that a turn blocks or fails.
+
+use serde::{Deserialize, Serialize};
+
+use openwave_core::{
+    AgentError, ProviderId, ReasoningEffort, Result, SecretProvider, Store, UtilityModel,
+};
+
+use crate::providers::{self, ResolvedModelPolicy};
+
+/// The roles the product resolves a model for.
+///
+/// `#[non_exhaustive]` so a new role can land without breaking wire clients that
+/// match on the string form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ModelRole {
+    /// The model a foreground turn runs on.
+    Chat,
+    /// The model background work the user did not ask for runs on.
+    Utility,
+}
+
+/// The `utility` role's ordered defaults.
+///
+/// One entry per provider that serves curated models, each that provider's
+/// cheapest current row. Anthropic leads because it is the provider the product
+/// defaults to for chat, so the common single-provider install resolves on the
+/// first step; the rest follow so an install credentialed elsewhere still gets
+/// a utility model. Any of the three is a good answer for a multi-provider
+/// install, so the order only has to be stable and explainable.
+const UTILITY_DEFAULTS: &[&str] = &[
+    "anthropic::claude-haiku-4-5-20251001",
+    "openai::gpt-5.4-nano",
+    "gemini::gemini-3.5-flash-lite",
+];
+
+impl ModelRole {
+    /// All roles, in display order.
+    pub const ALL: &'static [ModelRole] = &[ModelRole::Chat, ModelRole::Utility];
+
+    /// Wire/path form (`chat`, `utility`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelRole::Chat => "chat",
+            ModelRole::Utility => "utility",
+        }
+    }
+
+    /// Parse a path segment into a role.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "chat" => Some(Self::Chat),
+            "utility" => Some(Self::Utility),
+            _ => None,
+        }
+    }
+
+    /// Store setting key holding this role's explicit selection.
+    pub fn setting_key(self) -> &'static str {
+        match self {
+            // Pre-roles key, kept so existing installs keep their default.
+            ModelRole::Chat => "model",
+            ModelRole::Utility => "model.utility",
+        }
+    }
+
+    /// Ordered preference list of curated selection keys for this role.
+    ///
+    /// Empty for `chat`: a conversation runs on what the user picked, and its
+    /// last resort is the model this process launched with — process state no
+    /// registry list can name. Silently moving a foreground turn to another
+    /// provider is exactly what we don't want there.
+    pub fn defaults(self) -> &'static [&'static str] {
+        match self {
+            ModelRole::Chat => &[],
+            ModelRole::Utility => UTILITY_DEFAULTS,
+        }
+    }
+
+    /// The reasoning effort work in this role asks for, before the model's own
+    /// accepted range clamps it.
+    ///
+    /// `None` for `chat`, where effort is the user's per-chat choice rather than
+    /// a property of the role.
+    pub fn reasoning_effort(self) -> Option<ReasoningEffort> {
+        match self {
+            ModelRole::Chat => None,
+            // Compaction is summarization of text already written: buy speed,
+            // not thought. Models that reject the level clamp up or drop it.
+            ModelRole::Utility => Some(ReasoningEffort::None),
+        }
+    }
+}
+
+impl std::fmt::Display for ModelRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The explicit selection stored for `role`, if the user set one.
+pub async fn read_selection(store: &dyn Store, role: ModelRole) -> Result<Option<String>> {
+    Ok(store
+        .get_setting(role.setting_key())
+        .await?
+        .and_then(|value| value.as_str().map(str::to_owned)))
+}
+
+/// Persist `selection` for `role`. `None` clears it back to automatic, stored as
+/// JSON null so [`read_selection`] reads it back as unset.
+pub async fn write_selection(
+    store: &dyn Store,
+    role: ModelRole,
+    selection: Option<&str>,
+) -> Result<()> {
+    let value = selection.map_or(serde_json::Value::Null, |key| serde_json::json!(key));
+    store.set_setting(role.setting_key(), &value).await
+}
+
+/// Resolve the model `role` runs on right now: the user's selection when its
+/// provider can serve it, else the first usable entry in the role's ordered
+/// defaults.
+///
+/// `None` means this install has no model for the role. Callers skip the work.
+pub async fn resolve(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+    role: ModelRole,
+) -> Result<Option<ResolvedModelPolicy>> {
+    if let Some(selection) = read_selection(store, role).await? {
+        // A selection whose provider has since been disabled or lost its
+        // credential falls through to the defaults rather than issuing a
+        // request that would fail.
+        if let Some(policy) = usable_policy(store, secrets, &selection).await? {
+            return Ok(Some(policy));
+        }
+    }
+    for key in role.defaults() {
+        if let Some(policy) = usable_policy(store, secrets, key).await? {
+            return Ok(Some(policy));
+        }
+    }
+    Ok(None)
+}
+
+/// Resolve `selection` only if its provider is enabled and credentialed.
+async fn usable_policy(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+    selection: &str,
+) -> Result<Option<ResolvedModelPolicy>> {
+    let Some(policy) = providers::resolve_model_policy(store, selection, false).await? else {
+        return Ok(None);
+    };
+    Ok(
+        providers::provider_is_usable(store, secrets, policy.provider)
+            .await?
+            .then_some(policy),
+    )
+}
+
+/// Resolve the `utility` role into the shape the agent carries for one turn.
+///
+/// `None` means there is no utility model, and the agent skips maintenance work
+/// instead of billing it to the conversation's model.
+pub async fn resolve_utility_model(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+) -> Result<Option<UtilityModel>> {
+    let role = ModelRole::Utility;
+    let Some(policy) = resolve(store, secrets, role).await? else {
+        return Ok(None);
+    };
+    Ok(Some(UtilityModel {
+        provider: Some(ProviderId::new(policy.provider.as_str())),
+        model: policy.id.clone(),
+        reasoning_model: policy.supports_reasoning,
+        // Same reconciliation `apply_model_policy` performs for a foreground
+        // turn: a level this model does not accept degrades to the nearest one
+        // it does, or is dropped when it exposes no effort control.
+        reasoning_effort: role
+            .reasoning_effort()
+            .and_then(|effort| effort.clamp_to(&policy.reasoning_efforts)),
+        context_window: usize::try_from(policy.context_window)
+            .map_err(|_| AgentError::config("model context window is unsupported"))?,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model_registry;
+    use crate::providers::ProviderKind;
+
+    #[test]
+    fn every_role_default_names_a_curated_model() {
+        for &role in ModelRole::ALL {
+            for key in role.defaults() {
+                let (provider, id) = model_registry::parse_selection_key(key)
+                    .unwrap_or_else(|| panic!("{role}'s default `{key}` is not a selection key"));
+                assert!(
+                    model_registry::find_for(provider, id).is_some(),
+                    "{role}'s default `{key}` is not in the model registry",
+                );
+            }
+        }
+    }
+
+    /// A user credentialed on one provider must still get a utility model, or
+    /// the work that depends on it silently stops happening for them.
+    #[test]
+    fn the_utility_defaults_cover_every_provider_that_serves_curated_models() {
+        for &provider in ProviderKind::ALL {
+            if model_registry::models_for(provider).next().is_none() {
+                // Providers whose models come from their own configuration — a
+                // custom compatible endpoint, the gateway — have nothing a
+                // curated list can name. Those installs point `model.utility`
+                // at one of the models they configured.
+                continue;
+            }
+            assert!(
+                ModelRole::Utility.defaults().iter().any(|key| {
+                    model_registry::parse_selection_key(key)
+                        .is_some_and(|(kind, _)| kind == provider)
+                }),
+                "a user credentialed only on {provider} has no default utility model",
+            );
+        }
+    }
+}

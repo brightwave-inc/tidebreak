@@ -10,6 +10,7 @@ import {
   type Chat as WireChat,
   type ChatTranscript as WireChatTranscript,
   type CodeExecutionConfigInfo as WireCodeExecutionConfigInfo,
+  type CodeExecutionCredentialReadiness as WireCodeExecutionCredentialReadiness,
   type CodeExecutionProviderKind as WireCodeExecutionProviderKind,
   type CustomModelConfig as WireCustomModelConfig,
   type McpHealth as WireMcpHealth,
@@ -22,6 +23,8 @@ import {
   type McpServerInfo as WireMcpServerInfo,
   type McpServersInfo as WireMcpServersInfo,
   type ModelInfo as WireModelInfo,
+  type ModelRole as WireModelRole,
+  type ModelRoleInfo as WireModelRoleInfo,
   type Project as WireProject,
   type ProviderInfo as WireProviderInfo,
   type ProviderKind as WireProviderKind,
@@ -110,6 +113,17 @@ export type ModelInfo = Omit<WireModelInfo, "key"> & {
   key: ModelSelectionKey;
 };
 
+export type ModelRole = WireModelRole;
+
+/** A named model role, its pinned selection, and what it resolves to now. */
+export type ModelRoleInfo = WireModelRoleInfo;
+
+/** The catalog plus what each role resolves to (`GET /models`). */
+export type ModelCatalog = {
+  models: ModelInfo[];
+  roles: ModelRoleInfo[];
+};
+
 /** Global runtime settings (`GET/PUT /settings`). */
 /** Global runtime settings (`GET/PUT /settings`). */
 export type RuntimeSettings = Settings;
@@ -130,6 +144,10 @@ export type CodeExecutionProviderKind = WireCodeExecutionProviderKind;
 
 /** Non-secret code-execution selection, timeout policy, and host readiness. */
 export type CodeExecutionConfigInfo = WireCodeExecutionConfigInfo;
+
+/** Readiness only: the API never returns the saved E2B key. */
+export type CodeExecutionCredentialReadiness =
+  WireCodeExecutionCredentialReadiness;
 
 export type McpHealth = WireMcpHealth;
 
@@ -228,6 +246,10 @@ export type ToolResultPreview =
       outputTruncated: boolean;
       stdout: string;
       stderr: string;
+    }
+  | {
+      /** Web search is available after the reader configures a provider. */
+      tool: "web_search_provider_required";
     }
   | {
       /** A reference to an MCP Apps view — never markup. The document is
@@ -449,12 +471,27 @@ export class ApiClient {
   }
 
   /**
-   * The selectable catalog, plus the key a turn falls back to when its chat
-   * carries no override — which is the only way a client can name what
-   * "default" means.
+   * The selectable catalog, plus one row per model role: what the user pinned
+   * it to, and what it resolves to right now — the only way a client can name
+   * what "default" or "automatic" means for a role.
    */
-  listModels(): Promise<{ models: ModelInfo[]; default_key: string | null }> {
+  listModels(): Promise<ModelCatalog> {
     return this.json("/models", { headers: this.headers() });
+  }
+
+  /**
+   * Pin a model role to one model, or pass `null` to return it to automatic
+   * resolution against the role's ordered defaults.
+   */
+  putModelRole(
+    role: ModelRole,
+    selection: ModelSelectionKey | null,
+  ): Promise<ModelRoleInfo> {
+    return this.json(`/models/roles/${role}`, {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify({ selection }),
+    });
   }
 
   getSettings(): Promise<RuntimeSettings> {
@@ -527,6 +564,26 @@ export class ApiClient {
       method: "PUT",
       headers: this.headers(true),
       body: JSON.stringify(body),
+    });
+  }
+
+  putCodeExecutionCredential(
+    provider: CodeExecutionProviderKind,
+    apiKey: string,
+  ): Promise<CodeExecutionCredentialReadiness> {
+    return this.json(`/code-execution/credentials/${provider}`, {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+  }
+
+  deleteCodeExecutionCredential(
+    provider: CodeExecutionProviderKind,
+  ): Promise<CodeExecutionCredentialReadiness> {
+    return this.json(`/code-execution/credentials/${provider}`, {
+      method: "DELETE",
+      headers: this.headers(),
     });
   }
 
@@ -634,6 +691,12 @@ export class ApiClient {
 
   listChats(): Promise<Chat[]> {
     return this.json("/chats", { headers: this.headers() });
+  }
+
+  getChat(chatId: string): Promise<Chat> {
+    return this.json(`/chats/${encodeURIComponent(chatId)}`, {
+      headers: this.headers(),
+    });
   }
 
   async listPendingChatPrompts(): Promise<PendingChatPrompt[]> {
@@ -1371,6 +1434,9 @@ export function parseToolResultPreview(
 ): ToolResultPreview | null {
   if (value === undefined || value === null) return null;
   if (!isRecord(value)) return null;
+  if (value.tool === "web_search_provider_required") {
+    return { tool: "web_search_provider_required" };
+  }
   if (value.tool === "mcp_app") {
     const { server, resource_uri }: UncheckedMcpAppResult = value;
     if (

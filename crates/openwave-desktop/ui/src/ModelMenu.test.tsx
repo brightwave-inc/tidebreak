@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
+  firstAvailableModel,
   ModelMenu,
   ReasoningEffortMenu,
   reasoningEffortOptions,
@@ -118,6 +119,22 @@ describe("visibleModelGroups", () => {
       (group) => group.provider === "anthropic",
     );
     expect(anthropic?.models).toHaveLength(2);
+  });
+});
+
+describe("firstAvailableModel", () => {
+  it("lands in render order, not catalog order", () => {
+    // OpenAI first in the catalog, but Anthropic renders first — the toggle
+    // must land where the reader sees the check appear.
+    const [sonnet, gpt] = MODELS;
+    expect(firstAvailableModel([gpt, sonnet], null)?.key).toBe(
+      "anthropic::claude-sonnet-4",
+    );
+  });
+
+  it("is null when nothing can run", () => {
+    const nothing = MODELS.map((model) => ({ ...model, available: false }));
+    expect(firstAvailableModel(nothing, null)).toBeNull();
   });
 });
 

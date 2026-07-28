@@ -1,9 +1,15 @@
-import { memo } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import { memo, useMemo } from "react";
+import ReactMarkdown, {
+  type Components,
+  type Options,
+} from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
 import { ClipboardCopyButton } from "./ClipboardCopyButton";
-import { MarkdownTable } from "./MarkdownTable";
+import { splitMarkdownBlocks } from "./markdownBlocks";
+import { escapeLatexText } from "./markdownLatex";
 
 /**
  * Keep model-generated navigation deliberately narrow. `react-markdown` does
@@ -110,8 +116,54 @@ const components: Components = {
     );
   },
   blockquote: ({ children }) => <blockquote>{children}</blockquote>,
-  table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
 };
+
+// `singleDollarTextMath: false` keeps a bare `$` (a price, a shell variable)
+// from being read as a math delimiter; display and inline math still arrive
+// through the `$$…$$` / `$…$` forms that `escapeLatexText` normalizes to.
+const remarkPlugins: Options["remarkPlugins"] = [
+  remarkGfm,
+  [remarkMath, { singleDollarTextMath: false }],
+];
+
+const rehypePlugins: Options["rehypePlugins"] = [
+  // Highlight only fence-tagged languages; auto-detection on unlabeled blocks
+  // guesses wrong too often to be worth it.
+  [rehypeHighlight, { detect: false }],
+  rehypeKatex,
+];
+
+/**
+ * Normalize raw model output before the parser sees it: rewrite LaTeX
+ * delimiters into the dollar forms remark-math understands, then convert single
+ * newlines into hard breaks so intended line breaks survive without leaking
+ * source indentation.
+ */
+export function processMarkdownContent(input: string): string {
+  return preserveLineBreaks(escapeLatexText(input));
+}
+
+/**
+ * One top-level Markdown block, memoized on its verbatim source so that a
+ * streaming message — whose text grows a few characters every typewriter tick —
+ * only re-runs the remark/rehype pipeline for its trailing (still-growing)
+ * block. Every settled block above it hits this memo and is left untouched,
+ * turning a per-tick full-document re-parse into work proportional to the tail.
+ */
+const MarkdownBlock = memo(function MarkdownBlock({ block }: { block: string }) {
+  const processed = useMemo(() => processMarkdownContent(block), [block]);
+  return (
+    <ReactMarkdown
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      components={components}
+      skipHtml
+      urlTransform={(url) => safeMarkdownUrl(url) ?? ""}
+    >
+      {processed}
+    </ReactMarkdown>
+  );
+});
 
 interface MessageMarkdownProps {
   children: string;
@@ -120,19 +172,15 @@ interface MessageMarkdownProps {
 export const MessageMarkdown = memo(function MessageMarkdown({
   children,
 }: MessageMarkdownProps) {
+  const blocks = useMemo(() => splitMarkdownBlocks(children), [children]);
   return (
     <div className="message-markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        // Highlight only fence-tagged languages; auto-detection on unlabeled
-        // blocks guesses wrong too often to be worth it.
-        rehypePlugins={[[rehypeHighlight, { detect: false }]]}
-        components={components}
-        skipHtml
-        urlTransform={(url) => safeMarkdownUrl(url) ?? ""}
-      >
-        {preserveLineBreaks(children)}
-      </ReactMarkdown>
+      {blocks.map((block, index) => (
+        // Blocks are append-only while streaming: the prefix is immutable and
+        // only the tail grows, so the array index is a stable identity that
+        // keeps the growing block mounted across ticks.
+        <MarkdownBlock key={index} block={block} />
+      ))}
     </div>
   );
 });

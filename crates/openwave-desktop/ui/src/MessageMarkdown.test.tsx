@@ -46,7 +46,7 @@ describe("MessageMarkdown", () => {
     expect(markup).not.toContain("javascript:");
   });
 
-  it("adds a table-level copy action without exposing Markdown attributes", () => {
+  it("renders a plain table without a frame or copy footer", () => {
     const markup = renderToStaticMarkup(
       <MessageMarkdown>
         {"| Name | Value |\n| --- | --- |\n| Alpha | **1** |"}
@@ -54,9 +54,30 @@ describe("MessageMarkdown", () => {
     );
 
     expect(markup).toContain("<table>");
-    expect(markup).toContain('aria-label="Copy table contents"');
     expect(markup).toContain("Alpha");
     expect(markup).toContain("<strong>1</strong>");
+    // Chat tables are plain: no framing wrapper, no copy control.
+    expect(markup).not.toContain("Copy table contents");
+    expect(markup).not.toContain("markdown-table-frame");
+  });
+
+  it("renders display math through KaTeX rather than as literal source", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>{"$$E = mc^2$$"}</MessageMarkdown>,
+    );
+
+    // KaTeX emits its own markup; the raw delimiters must not survive.
+    expect(markup).toContain("katex");
+    expect(markup).not.toContain("$$E = mc^2$$");
+  });
+
+  it("normalizes bracketed LaTeX delimiters into rendered math", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>{"\\[a^2 + b^2 = c^2\\]"}</MessageMarkdown>,
+    );
+
+    expect(markup).toContain("katex");
+    expect(markup).not.toContain("\\[");
   });
 
   it("renders single newlines as line breaks without splitting paragraphs", () => {

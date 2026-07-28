@@ -1790,6 +1790,10 @@ impl Store for DbStore {
         ops::conversation::set_chat_title(self, id, title).await
     }
 
+    async fn set_chat_title_if_unset(&self, id: ChatId, title: &str) -> Result<bool> {
+        ops::conversation::set_chat_title_if_unset(self, id, title).await
+    }
+
     async fn update_chat_metadata(
         &self,
         id: ChatId,

@@ -52,9 +52,11 @@ export function HomeRoute() {
 
   return (
     <RouteFrame sidebar={<HomeSidebar />}>
-      <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-[clamp(0.5rem,4%,5rem)]">
-          <div className="mx-auto flex w-full min-h-0 max-w-3xl flex-1 flex-col gap-8 py-10">
+      <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden px-[clamp(0.5rem,4%,5rem)]">
+        {/* The greeting and the list of past chats scroll together and stay
+            centred while there is room; the composer below does not move. */}
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 py-10">
             <div className="space-y-2 text-center">
               <p className="text-3xl font-normal text-foreground">
                 What are we working on?
@@ -64,30 +66,31 @@ export function HomeRoute() {
               </p>
             </div>
 
-            {/* The composer leads, because starting something is what this
-                page is for; the list below is for returning to something. */}
-            <div>
-              {error && <p className="pb-2 text-sm text-critical">{error}</p>}
-              <Composer
-                activeTurnId={null}
-                busy={false}
-                cancelError={null}
-                cancelPending={false}
-                disabled={creatingChat}
-                draft={draft}
-                resetKey="home"
-                steerError={null}
-                steerPending={false}
-                steerStatus={null}
-                onDraftChange={setDraft}
-                onSend={startChat}
-                onSteer={async () => {}}
-                onStop={async () => {}}
-              />
-            </div>
-
             {chatsLoaded && <ChatExplorer />}
           </div>
+        </div>
+
+        {/* Docked at the foot of the page: the composer here starts a chat
+            rather than posting into one, but it stays put while the list above
+            scrolls, the way it does inside a conversation. */}
+        <div className="z-10 mx-auto w-full max-w-3xl pb-2">
+          {error && <p className="pb-2 text-sm text-critical">{error}</p>}
+          <Composer
+            activeTurnId={null}
+            busy={false}
+            cancelError={null}
+            cancelPending={false}
+            disabled={creatingChat}
+            draft={draft}
+            resetKey="home"
+            steerError={null}
+            steerPending={false}
+            steerStatus={null}
+            onDraftChange={setDraft}
+            onSend={startChat}
+            onSteer={async () => {}}
+            onStop={async () => {}}
+          />
         </div>
       </div>
     </RouteFrame>

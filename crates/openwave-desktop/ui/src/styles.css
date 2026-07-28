@@ -38,9 +38,6 @@
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.984 0.003 247.858);
 
-  --color-openwave: oklch(0.87 0.2 102);
-  --color-openwave-light: oklch(0.966 0.155 102);
-
   /* Semantic status */
   --success: oklch(0.627 0.194 149.214);
   --success-foreground: oklch(0.393 0.095 152.535);
@@ -140,9 +137,6 @@
   --destructive: oklch(0.68 0.22 27.325);
   --destructive-foreground: oklch(0.95 0.005 247.858);
 
-  --color-openwave: oklch(0.87 0.2 102);
-  --color-openwave-light: oklch(0.68 0.14 102);
-
   /* Semantic status — dark */
   --success: oklch(0.792 0.209 151.711);
   --success-foreground: oklch(0.962 0.044 156.743);
@@ -176,9 +170,6 @@
 }
 
 @theme inline {
-  --color-openwave: var(--color-openwave);
-  --color-openwave-light: var(--color-openwave-light);
-
   --color-page-background: var(--page-background);
   --color-border: var(--border);
   --color-input: var(--input);
@@ -324,40 +315,6 @@ body {
   display: flex;
   background: var(--page-background);
 }
-
-/* The settings sidebar is still hand-styled; the app rail moved to the
-   Tailwind primitives in `sidebar/primitives.tsx`. */
-.sidebar-action {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  width: 100%;
-  padding: 0.4rem 0.55rem;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted-foreground);
-  font-size: 0.85rem;
-  text-align: left;
-  cursor: pointer;
-}
-
-.sidebar-action.is-active,
-.sidebar-action:hover {
-  background: var(--sidebar-active);
-  color: var(--ink);
-}
-
-.sidebar-action svg {
-  flex: 0 0 auto;
-  color: var(--muted-foreground);
-}
-
-.sidebar-action.is-active svg,
-.sidebar-action:hover svg {
-  color: var(--ink);
-}
-
 
 /* ---------- Buttons ---------- */
 
@@ -784,7 +741,7 @@ body {
 }
 
 .welcome-prompt:hover svg {
-  color: var(--color-openwave);
+  color: var(--ink);
 }
 
 @media (max-width: 720px) {
@@ -1200,13 +1157,19 @@ body {
   margin-bottom: 0;
 }
 
-.message-markdown p,
+/* Paragraphs carry no margin of their own — the message column and the line
+   height give the prose its rhythm — while the block elements keep the
+   typographic default gap around them. */
+.message-markdown p {
+  margin: 0;
+}
+
 .message-markdown ul,
 .message-markdown ol,
 .message-markdown pre,
 .message-markdown blockquote,
-.message-markdown .markdown-table-frame {
-  margin: 0 0 0.7rem;
+.message-markdown table {
+  margin: 1.25em 0;
 }
 
 .message-markdown h1,
@@ -1262,7 +1225,7 @@ body {
 
 .message-markdown ul,
 .message-markdown ol {
-  padding-left: 1.35rem;
+  padding-left: 1.625em;
 }
 
 .message-markdown ul {
@@ -1274,7 +1237,13 @@ body {
 }
 
 .message-markdown li + li {
-  margin-top: 0.2rem;
+  margin-top: 0.5em;
+}
+
+/* Markers read as part of the prose, not as a faint decoration, so they take
+   the foreground colour in both themes. */
+.message-markdown ::marker {
+  color: var(--foreground);
 }
 
 .message-markdown a {
@@ -1291,7 +1260,7 @@ body {
 .message-markdown :not(pre) > code {
   border: 0.5px solid var(--line);
   border-radius: 4px;
-  padding: 0.08em 0.3em;
+  padding: 0.2em 0.4em;
   background: color-mix(in srgb, var(--muted) 75%, transparent);
   color: var(--code-ink);
   font-family: var(--mono);
@@ -1391,9 +1360,11 @@ body {
 }
 
 .message-markdown blockquote {
-  border-left: 2px solid var(--color-openwave);
+  border-left: 2px solid var(--line);
   padding-left: 0.75rem;
-  color: var(--muted-foreground);
+  color: var(--foreground);
+  font-style: italic;
+  font-weight: 500;
 }
 
 .message-markdown hr {
@@ -1404,18 +1375,13 @@ body {
 
 /* ---------- Tables ---------- */
 
-.markdown-table-frame {
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-}
-
-.markdown-table-wrap {
-  overflow-x: auto;
-}
-
+/* A chat table is plain prose, not a framed widget. `display: block` turns the
+   table into its own horizontal scroll container so a wide table overflows and
+   scrolls instead of crushing its columns below the message width. */
 .message-markdown table {
-  width: 100%;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
   font-size: 0.92em;
 }
@@ -1426,36 +1392,12 @@ body {
   padding: 0.35rem 0.45rem;
   text-align: left;
   vertical-align: top;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .message-markdown th {
   font-weight: 600;
-}
-
-.markdown-table-actions {
-  display: flex;
-  justify-content: flex-end;
-  border-top: 1px solid var(--line);
-  padding: 0.25rem;
-  background: var(--muted);
-}
-
-.markdown-table-copy {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  border: 0;
-  border-radius: 5px;
-  padding: 0.2rem 0.38rem;
-  color: var(--muted-foreground);
-  background: transparent;
-  font-size: 0.72rem;
-}
-
-.markdown-table-copy:hover,
-.markdown-table-copy:focus-visible {
-  color: var(--ink);
-  background: color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 .markdown-image-omitted {
@@ -1478,152 +1420,6 @@ body {
     opacity: 0.72;
     transform: none;
   }
-}
-
-/* ---------- Folder consent ---------- */
-
-.folder-consent {
-  align-self: flex-start;
-  width: min(100%, 34rem);
-  border: 1px solid color-mix(in srgb, var(--color-openwave) 55%, var(--line));
-  border-radius: 8px;
-  padding: 0.85rem;
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow);
-}
-
-.folder-consent-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.75rem;
-}
-
-.folder-consent h2 {
-  margin: 0 0 0.1rem;
-  font-size: 0.95rem;
-}
-
-.folder-consent-reason {
-  margin: 0.75rem 0 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.folder-consent-hint,
-.folder-consent-note,
-.folder-consent-error {
-  margin: 0.55rem 0 0;
-  font-size: 0.82rem;
-}
-
-.folder-consent-hint,
-.folder-consent-note {
-  color: var(--muted-foreground);
-}
-
-.folder-consent-error {
-  color: var(--danger);
-  overflow-wrap: anywhere;
-}
-
-.folder-consent-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-}
-
-/* ---------- User questions ---------- */
-
-.user-questions {
-  align-self: flex-start;
-  width: min(100%, 40rem);
-  border: 1px solid color-mix(in srgb, var(--color-openwave) 55%, var(--line));
-  border-radius: 8px;
-  padding: 0.95rem;
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow);
-}
-
-.user-questions h2 {
-  margin: 0 0 0.1rem;
-  font-size: 0.95rem;
-}
-
-.user-question-list {
-  display: grid;
-  gap: 1rem;
-  margin-top: 0.9rem;
-}
-
-.user-question {
-  display: grid;
-  min-width: 0;
-  gap: 0.55rem;
-  margin: 0;
-  border: 0;
-  padding: 0;
-}
-
-.user-question legend {
-  padding: 0;
-  color: var(--muted-foreground);
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.user-question > p {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.user-question-options {
-  display: grid;
-  gap: 0.4rem;
-}
-
-.user-question-option {
-  display: flex;
-  cursor: pointer;
-  gap: 0.6rem;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0.65rem;
-}
-
-.user-question-option:has(input:checked) {
-  border-color: var(--color-openwave);
-  background: color-mix(in srgb, var(--color-openwave) 8%, transparent);
-}
-
-.user-question-option input {
-  margin-top: 0.2rem;
-}
-
-.user-question-option span,
-.user-question-free-form {
-  display: grid;
-  min-width: 0;
-  gap: 0.15rem;
-}
-
-.user-question-option small,
-.user-question-free-form > span {
-  color: var(--muted-foreground);
-}
-
-.user-question-free-form textarea {
-  width: 100%;
-  resize: vertical;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0.6rem;
-  background: var(--bg);
-  color: var(--ink);
-  font: inherit;
 }
 
 /* ---------- Composer ---------- */
@@ -2045,55 +1841,6 @@ body {
   border: 0;
 }
 
-/* ---------- Settings panel ---------- */
-
-/* A single settings surface, used on the full settings page. */
-.settings-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  max-width: 44rem;
-}
-
-/* ---------- Full-page settings ---------- */
-
-.settings-page {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  height: 100%;
-  overflow: hidden;
-}
-
-.settings-nav {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  gap: 2px;
-  width: 220px;
-  padding: 0.85rem 0.6rem;
-  border-right: 1px solid var(--line);
-  overflow-y: auto;
-}
-
-.settings-nav-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: 0.35rem;
-}
-
-.settings-back {
-  color: var(--muted-foreground);
-}
-
-.settings-page-content {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow-y: auto;
-  padding: 1.5rem clamp(1rem, 4vw, 2.5rem);
-}
-
 /* ---------- Appearance ---------- */
 
 .theme-options {
@@ -2332,9 +2079,9 @@ body {
   justify-content: space-between;
   gap: 1rem;
   padding: 0.75rem 0.9rem;
-  border: 1px solid color-mix(in srgb, var(--color-openwave) 48%, var(--line));
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--color-openwave) 7%, var(--bg-elevated));
+  background: var(--bg-elevated);
   font-size: 0.84rem;
 }
 
@@ -2386,7 +2133,7 @@ body {
 }
 
 .document-search input:focus {
-  outline: 2px solid color-mix(in srgb, var(--color-openwave) 40%, transparent);
+  outline: 2px solid var(--ring);
   outline-offset: 1px;
 }
 
@@ -2489,7 +2236,7 @@ body {
 }
 
 .document-catalog-toolbar input:focus {
-  outline: 2px solid color-mix(in srgb, var(--color-openwave) 40%, transparent);
+  outline: 2px solid var(--ring);
   outline-offset: 1px;
 }
 
@@ -2563,7 +2310,7 @@ body {
 }
 
 .document-table tbody tr[aria-current="true"] {
-  background: color-mix(in srgb, var(--color-openwave) 6%, transparent);
+  background: var(--accent);
 }
 
 .document-title-button {
@@ -2655,7 +2402,7 @@ body {
 .document-action {
   border: 0;
   padding: 0.15rem 0.2rem;
-  color: var(--color-openwave);
+  color: var(--ink);
   background: transparent;
   font-size: 0.72rem;
   font-weight: 600;
@@ -2997,15 +2744,6 @@ body {
     border-radius: 0;
   }
 
-  .settings-nav {
-    width: 160px;
-    padding: 0.6rem 0.4rem;
-  }
-
-  .settings-page-content {
-    padding: 1.25rem 1rem;
-  }
-
   .messages {
     padding-inline: 1rem;
   }
@@ -3171,8 +2909,8 @@ body {
   justify-content: center;
   gap: 0.45rem;
   pointer-events: none;
-  border: 3px dashed color-mix(in srgb, var(--color-openwave) 72%, var(--line));
-  background: color-mix(in srgb, var(--color-openwave) 12%, transparent);
+  border: 3px dashed color-mix(in srgb, var(--ink) 40%, var(--line));
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
   color: var(--ink);
   text-align: center;
 }

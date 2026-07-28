@@ -82,7 +82,7 @@ export function RecentChatRow({
       </button>
       {needsAttention && (
         <span
-          className="shrink-0 text-amber-600 dark:text-amber-400"
+          className="text-warning shrink-0"
           aria-label={`${title} needs attention`}
           title="Needs attention"
         >

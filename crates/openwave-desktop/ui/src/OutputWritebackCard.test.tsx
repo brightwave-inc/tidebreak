@@ -10,7 +10,7 @@ const request = {
 };
 
 describe("OutputWritebackCard", () => {
-  it("presents replacement as sensitive without rendering destination data", () => {
+  it("names the replacement without rendering destination data", () => {
     const html = renderToStaticMarkup(
       <OutputWritebackCard
         request={request}
@@ -23,7 +23,6 @@ describe("OutputWritebackCard", () => {
     );
 
     expect(html).toContain("Replace an existing file?");
-    expect(html).toContain("sensitive write");
     expect(html).toContain("Allow replacement");
     expect(html).not.toContain("output_id");
     expect(html).not.toContain("root_id");

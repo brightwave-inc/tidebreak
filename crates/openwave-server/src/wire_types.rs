@@ -330,11 +330,15 @@ mod tests {
         // renderer importing from a single place.
         generate::collect_from::<crate::routes::Settings>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ModelInfo>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::ModelRoleInfo>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ChatTranscript>(&cfg, &mut out);
         generate::collect_from::<crate::providers::ProviderInfo>(&cfg, &mut out);
         generate::collect_from::<crate::web_search::WebSearchConfigInfo>(&cfg, &mut out);
         generate::collect_from::<crate::web_search::WebSearchCredentialReadiness>(&cfg, &mut out);
         generate::collect_from::<crate::code_execution::CodeExecutionConfigInfo>(&cfg, &mut out);
+        generate::collect_from::<crate::code_execution::CodeExecutionCredentialReadiness>(
+            &cfg, &mut out,
+        );
         generate::collect_from::<crate::mcp_config::McpServersInfo>(&cfg, &mut out);
         // Named separately because `serde(flatten)` inlines it into
         // `McpServerInfo` rather than referencing it, so the walk never reaches

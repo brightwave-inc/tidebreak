@@ -6,6 +6,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { AppContextProvider, type AppContextValue } from "./AppContext";
 import type { ApiClient } from "./api";
 import { MessageBubble, MessageList, type ChatMessage } from "./MessageList";
+import { renderWithRouter } from "./test/router";
 
 const noop = () => undefined;
 
@@ -627,5 +628,48 @@ describe("mcp app views", () => {
     expect(
       await screen.findByTitle("MCP App view from gateway"),
     ).toBeInTheDocument();
+  });
+});
+
+describe("actionable tool results", () => {
+  it("takes an unconfigured web search directly to its settings section", async () => {
+    const user = userEvent.setup();
+    const { router } = await renderWithRouter(
+      <MessageList
+        messages={[
+          {
+            id: "web-search-1",
+            role: "tool",
+            callId: "call-1",
+            name: "web_search",
+            status: "failed",
+            result: { tool: "web_search_provider_required" },
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Web search needs a provider" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Configure web search" }),
+    );
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/settings/web-search");
+    });
   });
 });

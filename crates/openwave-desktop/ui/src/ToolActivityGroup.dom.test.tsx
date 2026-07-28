@@ -9,10 +9,39 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("ToolActivityGroup live copy", () => {
-  it("types a changed row title while another tool keeps the phase live", async () => {
+describe("ToolActivityGroup rail animation", () => {
+  it("types the phase label once, then applies later changes instantly", async () => {
     vi.useFakeTimers();
     const { rerender } = render(
+      <ToolActivityGroup
+        groupIndex={0}
+        activities={[{ id: "search", name: "web_search", status: "running" }]}
+      />,
+    );
+
+    // The first live label types in, so it starts shorter than its final text.
+    const label = screen.getByLabelText("Searching the web");
+    expect(label.textContent).not.toBe("Searching the web");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(label.textContent).toBe("Searching the web");
+
+    // The phase settling changes the wording; that later change is applied
+    // instantly rather than re-typing the whole line.
+    rerender(
+      <ToolActivityGroup
+        groupIndex={0}
+        activities={[{ id: "search", name: "web_search", status: "completed" }]}
+      />,
+    );
+    expect(screen.getByLabelText("Searched the web").textContent).toBe(
+      "Searched the web",
+    );
+  });
+
+  it("renders expanded row titles at full length without animating them", () => {
+    render(
       <ToolActivityGroup
         groupIndex={0}
         activities={[
@@ -21,28 +50,9 @@ describe("ToolActivityGroup live copy", () => {
         ]}
       />,
     );
-
     fireEvent.click(screen.getByRole("button"));
-    expect(screen.getByLabelText("Searching the web").textContent).toBe(
-      "Searching the web",
-    );
 
-    rerender(
-      <ToolActivityGroup
-        groupIndex={0}
-        activities={[
-          { id: "search", name: "web_search", status: "completed" },
-          { id: "read", name: "read_file", status: "running" },
-        ]}
-      />,
-    );
-
-    const completedSearch = screen.getByLabelText("Searched the web");
-    expect(completedSearch.textContent).not.toBe("Searched the web");
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000);
-    });
-    expect(completedSearch.textContent).toBe("Searched the web");
+    // Row titles are plain text — present in full without advancing any timer.
+    expect(screen.getByText("Reading a file")).toBeTruthy();
   });
 });

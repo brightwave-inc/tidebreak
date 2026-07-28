@@ -74,8 +74,9 @@ pub struct ChatTranscriptSnapshot {
     pub refusals: Vec<ChatRefusalSnapshot>,
     /// Ordered renderer-safe sources keyed to their assistant message.
     pub citations: Vec<crate::AssistantCitationSnapshot>,
-    /// A renderer-safe historical projection. It contains fixed titles and
-    /// lifecycle timestamps only; canonical tool records never leave storage.
+    /// A renderer-safe historical projection. It contains fixed tool identity,
+    /// closed previews and lifecycle timestamps only; canonical tool records
+    /// never leave storage.
     pub tool_activity: Vec<ChatToolActivitySnapshot>,
     pub last_event_seq: i64,
 }
@@ -144,9 +145,9 @@ pub enum ChatToolActivityStatus {
     Cancelled,
 }
 
-/// A completed tool invocation with no results, tool identity, provider
-/// metadata, executor identity, lease, or diagnostic detail. The only arguments
-/// it can carry are the ones a tool explicitly projects for display.
+/// A completed tool invocation with no arbitrary result text, provider
+/// metadata, executor identity, lease, or diagnostic detail. The only action or
+/// result it can carry is one a tool explicitly projects through a closed type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct ChatToolActivitySnapshot {
     /// Allowlisted renderer tool name, never a provider-supplied one.
@@ -166,6 +167,11 @@ pub struct ChatToolActivitySnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub action: Option<crate::preview::ToolActionPreview>,
+    /// Closed projection of an actionable result. Arbitrary result text is
+    /// never included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub result: Option<crate::preview::ToolResultPreview>,
     // Present only for the fixed `spawn_sandbox_agent` renderer tool. It lets
     // the transcript attach the durable child status without exposing a
     // canonical tool record, delegated task, or executor identity.
@@ -1435,6 +1441,15 @@ pub trait Store: Send + Sync {
     /// Set (or clear, with `None`) a chat's human-facing title. A no-op if the
     /// chat doesn't exist.
     async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()>;
+
+    /// Set a chat's title only while it has none, reporting whether it applied.
+    ///
+    /// This is the write a derived title must use. A user rename is the
+    /// authoritative one, and it can land while a derived title is still being
+    /// produced; an unconditional write would replace the name the user just
+    /// typed with a guess. Whoever names the conversation first keeps it, which
+    /// also makes renaming a chat the way to opt out of ever being renamed for.
+    async fn set_chat_title_if_unset(&self, id: ChatId, title: &str) -> Result<bool>;
 
     /// Atomically update whichever user-editable chat metadata fields are
     /// present. An outer `None` leaves that field alone; an inner `None`

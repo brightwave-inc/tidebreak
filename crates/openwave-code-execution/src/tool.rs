@@ -46,8 +46,8 @@ impl Tool for ExecTool {
             description: "Run one executable with an argument vector in the configured isolated \
                           execution provider. No shell parses the arguments unless you explicitly \
                           invoke a shell. The local provider blocks network and user-data access \
-                          outside private chat scratch, confines all writes there, and returns \
-                          bounded stdout/stderr."
+                          outside private chat scratch; E2B runs in a managed cloud sandbox. Every \
+                          provider returns bounded stdout/stderr."
                 .into(),
             input_schema: json!({
                 "type": "object",

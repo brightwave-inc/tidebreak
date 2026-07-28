@@ -20,8 +20,9 @@ use uuid::Uuid;
 use openwave_core::error::{AgentError, Result};
 use openwave_core::provider::{
     ChatRequest, ContentBlock, ModelProvider, ProviderEvent, ProviderId, RefusalDetails,
-    StopReason, Usage,
+    ResponseFormat, StopReason, ToolChoice, Usage,
 };
+use openwave_core::tool::{strict_json_schema, OptionalProperties};
 use openwave_core::{ImageAttachments, ReasoningEffort, Role};
 
 use crate::google_auth::{valid_resource_segment, valid_vertex_location};
@@ -276,6 +277,31 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         }
     }
 
+    match &req.response_format {
+        Some(ResponseFormat::JsonSchema { name, schema }) => {
+            // Gemini's native JSON mode streams the constrained value as
+            // ordinary text parts, so there is nothing to renormalize on the way
+            // back out.
+            let schema =
+                strict_json_schema(schema, OptionalProperties::AcceptNull).ok_or_else(|| {
+                    AgentError::Provider(format!(
+                        "response format {name} has no strict JSON Schema form"
+                    ))
+                })?;
+            generation_config["responseMimeType"] = json!("application/json");
+            generation_config["responseSchema"] = gemini_response_schema(&schema)?;
+        }
+        None => {}
+        // `ResponseFormat` is open. A format this adapter has not learned must
+        // fail the request rather than stream an unconstrained answer that only
+        // looks like a success.
+        Some(other) => {
+            return Err(AgentError::Provider(format!(
+                "gemini cannot enforce response format {other:?}"
+            )))
+        }
+    }
+
     let mut body = json!({
         "contents": gemini_contents(&req.messages, &req.images)?,
         "generationConfig": generation_config,
@@ -291,9 +317,172 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
                 "parameters": tool.input_schema,
             })).collect::<Vec<_>>(),
         }]);
-        body["toolConfig"] = json!({ "functionCallingConfig": { "mode": "AUTO" } });
+        body["toolConfig"] = json!({
+            "functionCallingConfig": gemini_function_calling_config(req.tool_choice.as_ref())?,
+        });
     }
     Ok(body)
+}
+
+fn gemini_function_calling_config(choice: Option<&ToolChoice>) -> Result<Value> {
+    Ok(match choice {
+        None | Some(ToolChoice::Auto) => json!({ "mode": "AUTO" }),
+        Some(ToolChoice::Required) => json!({ "mode": "ANY" }),
+        Some(ToolChoice::None) => json!({ "mode": "NONE" }),
+        Some(ToolChoice::Tool { name }) => {
+            json!({ "mode": "ANY", "allowedFunctionNames": [name] })
+        }
+        // `ToolChoice` is open so a provider-neutral mode can be added without
+        // a breaking change. Silently substituting the model's own judgement
+        // for a mode this adapter has not learned would turn "must not call a
+        // tool" into "may".
+        Some(other) => {
+            return Err(AgentError::Provider(format!(
+                "gemini cannot express tool choice {other:?}"
+            )))
+        }
+    })
+}
+
+/// Keywords `responseSchema` understands and that carry over unchanged.
+const GEMINI_SCHEMA_KEYWORDS: &[&str] = &[
+    "description",
+    "enum",
+    "pattern",
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "minimum",
+    "maximum",
+];
+
+/// `format` values `responseSchema` recognizes.
+///
+/// Gemini's list is shorter than JSON Schema's, and it rejects a value it does
+/// not know. `format` is an annotation rather than a constraint, so an
+/// unrecognized one is dropped — the same trade [`strict_json_schema`] makes.
+const GEMINI_FORMATS: &[&str] = &[
+    "date-time",
+    "date",
+    "time",
+    "duration",
+    "enum",
+    "float",
+    "double",
+    "int32",
+    "int64",
+];
+
+/// Translate a strict draft 2020-12 schema into Gemini's `responseSchema`.
+///
+/// `responseSchema` is a subset of the OpenAPI 3.0 Schema object, not JSON
+/// Schema: type names are upper-case, nullability is a `nullable` flag rather
+/// than a `"null"` member of a type union, and `additionalProperties` does not
+/// exist — a Gemini object is closed already.
+///
+/// Anything outside the subset is an error rather than a dropped keyword, for
+/// the same reason as in [`strict_json_schema`]: a constraint we neither sent
+/// nor reported is a promise we quietly broke.
+fn gemini_response_schema(schema: &Value) -> Result<Value> {
+    let unsupported = |detail: &str| {
+        AgentError::Provider(format!("gemini responseSchema cannot express {detail}"))
+    };
+    let object = schema
+        .as_object()
+        .ok_or_else(|| unsupported("a non-object schema"))?;
+    let mut out = serde_json::Map::new();
+    for (keyword, value) in object {
+        match keyword.as_str() {
+            "type" | "properties" | "required" | "items" | "anyOf" => {}
+            // Gemini objects reject unknown properties on their own.
+            "additionalProperties" => {}
+            "format" => {
+                if value.as_str().is_some_and(|f| GEMINI_FORMATS.contains(&f)) {
+                    out.insert(keyword.clone(), value.clone());
+                }
+            }
+            keyword if GEMINI_SCHEMA_KEYWORDS.contains(&keyword) => {
+                out.insert(keyword.to_owned(), value.clone());
+            }
+            keyword => return Err(unsupported(&format!("the keyword `{keyword}`"))),
+        }
+    }
+
+    if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+        let branches = branches
+            .iter()
+            .map(gemini_response_schema)
+            .collect::<Result<Vec<_>>>()?;
+        out.insert("anyOf".to_owned(), Value::Array(branches));
+    }
+
+    let mut nullable = false;
+    let mut declared: Option<&str> = None;
+    if let Some(value) = object.get("type") {
+        let names: Vec<&str> = match value {
+            Value::String(name) => vec![name.as_str()],
+            Value::Array(names) => names
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<_>>()
+                .ok_or_else(|| unsupported("a non-string type name"))?,
+            _ => return Err(unsupported("a non-string type")),
+        };
+        for name in names {
+            if name == "null" {
+                nullable = true;
+            } else if declared.replace(name).is_some() {
+                // OpenAPI 3.0 has one type per schema, so a genuine union has
+                // no representation here.
+                return Err(unsupported("a union of two concrete types"));
+            }
+        }
+    }
+
+    if let Some(name) = declared {
+        let gemini_type =
+            gemini_schema_type(name).ok_or_else(|| unsupported(&format!("the type `{name}`")))?;
+        out.insert("type".to_owned(), json!(gemini_type));
+        if name == "object" {
+            let properties = object
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or_else(|| unsupported("an object with no declared properties"))?;
+            let translated = properties
+                .iter()
+                .map(|(name, property)| Ok((name.clone(), gemini_response_schema(property)?)))
+                .collect::<Result<serde_json::Map<_, _>>>()?;
+            out.insert("properties".to_owned(), Value::Object(translated));
+            if let Some(required) = object.get("required") {
+                out.insert("required".to_owned(), required.clone());
+            }
+        }
+        if name == "array" {
+            let items = object
+                .get("items")
+                .ok_or_else(|| unsupported("an array with no item schema"))?;
+            out.insert("items".to_owned(), gemini_response_schema(items)?);
+        }
+    } else if !out.contains_key("anyOf") {
+        return Err(unsupported("a schema with no type"));
+    }
+    if nullable {
+        out.insert("nullable".to_owned(), json!(true));
+    }
+    Ok(Value::Object(out))
+}
+
+fn gemini_schema_type(name: &str) -> Option<&'static str> {
+    match name {
+        "object" => Some("OBJECT"),
+        "array" => Some("ARRAY"),
+        "string" => Some("STRING"),
+        "integer" => Some("INTEGER"),
+        "number" => Some("NUMBER"),
+        "boolean" => Some("BOOLEAN"),
+        _ => None,
+    }
 }
 
 fn gemini_thinking_level(effort: ReasoningEffort) -> &'static str {
@@ -696,6 +885,7 @@ mod tests {
             temperature: Some(0.2),
             reasoning_effort: Some(ReasoningEffort::High),
             images: ImageAttachments::new(),
+            ..Default::default()
         }
     }
 
@@ -715,6 +905,51 @@ mod tests {
         assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
         assert!(body.get("temperature").is_none());
         assert!(body["generationConfig"].get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn a_constrained_request_translates_the_schema_to_the_openapi_subset() {
+        let mut req = request(vec![ChatMessage::text(Role::User, "hi")]);
+        req.tools.clear();
+        req.response_format = Some(ResponseFormat::JsonSchema {
+            name: "note".into(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "items": { "type": "array", "items": { "type": "string" } },
+                    "note": { "type": "string", "description": "Optional note." },
+                    "count": { "type": "integer", "format": "uint16", "minimum": 0 },
+                },
+                "required": ["items", "count"],
+            }),
+        });
+        let body = build_request_json(&req).unwrap();
+        assert_eq!(
+            body["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        // Upper-case type names, `nullable` in place of a `"null"` type member,
+        // no `additionalProperties`, and no generator-shaped `format`.
+        assert_eq!(
+            body["generationConfig"]["responseSchema"],
+            json!({
+                "type": "OBJECT",
+                "properties": {
+                    "items": { "type": "ARRAY", "items": { "type": "STRING" } },
+                    "note": {
+                        "type": "STRING",
+                        "nullable": true,
+                        "description": "Optional note.",
+                    },
+                    "count": { "type": "INTEGER", "minimum": 0 },
+                },
+                "required": ["count", "items", "note"],
+            })
+        );
+
+        // OpenAPI 3.0 schemas carry one concrete type, so a genuine union has no
+        // translation and must not go out as an unconstrained request.
+        assert!(gemini_response_schema(&json!({ "type": ["string", "integer"] })).is_err());
     }
 
     #[test]

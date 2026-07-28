@@ -94,8 +94,69 @@ impl ChatMessage {
     }
 }
 
-/// A request for one streamed model completion.
+/// A constraint on the shape of a completion's output.
+///
+/// This is a constraint, not a hint. An adapter either enforces it with the
+/// provider's native mechanism or fails the request; none of them sends an
+/// unconstrained completion and hopes. A caller that asked for JSON therefore
+/// never has to guess whether it got JSON — only whether the turn ran.
+///
+/// **Return channel.** Constrained output always arrives on
+/// [`ProviderEvent::TextDelta`], whatever mechanism the adapter used to obtain
+/// it. Providers disagree here — OpenAI and Gemini have a native JSON mode that
+/// streams as ordinary text, while Anthropic's form is a forced tool call whose
+/// arguments stream as [`ProviderEvent::ToolCallArgsDelta`] — and normalizing in
+/// the adapter is what keeps that disagreement out of every consumer. Both
+/// consumers of this event stream match exhaustively and reject a tool call
+/// they did not advertise, so the alternative would be a provider-conditional
+/// branch in each of them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ResponseFormat {
+    /// The completion must be a single JSON value satisfying `schema`.
+    JsonSchema {
+        /// Short identifier for the schema, e.g. `context_checkpoint`.
+        ///
+        /// Providers surface it in errors, and the Anthropic adapter uses it as
+        /// the name of the tool it forces, so it must match
+        /// `^[a-zA-Z0-9_-]{1,64}$`.
+        name: String,
+        /// The JSON Schema (draft 2020-12) the output must satisfy.
+        ///
+        /// Providers accept only a strict subset — see
+        /// [`crate::tool::strict_json_schema`], which produces it.
+        schema: Value,
+    },
+}
+
+/// Whether the model may, must, or must not call a tool this turn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolChoice {
+    /// The model decides. This is every provider's default.
+    Auto,
+    /// The model must call one of the advertised tools.
+    Required,
+    /// The model must not call a tool.
+    None,
+    /// The model must call exactly this tool.
+    Tool {
+        /// The name of the tool, which must be one the request advertises.
+        name: String,
+    },
+}
+
+/// A request for one streamed model completion.
+///
+/// The struct is constructed as a literal rather than through a builder, so it
+/// derives [`Default`] and callers spread `..Default::default()` over the
+/// controls they do not set. New request controls then reach the adapters
+/// without a mechanical edit at every construction site — and, more usefully,
+/// without the temptation to make the struct `#[non_exhaustive]`, which would
+/// hide from the compiler the one place that genuinely has to opt in.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
     /// Explicit provider route selected by the host. Composite routers must
     /// honor this hint exactly and must not silently fall back to another
@@ -128,6 +189,17 @@ pub struct ChatRequest {
     /// control and ignore it otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<crate::model::ReasoningEffort>,
+    /// Constraint on the output's shape. Absent, the model writes prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
+    /// Whether the model may, must, or must not call a tool. Absent, the
+    /// provider's own default holds, which is always the automatic choice.
+    ///
+    /// A [`ResponseFormat`] overrides this on adapters that constrain output by
+    /// forcing a tool: there is only one tool-choice slot on the wire, and the
+    /// output constraint is the stronger promise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
     /// Pixels for the [`ContentBlock::Image`] blocks in `messages`.
     ///
     /// Hydrated from the blob store for exactly this request. Skipped by serde
@@ -397,6 +469,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             images: ImageAttachments::new(),
+            ..Default::default()
         }))
         .unwrap();
         drop(provider);
@@ -425,6 +498,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             images: ImageAttachments::new(),
+            ..Default::default()
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("system"), "{json}");

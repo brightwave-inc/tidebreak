@@ -1330,6 +1330,12 @@ pub struct AgentRun {
     pub status: AgentRunStatus,
     /// Exact delegated task for a sandbox run. Foreground runs have no task.
     pub input: Option<String>,
+    /// Model selection frozen when a sandbox run was admitted, inherited from
+    /// its origin turn so the child cannot silently execute against a different
+    /// model than the conversation that delegated it. Foreground coordinators
+    /// carry the selection on their turns instead, and runs admitted before this
+    /// was persisted read back as absent.
+    pub model: Option<String>,
     /// Failure attempts already started. Reclaiming an expired lease starts a
     /// new attempt; later continuation resumptions will not.
     pub attempt_count: i32,
@@ -1365,6 +1371,8 @@ impl AgentRun {
     pub const MAX_DEPTH: u8 = 1;
     /// Maximum persisted delegated task length.
     pub const MAX_INPUT_LEN: usize = 65_536;
+    /// Maximum persisted model identifier length.
+    pub const MAX_MODEL_LEN: usize = TurnRun::MAX_MODEL_LEN;
     /// Default failure-attempt budget for sandboxed work.
     pub const DEFAULT_MAX_ATTEMPTS: i32 = 3;
     /// Default wall-clock budget for one sandbox run.

@@ -1,5 +1,7 @@
 import type {
   ModelInfo,
+  ModelRole,
+  ModelRoleInfo,
   ModelSelectionKey,
   ProviderKind,
 } from "./api";
@@ -45,4 +47,17 @@ export function providerLabel(provider: ProviderKind): string {
     case "model_gateway":
       return "Model Gateway";
   }
+}
+
+/**
+ * What `role` resolves to right now, as the server reports it.
+ *
+ * `null` when the server could not name a model for the role, which a client
+ * must present as "nothing" rather than guessing at one.
+ */
+export function resolvedRoleKey(
+  roles: ModelRoleInfo[],
+  role: ModelRole,
+): string | null {
+  return roles.find((entry) => entry.role === role)?.resolved_key ?? null;
 }

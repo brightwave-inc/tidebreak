@@ -7,6 +7,7 @@ import { refuseStrayFileDrops } from "./ImageAttachments";
 import { startImportQueue } from "./ImportQueueStore";
 import { router } from "./router";
 import { initTheme } from "./theme";
+import "katex/dist/katex.min.css";
 import "./styles.css";
 
 initTheme();

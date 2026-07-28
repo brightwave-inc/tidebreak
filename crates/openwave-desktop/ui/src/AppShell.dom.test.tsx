@@ -37,7 +37,7 @@ vi.mock("./boot", () => ({
 
 vi.mock("./api", () => ({
   ApiClient: class {
-    listModels = vi.fn(async () => ({ models: [] }));
+    listModels = vi.fn(async () => ({ models: [], roles: [] }));
     listProviders = vi.fn(async () => ({ providers: [] }));
     listChats = listChats;
     createChat = createChat;
@@ -80,13 +80,11 @@ vi.mock("./FoldersView", () => ({
   FoldersView: () => <div data-testid="folders">folders</div>,
 }));
 
-vi.mock("./SettingsView", () => ({
-  SettingsView: ({ onBack }: { onBack: () => void }) => (
-    <div data-testid="settings">
-      settings
-      <button onClick={onBack}>Back to app</button>
-    </div>
-  ),
+// The settings rail (Back to app, section links) is the real thing here; only
+// the section body is stubbed. Providers is where a bare /settings lands, so
+// stubbing it is enough to stand in for whichever section the outlet renders.
+vi.mock("./settings/ProvidersPanel", () => ({
+  ProvidersPanel: () => <div data-testid="settings">settings</div>,
 }));
 
 vi.mock("./ChatApprovalHydration", () => ({
@@ -323,7 +321,11 @@ describe("app shell", () => {
 
     await user.click(screen.getByText("Settings"));
     expect(await screen.findByTestId("settings")).toBeInTheDocument();
-    await waitFor(() => expect(router.state.location.pathname).toBe("/settings"));
+    // A bare /settings redirects to the first section, so that is where the URL
+    // lands rather than on /settings itself.
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/settings/providers"),
+    );
     // The conversation is gone, and that is fine — the transcript rehydrates
     // from a durable journal on the way back.
     expect(screen.queryByTestId("transcript")).not.toBeInTheDocument();

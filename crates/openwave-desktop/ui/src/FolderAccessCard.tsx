@@ -1,5 +1,7 @@
 import type { PendingFolderAccessRequest } from "./api";
 import type { FolderAccessDecision } from "./host";
+import { AttentionCard } from "./AttentionCard";
+import { Button } from "@/components/ui/button";
 
 export function FolderAccessCard({
   request,
@@ -25,72 +27,69 @@ export function FolderAccessCard({
     nativeHost && !nativeBusy && !request.claimedByDesktop && !working;
 
   return (
-    <section
-      className="folder-consent"
-      aria-labelledby={`folder-${request.callId}`}
-      aria-busy={working}
+    <AttentionCard
+      title="Folder access requested"
+      titleId={`folder-${request.callId}`}
+      subtitle={request.reason}
+      busy={working}
+      error={error}
     >
-      <div className="folder-consent-heading">
-        <div>
-          <h2 id={`folder-${request.callId}`}>Folder access requested</h2>
-          <span className="status">read access</span>
-        </div>
-      </div>
-      <p className="folder-consent-reason">{request.reason}</p>
       {hint && (
-        <p className="folder-consent-hint">
+        <p className="text-muted-foreground text-sm break-words">
           Suggested starting location: <strong>{hint}</strong>
         </p>
       )}
       {working ? (
-        <p className="folder-consent-note" role="status" aria-live="polite">
+        <p
+          className="text-muted-foreground text-sm"
+          role="status"
+          aria-live="polite"
+        >
           Resolving the folder request…
         </p>
       ) : request.claimedByDesktop ? (
-        <p className="folder-consent-note" role="status" aria-live="polite">
+        <p
+          className="text-muted-foreground text-sm"
+          role="status"
+          aria-live="polite"
+        >
           This request is already being handled by the native desktop.
         </p>
       ) : !nativeHost ? (
-        <div>
-          <p className="folder-consent-note">
+        <>
+          <p className="text-muted-foreground text-sm">
             Folder consent is unavailable in browser-only mode. This desktop
             cannot resolve a chat owned by the headless server.
           </p>
-          <div className="folder-consent-actions">
-            <button type="button" className="btn" onClick={onCancel}>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" onClick={onCancel}>
               Cancel turn
-            </button>
+            </Button>
           </div>
-        </div>
+        </>
       ) : nativeBusy ? (
-        <p className="folder-consent-note" role="status" aria-live="polite">
+        <p
+          className="text-muted-foreground text-sm"
+          role="status"
+          aria-live="polite"
+        >
           Finish the current folder request first.
         </p>
       ) : (
-        <div className="folder-consent-actions">
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={!actionable}
-            onClick={() => onDecision("allow")}
-          >
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" disabled={!actionable} onClick={() => onDecision("allow")}>
             Allow
-          </button>
-          <button
-            type="button"
-            className="btn"
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             disabled={!actionable}
             onClick={() => onDecision("decline")}
           >
             Decline
-          </button>
+          </Button>
         </div>
       )}
-      {error && (
-        <p className="folder-consent-error" role="alert">
-          {error}
-        </p>
-      )}
-    </section>
+    </AttentionCard>
   );
 }

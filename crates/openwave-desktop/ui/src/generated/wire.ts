@@ -182,9 +182,9 @@ root_id: HostRootId,
 origin: RootAttachmentOrigin, };
 
 /**
- * A completed tool invocation with no results, tool identity, provider
- * metadata, executor identity, lease, or diagnostic detail. The only arguments
- * it can carry are the ones a tool explicitly projects for display.
+ * A completed tool invocation with no arbitrary result text, provider
+ * metadata, executor identity, lease, or diagnostic detail. The only action or
+ * result it can carry is one a tool explicitly projects through a closed type.
  */
 export type ChatToolActivitySnapshot = { 
 /**
@@ -205,7 +205,12 @@ tool: RendererToolName,
  * from the arguments it ran with, so history describes the same action
  * the live stream did.
  */
-action?: ToolActionPreview, background_agent_run_id?: AgentRunId, status: ChatToolActivityStatus, started_at: string, finished_at: string | null, };
+action?: ToolActionPreview, 
+/**
+ * Closed projection of an actionable result. Arbitrary result text is
+ * never included.
+ */
+result?: ToolResultPreview, background_agent_run_id?: AgentRunId, status: ChatToolActivityStatus, started_at: string, finished_at: string | null, };
 
 /**
  * Fixed lifecycle vocabulary exposed for a historical tool card.
@@ -243,12 +248,17 @@ end: number, };
 /**
  * Renderer-safe configuration and readiness.
  */
-export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, };
+export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, has_credential: boolean, };
+
+/**
+ * Renderer-safe readiness for E2B's fixed credential slot.
+ */
+export type CodeExecutionCredentialReadiness = { provider: CodeExecutionProviderKind, has_credential: boolean, };
 
 /**
  * A configured code-execution backend.
  */
-export type CodeExecutionProviderKind = "local";
+export type CodeExecutionProviderKind = "local" | "e2b";
 
 /**
  * Conservative, user-inspectable capabilities for one model served by an
@@ -455,6 +465,38 @@ reasoning_efforts: Array<ReasoningEffort>,
  * Whether the model accepts image input alongside text.
  */
 multimodal: boolean, };
+
+/**
+ * The roles the product resolves a model for.
+ *
+ * `#[non_exhaustive]` so a new role can land without breaking wire clients that
+ * match on the string form.
+ */
+export type ModelRole = "chat" | "utility";
+
+/**
+ * One named model role and what it resolves to right now.
+ */
+export type ModelRoleInfo = { 
+/**
+ * The role this row describes.
+ */
+role: ModelRole, 
+/**
+ * The catalog key the user selected for this role, or `None` when the role
+ * is left automatic.
+ */
+selection: string | null, 
+/**
+ * The catalog key this role resolves to right now, selection or not.
+ *
+ * A selector that offers "automatic" as a choice can only say what that
+ * choice means if the server says which model it lands on. `None` when the
+ * role resolves to nothing the catalog can name, which leaves the client
+ * with nothing to promise rather than a guess — and, for `utility`, means
+ * the work that depends on it is skipped.
+ */
+resolved_key: string | null, };
 
 /**
  * Closed renderer-safe pending approval projection. Canonical arguments,
@@ -710,7 +752,7 @@ timed_out: boolean,
 /**
  * Whether the provider dropped output past its capture limit.
  */
-output_truncated: boolean, stdout: string, stderr: string, } | { "tool": "mcp_app", 
+output_truncated: boolean, stdout: string, stderr: string, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
 /**
  * The configured MCP server namespace that serves the view.
  */

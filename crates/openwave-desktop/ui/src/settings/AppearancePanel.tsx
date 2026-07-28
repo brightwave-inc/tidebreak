@@ -1,7 +1,7 @@
 import { Monitor, Moon, Sun } from "lucide-react";
 import type { ComponentType } from "react";
 import type { ThemeMode } from "../theme";
-import { SettingsField, SettingsPanel } from "./primitives";
+import { SettingsField, SettingsPanel, SettingsSection } from "./primitives";
 
 const OPTIONS: {
   mode: ThemeMode;
@@ -25,27 +25,29 @@ export function AppearancePanel({
       title="Appearance"
       description="Choose how OpenWave looks. System follows your operating system setting."
     >
-      <SettingsField label="Theme">
-        <div className="theme-options" role="radiogroup" aria-label="Theme">
-          {OPTIONS.map((option) => {
-            const Icon = option.icon;
-            const active = mode === option.mode;
-            return (
-              <button
-                key={option.mode}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                className={`theme-option${active ? " is-active" : ""}`}
-                onClick={() => onChange(option.mode)}
-              >
-                <Icon size={16} />
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
-      </SettingsField>
+      <SettingsSection>
+        <SettingsField label="Theme">
+          <div className="theme-options" role="radiogroup" aria-label="Theme">
+            {OPTIONS.map((option) => {
+              const Icon = option.icon;
+              const active = mode === option.mode;
+              return (
+                <button
+                  key={option.mode}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  className={`theme-option${active ? " is-active" : ""}`}
+                  onClick={() => onChange(option.mode)}
+                >
+                  <Icon size={16} />
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+        </SettingsField>
+      </SettingsSection>
     </SettingsPanel>
   );
 }

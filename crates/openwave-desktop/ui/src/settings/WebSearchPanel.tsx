@@ -22,8 +22,8 @@ import {
   SettingsSection,
 } from "./primitives";
 
-const MIN_WEB_SEARCH_TIMEOUT_MS = 1_000;
-const MAX_WEB_SEARCH_TIMEOUT_MS = 60_000;
+const MIN_WEB_SEARCH_TIMEOUT_SECONDS = 1;
+const MAX_WEB_SEARCH_TIMEOUT_SECONDS = 60;
 
 // Radix Select reserves the empty string, so "Disabled" (no provider) rides on
 // a sentinel value the wire never carries.
@@ -33,24 +33,12 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
   const [config, setConfig] = useState<WebSearchConfigInfo | null>(null);
   const [credentials, setCredentials] = useState<WebSearchCredentialReadiness[]>([]);
   const [provider, setProvider] = useState<WebSearchProviderKind | "">("");
-  const [timeoutMs, setTimeoutMs] = useState("");
+  const [timeoutSeconds, setTimeoutSeconds] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [loading, setLoading] = useState(true);
-  const [savingConfig, setSavingConfig] = useState(false);
-  const [savingCredential, setSavingCredential] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [removingCredential, setRemovingCredential] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  async function refresh() {
-    const [nextConfig, nextCredentials] = await Promise.all([
-      client.getWebSearchConfig(),
-      client.listWebSearchCredentials(),
-    ]);
-    setConfig(nextConfig);
-    setCredentials(nextCredentials.credentials);
-    setProvider(nextConfig.provider ?? "");
-    setTimeoutMs(String(nextConfig.timeout_ms));
-  }
 
   useEffect(() => {
     let cancelled = false;
@@ -66,7 +54,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
         setConfig(nextConfig);
         setCredentials(nextCredentials.credentials);
         setProvider(nextConfig.provider ?? "");
-        setTimeoutMs(String(nextConfig.timeout_ms));
+        setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
       } catch (err) {
         if (!cancelled) setError(String(err));
       } finally {
@@ -78,67 +66,66 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
     };
   }, [client]);
 
-  const activeProvider = config?.provider;
-  const selectedCredential = activeProvider
-    ? credentials.find((credential) => credential.provider === activeProvider)
-    : undefined;
-  const selectedHasCredential = selectedCredential?.has_credential ?? false;
-  const working = savingConfig || savingCredential || removingCredential;
+  // Keyed to the provider in the dropdown, not the saved one: picking a
+  // provider has to offer its key field in the same pass that selects it.
+  const selectedHasCredential = provider
+    ? (credentials.find((credential) => credential.provider === provider)
+        ?.has_credential ?? false)
+    : false;
+  const working = saving || removingCredential;
   const state = webSearchState(config);
 
-  async function saveConfig() {
-    const parsedTimeout = Number(timeoutMs);
+  async function save() {
+    const seconds = Number(timeoutSeconds);
     if (
-      !Number.isInteger(parsedTimeout) ||
-      parsedTimeout < MIN_WEB_SEARCH_TIMEOUT_MS ||
-      parsedTimeout > MAX_WEB_SEARCH_TIMEOUT_MS
+      !Number.isFinite(seconds) ||
+      timeoutSeconds.trim() === "" ||
+      seconds < MIN_WEB_SEARCH_TIMEOUT_SECONDS ||
+      seconds > MAX_WEB_SEARCH_TIMEOUT_SECONDS
     ) {
       setError(
-        `Timeout must be a whole number between ${MIN_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} and ${MAX_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} ms.`,
+        `Timeout must be between ${MIN_WEB_SEARCH_TIMEOUT_SECONDS} and ${MAX_WEB_SEARCH_TIMEOUT_SECONDS} seconds.`,
       );
       return;
     }
 
-    setSavingConfig(true);
+    setSaving(true);
     setError(null);
     try {
+      // The key goes first so a provider never lands selected-but-unusable
+      // when the caller supplied both in one pass.
+      if (provider && apiKey.trim()) {
+        await client.putWebSearchCredential(provider, apiKey.trim());
+        setApiKey("");
+      }
       const nextConfig = await client.putWebSearchConfig({
         provider: provider || null,
-        timeout_ms: parsedTimeout,
+        timeout_ms: Math.round(seconds * 1000),
       });
+      const nextCredentials = await client.listWebSearchCredentials();
       setConfig(nextConfig);
-      setTimeoutMs(String(nextConfig.timeout_ms));
-      toast.success("Saved web-search configuration");
+      setCredentials(nextCredentials.credentials);
+      setTimeoutSeconds(String(nextConfig.timeout_ms / 1000));
+      toast.success("Saved web-search settings");
     } catch (err) {
       setError(String(err));
     } finally {
-      setSavingConfig(false);
-    }
-  }
-
-  async function saveCredential() {
-    if (!activeProvider || !apiKey.trim()) return;
-    setSavingCredential(true);
-    setError(null);
-    try {
-      await client.putWebSearchCredential(activeProvider, apiKey.trim());
-      setApiKey("");
-      await refresh();
-      toast.success("Saved the API key");
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setSavingCredential(false);
+      setSaving(false);
     }
   }
 
   async function removeCredential() {
-    if (!activeProvider) return;
+    if (!provider) return;
     setRemovingCredential(true);
     setError(null);
     try {
-      await client.deleteWebSearchCredential(activeProvider);
-      await refresh();
+      await client.deleteWebSearchCredential(provider);
+      const [nextConfig, nextCredentials] = await Promise.all([
+        client.getWebSearchConfig(),
+        client.listWebSearchCredentials(),
+      ]);
+      setConfig(nextConfig);
+      setCredentials(nextCredentials.credentials);
       toast.success("Removed the saved API key");
     } catch (err) {
       setError(String(err));
@@ -150,7 +137,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
   return (
     <SettingsPanel
       title="Web search"
-      description="Choose the provider agents may use and bound every request. Existing keys are never shown here."
+      description="Choose the provider agents may use, give it a key, and bound every request. Saved keys are never shown here."
       busy={loading}
     >
       {loading ? (
@@ -173,13 +160,14 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
               <Select
                 value={provider === "" ? NO_PROVIDER : provider}
                 disabled={working}
-                onValueChange={(value) =>
+                onValueChange={(value) => {
                   setProvider(
                     value === NO_PROVIDER
                       ? ""
                       : (value as WebSearchProviderKind),
-                  )
-                }
+                  );
+                  setApiKey("");
+                }}
               >
                 <SelectTrigger aria-label="Provider">
                   <SelectValue />
@@ -192,44 +180,22 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
               </Select>
             </SettingsField>
 
-            <SettingsField
-              label="Request timeout (ms)"
-              hint={`Between ${MIN_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} and ${MAX_WEB_SEARCH_TIMEOUT_MS.toLocaleString()} ms.`}
-            >
-              <Input
-                type="number"
-                inputMode="numeric"
-                min={MIN_WEB_SEARCH_TIMEOUT_MS}
-                max={MAX_WEB_SEARCH_TIMEOUT_MS}
-                step="1000"
-                value={timeoutMs}
-                disabled={working}
-                onChange={(event) => setTimeoutMs(event.target.value)}
-              />
-            </SettingsField>
-            <Button
-              type="button"
-              className="self-start"
-              disabled={working}
-              onClick={() => void saveConfig()}
-            >
-              {savingConfig ? "Saving…" : "Save configuration"}
-            </Button>
-          </SettingsSection>
-
-          {activeProvider && (
-            <SettingsSection title={`${activeProvider} credential`}>
-              <span className="text-xs text-muted-foreground">
-                {selectedHasCredential
-                  ? "credential saved"
-                  : "no credential saved"}
-              </span>
+            {provider && (
               <SettingsField
-                label={selectedHasCredential ? "Replace API key" : "API key"}
+                label="API key"
+                hint={
+                  selectedHasCredential
+                    ? "A key is already saved. Type a new one to replace it."
+                    : "Stored in the system keychain, never shown again."
+                }
               >
                 <Input
                   type="password"
-                  placeholder="Paste a new API key"
+                  placeholder={
+                    selectedHasCredential
+                      ? "Saved — leave blank to keep it"
+                      : `Paste your ${providerLabel(provider)} API key`
+                  }
                   value={apiKey}
                   maxLength={8_192}
                   autoComplete="new-password"
@@ -237,38 +203,44 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
                   onChange={(event) => setApiKey(event.target.value)}
                 />
               </SettingsField>
-              <div className="flex flex-wrap gap-2">
+            )}
+
+            <SettingsField
+              label="Request timeout (seconds)"
+              hint={`Between ${MIN_WEB_SEARCH_TIMEOUT_SECONDS} and ${MAX_WEB_SEARCH_TIMEOUT_SECONDS} seconds.`}
+            >
+              <Input
+                type="number"
+                inputMode="numeric"
+                min={MIN_WEB_SEARCH_TIMEOUT_SECONDS}
+                max={MAX_WEB_SEARCH_TIMEOUT_SECONDS}
+                step="1"
+                value={timeoutSeconds}
+                disabled={working}
+                onChange={(event) => setTimeoutSeconds(event.target.value)}
+              />
+            </SettingsField>
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                disabled={working}
+                onClick={() => void save()}
+              >
+                {saving ? "Saving…" : "Save settings"}
+              </Button>
+              {provider && selectedHasCredential && (
                 <Button
                   type="button"
-                  disabled={working || !apiKey.trim()}
-                  onClick={() => void saveCredential()}
+                  variant="outline"
+                  disabled={working}
+                  onClick={() => void removeCredential()}
                 >
-                  {savingCredential
-                    ? "Saving…"
-                    : selectedHasCredential
-                      ? "Update key"
-                      : "Save key"}
+                  {removingCredential ? "Removing…" : "Remove saved key"}
                 </Button>
-                {selectedHasCredential && (
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    disabled={working}
-                    onClick={() => void removeCredential()}
-                  >
-                    {removingCredential ? "Removing…" : "Remove saved key"}
-                  </Button>
-                )}
-              </div>
-            </SettingsSection>
-          )}
-
-          {provider !== (activeProvider ?? "") && (
-            <p className="text-xs text-muted-foreground">
-              Save the provider configuration before managing that provider’s
-              key.
-            </p>
-          )}
+              )}
+            </div>
+          </SettingsSection>
 
           <p className="text-sm leading-relaxed text-muted-foreground">
             Foreground and background agents can request configured search.
@@ -280,6 +252,17 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>
   );
+}
+
+function providerLabel(provider: WebSearchProviderKind): string {
+  switch (provider) {
+    case "exa":
+      return "Exa";
+    case "tavily":
+      return "Tavily";
+    default:
+      return provider;
+  }
 }
 
 function webSearchState(config: WebSearchConfigInfo | null): {
@@ -298,12 +281,12 @@ function webSearchState(config: WebSearchConfigInfo | null): {
     return {
       kind: "ready",
       label: "Ready",
-      description: `${config.provider} is selected and has a saved credential.`,
+      description: `${providerLabel(config.provider)} is selected and has a saved key.`,
     };
   }
   return {
     kind: "not-configured",
     label: "Not configured",
-    description: `${config.provider} is selected but needs an API key.`,
+    description: `${providerLabel(config.provider)} is selected but needs an API key.`,
   };
 }

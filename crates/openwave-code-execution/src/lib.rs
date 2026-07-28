@@ -6,16 +6,16 @@
 //! reconcile retries and map a chat to its own remote session without exposing
 //! provider credentials or host paths to the model.
 //!
-//! [`LocalExecutionProvider`] is the first adapter. It runs directly on macOS
-//! under the native Seatbelt sandbox, denies network access, clears the inherited
-//! environment, confines writes to one private chat scratch directory, bounds
-//! time and captured output, and records a private terminal receipt. Unsupported
-//! platforms fail closed rather than running a command without confinement.
+//! [`LocalExecutionProvider`] runs directly on macOS under the native Seatbelt
+//! sandbox. [`E2BExecutionProvider`] runs the same direct command contract in a
+//! managed E2B sandbox and reuses one live remote workspace per chat.
 
+mod e2b;
 mod local;
 mod tool;
 mod types;
 
+pub use e2b::{E2BCredential, E2BExecutionProvider, E2BSessionPool, E2B_CREDENTIAL_KEY};
 pub use local::LocalExecutionProvider;
 pub use tool::{ExecTool, EXEC_TOOL_NAME};
 pub use types::{

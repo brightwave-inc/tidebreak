@@ -31,7 +31,9 @@ import { UserQuestionsCard } from "./UserQuestionsCard";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
 import { BackgroundAgentList } from "./BackgroundAgentList";
+import { WebSearchProviderRequiredCard } from "./WebSearchProviderRequiredCard";
 import { useSourceNav } from "./panel/SourceNav";
+import { useStreamingTypewriter } from "./useStreamingTypewriter";
 import { Skeleton } from "./components/ui/skeleton";
 
 export type ChatMessage =
@@ -521,6 +523,13 @@ function surfacedCards(
       continue;
     }
     if (entry.role !== "tool") continue;
+    if (
+      entry.result?.tool === "web_search_provider_required" &&
+      !parked.has(entry.callId)
+    ) {
+      cards.push(<WebSearchProviderRequiredCard key={entry.id} />);
+      continue;
+    }
     // An MCP App view is keyed on the *result*: the tool has no action
     // preview, and its card exists to show what the server's declared view
     // renders — inside the sandbox — not to restate arguments or output.
@@ -554,6 +563,23 @@ function surfacedCards(
     );
   }
   return cards;
+}
+
+/**
+ * Assistant prose driven by the typewriter: while the bubble is the live
+ * streaming turn its text is typed in, and a settled or rehydrated message
+ * renders at once. Block-level memoization inside {@link MessageMarkdown} keeps
+ * each tick's re-parse confined to the trailing block.
+ */
+function AssistantMessageBody({
+  text,
+  streaming,
+}: {
+  text: string;
+  streaming: boolean;
+}) {
+  const displayed = useStreamingTypewriter(text, streaming);
+  return <MessageMarkdown>{displayed}</MessageMarkdown>;
 }
 
 /**
@@ -596,7 +622,9 @@ function MessageBubbleImpl({
 
     return (
       <article className="message message-assistant" aria-label="Assistant">
-        {message.text && <MessageMarkdown>{message.text}</MessageMarkdown>}
+        {message.text && (
+          <AssistantMessageBody text={message.text} streaming={busy} />
+        )}
         <AssistantSources
           sources={message.sources}
           onOpenSource={

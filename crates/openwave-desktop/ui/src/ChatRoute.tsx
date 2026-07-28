@@ -9,6 +9,7 @@ import type {
 } from "./api";
 import { useApp } from "./AppContext";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
+import { ChatHeaderTitle } from "./ChatHeaderTitle";
 import { reconcilePendingApprovalCards } from "./ApprovalHistory";
 import { loadChatApprovalHydration } from "./ChatApprovalHydration";
 import { useChatListStore } from "./ChatListStore";
@@ -26,6 +27,7 @@ import {
 import { useFirstMessage } from "./FirstMessage";
 import { ChatView } from "./ChatView";
 import { DeliverablesView } from "./DeliverablesView";
+import { lookUpDerivedTitle } from "./DerivedChatTitle";
 import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
 import { DocumentsView } from "./DocumentsView";
 import { FoldersView } from "./FoldersView";
@@ -213,6 +215,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         return;
       case "turn_resolved":
         signalTurnLifecycle("resolved");
+        void adoptDerivedTitle();
         return;
       case "invalidate_terminal_hydration":
         terminalHydrationGenerationRef.current += 1;
@@ -223,6 +226,20 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         return;
       }
     }
+  }
+
+  /** Show a title the server derived for this chat while the turn ran. */
+  async function adoptDerivedTitle() {
+    const named = await lookUpDerivedTitle(
+      client,
+      chatId,
+      () =>
+        useChatListStore
+          .getState()
+          .chats.find((candidate) => candidate.id === chatId),
+      (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    );
+    if (named) chatListActions.replaceChat(named);
   }
 
   async function refreshTerminalTranscript(generation: number) {
@@ -440,9 +457,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     <div className="mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 px-1">
         <div className="w-24" />
-        <h1 className="min-w-0 max-w-sm flex-1 truncate text-center text-sm font-medium">
-          {chat.title?.trim() || "New chat"}
-        </h1>
+        <ChatHeaderTitle chat={chat} />
         <div className="flex w-24 items-center justify-end">
           <span className="truncate text-xs text-muted-foreground" title={status}>
             {status}

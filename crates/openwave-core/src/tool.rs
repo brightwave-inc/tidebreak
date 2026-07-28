@@ -156,6 +156,183 @@ fn remove_schema_defaults(schema: &mut Value) {
     }
 }
 
+/// What to do with a property the schema does not require, when converting to
+/// the strict schema subset providers enforce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionalProperties {
+    /// Widen the property to also accept `null`, then require it.
+    ///
+    /// Correct when the reader is a serde `Option`, which reads an explicit
+    /// `null` back as absent.
+    AcceptNull,
+    /// Refuse the conversion.
+    ///
+    /// Correct when the reader's handling of an absent value is unknown. A
+    /// hand-written tool schema whose optional property deserializes into a
+    /// `#[serde(default)]` field that is *not* an `Option` rejects the `null`
+    /// that widening invites, and would start failing every call.
+    Reject,
+}
+
+/// Keywords carried through a strict conversion unchanged.
+///
+/// Anything not listed here and not handled structurally below is refused
+/// rather than dropped. Silently discarding a constraint changes what the model
+/// was asked for, and strict mode is precisely the promise that it did not.
+const STRICT_PASSTHROUGH_KEYWORDS: &[&str] = &[
+    "description",
+    "enum",
+    "const",
+    "pattern",
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+];
+
+/// `format` values providers recognize in a strict schema.
+///
+/// `format` is an annotation rather than a constraint, and generators emit
+/// Rust-shaped values (`uint16`, `float`) that a strict validator rejects
+/// outright. An unrecognized value is therefore dropped instead of refusing the
+/// whole schema: the `type` and the numeric bounds beside it still carry the
+/// constraint.
+const STRICT_FORMATS: &[&str] = &[
+    "date-time",
+    "time",
+    "date",
+    "duration",
+    "email",
+    "hostname",
+    "ipv4",
+    "ipv6",
+    "uuid",
+];
+
+/// Rewrite a draft 2020-12 schema into the strict subset providers enforce, or
+/// return `None` when it cannot be expressed there.
+///
+/// Strict mode narrows JSON Schema in two ways. Every object must close
+/// `additionalProperties` and must enumerate its properties — so a schema that
+/// declares no `properties` at all ("any object") has no strict form. And every
+/// declared property must appear in `required`, which is not safe in general;
+/// `optional` decides what happens when one does not.
+///
+/// Refusing rather than guessing is the point. A schema the provider rejects
+/// fails the whole turn, so a caller needs a definite answer: either a schema
+/// the provider will accept, or a signal to send the request unconstrained.
+#[must_use]
+pub fn strict_json_schema(schema: &Value, optional: OptionalProperties) -> Option<Value> {
+    let object = schema.as_object()?;
+    let mut strict = serde_json::Map::new();
+    for (keyword, value) in object {
+        match keyword.as_str() {
+            // Handled structurally below.
+            "type" | "properties" | "required" | "items" | "additionalProperties" | "anyOf" => {}
+            // Not a constraint on the value, so it neither survives nor blocks.
+            "title" => {}
+            "format" => {
+                if value.as_str().is_some_and(|f| STRICT_FORMATS.contains(&f)) {
+                    strict.insert(keyword.clone(), value.clone());
+                }
+            }
+            keyword if STRICT_PASSTHROUGH_KEYWORDS.contains(&keyword) => {
+                strict.insert(keyword.to_owned(), value.clone());
+            }
+            // `$ref`/`$defs`, `oneOf`, `allOf`, `not`, `if`/`then`,
+            // `patternProperties`, and whatever a later draft adds.
+            _ => return None,
+        }
+    }
+
+    if let Some(branches) = object.get("anyOf") {
+        let branches: Vec<Value> = branches
+            .as_array()
+            .filter(|branches| !branches.is_empty())?
+            .iter()
+            .map(|branch| strict_json_schema(branch, optional))
+            .collect::<Option<_>>()?;
+        strict.insert("anyOf".to_owned(), Value::Array(branches));
+    }
+
+    let types: Vec<&str> = match object.get("type") {
+        Some(Value::String(name)) => vec![name.as_str()],
+        Some(Value::Array(names)) => names
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .filter(|names| !names.is_empty())?,
+        Some(_) => return None,
+        // Strict mode has no way to say "any value"; a branch schema carries
+        // its types inside the branches instead.
+        None if strict.contains_key("anyOf") => Vec::new(),
+        None => return None,
+    };
+
+    if types.contains(&"object") {
+        let properties = object.get("properties").and_then(Value::as_object)?;
+        let required: Vec<&str> = match object.get("required") {
+            Some(Value::Array(names)) => names.iter().map(Value::as_str).collect::<Option<_>>()?,
+            Some(_) => return None,
+            None => Vec::new(),
+        };
+        let mut strict_properties = serde_json::Map::new();
+        for (name, property) in properties {
+            let mut property = strict_json_schema(property, optional)?;
+            if !required.contains(&name.as_str()) {
+                if optional == OptionalProperties::Reject {
+                    return None;
+                }
+                property = accepting_null(property)?;
+            }
+            strict_properties.insert(name.clone(), property);
+        }
+        strict.insert(
+            "required".to_owned(),
+            Value::Array(properties.keys().cloned().map(Value::String).collect()),
+        );
+        strict.insert("properties".to_owned(), Value::Object(strict_properties));
+        strict.insert("additionalProperties".to_owned(), Value::Bool(false));
+    }
+    if types.contains(&"array") {
+        let items = strict_json_schema(object.get("items")?, optional)?;
+        strict.insert("items".to_owned(), items);
+    }
+    if let Some(declared) = object.get("type") {
+        strict.insert("type".to_owned(), declared.clone());
+    }
+    Some(Value::Object(strict))
+}
+
+/// Widen an already-strict property schema to also accept `null`.
+fn accepting_null(mut property: Value) -> Option<Value> {
+    let object = property.as_object_mut()?;
+    match object.get_mut("type") {
+        Some(Value::String(name)) if name != "null" => {
+            let widened = vec![
+                Value::String(name.clone()),
+                Value::String("null".to_owned()),
+            ];
+            object.insert("type".to_owned(), Value::Array(widened));
+        }
+        Some(Value::String(_)) => {}
+        Some(Value::Array(names)) => {
+            if !names.iter().any(|name| name.as_str() == Some("null")) {
+                names.push(Value::String("null".to_owned()));
+            }
+        }
+        // A branch schema has no single type to widen, and adding a `"null"`
+        // branch would need every sibling keyword re-checked against it.
+        _ => return None,
+    }
+    Some(property)
+}
+
 /// The result of executing a tool.
 ///
 /// `content` is the model-readable result folded back into the conversation;
@@ -178,6 +355,8 @@ pub enum ToolErrorCategory {
     UserDeclined,
     /// The model named a tool this turn does not advertise.
     NotFound,
+    /// The capability is available after the reader configures it.
+    ConfigurationRequired,
     /// The tool ran and reported a failure of its own.
     ToolFailed,
 }
@@ -190,6 +369,7 @@ impl ToolErrorCategory {
             Self::UserCancelled => "user_cancelled",
             Self::UserDeclined => "user_declined",
             Self::NotFound => "not_found",
+            Self::ConfigurationRequired => "configuration_required",
             Self::ToolFailed => "tool_failed",
         }
     }
@@ -199,7 +379,10 @@ impl ToolErrorCategory {
     #[must_use]
     pub const fn is_product_failure(self) -> bool {
         match self {
-            Self::UserCancelled | Self::UserDeclined | Self::NotFound => false,
+            Self::UserCancelled
+            | Self::UserDeclined
+            | Self::NotFound
+            | Self::ConfigurationRequired => false,
             Self::ToolFailed => true,
         }
     }
@@ -482,6 +665,70 @@ mod tests {
     }
 
     #[test]
+    fn strict_mode_requires_every_property_or_refuses_to_convert() {
+        // The case the post-processor exists for: schemars leaves an `Option`
+        // field out of `required`, and strict mode has no optional properties.
+        let schema = input_schema_for::<DerivedArguments>();
+        assert_eq!(
+            strict_json_schema(&schema, OptionalProperties::AcceptNull).unwrap(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "optional": {
+                        "type": ["string", "null"],
+                        "description": "Optional text."
+                    }
+                },
+                "required": ["optional"],
+                "additionalProperties": false
+            })
+        );
+        // Widening invites a `null` the reader has to absorb, which only an
+        // `Option` reliably does. A hand-written tool schema cannot promise
+        // that, so the conversion is refused rather than quietly performed.
+        assert!(strict_json_schema(&schema, OptionalProperties::Reject).is_none());
+    }
+
+    #[test]
+    fn strict_mode_closes_objects_and_refuses_what_it_cannot_express() {
+        // Closing the object is the safe half of strict mode: readers ignore
+        // unknown keys, so forbidding them takes nothing away.
+        let open = serde_json::json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": ["path"],
+        });
+        let strict = strict_json_schema(&open, OptionalProperties::Reject).unwrap();
+        assert_eq!(strict["additionalProperties"], serde_json::json!(false));
+
+        // A generator-shaped `format` is an annotation a strict validator
+        // rejects outright, so it goes while the real bound beside it stays.
+        let counted = serde_json::json!({
+            "type": "object",
+            "properties": { "n": { "type": "integer", "format": "uint16", "minimum": 0 } },
+            "required": ["n"],
+        });
+        let strict = strict_json_schema(&counted, OptionalProperties::Reject).unwrap();
+        assert_eq!(
+            strict["properties"]["n"],
+            serde_json::json!({ "type": "integer", "minimum": 0 })
+        );
+
+        // An object declaring no properties means "any object"; closing it would
+        // narrow it to `{}`. A `$ref` is a constraint we never translated.
+        for inexpressible in [
+            serde_json::json!({ "type": "object" }),
+            serde_json::json!({ "$ref": "#/$defs/Node" }),
+            serde_json::json!({ "description": "anything at all" }),
+        ] {
+            assert!(
+                strict_json_schema(&inexpressible, OptionalProperties::AcceptNull).is_none(),
+                "{inexpressible}"
+            );
+        }
+    }
+
+    #[test]
     fn a_reader_choice_is_not_recorded_as_a_product_failure() {
         // The distinction this exists for: a cancelled or declined call is a
         // choice, not a defect, and counting it as one makes any later question
@@ -490,6 +737,7 @@ mod tests {
             ToolErrorCategory::UserCancelled,
             ToolErrorCategory::UserDeclined,
             ToolErrorCategory::NotFound,
+            ToolErrorCategory::ConfigurationRequired,
         ] {
             assert!(!category.is_product_failure(), "{}", category.as_str());
         }
@@ -500,6 +748,7 @@ mod tests {
             ToolErrorCategory::UserCancelled,
             ToolErrorCategory::UserDeclined,
             ToolErrorCategory::NotFound,
+            ToolErrorCategory::ConfigurationRequired,
             ToolErrorCategory::ToolFailed,
         ]
         .map(ToolErrorCategory::as_str);
