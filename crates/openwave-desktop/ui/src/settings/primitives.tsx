@@ -1,9 +1,15 @@
 import type { ReactNode } from "react";
 
+import { Card } from "@/components/ui/card";
+
 /**
- * A single settings surface: a titled, optionally described column of fields.
- * The surrounding container owns scrolling and chrome, so this stays layout-only
- * and works both as a full-page section and as a docked side panel.
+ * A whole settings surface: the page title, an optional description, and the
+ * sections below it.
+ *
+ * Panels only name their sections and fields; the composition — a large page
+ * title, a bounded reading column, and the rhythm between sections — is owned
+ * here, so bringing the surface in line does not mean editing every panel.
+ * The surrounding route owns the rail and the window; this owns the scroll.
  */
 export function SettingsPanel({
   title,
@@ -17,18 +23,26 @@ export function SettingsPanel({
   children: ReactNode;
 }) {
   return (
-    <div className="settings-panel" aria-busy={busy}>
-      <div className="flex flex-col gap-1">
-        <h2 className="text-base font-semibold tracking-tight">{title}</h2>
-        {description && (
-          <p className="text-sm text-muted-foreground">{description}</p>
-        )}
+    <div className="h-full min-h-0 overflow-y-auto" aria-busy={busy}>
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-10 px-6 py-8 md:px-10">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-2xl font-medium tracking-tight">{title}</h1>
+          {description && (
+            <p className="text-sm text-muted-foreground">{description}</p>
+          )}
+        </div>
+        {children}
       </div>
-      {children}
     </div>
   );
 }
 
+/**
+ * A field within a section: a label and its control, kept in one `label` so the
+ * control takes the label's name whether or not it carries its own. Full width,
+ * because the controls that live here — selects, text inputs, editors — read
+ * badly squeezed against the right edge.
+ */
 export function SettingsField({
   label,
   hint,
@@ -40,24 +54,38 @@ export function SettingsField({
 }) {
   return (
     <label className="flex flex-col gap-1.5">
-      <span className="text-sm font-medium">{label}</span>
+      <span className="font-bold">{label}</span>
       {children}
-      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+      {hint && <span className="text-sm text-muted-foreground">{hint}</span>}
     </label>
   );
 }
 
+/**
+ * A group of related fields, with an optional heading and description above a
+ * transparent bordered card. A panel is a stack of these; a section with no
+ * heading is just the card, for panels that carry a single unnamed group.
+ */
 export function SettingsSection({
   title,
+  description,
   children,
 }: {
   title?: string;
+  description?: string;
   children: ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-3 rounded-lg border border-border p-4">
-      {title && <h3 className="text-sm font-semibold capitalize">{title}</h3>}
-      {children}
+    <section className="flex flex-col gap-4">
+      {(title || description) && (
+        <div className="flex flex-col gap-1">
+          {title && <h2 className="text-lg font-semibold">{title}</h2>}
+          {description && (
+            <p className="text-sm text-muted-foreground">{description}</p>
+          )}
+        </div>
+      )}
+      <Card className="gap-4 border bg-transparent p-4">{children}</Card>
     </section>
   );
 }

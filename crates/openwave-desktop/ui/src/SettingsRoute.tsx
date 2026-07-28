@@ -1,12 +1,15 @@
-import { useNavigate, useRouter } from "@tanstack/react-router";
+import { Outlet, useNavigate, useRouter } from "@tanstack/react-router";
 
-import { useApp } from "./AppContext";
 import { RouteFrame } from "./RouteFrame";
-import { HomeSidebar } from "./sidebar/HomeSidebar";
-import { SettingsView } from "./SettingsView";
+import { SettingsSidebar } from "./sidebar/SettingsSidebar";
 
 /**
  * Settings, as a place with an address.
+ *
+ * This is the layout the sections hang in: it owns the rail and the way back,
+ * and renders whichever section the URL names into the outlet. Because each
+ * section has its own path, a visit lands where the reader left off rather than
+ * resetting, and a link can be shared straight to it.
  *
  * The conversation unmounts while this is open, which it can afford to: the
  * transcript is a view of a durable journal and rehydrates on the way back, and
@@ -21,36 +24,20 @@ import { SettingsView } from "./SettingsView";
 export function SettingsRoute() {
   const navigate = useNavigate();
   const router = useRouter();
-  const {
-    client,
-    models,
-    providers,
-    refreshCatalog,
-    themeMode,
-    setThemeMode,
-    updateState,
-    checkForUpdate,
-    restartForUpdate,
-  } = useApp();
 
   return (
-    <RouteFrame sidebar={<HomeSidebar />}>
-      <SettingsView
-        client={client}
-        models={models}
-        providers={providers}
-        onProvidersChanged={() => void refreshCatalog()}
-        onBack={() => {
-          // A deep link straight to settings has nothing behind it.
-          if (router.history.canGoBack()) router.history.back();
-          else void navigate({ to: "/" });
-        }}
-        themeMode={themeMode}
-        onThemeChange={setThemeMode}
-        updateState={updateState}
-        onCheckForUpdate={checkForUpdate}
-        onRestartForUpdate={restartForUpdate}
-      />
+    <RouteFrame
+      sidebar={
+        <SettingsSidebar
+          onBack={() => {
+            // A deep link straight to settings has nothing behind it.
+            if (router.history.canGoBack()) router.history.back();
+            else void navigate({ to: "/" });
+          }}
+        />
+      }
+    >
+      <Outlet />
     </RouteFrame>
   );
 }

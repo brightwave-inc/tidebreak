@@ -3,6 +3,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  redirect,
 } from "@tanstack/react-router";
 
 import { AppShell } from "./AppShell";
@@ -10,6 +11,7 @@ import { ChatRoute } from "./ChatRoute";
 import { HomeRoute } from "./HomeRoute";
 import type { PanelSearch } from "./panel/panelUrl";
 import { SettingsRoute } from "./SettingsRoute";
+import { DEFAULT_SETTINGS_PATH, SETTINGS_SECTIONS } from "./settings/sections";
 
 const rootRoute = createRootRoute({ component: AppShell });
 
@@ -46,7 +48,28 @@ export const settingsRoute = createRoute({
   component: SettingsRoute,
 });
 
-export const routeTree = rootRoute.addChildren([homeRoute, chatRoute, settingsRoute]);
+/** A bare `/settings` has no section of its own; send it to the first one. */
+const settingsIndexRoute = createRoute({
+  getParentRoute: () => settingsRoute,
+  path: "/",
+  beforeLoad: () => {
+    throw redirect({ to: DEFAULT_SETTINGS_PATH });
+  },
+});
+
+const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
+  createRoute({
+    getParentRoute: () => settingsRoute,
+    path: section.path,
+    component: section.Component,
+  }),
+);
+
+export const routeTree = rootRoute.addChildren([
+  homeRoute,
+  chatRoute,
+  settingsRoute.addChildren([settingsIndexRoute, ...settingsSectionRoutes]),
+]);
 
 /**
  * Hash history, because the renderer is loaded from a custom protocol with no
