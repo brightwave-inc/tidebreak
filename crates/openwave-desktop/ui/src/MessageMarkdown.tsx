@@ -1,4 +1,4 @@
-import { memo, useMemo } from "react";
+import { isValidElement, memo, useMemo, type ReactNode } from "react";
 import ReactMarkdown, {
   type Components,
   type Options,
@@ -10,6 +10,7 @@ import rehypeKatex from "rehype-katex";
 import { ClipboardCopyButton } from "./ClipboardCopyButton";
 import { splitMarkdownBlocks } from "./markdownBlocks";
 import { escapeLatexText } from "./markdownLatex";
+import { slugify } from "./markdownHeadings";
 
 /**
  * Keep model-generated navigation deliberately narrow. `react-markdown` does
@@ -118,6 +119,38 @@ const components: Components = {
   blockquote: ({ children }) => <blockquote>{children}</blockquote>,
 };
 
+/**
+ * The same components, with every heading carrying the slug id derived from its
+ * own text — which is how the source viewer's outline finds a section to scroll
+ * to without the two sides agreeing on anything but {@link slugify}.
+ *
+ * Opt-in rather than always on: a transcript renders many messages into one
+ * document, and headings from different messages would collide on id.
+ */
+const componentsWithHeadingIds: Components = {
+  ...components,
+  ...Object.fromEntries(
+    (["h1", "h2", "h3", "h4", "h5", "h6"] as const).map((tag) => [
+      tag,
+      ({ children }: { children?: ReactNode }) => {
+        const Tag = tag;
+        return <Tag id={slugify(headingText(children))}>{children}</Tag>;
+      },
+    ]),
+  ),
+};
+
+/** A heading's plain text, from whatever inline nodes it was rendered as. */
+function headingText(children: ReactNode): string {
+  if (typeof children === "string") return children;
+  if (typeof children === "number") return String(children);
+  if (Array.isArray(children)) return children.map(headingText).join("");
+  if (isValidElement<{ children?: ReactNode }>(children)) {
+    return headingText(children.props.children);
+  }
+  return "";
+}
+
 // `singleDollarTextMath: false` keeps a bare `$` (a price, a shell variable)
 // from being read as a math delimiter; display and inline math still arrive
 // through the `$$…$$` / `$…$` forms that `escapeLatexText` normalizes to.
@@ -150,13 +183,19 @@ export function processMarkdownContent(input: string): string {
  * block. Every settled block above it hits this memo and is left untouched,
  * turning a per-tick full-document re-parse into work proportional to the tail.
  */
-const MarkdownBlock = memo(function MarkdownBlock({ block }: { block: string }) {
+const MarkdownBlock = memo(function MarkdownBlock({
+  block,
+  headingIds,
+}: {
+  block: string;
+  headingIds: boolean;
+}) {
   const processed = useMemo(() => processMarkdownContent(block), [block]);
   return (
     <ReactMarkdown
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
-      components={components}
+      components={headingIds ? componentsWithHeadingIds : components}
       skipHtml
       urlTransform={(url) => safeMarkdownUrl(url) ?? ""}
     >
@@ -167,10 +206,16 @@ const MarkdownBlock = memo(function MarkdownBlock({ block }: { block: string }) 
 
 interface MessageMarkdownProps {
   children: string;
+  /**
+   * Give every heading a slug id, for a caller that means to scroll to one.
+   * Off for transcripts, where headings from separate messages would collide.
+   */
+  headingIds?: boolean;
 }
 
 export const MessageMarkdown = memo(function MessageMarkdown({
   children,
+  headingIds = false,
 }: MessageMarkdownProps) {
   const blocks = useMemo(() => splitMarkdownBlocks(children), [children]);
   return (
@@ -179,7 +224,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
         // Blocks are append-only while streaming: the prefix is immutable and
         // only the tail grows, so the array index is a stable identity that
         // keeps the growing block mounted across ticks.
-        <MarkdownBlock key={index} block={block} />
+        <MarkdownBlock key={index} block={block} headingIds={headingIds} />
       ))}
     </div>
   );
