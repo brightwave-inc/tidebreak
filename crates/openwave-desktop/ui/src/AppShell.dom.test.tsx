@@ -68,8 +68,8 @@ vi.mock("./ChatView", () => ({
   ChatView: () => <div data-testid="transcript">transcript</div>,
 }));
 
-vi.mock("./DocumentsView", () => ({
-  DocumentsView: () => <div data-testid="sources">sources</div>,
+vi.mock("./sources/SourcesView", () => ({
+  SourcesView: () => <div data-testid="sources">sources</div>,
 }));
 
 vi.mock("./DeliverablesView", () => ({
