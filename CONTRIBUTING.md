@@ -16,6 +16,10 @@ design before large changes.
 ## Development
 
 ```sh
+# Run the desktop app: installs the UI dependencies, then opens the window.
+# Arguments are forwarded to `cargo tauri dev`.
+scripts/dev.sh
+
 # Build everything
 cargo build --workspace
 
