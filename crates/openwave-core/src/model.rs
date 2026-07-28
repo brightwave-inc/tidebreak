@@ -1002,6 +1002,8 @@ pub struct DocumentSummaryRecord {
     pub media_type: String,
     /// Optional human-facing title.
     pub title: Option<String>,
+    /// Exact retained source byte length, when original bytes are available.
+    pub source_byte_len: Option<u64>,
     /// Current authoritative source revision.
     pub content_revision: i64,
     /// Processing lifecycle of the current authoritative revision.

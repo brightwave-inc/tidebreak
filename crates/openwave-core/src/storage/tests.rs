@@ -1982,6 +1982,7 @@ fn document_summary(document: &DocumentRecord) -> DocumentSummaryRecord {
         source_uri: document.source_uri.clone(),
         media_type: document.media_type.clone(),
         title: document.title.clone(),
+        source_byte_len: document.source_blob.as_ref().map(|blob| blob.byte_len),
         content_revision: document.content_revision,
         processing_status: document.processing_status,
         searchable: document.is_searchable(),

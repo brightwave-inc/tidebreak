@@ -6696,6 +6696,10 @@ async fn document_catalog_pages_metadata_and_keeps_project_content_private() {
         .unwrap();
     assert_eq!(catalog_summary["uri"], "file:///catalog.txt");
     assert_eq!(catalog_summary["media_type"], "text/markdown");
+    assert_eq!(
+        catalog_summary["source_byte_len"],
+        serde_json::json!("# Catalog\n\nDurable source".len())
+    );
     assert_eq!(catalog_summary["content_revision"], 1);
     assert_eq!(catalog_summary["processing_status"], "queued");
     assert!(catalog_summary["indexed_revision"].is_null());

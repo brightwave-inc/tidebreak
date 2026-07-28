@@ -14,7 +14,9 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use futures::{stream, StreamExt};
-use openwave_core::{ChatId, DocumentProcessingStatus, DocumentSourceBlob, Store};
+use openwave_core::{
+    ChatId, DocumentId, DocumentJobStatus, DocumentProcessingStatus, DocumentSourceBlob, Store,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WindowEvent};
@@ -50,9 +52,18 @@ struct CatalogDocument {
     document_id: Uuid,
     title: Option<String>,
     media_type: String,
+    source_byte_len: Option<u64>,
+    content_revision: i64,
     processing_status: DocumentProcessingStatus,
     searchable: bool,
     updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryDocumentFailure {
+    message: &'static str,
+    retriable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,8 +72,10 @@ pub(crate) struct LibraryDocument {
     document_id: String,
     title: Option<String>,
     media_type: String,
+    size_bytes: Option<u64>,
     processing_status: DocumentProcessingStatus,
     searchable: bool,
+    failure: Option<LibraryDocumentFailure>,
     updated_at: String,
 }
 
@@ -73,16 +86,18 @@ pub(crate) struct LibraryCatalog {
     truncated: bool,
 }
 
-impl From<CatalogDocument> for LibraryDocument {
-    fn from(document: CatalogDocument) -> Self {
+impl LibraryDocument {
+    fn from_catalog(document: CatalogDocument, failure: Option<LibraryDocumentFailure>) -> Self {
         Self {
             document_id: document.document_id.to_string(),
             title: document
                 .title
                 .and_then(|title| is_safe_renderer_text(&title, 255, false).then_some(title)),
             media_type: document.media_type,
+            size_bytes: document.source_byte_len,
             processing_status: document.processing_status,
             searchable: document.searchable,
+            failure,
             updated_at: document.updated_at,
         }
     }
@@ -278,6 +293,13 @@ pub(crate) struct LibraryRequest {
     chat_id: Uuid,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct LibraryDocumentRequest {
+    chat_id: Uuid,
+    document_id: Uuid,
+}
+
 #[tauri::command]
 pub(crate) async fn list_library_documents(
     state: State<'_, Arc<AppState>>,
@@ -287,6 +309,9 @@ pub(crate) async fn list_library_documents(
     let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
     let info = wait_server_info(state.inner()).await?;
     let http = local_client();
+    let store = host_access
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
     let path = documents_path(chat_id);
     let mut cursor: Option<String> = None;
     let mut documents = Vec::new();
@@ -309,7 +334,10 @@ pub(crate) async fn list_library_documents(
             .json::<CatalogPage>()
             .await
             .map_err(|_| "The source catalog returned an invalid response".to_owned())?;
-        documents.extend(page.documents.into_iter().map(LibraryDocument::from));
+        for document in page.documents {
+            let failure = library_document_failure(store.as_ref(), &document).await?;
+            documents.push(LibraryDocument::from_catalog(document, failure));
+        }
         cursor = page.next_cursor;
         if documents.len() >= MAX_LIBRARY_DOCUMENTS || cursor.is_none() {
             let overflowed = documents.len() > MAX_LIBRARY_DOCUMENTS;
@@ -322,6 +350,63 @@ pub(crate) async fn list_library_documents(
         documents,
         truncated,
     })
+}
+
+#[tauri::command]
+pub(crate) async fn delete_library_document(
+    state: State<'_, Arc<AppState>>,
+    host_access: State<'_, HostAccess>,
+    request: LibraryDocumentRequest,
+) -> Result<(), String> {
+    let (chat_id, document_id) =
+        resolve_document_scope(&host_access, request.chat_id, request.document_id).await?;
+    let info = wait_server_info(state.inner()).await?;
+    let response = native_auth(
+        local_client().delete(format!(
+            "{}{}",
+            info.base_url,
+            document_path(chat_id, document_id)
+        )),
+        &info,
+    )
+    .send()
+    .await
+    .map_err(|_| "Could not delete that source".to_owned())?;
+    if !response.status().is_success() {
+        return Err("Could not delete that source".to_owned());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn retry_library_document(
+    state: State<'_, Arc<AppState>>,
+    host_access: State<'_, HostAccess>,
+    request: LibraryDocumentRequest,
+) -> Result<(), String> {
+    let (chat_id, document_id) =
+        resolve_document_scope(&host_access, request.chat_id, request.document_id).await?;
+    let info = wait_server_info(state.inner()).await?;
+    let response = native_auth(
+        local_client().post(format!(
+            "{}{}",
+            info.base_url,
+            retry_document_path(chat_id, document_id)
+        )),
+        &info,
+    )
+    .send()
+    .await
+    .map_err(|_| "Could not retry that source".to_owned())?;
+    if !response.status().is_success() {
+        return Err(if response.status() == reqwest::StatusCode::CONFLICT {
+            "This source can no longer be retried. Refresh sources for its current status."
+                .to_owned()
+        } else {
+            "Could not retry that source".to_owned()
+        });
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -640,8 +725,110 @@ async fn resolve_conversation_scope_from_store(
     Ok(chat_id)
 }
 
+async fn resolve_document_scope(
+    host_access: &HostAccess,
+    chat_id: Uuid,
+    document_id: Uuid,
+) -> Result<(ChatId, DocumentId), String> {
+    let chat_id = resolve_conversation_scope(host_access, chat_id).await?;
+    if document_id.is_nil() {
+        return Err("Invalid source".to_owned());
+    }
+    let document_id = DocumentId::from(document_id);
+    let store = host_access
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let owned = store
+        .get_document(document_id)
+        .await
+        .map_err(|_| "Could not load that source".to_owned())?
+        .is_some_and(|document| document.chat_id == Some(chat_id) && document.project_id.is_none());
+    if !owned {
+        return Err("Source not found in this conversation".to_owned());
+    }
+    Ok((chat_id, document_id))
+}
+
+async fn library_document_failure(
+    store: &dyn Store,
+    document: &CatalogDocument,
+) -> Result<Option<LibraryDocumentFailure>, String> {
+    if document.processing_status != DocumentProcessingStatus::Failed {
+        return Ok(None);
+    }
+    let failed = store
+        .list_document_jobs(DocumentId::from(document.document_id))
+        .await
+        .map_err(|_| "Could not load this conversation's source status".to_owned())?
+        .into_iter()
+        .filter(|job| {
+            job.content_revision == document.content_revision
+                && job.status == DocumentJobStatus::Failed
+        })
+        .max_by_key(|job| job.updated_at);
+    Ok(Some(failure_projection(
+        failed
+            .as_ref()
+            .and_then(|job| job.last_error_code.as_deref()),
+    )))
+}
+
+fn failure_projection(code: Option<&str>) -> LibraryDocumentFailure {
+    let (message, retriable) = match code {
+        Some("embedding_failed") => (
+            "OpenWave could not prepare this source for search. Check the model connection, then retry.",
+            true,
+        ),
+        Some("vector_store_failed" | "index_failed") => (
+            "The local search index was unavailable. Retry preparing this source.",
+            true,
+        ),
+        Some("source_blob_read_failed") => (
+            "OpenWave could not read the stored file. Retry, or delete it and add it again if the problem continues.",
+            true,
+        ),
+        Some("pipeline_changed" | "lease_expired") => (
+            "Source processing changed before this file finished. Retry with the current setup.",
+            true,
+        ),
+        Some("parse_failed") => (
+            "OpenWave could not read this file. Delete it and add a supported, uncorrupted version.",
+            false,
+        ),
+        Some(
+            "source_blob_missing"
+            | "source_blob_length_mismatch"
+            | "source_blob_digest_mismatch",
+        ) => (
+            "The stored file is unavailable or damaged. Delete this source and add the file again.",
+            false,
+        ),
+        Some("dimension_mismatch" | "generation_conflict") => (
+            "This source no longer matches the current search index. Delete it and add the file again.",
+            false,
+        ),
+        Some("generation_fenced" | "activation_fenced" | "invalid_document_stage") => (
+            "This source was superseded while it was being prepared. Delete it and add the file again.",
+            false,
+        ),
+        Some(_) | None => (
+            "OpenWave could not prepare this source. Delete it and add the file again.",
+            false,
+        ),
+    };
+    LibraryDocumentFailure { message, retriable }
+}
+
 fn documents_path(chat_id: ChatId) -> String {
     format!("/chats/{chat_id}/documents")
+}
+
+fn document_path(chat_id: ChatId, document_id: DocumentId) -> String {
+    format!("{}/{document_id}", documents_path(chat_id))
+}
+
+fn retry_document_path(chat_id: ChatId, document_id: DocumentId) -> String {
+    format!("{}/retry", document_path(chat_id, document_id))
 }
 
 pub(crate) fn raw_documents_path(chat_id: ChatId) -> String {
@@ -1042,6 +1229,15 @@ mod tests {
             raw_documents_path(standalone.id),
             format!("/chats/{}/documents/raw", standalone.id)
         );
+        let document_id = DocumentId::new();
+        assert_eq!(
+            document_path(standalone.id, document_id),
+            format!("/chats/{}/documents/{document_id}", standalone.id)
+        );
+        assert_eq!(
+            retry_document_path(standalone.id, document_id),
+            format!("/chats/{}/documents/{document_id}/retry", standalone.id)
+        );
         assert_eq!(
             search_path(standalone.id),
             format!("/chats/{}/search", standalone.id)
@@ -1058,6 +1254,12 @@ mod tests {
             "query": "notes",
         });
         assert!(serde_json::from_value::<SearchLibraryRequest>(injected_search).is_err());
+        let injected_document = serde_json::json!({
+            "chatId": standalone.id,
+            "documentId": DocumentId::new(),
+            "projectId": project.id,
+        });
+        assert!(serde_json::from_value::<LibraryDocumentRequest>(injected_document).is_err());
     }
 
     #[test]
@@ -1176,14 +1378,19 @@ mod tests {
 
     #[test]
     fn renderer_catalog_projection_has_a_closed_safe_shape() {
-        let document = LibraryDocument::from(CatalogDocument {
-            document_id: Uuid::nil(),
-            title: Some("notes.md".to_owned()),
-            media_type: "text/markdown".to_owned(),
-            processing_status: DocumentProcessingStatus::Ready,
-            searchable: true,
-            updated_at: "2026-07-18T00:00:00Z".to_owned(),
-        });
+        let document = LibraryDocument::from_catalog(
+            CatalogDocument {
+                document_id: Uuid::nil(),
+                title: Some("notes.md".to_owned()),
+                media_type: "text/markdown".to_owned(),
+                source_byte_len: Some(42),
+                content_revision: 1,
+                processing_status: DocumentProcessingStatus::Ready,
+                searchable: true,
+                updated_at: "2026-07-18T00:00:00Z".to_owned(),
+            },
+            None,
+        );
         let json = serde_json::to_value(document).unwrap();
         let keys = json
             .as_object()
@@ -1195,9 +1402,11 @@ mod tests {
             keys,
             [
                 "documentId",
+                "failure",
                 "mediaType",
                 "processingStatus",
                 "searchable",
+                "sizeBytes",
                 "title",
                 "updatedAt"
             ]
@@ -1206,5 +1415,38 @@ mod tests {
         for forbidden in ["uri", "revision", "fingerprint", "content", "token", "path"] {
             assert!(!serialized.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn failure_projection_offers_retry_only_for_recoverable_worker_failures() {
+        for code in [
+            "embedding_failed",
+            "vector_store_failed",
+            "index_failed",
+            "source_blob_read_failed",
+            "pipeline_changed",
+            "lease_expired",
+        ] {
+            let failure = failure_projection(Some(code));
+            assert!(failure.retriable, "{code}");
+            assert!(is_safe_renderer_text(failure.message, 500, false));
+        }
+        for code in [
+            "parse_failed",
+            "source_blob_missing",
+            "source_blob_length_mismatch",
+            "source_blob_digest_mismatch",
+            "dimension_mismatch",
+            "generation_conflict",
+            "generation_fenced",
+            "activation_fenced",
+            "invalid_document_stage",
+            "unknown",
+        ] {
+            let failure = failure_projection(Some(code));
+            assert!(!failure.retriable, "{code}");
+            assert!(is_safe_renderer_text(failure.message, 500, false));
+        }
+        assert!(!failure_projection(None).retriable);
     }
 }

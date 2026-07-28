@@ -2381,24 +2381,6 @@ body {
   opacity: 0.5;
 }
 
-.document-list {
-  display: grid;
-  border-top: 1px solid var(--line);
-}
-
-.document-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.75rem;
-  min-height: 4.25rem;
-  border-bottom: 1px solid var(--line);
-}
-
-.document-row:last-child {
-  border-bottom: 0;
-}
-
 .document-icon {
   display: grid;
   width: 2rem;
@@ -2410,23 +2392,217 @@ body {
   background: var(--page-background);
 }
 
-.document-copy {
-  display: grid;
-  min-width: 0;
-  gap: 0.15rem;
+.document-catalog-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.7rem 0;
+  border-top: 1px solid var(--line);
 }
 
-.document-copy strong {
+.document-catalog-toolbar label {
+  width: min(100%, 20rem);
+}
+
+.document-catalog-toolbar input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0.45rem 0.6rem;
+  background: var(--page-background);
+  font-size: 0.8rem;
+}
+
+.document-catalog-toolbar input:focus {
+  outline: 2px solid color-mix(in srgb, var(--color-openwave) 40%, transparent);
+  outline-offset: 1px;
+}
+
+.document-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border-top: 1px solid var(--line);
+}
+
+.document-table {
+  width: 100%;
+  min-width: 58rem;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.78rem;
+}
+
+.document-table th,
+.document-table td {
+  padding: 0.7rem 0.55rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.document-table th {
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.document-table th:first-child {
+  width: 25%;
+}
+
+.document-table th:nth-child(2) {
+  width: 9%;
+}
+
+.document-table th:nth-child(3) {
+  width: 8%;
+}
+
+.document-table th:nth-child(4) {
+  width: 13%;
+}
+
+.document-table th:nth-child(5) {
+  width: 29%;
+}
+
+.document-table th:last-child {
+  width: 16%;
+}
+
+.document-table th button {
+  border: 0;
+  padding: 0.15rem 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+}
+
+.document-table th button:hover,
+.document-table th button:focus-visible {
+  color: var(--ink);
+}
+
+.document-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.document-table tbody tr[aria-current="true"] {
+  background: color-mix(in srgb, var(--color-openwave) 6%, transparent);
+}
+
+.document-title-button {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 0.55rem;
+  border: 0;
+  padding: 0;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+}
+
+.document-title-button strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.86rem;
+  font-size: 0.82rem;
   font-weight: 590;
 }
 
-.document-copy span {
+.document-title-button:hover strong,
+.document-title-button:focus-visible strong {
+  text-decoration: underline;
+  text-underline-offset: 0.16rem;
+}
+
+.document-status-cell {
+  overflow-wrap: anywhere;
+}
+
+.document-processing {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  color: var(--warning-foreground);
+  font-weight: 570;
+}
+
+.document-processing-pulse {
+  width: 0.48rem;
+  height: 0.48rem;
+  border-radius: 999px;
+  background: currentColor;
+  animation: document-processing-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes document-processing-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .document-processing-pulse {
+    animation: none;
+  }
+}
+
+.document-failure,
+.document-unsearchable {
+  display: grid;
+  justify-items: start;
+  gap: 0.3rem;
+  color: var(--danger);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.document-unsearchable {
   color: var(--muted-foreground);
-  font-size: 0.74rem;
+  font-weight: 570;
+}
+
+.document-unsearchable > span {
+  font-weight: 400;
+}
+
+.document-retry,
+.document-action {
+  border: 0;
+  padding: 0.15rem 0.2rem;
+  color: var(--color-openwave);
+  background: transparent;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.document-retry:hover:not(:disabled),
+.document-retry:focus-visible,
+.document-action:hover:not(:disabled),
+.document-action:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 0.15rem;
+}
+
+.document-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+.document-action.is-danger {
+  color: var(--danger);
 }
 
 /* A transcript phase whose row threw while rendering. Deliberately quiet: the
@@ -2436,37 +2612,6 @@ body {
   padding: 0.5rem 0.75rem;
   color: var(--muted-foreground);
   font-size: 0.82rem;
-}
-
-.document-status {
-  padding: 0.2rem 0.5rem;
-  border-radius: 999px;
-  color: var(--muted-foreground);
-  background: var(--muted);
-  font-size: 0.72rem;
-  font-weight: 570;
-}
-
-.document-status.is-ready {
-  color: var(--success-foreground);
-  background: var(--success-background);
-}
-
-.document-status.is-processing,
-.document-status.is-queued {
-  color: var(--warning-foreground);
-  background: var(--warning-background);
-}
-
-.document-status.is-failed {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 9%, var(--page-background));
-}
-
-/* Stored but with nothing to search: neither a success nor a failure, so it
-   keeps the neutral base and only hints that an explanation is available. */
-.document-status.is-unsearchable {
-  cursor: help;
 }
 
 .document-empty,
@@ -2855,14 +3000,8 @@ body {
     max-height: 14rem;
   }
 
-  .document-row {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .document-status {
-    grid-column: 2;
-    justify-self: start;
-    margin-top: -0.5rem;
+  .document-catalog-toolbar label {
+    width: 100%;
   }
 }
 

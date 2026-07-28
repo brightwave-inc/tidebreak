@@ -100,6 +100,8 @@ pub struct DocumentSummary {
     pub media_type: String,
     /// Optional human-facing title.
     pub title: Option<String>,
+    /// Exact retained source byte length, when original bytes are available.
+    pub source_byte_len: Option<u64>,
     /// Current authoritative source revision.
     pub content_revision: i64,
     /// Processing lifecycle of the current source revision.
@@ -131,6 +133,7 @@ impl From<DocumentSummaryRecord> for DocumentSummary {
             uri: document.source_uri,
             media_type: document.media_type,
             title: document.title,
+            source_byte_len: document.source_byte_len,
             content_revision: document.content_revision,
             processing_status: document.processing_status,
             searchable: document.searchable,
@@ -152,6 +155,7 @@ impl From<&DocumentRecord> for DocumentSummary {
             uri: document.source_uri.clone(),
             media_type: document.media_type.clone(),
             title: document.title.clone(),
+            source_byte_len: document.source_blob.as_ref().map(|source| source.byte_len),
             content_revision: document.content_revision,
             processing_status: document.processing_status,
             searchable: document.is_searchable(),
