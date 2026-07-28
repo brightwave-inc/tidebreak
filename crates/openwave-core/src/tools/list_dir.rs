@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::Result;
+use crate::preview::{ResultEntry, ResultEntryKind};
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolOutput, ToolSpec};
 
 use super::arguments;
@@ -49,7 +50,14 @@ impl Tool for ListDir {
         };
         let result = tokio::task::spawn_blocking(move || list_directory(&workspace, &path)).await;
         match result {
-            Ok(Ok(listing)) => Ok(ToolOutput::text(listing)),
+            Ok(Ok(listing)) => Ok(ToolOutput::text(&listing).with_entries(directory_entries(
+                &listing,
+                if relative == "." {
+                    None
+                } else {
+                    Some(relative)
+                },
+            ))),
             Ok(Err(error)) => Ok(ToolOutput::error(format!(
                 "could not list {relative}: {error}"
             ))),
@@ -58,4 +66,27 @@ impl Tool for ListDir {
             ))),
         }
     }
+}
+
+/// The listing as rows, read back out of the text the model is given.
+///
+/// Derived from that one string rather than built alongside it, so the card and
+/// the model can never disagree about what the directory holds. The trailing
+/// slash `list_directory` appends is what marks a directory, and it is dropped
+/// from the row: the icon says it better.
+fn directory_entries(listing: &str, path: Option<&str>) -> Vec<ResultEntry> {
+    listing
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let entry = match line.strip_suffix('/') {
+                Some(name) => ResultEntry::new(ResultEntryKind::Folder, name),
+                None => ResultEntry::new(ResultEntryKind::File, line),
+            };
+            match path {
+                Some(path) => entry.with_detail(path),
+                None => entry,
+            }
+        })
+        .collect()
 }

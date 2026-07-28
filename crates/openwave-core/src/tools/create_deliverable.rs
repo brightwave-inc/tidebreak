@@ -187,6 +187,7 @@ impl Tool for CreateDeliverable {
             citations: Vec::new(),
             created_at: call.created_at,
         };
+        let listed = filename.clone();
         let record = match requested_output_id {
             Some(existing) => self.store.append_output_revision(existing, &revision).await,
             None => {
@@ -209,7 +210,16 @@ impl Tool for CreateDeliverable {
                 "output_id": record.id,
                 "revision_id": record.current_revision,
                 "revision_count": record.revision_count,
-            }))),
+            }))
+            // The revision number is the fact a reader needs: a second
+            // `create_deliverable` on the same output looks identical in the
+            // rail whether it replaced the file or appended to its history.
+            .with_entries(vec![crate::ResultEntry::new(
+                crate::ResultEntryKind::Output,
+                listed,
+            )
+            .with_detail(format!("revision {}", record.current_revision))
+            .with_meta(crate::format_bytes(content_len as u64))])),
             Err(error) => Ok(ToolOutput::error(format!(
                 "could not publish deliverable: {error}"
             ))),

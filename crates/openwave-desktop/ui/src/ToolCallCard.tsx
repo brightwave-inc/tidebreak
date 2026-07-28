@@ -1,5 +1,5 @@
-import { useId, useState } from "react";
-import { Check, ChevronDown, Clock, Loader2, Terminal, X } from "lucide-react";
+import { useState } from "react";
+import { Check, Clock, Loader2, Terminal, X } from "lucide-react";
 import {
   isRendererToolName,
   type ExecResultPreview,
@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { ToolTone } from "./ToolStatusIcon";
 import { ScrollableContainer } from "./ScrollableContainer";
+import { ToolCardShell } from "./ToolCardShell";
 import { toolPreviewPresentation } from "./ToolPreview";
 
 export type ToolCallStatus =
@@ -229,88 +230,63 @@ export function ToolCommandCard({
   const presentation = toolCallPresentation(name, status);
   const command = toolPreviewPresentation(preview, result);
   const running = presentation.tone === "running";
-  const [expanded, setExpanded] = useState(running);
   const [tab, setTab] = useState<"command" | "output">("output");
-  const bodyId = useId();
   const output = commandOutput(result);
   // A command that finished silently has nothing to tab between, and a
   // "Command / Output → no output" pair reads as confusing noise.
   const tabbed = running || output !== null;
 
   return (
-    <section
-      className="bg-background max-w-prose overflow-hidden rounded-lg border"
-      aria-label={`${presentation.label}: ${presentation.statusLabel}`}
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
+    <ToolCardShell
+      label={`${presentation.label}: ${presentation.statusLabel}`}
+      icon={<Terminal className="size-3.5 shrink-0" aria-hidden="true" />}
+      title={command.headline}
+      titleClassName="font-mono"
+      badge={<ToolStatusBadge presentation={presentation} result={result} />}
+      defaultExpanded={running}
     >
-      <button
-        type="button"
-        className="hover:bg-muted/50 focus-visible:ring-ring flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-hidden"
-        aria-expanded={expanded}
-        aria-controls={bodyId}
-        onClick={() => setExpanded((current) => !current)}
-      >
-        <span className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-xs font-medium">
-          <ChevronDown
-            className={cn(
-              "size-3.5 shrink-0 transition-transform",
-              !expanded && "-rotate-90",
-            )}
-            aria-hidden="true"
-          />
-          <Terminal className="size-3.5 shrink-0" aria-hidden="true" />
-          <span className="truncate font-mono">{command.headline}</span>
-        </span>
-        <ToolStatusBadge presentation={presentation} result={result} />
-      </button>
-      {expanded && (
-        <div id={bodyId} className="border-t">
-          {tabbed && (
-            <div
-              role="tablist"
-              aria-label="Command detail"
-              className="flex w-full items-center justify-start gap-1 border-b px-1"
+      {tabbed && (
+        <div
+          role="tablist"
+          aria-label="Command detail"
+          className="flex w-full items-center justify-start gap-1 border-b px-1"
+        >
+          {(["command", "output"] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={tab === value}
+              onClick={() => setTab(value)}
+              className={cn(
+                "cursor-pointer rounded-md px-2.5 py-1 text-xs font-medium capitalize transition-colors",
+                tab === value
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
             >
-              {(["command", "output"] as const).map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  role="tab"
-                  aria-selected={tab === value}
-                  onClick={() => setTab(value)}
-                  className={cn(
-                    "cursor-pointer rounded-md px-2.5 py-1 text-xs font-medium capitalize transition-colors",
-                    tab === value
-                      ? "text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {value}
-                </button>
-              ))}
-            </div>
-          )}
-          <div className="p-1">
-            {!tabbed || tab === "command" ? (
-              <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
-                {command.detail}
-              </ScrollableContainer>
-            ) : output === null ? (
-              <p className="text-muted-foreground flex items-center gap-1.5 p-2 text-xs">
-                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                Waiting for output…
-              </p>
-            ) : (
-              <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
-                {output}
-              </ScrollableContainer>
-            )}
-          </div>
+              {value}
+            </button>
+          ))}
         </div>
       )}
-    </section>
+      <div className="p-1">
+        {!tabbed || tab === "command" ? (
+          <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
+            {command.detail}
+          </ScrollableContainer>
+        ) : output === null ? (
+          <p className="text-muted-foreground flex items-center gap-1.5 p-2 text-xs">
+            <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+            Waiting for output…
+          </p>
+        ) : (
+          <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
+            {output}
+          </ScrollableContainer>
+        )}
+      </div>
+    </ToolCardShell>
   );
 }
 

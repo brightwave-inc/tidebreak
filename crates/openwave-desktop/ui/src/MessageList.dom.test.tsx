@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./ApprovalCard";
@@ -628,6 +628,58 @@ describe("mcp app views", () => {
     expect(
       await screen.findByTitle("MCP App view from gateway"),
     ).toBeInTheDocument();
+  });
+
+  it("surfaces what a call found, behind one line until it is opened", async () => {
+    const user = userEvent.setup();
+    render(
+      <MessageList
+        messages={[
+          {
+            id: "t1",
+            role: "tool",
+            callId: "c1",
+            name: "list_dir",
+            status: "completed",
+            result: {
+              tool: "entries",
+              elided: 3,
+              entries: [
+                { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB" },
+                { kind: "folder", label: "reports", detail: null, meta: null },
+              ],
+            },
+          },
+        ]}
+        folderAccessRequests={[]}
+        nativeHost={false}
+        nativeBusy={false}
+        resolvingFolderCalls={new Set()}
+        folderAccessErrors={{}}
+        decidingApprovalCalls={new Set()}
+        approvalErrors={{}}
+        busy={false}
+        scrollRef={{ current: null }}
+        onScroll={noop}
+        onApproval={noop}
+        onFolderAccessDecision={noop}
+        onFolderAccessCancel={noop}
+      />,
+    );
+
+    // The count is on the collapsed header, and it counts the rows the card is
+    // not showing — a reader must not have to open the card to learn there
+    // were five results.
+    const card = screen.getByRole("status", {
+      name: "Browse files: File browse complete",
+    });
+    expect(within(card).getByText("5 results")).toBeInTheDocument();
+    expect(screen.queryByText("notes.md")).not.toBeInTheDocument();
+
+    await user.click(within(card).getByRole("button"));
+    expect(screen.getByText("notes.md")).toBeInTheDocument();
+    expect(screen.getByText("reports")).toBeInTheDocument();
+    expect(screen.getByText("3 more not shown")).toBeInTheDocument();
   });
 });
 

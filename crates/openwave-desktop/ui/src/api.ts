@@ -48,6 +48,7 @@ import {
   type RendererRefusal,
   type RendererSequencedEvent,
   type RendererToolName,
+  type ResultEntryKind,
   type ToolActionPreview,
   type TranscriptImageAttachment as WireTranscriptImageAttachment,
   type TranscriptRole,
@@ -61,6 +62,7 @@ export type {
   ChatToolActivityStatus,
   TranscriptRole,
   RendererToolName,
+  ResultEntryKind,
   ToolActionPreview,
   RendererRefusal,
 };
@@ -274,7 +276,25 @@ export type ToolResultPreview =
       tool: "mcp_app";
       server: string;
       resourceUri: string;
+    }
+  | {
+      /** What a call found, read, or wrote, as the list of things it was. */
+      tool: "entries";
+      entries: ResultEntry[];
+      /** Rows the server bounded away, counted rather than shown. */
+      elided: number;
     };
+
+/** One row of a listed result. */
+export type ResultEntry = {
+  kind: ResultEntryKind;
+  label: string;
+  detail: string | null;
+  meta: string | null;
+};
+
+/** The entries-shaped result the list card renders. */
+export type EntriesResultPreview = Extract<ToolResultPreview, { tool: "entries" }>;
 
 /** The exec-shaped result the command card renders. */
 export type ExecResultPreview = Extract<ToolResultPreview, { tool: "exec" }>;
@@ -1444,6 +1464,46 @@ type UncheckedMcpAppResult = Partial<
   Record<keyof Extract<WireToolResultPreview, { tool: "mcp_app" }>, unknown>
 >;
 
+type UncheckedEntriesResult = Partial<
+  Record<keyof Extract<WireToolResultPreview, { tool: "entries" }>, unknown>
+>;
+
+const RESULT_ENTRY_KINDS: readonly ResultEntryKind[] = [
+  "file",
+  "folder",
+  "source",
+  "passage",
+  "link",
+  "output",
+];
+
+/**
+ * Validate one listed row.
+ *
+ * A row is dropped rather than partially rendered, on the same terms as a whole
+ * preview: a row with no label is a blank line the reader cannot interpret, and
+ * an unrecognized kind would reach the icon map with nothing to draw.
+ */
+function parseResultEntry(value: unknown): ResultEntry | null {
+  if (!isRecord(value)) return null;
+  const { kind, label } = value;
+  // A missing hint is faithfully the absence the row shows, so `detail` and
+  // `meta` are normalized rather than validated — only a present value of the
+  // wrong type would be a reason to distrust the row, and it drops that field.
+  const detail = value.detail ?? null;
+  const meta = value.meta ?? null;
+  if (
+    typeof label !== "string" ||
+    label.length === 0 ||
+    !(RESULT_ENTRY_KINDS as readonly unknown[]).includes(kind) ||
+    !isOptionalString(detail) ||
+    !isOptionalString(meta)
+  ) {
+    return null;
+  }
+  return { kind: kind as ResultEntryKind, label, detail, meta };
+}
+
 /**
  * Validate a result field by field, on the same terms as an action: anything
  * that cannot be fully verified is dropped rather than half-rendered.
@@ -1467,6 +1527,23 @@ export function parseToolResultPreview(
       return null;
     }
     return { tool: "mcp_app", server, resourceUri: resource_uri };
+  }
+  if (value.tool === "entries") {
+    const { entries, elided }: UncheckedEntriesResult = value;
+    if (!Array.isArray(entries) || !Number.isInteger(elided) || Number(elided) < 0) {
+      return null;
+    }
+    const parsed = entries
+      .map(parseResultEntry)
+      .filter((entry): entry is ResultEntry => entry !== null);
+    // Rows this parser rejected are counted with the ones the server bounded
+    // away, because in both cases the card is showing fewer results than the
+    // call returned and has to say so.
+    return {
+      tool: "entries",
+      entries: parsed,
+      elided: Number(elided) + (entries.length - parsed.length),
+    };
   }
   if (value.tool !== "exec") return null;
   const { exit_code, timed_out, output_truncated, stdout, stderr }: UncheckedExecResult = value;

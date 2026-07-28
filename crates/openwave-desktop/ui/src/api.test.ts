@@ -804,4 +804,35 @@ describe("parseToolResultPreview closed results", () => {
       expect(parseToolResultPreview(value)).toBeNull();
     }
   });
+
+  it("drops rows it cannot read and counts them as not shown", () => {
+    // A row the parser rejects is a result the call returned and the card is
+    // not showing. Dropping it silently would leave the count saying the
+    // search found three things when it found five.
+    expect(
+      parseToolResultPreview({
+        tool: "entries",
+        elided: 2,
+        entries: [
+          { kind: "file", label: "notes.md", detail: "scratch", meta: "1.2 KB" },
+          { kind: "sabotage", label: "notes.md" },
+          { kind: "file", label: "" },
+          { kind: "folder", label: "reports" },
+        ],
+      }),
+    ).toEqual({
+      tool: "entries",
+      elided: 4,
+      entries: [
+        { kind: "file", label: "notes.md", detail: "scratch", meta: "1.2 KB" },
+        { kind: "folder", label: "reports", detail: null, meta: null },
+      ],
+    });
+  });
+
+  it("keeps an empty list, which is a result and not the absence of one", () => {
+    expect(
+      parseToolResultPreview({ tool: "entries", entries: [], elided: 0 }),
+    ).toEqual({ tool: "entries", entries: [], elided: 0 });
+  });
 });

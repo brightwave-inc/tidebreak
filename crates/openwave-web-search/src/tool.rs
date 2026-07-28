@@ -2,12 +2,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openwave_core::{
-    ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolSpec, WebSearchArgs,
+    ApprovalClass, ResultEntry, ResultEntryKind, Tool, ToolCtx, ToolErrorCategory, ToolOutput,
+    ToolSpec, WebSearchArgs,
 };
 use serde_json::Value;
 use thiserror::Error;
+use url::Url;
 
-use crate::{SearchDomain, WebSearchError, WebSearchProvider, WebSearchRequest, MAX_OUTPUT_BYTES};
+use crate::{
+    SearchDomain, WebSearchError, WebSearchProvider, WebSearchRequest, WebSearchResult,
+    MAX_OUTPUT_BYTES,
+};
 
 /// Default result count when a model omits `max_results`.
 pub const DEFAULT_MAX_RESULTS: usize = openwave_core::DEFAULT_WEB_SEARCH_RESULTS;
@@ -96,7 +101,24 @@ impl Tool for WebSearchTool {
                 ))
             }
         };
-        Ok(ToolOutput::text(result))
+        let entries = response.results.iter().map(page_entry).collect();
+        Ok(ToolOutput::text(result).with_entries(entries))
+    }
+}
+
+/// One web result as a card row.
+///
+/// The host, not the whole URL: a column of rows is for telling results apart,
+/// and forty characters of query string does that worse than "sec.gov" does.
+/// A URL the parser rejects still gets a row — its title is the result.
+fn page_entry(result: &WebSearchResult) -> ResultEntry {
+    let entry = ResultEntry::new(ResultEntryKind::Link, &result.title);
+    match Url::parse(&result.url).ok().and_then(|url| {
+        url.host_str()
+            .map(|host| host.trim_start_matches("www.").to_owned())
+    }) {
+        Some(host) => entry.with_detail(host),
+        None => entry,
     }
 }
 

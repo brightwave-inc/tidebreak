@@ -24,6 +24,7 @@ import { MessageFooter } from "./MessageFooter";
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
 import { McpAppCard } from "./McpAppCard";
 import { ToolCommandCard, type ToolCallStatus } from "./ToolCallCard";
+import { ToolEntriesCard } from "./ToolEntriesCard";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ToolActivityGroup } from "./ToolActivityGroup";
 import { WelcomeState } from "./WelcomeState";
@@ -541,6 +542,20 @@ function surfacedCards(
           resourceUri={entry.result.resourceUri}
           chatId={chatId}
           callId={entry.callId}
+        />,
+      );
+      continue;
+    }
+    // Also keyed on the result, and for the same reason as an MCP view: what
+    // the call found is the card, and most of these tools project no action
+    // preview because their arguments say nothing a reader needs.
+    if (entry.result?.tool === "entries" && !parked.has(entry.callId)) {
+      cards.push(
+        <ToolEntriesCard
+          key={entry.id}
+          name={entry.name}
+          status={entry.status}
+          result={entry.result}
         />,
       );
       continue;
