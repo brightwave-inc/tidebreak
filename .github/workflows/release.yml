@@ -252,11 +252,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Apple Silicon only while the product is in active development; see
+        # docs/releases.md.
         include:
           - arch: aarch64
             target: aarch64-apple-darwin
-          - arch: x86_64
-            target: x86_64-apple-darwin
     env:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
@@ -385,11 +385,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Apple Silicon only while the product is in active development; see
+        # docs/releases.md.
         include:
           - arch: aarch64
             target: aarch64-apple-darwin
-          - arch: x86_64
-            target: x86_64-apple-darwin
     env:
       # Reuse compiler outputs across trusted release runs without caching the
       # signed bundles or any signing material.
@@ -786,13 +786,6 @@ jobs:
           name: openwave-macos-aarch64-${{ needs.validate.outputs.version }}
           path: dist/macos/aarch64
 
-      - name: Download Intel artifacts
-        if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: openwave-macos-x86_64-${{ needs.validate.outputs.version }}
-          path: dist/macos/x86_64
-
       - name: Create release manifests and checksums
         if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
         run: >-
@@ -956,7 +949,6 @@ jobs:
           while IFS=$'\t' read -r arch url digest; do
             case "$arch" in
               aarch64) name="OpenWave-macos-apple-silicon.dmg" ;;
-              x86_64) name="OpenWave-macos-intel.dmg" ;;
               *) echo "Unsupported release architecture: $arch" >&2; exit 1 ;;
             esac
             curl --fail --silent --show-error --location "$url" \
@@ -970,8 +962,8 @@ jobs:
             "$manifest")
 
           dmg_count="$(find downloads -name '*.dmg' -type f | wc -l)"
-          (( dmg_count == 2 )) || {
-            echo "Expected both macOS disk images, found $dmg_count." >&2
+          (( dmg_count == 1 )) || {
+            echo "Expected one macOS disk image, found $dmg_count." >&2
             exit 1
           }
 

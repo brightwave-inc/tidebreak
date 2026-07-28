@@ -39,9 +39,7 @@ jobs:
           cache-targets: false
 
       - name: Fetch Cargo dependency downloads
-        run: |
-          cargo fetch --locked --target aarch64-apple-darwin
-          cargo fetch --locked --target x86_64-apple-darwin
+        run: cargo fetch --locked --target aarch64-apple-darwin
 
   warm:
     name: macOS cache · ${{ matrix.arch }}
@@ -51,11 +49,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Apple Silicon only while the product is in active development; see
+        # docs/releases.md. Restoring Intel means adding its row back here, to
+        # the two release matrices, and to MACOS_ARCHITECTURES.
         include:
           - arch: aarch64
             target: aarch64-apple-darwin
-          - arch: x86_64
-            target: x86_64-apple-darwin
     env:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache

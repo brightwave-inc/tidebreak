@@ -12,7 +12,9 @@ import { pathToFileURL } from "node:url";
 
 import { parseReleaseTag } from "./check-release-tag.mjs";
 
-export const MACOS_ARCHITECTURES = ["aarch64", "x86_64"];
+// The architectures a release ships. Apple Silicon only while the product is
+// in active development; see docs/releases.md.
+export const MACOS_ARCHITECTURES = ["aarch64"];
 
 const ARTIFACT_FORMATS = [
   { extension: ".dmg", format: "dmg" },

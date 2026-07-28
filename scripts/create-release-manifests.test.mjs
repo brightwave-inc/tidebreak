@@ -42,18 +42,15 @@ test("creates a complete manifest and Tauri updater document", () => {
   const dist = releaseFixture();
   const { manifest, latest } = createReleaseManifests({ dist, ...RELEASE });
 
-  assert.equal(manifest.artifacts.length, 6);
-  assert.deepEqual(Object.keys(latest.platforms), [
-    "darwin-aarch64",
-    "darwin-x86_64",
-  ]);
+  assert.equal(manifest.artifacts.length, MACOS_ARCHITECTURES.length * 3);
+  assert.deepEqual(Object.keys(latest.platforms), ["darwin-aarch64"]);
   assert.match(
     latest.platforms["darwin-aarch64"].url,
     /releases\/v0\.4\.2\/macos\/aarch64\/OpenWave_0\.4\.2_aarch64\.app\.tar\.gz$/,
   );
   assert.equal(
-    latest.platforms["darwin-x86_64"].signature,
-    "signature-x86_64",
+    latest.platforms["darwin-aarch64"].signature,
+    "signature-aarch64",
   );
 
   const diskManifest = JSON.parse(
@@ -75,8 +72,8 @@ test("fails closed when an architecture is incomplete", () => {
   const missing = path.join(
     dist,
     "macos",
-    "x86_64",
-    "OpenWave_0.4.2_x86_64.app.tar.gz.sig",
+    "aarch64",
+    "OpenWave_0.4.2_aarch64.app.tar.gz.sig",
   );
   writeFileSync(missing, "");
 

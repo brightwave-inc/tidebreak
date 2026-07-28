@@ -184,7 +184,6 @@ test("cache warming cannot access production credentials or publish", () => {
   assert.match(cache, /^  cargo-downloads:$/m);
   assert.match(cache, /^    needs: cargo-downloads$/m);
   assert.match(cache, /cargo fetch --locked --target aarch64-apple-darwin/);
-  assert.match(cache, /cargo fetch --locked --target x86_64-apple-darwin/);
   assert.match(cache, /cancel-in-progress: false/);
   assert.match(cache, /--no-bundle --ci/);
   assert.match(cache, /continue-on-error: true/);
@@ -372,7 +371,6 @@ test("GitHub release downloads are copied from the hosted release", () => {
   assert.match(attachJob, /releases\/v\$OPENWAVE_VERSION\/manifest\.json/);
   assert.match(attachJob, /sha256sum --check --strict/);
   assert.match(attachJob, /OpenWave-macos-apple-silicon\.dmg/);
-  assert.match(attachJob, /OpenWave-macos-intel\.dmg/);
   assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
 
   assert.match(

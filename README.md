@@ -18,7 +18,6 @@
 
 <p align="center">
   <a href="https://github.com/brightwave-inc/openwave/releases/latest/download/OpenWave-macos-apple-silicon.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Download for macOS, Apple Silicon"></a>
-  <a href="https://github.com/brightwave-inc/openwave/releases/latest/download/OpenWave-macos-intel.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Intel-555555.svg?logo=apple&logoColor=white" alt="Download for macOS, Intel"></a>
 </p>
 
 ---
