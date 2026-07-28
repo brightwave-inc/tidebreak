@@ -577,10 +577,14 @@ mod tests {
 
         // The route set includes the gateway with its synced models claimed.
         runtime.sync_models().await.unwrap();
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
         let routes = providers::collect_routes(
             &*store,
             &*runtime.secrets,
             runtime.route_token_source().await,
+            &policy,
         )
         .await;
         let gateway_route = routes
@@ -750,7 +754,10 @@ mod tests {
         let runtime = GatewayRuntime::new(store.clone(), secrets);
 
         assert!(runtime.route_token_source().await.is_none());
-        let routes = providers::collect_routes(&*store, &*runtime.secrets, None).await;
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        let routes = providers::collect_routes(&*store, &*runtime.secrets, None, &policy).await;
         assert!(routes
             .iter()
             .all(|route| route.kind != openwave_router::RouteKind::ModelGateway));

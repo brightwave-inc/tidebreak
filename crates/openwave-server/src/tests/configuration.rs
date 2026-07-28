@@ -1090,6 +1090,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
             store.clone(),
             secrets.clone(),
             crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+            Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,
         Arc::new(ToolRegistry::new()),
@@ -1233,6 +1234,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
             store.clone(),
             secrets.clone(),
             crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+            Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,
         Arc::new(ToolRegistry::new()),
@@ -1477,6 +1479,7 @@ async fn resolver_builds_a_router_from_enabled_providers() {
         store.clone(),
         secrets.clone(),
         crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+        Arc::new(crate::managed_policy::NoOsPolicy),
     );
     let resolved = resolver.resolve().await;
     // Composite router — selection happens on stream from req.model.
@@ -1558,7 +1561,10 @@ async fn resolver_includes_configured_curated_api_key_providers() {
         .await
         .unwrap();
 
-        let routes = providers::collect_routes(&*store, &*secrets, None).await;
+        let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+            .await
+            .unwrap();
+        let routes = providers::collect_routes(&*store, &*secrets, None, &policy).await;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].kind, route_kind);
 
@@ -1566,6 +1572,7 @@ async fn resolver_includes_configured_curated_api_key_providers() {
             store.clone(),
             secrets.clone(),
             crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+            Arc::new(crate::managed_policy::NoOsPolicy),
         );
         let provider = resolver.resolve().await;
         assert_eq!(provider.id().0, "router");
@@ -1617,7 +1624,10 @@ async fn malformed_gemini_service_account_never_advertises_or_builds_a_route() {
             .await
             .unwrap()
     );
-    assert!(providers::collect_routes(&*store, &*secrets, None)
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    assert!(providers::collect_routes(&*store, &*secrets, None, &policy)
         .await
         .is_empty());
     assert!(providers::catalog_models(&*store, &*secrets)
@@ -1660,10 +1670,215 @@ async fn openai_compatible_route_is_free_form_fallback() {
     .await
     .unwrap();
 
-    let routes = providers::collect_routes(&*store, &*secrets, None).await;
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    let routes = providers::collect_routes(&*store, &*secrets, None, &policy).await;
     let router = openwave_router::Router::build(routes);
     assert_eq!(
         router.select("llama-3-local"),
         Some(openwave_router::RouteKind::OpenaiCompatible)
     );
+}
+
+/// The one behavioral fork managed lockdown introduces on the read path:
+/// route collection offers the gateway alone, aimed at the policy URL.
+#[tokio::test]
+async fn a_managed_profile_offers_only_the_gateway_route() {
+    struct StaticTokens;
+
+    #[async_trait]
+    impl openwave_router::BearerTokenSource for StaticTokens {
+        async fn bearer_token(&self) -> openwave_core::Result<String> {
+            Ok("mg_at_test".into())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    let tokens: Arc<dyn openwave_router::BearerTokenSource> = Arc::new(StaticTokens);
+
+    // A fully configured BYOK spread: Anthropic on a stored key, Gemini on the
+    // env-var fallback, and a gateway row whose stored base URL is stale.
+    std::env::set_var("GEMINI_API_KEY", "env-fallback-key");
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderCredential::api_key("sk-stored"),
+    )
+    .await
+    .unwrap();
+    for (kind, base_url) in [
+        (providers::ProviderKind::Anthropic, None),
+        (providers::ProviderKind::Gemini, None),
+        (
+            providers::ProviderKind::ModelGateway,
+            Some("https://stale.example".to_string()),
+        ),
+    ] {
+        providers::write_config(
+            &*store,
+            kind,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url,
+                vertex_location: None,
+                models: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    // Unmanaged control: the same store offers the BYOK routes, and the env
+    // fallback is honored — so the managed delta below is load-bearing.
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    let kinds: Vec<_> =
+        providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), &policy)
+            .await
+            .into_iter()
+            .map(|route| route.kind)
+            .collect();
+    assert!(kinds.contains(&openwave_router::RouteKind::Anthropic));
+    assert!(kinds.contains(&openwave_router::RouteKind::Gemini));
+
+    // Provisioned: only the gateway remains, aimed at the policy URL. The
+    // stale stored row and every BYOK credential — stored or env — are inert.
+    crate::managed_policy::provision(&*store, "https://corp.gateway")
+        .await
+        .unwrap();
+    let policy = crate::managed_policy::resolve(&*store, &crate::managed_policy::NoOsPolicy)
+        .await
+        .unwrap();
+    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens), &policy).await;
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].kind, openwave_router::RouteKind::ModelGateway);
+    assert_eq!(
+        routes[0].base_url.as_deref(),
+        Some("https://corp.gateway/compat/anthropic")
+    );
+}
+
+async fn put_json(
+    router: &Router,
+    bearer: &str,
+    uri: &str,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(uri)
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn delete(router: &Router, bearer: &str, uri: &str) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(uri)
+                .header(header::AUTHORIZATION, bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Every locked write path over the real routes: BYOK credential/endpoint
+/// writes, the legacy api-key shim, credential deletion, and a gateway
+/// re-point all refuse with the stable `managed_profile` kind — while an
+/// enable toggle and a same-gateway base URL write stay open.
+#[tokio::test]
+async fn a_managed_profile_refuses_byok_and_gateway_repoint_writes() {
+    let (router, token, store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    crate::managed_policy::provision(&*store, "https://corp.gateway")
+        .await
+        .unwrap();
+
+    // A BYOK credential write is refused with the stable managed kind.
+    let response = put_json(
+        &router,
+        &bearer,
+        "/providers/anthropic",
+        serde_json::json!({"credential": {"type": "api_key", "key": "sk-blocked"}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let info: AgentErrorInfo = json_body(response).await;
+    assert_eq!(info.kind, "managed_profile");
+    assert!(!info.message.contains("sk-blocked"));
+
+    // A BYOK endpoint write is refused; a plain enable toggle is not locked.
+    let response = put_json(
+        &router,
+        &bearer,
+        "/providers/openai_compatible",
+        serde_json::json!({"base_url": "https://byo.example"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = put_json(
+        &router,
+        &bearer,
+        "/providers/anthropic",
+        serde_json::json!({"enabled": false}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The gateway base URL is locked to the policy URL: a re-point is refused,
+    // re-asserting the same gateway (modulo normalization) keeps the stored
+    // row in sync.
+    let response = put_json(
+        &router,
+        &bearer,
+        "/providers/model_gateway",
+        serde_json::json!({"base_url": "https://evil.example"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = put_json(
+        &router,
+        &bearer,
+        "/providers/model_gateway",
+        serde_json::json!({"base_url": "https://corp.gateway"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The legacy api-key shim and credential deletion refuse the same way.
+    let response = put_json(
+        &router,
+        &bearer,
+        "/settings/api-key",
+        serde_json::json!({"api_key": "sk-blocked"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = delete(&router, &bearer, "/settings/api-key").await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = delete(&router, &bearer, "/providers/anthropic/credential").await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }

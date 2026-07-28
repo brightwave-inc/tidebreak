@@ -628,6 +628,21 @@ async fn has_api_key(secrets: &dyn SecretProvider) -> bool {
     false
 }
 
+/// Refuse a BYOK credential write on a managed profile.
+///
+/// The gateway session is a managed profile's only model credential; stored
+/// BYOK keys are frozen while the policy holds — inert, not deleted, so an
+/// unmanaged profile is byte-for-byte unaffected.
+async fn refuse_credential_writes_when_managed(state: &AppState) -> Result<(), ServerError> {
+    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    if policy.managed {
+        return Err(providers::managed_profile_refusal(
+            "this profile is managed by a model gateway; provider API keys are locked",
+        ));
+    }
+    Ok(())
+}
+
 /// Body of `PUT /settings/api-key`.
 ///
 /// Legacy shim: writes the Anthropic credential in the typed blob shape and
@@ -651,6 +666,7 @@ pub async fn put_api_key(
     State(state): State<AppState>,
     Json(body): Json<ApiKey>,
 ) -> Result<StatusCode, ServerError> {
+    refuse_credential_writes_when_managed(&state).await?;
     if body.api_key.is_empty() {
         return Err(ServerError::bad_request("api_key must not be empty"));
     }
@@ -675,6 +691,7 @@ pub async fn put_api_key(
 /// `has_api_key` may stay `true` and turns keep resolving a provider after a
 /// delete. The environment is a deploy-time default the API doesn't override.
 pub async fn delete_api_key(State(state): State<AppState>) -> Result<StatusCode, ServerError> {
+    refuse_credential_writes_when_managed(&state).await?;
     providers::delete_credential(&*state.secrets, ProviderKind::Anthropic).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -702,7 +719,9 @@ pub async fn put_provider(
 ) -> Result<Json<ProviderInfo>, ServerError> {
     let kind = ProviderKind::parse(&kind)
         .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
-    let info = providers::update_provider(&*state.store, &*state.secrets, kind, body).await?;
+    let policy = crate::managed_policy::resolve(&*state.store, &*state.os_policy).await?;
+    let info =
+        providers::update_provider(&*state.store, &*state.secrets, kind, body, &policy).await?;
     Ok(Json(info))
 }
 
@@ -713,6 +732,7 @@ pub async fn delete_provider_credential(
 ) -> Result<StatusCode, ServerError> {
     let kind = ProviderKind::parse(&kind)
         .ok_or_else(|| ServerError::not_found(format!("unknown provider kind: {kind}")))?;
+    refuse_credential_writes_when_managed(&state).await?;
     providers::delete_credential(&*state.secrets, kind).await?;
     Ok(StatusCode::NO_CONTENT)
 }

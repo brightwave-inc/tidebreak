@@ -551,13 +551,52 @@ pub async fn list_providers(
     Ok(out)
 }
 
+/// The refusal every managed-lockdown write path answers with. One stable
+/// `kind` so clients can branch on it wherever the lock surfaces.
+pub(crate) fn managed_profile_refusal(message: impl Into<String>) -> ServerError {
+    ServerError::conflict_kind("managed_profile", message)
+}
+
 /// Apply a [`ProviderUpdate`] and return the resulting [`ProviderInfo`].
+///
+/// On a managed profile, BYOK providers are locked: credential and base-URL
+/// writes for any non-gateway kind are refused, and the gateway's own base
+/// URL only accepts a value that normalizes to the policy's locked gateway
+/// URL (which keeps the stored row in sync — routing itself reads the policy
+/// URL directly, see [`collect_routes`]).
 pub async fn update_provider(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     kind: ProviderKind,
     update: ProviderUpdate,
+    policy: &crate::managed_policy::ManagedPolicy,
 ) -> std::result::Result<ProviderInfo, ServerError> {
+    if policy.managed {
+        if kind != ProviderKind::ModelGateway
+            && (update.credential.is_some() || update.base_url.is_some())
+        {
+            return Err(managed_profile_refusal(format!(
+                "this profile is managed by a model gateway; {kind} credentials and endpoints are locked"
+            )));
+        }
+        if kind == ProviderKind::ModelGateway {
+            if let Some(base_url) = &update.base_url {
+                let locked = policy.gateway_url.as_deref().unwrap_or_default();
+                let matches_locked = base_url.as_deref().is_some_and(|url| {
+                    crate::managed_policy::validated_gateway_url(url)
+                        .ok()
+                        .as_deref()
+                        == Some(locked)
+                });
+                if !matches_locked {
+                    return Err(managed_profile_refusal(format!(
+                        "this profile is managed; the model gateway base URL is locked to {locked}"
+                    )));
+                }
+            }
+        }
+    }
+
     let mut config = read_config(store, kind).await?;
 
     if let Some(enabled) = update.enabled {
@@ -773,13 +812,22 @@ pub fn route_kind(kind: ProviderKind) -> openwave_router::RouteKind {
 /// Vertex routes; API keys remain Developer API routes. Store-read failures for
 /// a single kind skip that kind (fail closed for it) rather than aborting the
 /// whole list.
+///
+/// On a managed profile only the gateway route is offered: BYOK kinds are
+/// skipped before any credential is read, so stored keys and the env-var
+/// fallbacks are inert without being deleted, and the gateway's bearer target
+/// comes from the policy's locked URL — stored config can never redirect it.
 pub async fn collect_routes(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     gateway_tokens: Option<std::sync::Arc<dyn openwave_router::BearerTokenSource>>,
+    policy: &crate::managed_policy::ManagedPolicy,
 ) -> Vec<openwave_router::Route> {
     let mut routes = Vec::new();
     for &kind in ProviderKind::ALL {
+        if policy.managed && kind != ProviderKind::ModelGateway {
+            continue;
+        }
         let config = match read_config(store, kind).await {
             Ok(c) => c,
             Err(_) => continue,
@@ -793,7 +841,11 @@ pub async fn collect_routes(
             let Some(source) = gateway_tokens.clone() else {
                 continue;
             };
-            let Some(base) = config.base_url.as_deref() else {
+            let Some(base) = (if policy.managed {
+                policy.gateway_url.as_deref()
+            } else {
+                config.base_url.as_deref()
+            }) else {
                 continue;
             };
             if !(base.starts_with("https://") || base.starts_with("http://")) {

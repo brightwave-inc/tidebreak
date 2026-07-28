@@ -128,6 +128,7 @@ async fn titling_app(
             store.clone(),
             secrets.clone(),
             crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
+            Arc::new(crate::managed_policy::NoOsPolicy),
         )),
         secrets,
         Arc::new(ToolRegistry::new()),

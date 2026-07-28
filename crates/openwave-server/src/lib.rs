@@ -593,14 +593,26 @@ async fn bind_inner(
         Some(service) => KeychainSecretProvider::with_service(service),
         None => KeychainSecretProvider::new(),
     });
+    // Until the platform readers land, no OS source asserts a policy. This is
+    // the one instance shared by the boot migration, the resolver, and the
+    // request handlers, so they can never disagree on the resolved policy.
+    let os_policy: Arc<dyn managed_policy::OsPolicySource> = Arc::new(managed_policy::NoOsPolicy);
     // Pre-providers installs may only have an env/legacy key — enable Anthropic
-    // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade.
-    providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
+    // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade. Never
+    // on a managed profile: auto-enabling a BYOK provider would fight the
+    // lockdown, so managed — or unreadable, which fails closed — skips it.
+    match managed_policy::resolve(&*store, &*os_policy).await {
+        Ok(policy) if !policy.managed => {
+            providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
+        }
+        _ => {}
+    }
     let gateway = gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone());
     let resolver = Arc::new(KeyedResolver::new(
         store.clone(),
         secrets.clone(),
         gateway.clone(),
+        os_policy.clone(),
     ));
     let embedder = resolve_embedder(&*store, &*secrets).await;
     let vector_store = connect_vector_store(&config, embedder.dimensions()).await?;
@@ -645,6 +657,7 @@ async fn bind_inner(
     // instances over the same keychain entry can race a stale refresh token
     // into the gateway's reuse detection (a spurious full sign-out).
     state.gateway = gateway;
+    state.os_policy = os_policy;
     state.mcp.initialize(mcp_servers).await?;
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();
