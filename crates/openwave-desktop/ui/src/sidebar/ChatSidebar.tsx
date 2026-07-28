@@ -5,7 +5,6 @@ import {
   FolderOpen,
   Library,
   Shapes,
-  SquarePen,
 } from "lucide-react";
 
 import type { Chat } from "@/api";
@@ -14,6 +13,7 @@ import { useChatAttention } from "@/ChatAttention";
 import { useChatListStore } from "@/ChatListStore";
 import type { PanelType } from "@/panel/panelTypes";
 import { usePanelNav } from "@/panel/usePanelNav";
+import { NewChatButton } from "./NewChatButton";
 import { SidebarButton, SidebarSectionTitle } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
 
@@ -64,13 +64,11 @@ export function ChatSidebar({ chat }: { chat: Chat }) {
         )}
       </SidebarButton>
 
-      <SidebarButton
+      <NewChatButton
         onClick={newChat}
         disabled={creatingChat || deletingChatId !== null}
-      >
-        <SquarePen />
-        <span>{creatingChat ? "Starting…" : "New chat"}</span>
-      </SidebarButton>
+        creating={creatingChat}
+      />
 
       <SidebarSectionTitle className="mt-4">
         {chat.title?.trim() || "New chat"}
