@@ -7,14 +7,14 @@ import type {
   WebSearchProviderKind,
 } from "../api";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   ActiveProviderField,
   ProviderCredentialField,
+  TimeoutSecondsField,
+  timeoutMsFromSeconds,
 } from "./ProviderFields";
 import {
   SettingsError,
-  SettingsField,
   SettingsPanel,
   SettingsSection,
   SettingsStatus,
@@ -68,16 +68,13 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
   const state = webSearchState(config);
 
   async function save() {
-    const seconds = Number(timeoutSeconds);
-    if (
-      !Number.isFinite(seconds) ||
-      timeoutSeconds.trim() === "" ||
-      seconds < MIN_WEB_SEARCH_TIMEOUT_SECONDS ||
-      seconds > MAX_WEB_SEARCH_TIMEOUT_SECONDS
-    ) {
-      setError(
-        `Timeout must be between ${MIN_WEB_SEARCH_TIMEOUT_SECONDS} and ${MAX_WEB_SEARCH_TIMEOUT_SECONDS} seconds.`,
-      );
+    const timeout = timeoutMsFromSeconds(
+      timeoutSeconds,
+      MIN_WEB_SEARCH_TIMEOUT_SECONDS,
+      MAX_WEB_SEARCH_TIMEOUT_SECONDS,
+    );
+    if ("error" in timeout) {
+      setError(timeout.error);
       return;
     }
 
@@ -94,7 +91,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       }
       const nextConfig = await client.putWebSearchConfig({
         provider: provider || null,
-        timeout_ms: Math.round(seconds * 1000),
+        timeout_ms: timeout.timeoutMs,
       });
       const nextCredentials = await client.listWebSearchCredentials();
       setConfig(nextConfig);
@@ -186,21 +183,14 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
               }))}
             />
 
-            <SettingsField
-              label="Request timeout (seconds)"
-              hint={`Between ${MIN_WEB_SEARCH_TIMEOUT_SECONDS} and ${MAX_WEB_SEARCH_TIMEOUT_SECONDS} seconds.`}
-            >
-              <Input
-                type="number"
-                inputMode="numeric"
-                min={MIN_WEB_SEARCH_TIMEOUT_SECONDS}
-                max={MAX_WEB_SEARCH_TIMEOUT_SECONDS}
-                step="1"
-                value={timeoutSeconds}
-                disabled={working}
-                onChange={(event) => setTimeoutSeconds(event.target.value)}
-              />
-            </SettingsField>
+            <TimeoutSecondsField
+              label="Request timeout"
+              minSeconds={MIN_WEB_SEARCH_TIMEOUT_SECONDS}
+              maxSeconds={MAX_WEB_SEARCH_TIMEOUT_SECONDS}
+              value={timeoutSeconds}
+              disabled={working}
+              onChange={setTimeoutSeconds}
+            />
           </SettingsSection>
 
           {/* One save for the whole surface: it stores every key typed above

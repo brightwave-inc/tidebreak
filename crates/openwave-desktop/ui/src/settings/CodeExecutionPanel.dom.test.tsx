@@ -68,7 +68,7 @@ describe("CodeExecutionPanel", () => {
       target: { value: "daytona-secret" },
     });
     fireEvent.change(screen.getByLabelText(/Execution timeout/), {
-      target: { value: "30000" },
+      target: { value: "30" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
@@ -129,7 +129,7 @@ describe("CodeExecutionPanel", () => {
     render(<CodeExecutionPanel client={client} />);
 
     fireEvent.change(await screen.findByLabelText(/Execution timeout/), {
-      target: { value: "500000" },
+      target: { value: "500" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
