@@ -398,7 +398,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           <PanelFrame position={side} spaceBetween>
             <DocumentsView
               chatId={chatId}
-              documentId={panel.documentId}
               onOpen={(documentId) => openPanel({ type: "sources", documentId })}
             />
           </PanelFrame>

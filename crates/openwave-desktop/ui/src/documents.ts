@@ -116,6 +116,22 @@ export async function importDroppedLibraryDocuments(
   );
 }
 
+/**
+ * Write one source's original bytes wherever the reader chooses.
+ *
+ * Resolves false when the save dialog was dismissed. The bytes never pass
+ * through the renderer: the host reads them and writes the file itself, so
+ * neither the destination nor the size of the source is a renderer concern.
+ */
+export async function exportLibraryDocument(
+  chatId: string,
+  documentId: string,
+): Promise<boolean> {
+  return (await invoke("export_library_document", {
+    request: { chatId, documentId },
+  })) as boolean;
+}
+
 export async function listenForLibraryImportProgress(
   listener: (progress: LibraryImportProgress) => void,
 ): Promise<() => void> {

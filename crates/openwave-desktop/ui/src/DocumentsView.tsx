@@ -46,7 +46,7 @@ export function DocumentsView({
   apis = defaultApis,
 }: {
   chatId: string;
-  /** URL-selected source identity. The detail viewer lands in #543. */
+  /** URL-selected source identity, highlighted when this catalog is visible. */
   documentId?: string;
   /** Navigate to the existing `sources.{documentId}` panel contract. */
   onOpen?: (documentId: string) => void;
