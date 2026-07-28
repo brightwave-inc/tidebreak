@@ -895,8 +895,10 @@ struct AppListResponse {
 
 /// The gateway's endpoint-slug contract: 1–127 bytes of ASCII alphanumerics,
 /// `-`, or `_`. Enforced here so a slug can never rewrite the request path
-/// (`/`, `..`) or the token resource string it is embedded into.
-fn validate_mcp_endpoint_slug(slug: &str) -> Result<()> {
+/// (`/`, `..`) or the token resource string it is embedded into. Public so
+/// configuration layers validate against the same contract instead of a
+/// second copy of these literals.
+pub fn validate_mcp_endpoint_slug(slug: &str) -> Result<()> {
     if slug.is_empty()
         || slug.len() > 127
         || !slug

@@ -21,17 +21,51 @@ import {
 
 const SIGN_IN_POLL_MS = 2_000;
 const DEFAULT_MOUNT_TIMEOUT_MS = 60_000;
+/** Server names cap at 32 bytes (the MCP tool namespace); endpoint slugs go
+ * to 127, so the mount name is derived, not the slug itself. Mount identity
+ * is always the `gateway_endpoint` field, never the name. */
+const MAX_NAMESPACE_BYTES = 32;
 
 function definitionOf(server: McpServerInfo): McpServerDefinition {
   const { health: _, tool_count: __, diagnostic: ___, ...value } = server;
   return value;
 }
 
+/** A valid, unused namespace for a mount: the slug, truncated to the name
+ * limit and de-duplicated against every configured server. */
+function mountName(slug: string, taken: ReadonlySet<string>): string {
+  const base = slug.slice(0, MAX_NAMESPACE_BYTES);
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n += 1) {
+    const suffix = `_${n}`;
+    const candidate =
+      base.slice(0, MAX_NAMESPACE_BYTES - suffix.length) + suffix;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** Sentence-shaped status for a mount row; diagnostics already are one. */
+function mountStatus(mounted: McpServerInfo): string {
+  if (mounted.health === "healthy") {
+    return `${mounted.tool_count} tool${mounted.tool_count === 1 ? "" : "s"} available to new turns.`;
+  }
+  if (mounted.diagnostic) return mounted.diagnostic;
+  switch (mounted.health) {
+    case "initializing":
+    case "reconnecting":
+      return "Connecting…";
+    case "disabled":
+      return "Disabled in MCP servers settings.";
+    default:
+      return "Needs attention. See MCP servers settings.";
+  }
+}
+
 /** A fresh gateway mount: everything comes from the session except the name,
  * which doubles as the tool namespace. */
-function mountDefinition(slug: string): McpServerDefinition {
+function mountDefinition(slug: string, name: string): McpServerDefinition {
   return {
-    name: slug,
+    name,
     command: null,
     args: [],
     env: {},
@@ -170,7 +204,10 @@ export function GatewayPanel({
       const without = current.filter(
         (server) => server.gateway_endpoint !== slug,
       );
-      const next = mounted ? [...without, mountDefinition(slug)] : without;
+      const taken = new Set(without.map((server) => server.name));
+      const next = mounted
+        ? [...without, mountDefinition(slug, mountName(slug, taken))]
+        : without;
       const result = await client.putMcpServers(next);
       setMcpServers(result.servers);
       toast.success(mounted ? `Mounted ${slug}` : `Unmounted ${slug}`);
@@ -409,9 +446,7 @@ export function GatewayPanel({
                         <code className="font-medium">{slug}</code>
                         {mounted && (
                           <p className="text-muted-foreground text-xs">
-                            {mounted.health === "healthy"
-                              ? `${mounted.tool_count} tool${mounted.tool_count === 1 ? "" : "s"} available to new turns.`
-                              : (mounted.diagnostic ?? mounted.health)}
+                            {mountStatus(mounted)}
                           </p>
                         )}
                       </div>

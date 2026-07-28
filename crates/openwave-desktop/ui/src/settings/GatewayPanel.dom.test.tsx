@@ -233,6 +233,41 @@ describe("GatewayPanel", () => {
     expect(await screen.findByText(/3 tools available/)).toBeInTheDocument();
   });
 
+  it("derives a mount name that fits the namespace limit for long slugs", async () => {
+    const longSlug = "a-very-long-endpoint-slug-that-exceeds-the-name-limit";
+    const putMcpServers = vi.fn().mockResolvedValue({ servers: [] });
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+      getGatewayApps: vi.fn().mockResolvedValue({
+        supported: true,
+        apps: [
+          {
+            id: "app-1",
+            name: "Incident API",
+            app_kind: "rest_api",
+            enabled: true,
+            mcp_endpoint_slugs: [longSlug],
+          },
+        ],
+      }),
+      putMcpServers,
+    });
+    const user = userEvent.setup();
+    render(<GatewayPanel client={client} onChanged={() => undefined} />);
+
+    await user.click(
+      await screen.findByRole("switch", { name: `Mount ${longSlug}` }),
+    );
+    await waitFor(() =>
+      expect(putMcpServers).toHaveBeenCalledWith([
+        expect.objectContaining({
+          name: longSlug.slice(0, 32),
+          gateway_endpoint: longSlug,
+        }),
+      ]),
+    );
+  });
+
   it("surfaces a failed sign-in with its bounded message", async () => {
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue({

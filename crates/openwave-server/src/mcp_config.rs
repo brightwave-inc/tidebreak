@@ -521,14 +521,37 @@ impl McpRuntime {
         }))
         .await;
         for (definition, connection) in definitions.iter().zip(connections) {
-            let Some((client, ui_views)) = connection.map_err(|error| {
-                AgentError::config(format!(
-                    "external MCP server {} failed to start: {}",
-                    definition.name,
-                    connection_diagnostic(definition, &error)
-                ))
-            })?
-            else {
+            let connection = match connection {
+                Ok(connection) => connection,
+                // A gateway mount depends on session state that changes out
+                // of band (sign-out, revoked entitlement), so its failure
+                // degrades the mount instead of rejecting the candidate —
+                // otherwise a signed-out mount would block every unrelated
+                // settings save until it was deleted.
+                Err(error) if definition.gateway_endpoint.is_some() => {
+                    servers.insert(
+                        definition.name.clone(),
+                        ManagedServer {
+                            client: None,
+                            health: McpHealth::Degraded,
+                            diagnostic: Some(connection_diagnostic(definition, &error)),
+                            reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
+                            epoch: self.fresh_epoch(),
+                            reconnect_lock: Arc::new(Mutex::new(())),
+                            ui_views: HashMap::new(),
+                        },
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    return Err(AgentError::config(format!(
+                        "external MCP server {} failed to start: {}",
+                        definition.name,
+                        connection_diagnostic(definition, &error)
+                    )));
+                }
+            };
+            let Some((client, ui_views)) = connection else {
                 servers.insert(
                     definition.name.clone(),
                     ManagedServer {
@@ -995,22 +1018,17 @@ fn validate_no_process_fields(server: &McpServerDefinition) -> Result<()> {
     Ok(())
 }
 
-/// The gateway's endpoint-slug contract: 1–127 bytes of ASCII alphanumerics,
-/// `-`, or `_`. Mirrored here so an invalid slug is rejected when the
-/// configuration is saved, not when a connection first resolves it.
+/// The gateway's endpoint-slug contract, checked when the configuration is
+/// saved rather than when a connection first resolves it. The contract
+/// itself lives in one place — the connector that embeds the slug into the
+/// request path and token resource.
 fn validate_gateway_endpoint_slug(server_name: &str, slug: &str) -> Result<()> {
-    if slug.is_empty()
-        || slug.len() > 127
-        || !slug
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(server_error(
+    openwave_connectors::validate_mcp_endpoint_slug(slug).map_err(|_| {
+        server_error(
             server_name,
             "gateway endpoint must be 1-127 ASCII letters, digits, '_' or '-'",
-        ));
-    }
-    Ok(())
+        )
+    })
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -1584,6 +1602,50 @@ mod tests {
         assert_eq!(
             info.servers[0].diagnostic.as_deref(),
             Some("Sign in to the model gateway to reconnect this server.")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_gateway_mount_never_blocks_a_settings_replacement() {
+        let (runtime, store, _directory) = test_runtime().await;
+        // Saving a configuration that contains an unconnectable gateway
+        // mount (signed out) plus an ordinary edit must persist both: the
+        // mount degrades in place instead of rejecting the candidate.
+        let info = runtime
+            .replace(McpServersConfig {
+                servers: vec![
+                    gateway_definition("tools", "tools"),
+                    disabled_definition("docs", "/bin/docs"),
+                ],
+            })
+            .await
+            .unwrap();
+        assert_eq!(info.servers[0].health, McpHealth::Degraded);
+        assert_eq!(
+            info.servers[0].diagnostic.as_deref(),
+            Some("Sign in to the model gateway to reconnect this server.")
+        );
+        assert_eq!(info.servers[1].health, McpHealth::Disabled);
+        let saved: McpServersConfig =
+            serde_json::from_value(store.get_setting(SETTING_KEY).await.unwrap().unwrap()).unwrap();
+        assert_eq!(saved.servers.len(), 2);
+
+        // A non-gateway failure keeps save-and-verify semantics: reject and
+        // change nothing.
+        let error = runtime
+            .replace(McpServersConfig {
+                servers: vec![http_definition("dead", "http://127.0.0.1:1/mcp")],
+            })
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("failed to start"));
+        let saved: McpServersConfig =
+            serde_json::from_value(store.get_setting(SETTING_KEY).await.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            saved.servers.len(),
+            2,
+            "rejected candidate must not persist"
         );
     }
 
