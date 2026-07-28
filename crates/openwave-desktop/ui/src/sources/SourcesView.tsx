@@ -329,7 +329,6 @@ export function SourcesView({
             role="status"
           >
             <strong className="font-medium">{imported.displayName}</strong> was added.
-            OpenWave is preparing it for search.
           </div>
         )}
         {error && (
@@ -366,9 +365,9 @@ export function SourcesView({
               </EmptyMedia>
               <EmptyTitle>No sources yet</EmptyTitle>
               <EmptyDescription>
-                Drop files here, or add folders and ZIP archives. PDFs, Office
-                documents, Markdown, text, and supported images are prepared for search;
-                other formats stay available to the conversation as sources.
+                Drop files here, or add folders and ZIP archives. Anything OpenWave
+                can read becomes searchable in this conversation; anything else is
+                still kept as a source.
               </EmptyDescription>
             </EmptyHeader>
             <EmptyContent>{addSourcesButton}</EmptyContent>
