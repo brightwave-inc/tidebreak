@@ -46,25 +46,34 @@ local-only `openwave-dev` identity in a dedicated keychain under
 with its own generated password, so starting a dev build does not need your
 login-keychain password or a Developer ID distribution key.
 
-Every binary is signed with the same fixed identifier, so clicking **Always
-Allow** once covers all dev binaries — including test executables, whose
-hashed file names change between builds. You can set
+Every binary is signed with the same fixed identifier, so an item a signed
+build creates stays readable from every other dev binary — including test
+executables, whose hashed file names change between builds. You can set
 `OPENWAVE_DEV_SIGNING_IDENTITY` to pick an identity explicitly, or set it
 empty to opt out.
 
-The first signed launch may still ask once per existing secret created by an
-older ad-hoc-signed build. Choose **Always Allow** on those prompts; the
-approval then survives rebuilds. If an Apple Development identity is in use
-and the prompt asks for your **login keychain password** instead of a plain
-Allow/Deny, repair that item's partition list once:
+#### Credentials stored before dev signing
+
+Signing fixes items the signed build **created**. Credentials you stored
+earlier belong to that earlier build, and macOS keeps challenging for them —
+one prompt per credential, on every launch. **Always Allow** does not settle
+it: the local `openwave-dev` certificate is self-signed with no team
+identifier, so the approval is pinned to the binary's cdhash and the next
+rebuild invalidates it. (The partition-list repair that Apple documents needs a
+team identifier, so it does not apply either.)
+
+Re-home those credentials once instead, which rewrites each one so the item
+belongs to the dev signature:
 
 ```sh
-security set-generic-password-partition-list \
-  -S "apple-tool:,apple:,teamid:<YOUR_TEAM_ID>" -s openwave.dev -a <account>
+cargo run -p openwave-cli -- rehome-secrets
 ```
 
-(`security find-identity -v -p codesigning` shows the team id in parentheses;
-`security find-generic-password -s openwave.dev` lists the accounts.)
+Run it through Cargo, so the signing runner applies. Each stored credential
+asks for access once or twice more while it is read and its old item removed —
+plain **Allow** is enough — and then stops asking, including after later
+rebuilds. `security find-generic-password -s openwave.dev` lists what the dev
+profile has stored.
 
 ### Desktop UI
 
