@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import type {
   ApiClient,
   WebSearchConfigInfo,
@@ -97,6 +98,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       });
       setConfig(nextConfig);
       setTimeoutMs(String(nextConfig.timeout_ms));
+      toast.success("Saved web-search configuration");
     } catch (err) {
       setError(String(err));
     } finally {
@@ -112,6 +114,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
       await client.putWebSearchCredential(activeProvider, apiKey.trim());
       setApiKey("");
       await refresh();
+      toast.success("Saved the API key");
     } catch (err) {
       setError(String(err));
     } finally {
@@ -126,6 +129,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
     try {
       await client.deleteWebSearchCredential(activeProvider);
       await refresh();
+      toast.success("Removed the saved API key");
     } catch (err) {
       setError(String(err));
     } finally {
