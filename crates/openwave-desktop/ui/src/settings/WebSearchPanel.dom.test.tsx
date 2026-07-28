@@ -8,39 +8,49 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, WebSearchConfigInfo } from "../api";
+import type {
+  ApiClient,
+  WebSearchConfigInfo,
+  WebSearchCredentialReadiness,
+} from "../api";
 import { WebSearchPanel } from "./WebSearchPanel";
 
-function clientFor(config: WebSearchConfigInfo) {
+function clientFor(
+  config: WebSearchConfigInfo,
+  credentials: WebSearchCredentialReadiness[] = [
+    { provider: "exa", has_credential: false },
+    { provider: "tavily", has_credential: false },
+  ],
+) {
   const putWebSearchConfig = vi.fn().mockResolvedValue(config);
-  const putWebSearchCredential = vi.fn().mockResolvedValue({
-    provider: "exa",
-    has_credential: true,
-  });
-  const credentials = {
-    credentials: [
-      {
-        provider: config.provider ?? "exa",
-        has_credential: config.has_credential,
-      },
-    ],
-  };
+  const putWebSearchCredential = vi
+    .fn()
+    .mockImplementation((provider: string) =>
+      Promise.resolve({ provider, has_credential: true }),
+    );
+  const deleteWebSearchCredential = vi
+    .fn()
+    .mockImplementation((provider: string) =>
+      Promise.resolve({ provider, has_credential: false }),
+    );
   return {
     client: {
       getWebSearchConfig: vi.fn().mockResolvedValue(config),
-      listWebSearchCredentials: vi.fn().mockResolvedValue(credentials),
+      listWebSearchCredentials: vi.fn().mockResolvedValue({ credentials }),
       putWebSearchConfig,
       putWebSearchCredential,
+      deleteWebSearchCredential,
     } as unknown as ApiClient,
     putWebSearchConfig,
     putWebSearchCredential,
+    deleteWebSearchCredential,
   };
 }
 
 afterEach(cleanup);
 
 describe("WebSearchPanel", () => {
-  it("saves the key and the configuration in one pass, in seconds", async () => {
+  it("saves a key per provider and the active selection in one pass, in seconds", async () => {
     const { client, putWebSearchConfig, putWebSearchCredential } = clientFor({
       provider: "exa",
       has_credential: false,
@@ -49,8 +59,12 @@ describe("WebSearchPanel", () => {
 
     render(<WebSearchPanel client={client} />);
 
-    const key = await screen.findByLabelText(/API key/);
-    fireEvent.change(key, { target: { value: "  exa-secret  " } });
+    fireEvent.change(await screen.findByLabelText(/Exa API key/), {
+      target: { value: "  exa-secret  " },
+    });
+    fireEvent.change(screen.getByLabelText(/Tavily API key/), {
+      target: { value: "tavily-secret" },
+    });
     fireEvent.change(screen.getByLabelText(/Request timeout/), {
       target: { value: "30" },
     });
@@ -59,10 +73,35 @@ describe("WebSearchPanel", () => {
     await waitFor(() =>
       expect(putWebSearchCredential).toHaveBeenCalledWith("exa", "exa-secret"),
     );
+    expect(putWebSearchCredential).toHaveBeenCalledWith(
+      "tavily",
+      "tavily-secret",
+    );
     expect(putWebSearchConfig).toHaveBeenCalledWith({
       provider: "exa",
       timeout_ms: 30_000,
     });
+  });
+
+  it("removes one provider's saved key without touching the other", async () => {
+    const { client, deleteWebSearchCredential } = clientFor(
+      { provider: "exa", has_credential: true, timeout_ms: 20_000 },
+      [
+        { provider: "exa", has_credential: true },
+        { provider: "tavily", has_credential: true },
+      ],
+    );
+
+    render(<WebSearchPanel client={client} />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Remove saved Tavily key" }),
+    );
+
+    await waitFor(() =>
+      expect(deleteWebSearchCredential).toHaveBeenCalledWith("tavily"),
+    );
+    expect(deleteWebSearchCredential).toHaveBeenCalledTimes(1);
   });
 
   it("rejects a timeout outside the bounds before touching the server", async () => {
