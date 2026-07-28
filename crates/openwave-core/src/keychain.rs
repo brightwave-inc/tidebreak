@@ -40,16 +40,16 @@ impl KeychainSecretProvider {
     /// call `use_mock` before `main`.
     #[must_use]
     pub fn new() -> Self {
-        if std::env::var("OPENWAVE_KEYCHAIN_MOCK").is_ok_and(|v| !v.is_empty()) {
-            Self::use_mock();
-        }
-        Self {
-            service: DEFAULT_SERVICE.to_string(),
-        }
+        Self::with_service(DEFAULT_SERVICE)
     }
 
     /// Use a custom service name (useful to isolate profiles or tests).
+    /// Honors [`use_mock`](Self::new) and `OPENWAVE_KEYCHAIN_MOCK` the same
+    /// way [`new`](Self::new) does.
     pub fn with_service(service: impl Into<String>) -> Self {
+        if std::env::var("OPENWAVE_KEYCHAIN_MOCK").is_ok_and(|v| !v.is_empty()) {
+            Self::use_mock();
+        }
         Self {
             service: service.into(),
         }

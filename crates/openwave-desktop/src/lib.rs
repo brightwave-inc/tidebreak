@@ -233,12 +233,19 @@ async fn boot_server(
     data_dir: PathBuf,
 ) -> Result<(), String> {
     let client_executor_id = app.state::<host_access::HostAccess>().client_executor_id();
-    let server = openwave_server::bind_configured_with_desktop_executor(
-        Config::desktop(data_dir),
-        client_executor_id,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut config = Config::desktop(data_dir);
+    // Debug builds keep their own keychain service, completing the identifier
+    // and app-data split: dev and release must not share mutable secret state,
+    // and items created by a dev-signed binary fail the release app's keychain
+    // ACL check anyway.
+    #[cfg(debug_assertions)]
+    {
+        config.keychain_service = Some("openwave.dev".into());
+    }
+    let server = openwave_server::bind_configured_with_desktop_executor(config, client_executor_id)
+        .await
+        .map_err(|e| e.to_string())?;
     app.state::<host_access::HostAccess>()
         .initialize_store(server.store())?;
     let base_url = format!("http://{}", server.local_addr());

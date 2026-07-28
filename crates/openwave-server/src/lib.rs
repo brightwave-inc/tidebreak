@@ -572,7 +572,10 @@ async fn bind_inner(
     // directory and its worker set.
     let instance_lock = InstanceLock::acquire(&config)?;
     let store = connect_store(&config).await?;
-    let secrets: Arc<dyn SecretProvider> = Arc::new(KeychainSecretProvider::new());
+    let secrets: Arc<dyn SecretProvider> = Arc::new(match &config.keychain_service {
+        Some(service) => KeychainSecretProvider::with_service(service),
+        None => KeychainSecretProvider::new(),
+    });
     // Pre-providers installs may only have an env/legacy key — enable Anthropic
     // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade.
     providers::migrate_legacy_anthropic(&*store, &*secrets).await?;

@@ -61,7 +61,14 @@ fn usage_error(message: &str) -> ! {
 
 /// Bind the server and run its accept loop, announcing where to reach it.
 async fn serve() -> Result<()> {
-    let config = Config::from_env()?;
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut config = Config::from_env()?;
+    // Debug builds keep their own keychain service, matching the desktop's
+    // dev/release split: a dev daemon must not mutate release secret state.
+    #[cfg(debug_assertions)]
+    {
+        config.keychain_service = Some("openwave.dev".into());
+    }
     let server = openwave_server::bind_configured(config).await?;
     // The address and token are the client's entry point: the parent process that
     // launched the daemon reads them from stdout to connect. The token is a secret,
