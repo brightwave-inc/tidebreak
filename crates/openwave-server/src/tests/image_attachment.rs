@@ -675,6 +675,7 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
         Arc::new(resolver::ConfiguredResolver::new(
             store.clone(),
             secrets.clone(),
+            crate::gateway_runtime::GatewayRuntime::new(store.clone(), secrets.clone()),
         )),
         secrets,
         Arc::new(ToolRegistry::new()),

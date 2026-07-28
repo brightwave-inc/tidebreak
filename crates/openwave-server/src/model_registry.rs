@@ -388,6 +388,7 @@ mod tests {
             ProviderKind::Anthropic => true,
             ProviderKind::Openai => true,
             ProviderKind::OpenaiCompatible => false,
+            ProviderKind::ModelGateway => true,
         }
     }
 
