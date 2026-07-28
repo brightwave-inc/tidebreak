@@ -55,7 +55,6 @@ import { PanelLayout } from "./panel/PanelLayout";
 import type { PanelContent } from "./panel/panelTypes";
 import { usePanelNav } from "./panel/usePanelNav";
 import { SourceNavProvider, useStableSourceNav } from "./panel/SourceNav";
-import { PanelBreadcrumb } from "./components/PanelHeader";
 import { RouteFrame } from "./RouteFrame";
 import { ChatSidebar } from "./sidebar/ChatSidebar";
 import { useRefreshSignals } from "./RefreshSignals";
@@ -434,10 +433,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         );
       case "folders":
         return (
-          <PanelFrame
-            position={side}
-            breadcrumb={<PanelBreadcrumb firstPart="Folders" />}
-          >
+          <PanelFrame position={side} spaceBetween>
             <FoldersView chat={chat!} />
           </PanelFrame>
         );

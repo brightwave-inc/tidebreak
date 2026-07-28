@@ -45,9 +45,8 @@ describe("FoldersView", () => {
   it("renders an empty chat without treating the missing grant as an error", async () => {
     render(<FoldersView chat={chat} />);
 
-    expect(
-      await screen.findByText("No folders connected to this chat."),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("No folders connected")).toBeInTheDocument();
+    // A chat with no grant yet is the ordinary starting state, not a failure.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(host.listConnectedFolders).toHaveBeenCalledWith(chat);
     expect(host.listApprovedFolders).toHaveBeenCalledOnce();

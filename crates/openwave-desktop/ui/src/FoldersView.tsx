@@ -1,5 +1,20 @@
+import { FolderOpenIcon, PlusIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+
 import type { Chat } from "./api";
+import { PanelSecondaryHeader } from "@/components/PanelHeader";
+import { useConfirm } from "@/components/ConfirmDialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import {
   connectApprovedFolder,
   connectFolder,
@@ -13,14 +28,16 @@ import {
   PICKER_HOLDERS,
   useNativePickerLatch,
 } from "./NativePickerLatch";
-import { useConfirm } from "./components/ConfirmDialog";
 
 /**
  * A chat's connected folders: the directories the native host may read on this
- * conversation's behalf. Chat-scoped like sources and outputs, so it lives
- * behind the same per-chat tab control rather than a global side panel.
- * Folders already approved on this device can be reused without choosing them
- * from the picker again.
+ * conversation's behalf.
+ *
+ * Two sections rather than one. The first is what this conversation can reach.
+ * The second is what this device has already approved and can be reattached
+ * without going back through the picker — an affordance that only makes sense
+ * for an app holding its own grants, and the reason this panel is not simply
+ * a list.
  */
 export function FoldersView({ chat }: { chat: Chat }) {
   const [folders, setFolders] = useState<ConnectedFolder[]>([]);
@@ -117,94 +134,143 @@ export function FoldersView({ chat }: { chat: Chat }) {
     }
   }
 
-  return (
-    <section className="folders-view" aria-labelledby="folders-title">
-      <header className="folders-header">
-        <div>
-          <h1 id="folders-title">Folders</h1>
-          <p>
-            OpenWave can read only the folders attached to this chat. Folders
-            you approved before can be reused without choosing them again.
-          </p>
-        </div>
-        <div className="folders-header-actions">
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={working}
-            onClick={() => void addFolder()}
-          >
-            {working ? "Working…" : "Choose another folder…"}
-          </button>
-        </div>
-      </header>
+  const connectButton = (
+    <Button size="sm" disabled={working} onClick={() => void addFolder()}>
+      <PlusIcon className="size-4" />
+      {working ? "Working…" : "Connect folder"}
+    </Button>
+  );
 
-      <div className="folders-content">
+  const nothingToShow = folders.length === 0 && availableFolders.length === 0;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PanelSecondaryHeader showBorder={false} className="pr-1 pl-4">
+        <div className="flex items-baseline gap-3">
+          <h1 className="text-lg font-medium">Folders</h1>
+          {folders.length > 0 && (
+            <span className="text-lg font-medium text-muted-foreground">
+              {folders.length}
+            </span>
+          )}
+        </div>
+        <span className="grow" />
+        <div className="pr-2">{connectButton}</div>
+      </PanelSecondaryHeader>
+
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4">
         {error && (
-          <div className="document-error" role="alert">
+          <div
+            className="shrink-0 rounded-md bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
+            role="alert"
+          >
             {error}
           </div>
         )}
 
-        <div className="folders-section">
-          {folders.length > 0 && (
-            <p className="folders-section-label">Connected</p>
-          )}
-          {folders.length === 0 && !error ? (
-            <p className="folders-empty">
-              No folders connected to this chat.
-            </p>
-          ) : (
-            <div className="folders-list">
-              {folders.map((folder) => (
-                <div className="folder-row" key={folder.rootId}>
-                  <div className="folder-meta">
-                    <strong className="folder-name">
-                      {folder.displayName}
-                    </strong>
-                    <span className="folder-access">read access</span>
-                  </div>
-                  <button
-                    type="button"
-                    className="btn"
-                    disabled={working}
-                    onClick={() => void removeFolder(folder)}
-                  >
-                    Disconnect
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        {nothingToShow && !error ? (
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <FolderOpenIcon />
+              </EmptyMedia>
+              <EmptyTitle>No folders connected</EmptyTitle>
+              <EmptyDescription>
+                Connect a folder to let OpenWave read files from your computer in
+                this conversation. It can read only the folders you attach here.
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>{connectButton}</EmptyContent>
+          </Empty>
+        ) : (
+          <>
+            {folders.length > 0 && (
+              <FolderSection label="Connected">
+                {folders.map((folder) => (
+                  <FolderRow
+                    key={folder.rootId}
+                    name={folder.displayName}
+                    badge={<Badge variant="secondary" size="sm">Read access</Badge>}
+                    action={
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        disabled={working}
+                        onClick={() => void removeFolder(folder)}
+                      >
+                        Disconnect
+                      </Button>
+                    }
+                  />
+                ))}
+              </FolderSection>
+            )}
 
-        {availableFolders.length > 0 && (
-          <div className="folders-section">
-            <p className="folders-section-label">Available on this Mac</p>
-            <div className="folders-list">
-              {availableFolders.map((folder) => (
-                <div className="folder-row" key={folder.rootId}>
-                  <div className="folder-meta">
-                    <strong className="folder-name">
-                      {folder.displayName}
-                    </strong>
-                    <span className="folder-access">previously approved</span>
-                  </div>
-                  <button
-                    type="button"
-                    className="btn"
-                    disabled={working}
-                    onClick={() => void addApprovedFolder(folder.rootId)}
-                  >
-                    Connect
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
+            {availableFolders.length > 0 && (
+              <FolderSection label="Available on this Mac">
+                {availableFolders.map((folder) => (
+                  <FolderRow
+                    key={folder.rootId}
+                    name={folder.displayName}
+                    badge={
+                      <Badge variant="outline" size="sm">
+                        Previously approved
+                      </Badge>
+                    }
+                    action={
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        disabled={working}
+                        onClick={() => void addApprovedFolder(folder.rootId)}
+                      >
+                        Connect
+                      </Button>
+                    }
+                  />
+                ))}
+              </FolderSection>
+            )}
+          </>
         )}
       </div>
       {confirmDialog}
+    </div>
+  );
+}
+
+function FolderSection({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="flex shrink-0 flex-col gap-2">
+      <h2 className="text-xs font-medium text-muted-foreground">{label}</h2>
+      <div className="flex flex-col gap-2">{children}</div>
     </section>
+  );
+}
+
+function FolderRow({
+  name,
+  badge,
+  action,
+}: {
+  name: string;
+  badge: React.ReactNode;
+  action: React.ReactNode;
+}) {
+  return (
+    <Card className="flex flex-row items-center justify-between gap-3 px-3 py-2.5">
+      <div className="flex min-w-0 items-center gap-2">
+        <FolderOpenIcon className="size-4 shrink-0 text-muted-foreground" />
+        <span className="truncate text-sm font-medium">{name}</span>
+        {badge}
+      </div>
+      <div className="shrink-0">{action}</div>
+    </Card>
   );
 }
