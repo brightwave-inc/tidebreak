@@ -1,8 +1,10 @@
-//! Native bridge for conversation-private generated outputs.
+//! Native bridge for durable conversation outputs.
 //!
-//! The model writes only to a closed directory inside private scratch. The
-//! renderer receives bounded text and safe metadata, while a user-selected save
-//! destination stays entirely inside this native boundary.
+//! The renderer names an output only by opaque identity. Authoritative output
+//! ownership and immutable revision metadata come from the product store;
+//! private scratch paths and selected export destinations terminate inside this
+//! module. Native exports are keyed by a renderer-minted operation identity so
+//! an ambiguous response can recover one exact terminal receipt.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -10,22 +12,25 @@ use std::path::{Path, PathBuf};
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
-use chrono::{DateTime, Utc};
 use openwave_core::{
-    deliverable_media_type, validate_deliverable_name, ChatId, DELIVERABLES_DIRECTORY,
-    MAX_DELIVERABLE_BYTES,
+    deliverable_media_type, ChatId, OutputId, OutputRecord, OutputRevision, OutputRevisionId,
+    Store, MAX_DELIVERABLE_BYTES, OUTPUTS_DIRECTORY,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::client_execution::{
+    OutputExportFailureReason, OutputExportPhase, OutputExportReceipt, OutputExportTerminal,
+    ReceiptStore,
+};
 use crate::documents::resolve_conversation_scope;
 use crate::host_access::HostAccess;
 
 const MAX_DELIVERABLES: usize = 100;
-const MAX_DELIVERABLE_DIRECTORY_ENTRIES: usize = 1_000;
 const MAX_PREVIEW_CHARACTERS: usize = 100_000;
 
 #[derive(Debug, Deserialize)]
@@ -38,15 +43,25 @@ pub(crate) struct DeliverablesRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DeliverableRequest {
     chat_id: Uuid,
-    filename: String,
+    output_id: OutputId,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExportDeliverableRequest {
+    operation_id: Uuid,
+    chat_id: Uuid,
+    output_id: OutputId,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DeliverableSummary {
+    output_id: OutputId,
     filename: String,
     media_type: String,
     size_bytes: u64,
+    revision_count: u32,
     updated_at: String,
 }
 
@@ -60,23 +75,51 @@ pub(crate) struct DeliverablesCatalog {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DeliverablePreview {
+    output_id: OutputId,
     filename: String,
     media_type: String,
     content: String,
     truncated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OutputExportResult {
+    operation_id: Uuid,
+    output_id: OutputId,
+    revision_id: OutputRevisionId,
+    #[serde(flatten)]
+    terminal: OutputExportTerminal,
+}
+
 #[tauri::command]
 pub(crate) async fn list_deliverables(
-    app: AppHandle,
     host_access: State<'_, HostAccess>,
     request: DeliverablesRequest,
 ) -> Result<DeliverablesCatalog, String> {
     let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    let scratch_root = crate::data_dir(&app)?.join("scratch");
-    tauri::async_runtime::spawn_blocking(move || list_deliverables_in_root(&scratch_root, chat_id))
+    let store = host_access
+        .store()
+        .ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let mut outputs = store
+        .list_outputs(chat_id, (MAX_DELIVERABLES + 1) as u64)
         .await
-        .map_err(|_| "Could not load this conversation's outputs".to_owned())?
+        .map_err(|_| "Could not load this conversation's outputs".to_owned())?;
+    let truncated = outputs.len() > MAX_DELIVERABLES;
+    outputs.truncate(MAX_DELIVERABLES);
+    let mut deliverables = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        let revision = store
+            .get_output_revision(output.current_revision)
+            .await
+            .map_err(|_| "Could not load this conversation's outputs".to_owned())?
+            .ok_or_else(|| "Could not load this conversation's outputs".to_owned())?;
+        deliverables.push(summary_from_record(&output, &revision)?);
+    }
+    Ok(DeliverablesCatalog {
+        deliverables,
+        truncated,
+    })
 }
 
 #[tauri::command]
@@ -86,144 +129,410 @@ pub(crate) async fn read_deliverable(
     request: DeliverableRequest,
 ) -> Result<DeliverablePreview, String> {
     let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    validate_deliverable_name(&request.filename)
-        .map_err(|_| "Invalid output filename".to_owned())?;
+    let (output, revision) =
+        require_live_output(host_access.store(), chat_id, request.output_id).await?;
     let scratch_root = crate::data_dir(&app)?.join("scratch");
-    let filename = request.filename;
-    tauri::async_runtime::spawn_blocking(move || {
-        let content = read_deliverable_bytes(&scratch_root, chat_id, &filename)?;
-        preview_from_bytes(filename, content)
+    let read_output = output.clone();
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        read_output_revision_bytes(&scratch_root, chat_id, &read_output, &revision)
     })
     .await
-    .map_err(|_| "Could not preview that output".to_owned())?
+    .map_err(|_| "Could not preview that output".to_owned())??;
+    preview_from_bytes(&output, bytes)
 }
 
 #[tauri::command]
 pub(crate) async fn export_deliverable(
     app: AppHandle,
     host_access: State<'_, HostAccess>,
-    request: DeliverableRequest,
-) -> Result<bool, String> {
-    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
-    validate_deliverable_name(&request.filename)
-        .map_err(|_| "Invalid output filename".to_owned())?;
-    let _picker = host_access
-        .picker
-        .try_lock()
-        .map_err(|_| "A file or folder picker is already open".to_owned())?;
-    let scratch_root = crate::data_dir(&app)?.join("scratch");
-    let filename = request.filename;
-    let read_filename = filename.clone();
-    let content = tauri::async_runtime::spawn_blocking(move || {
-        read_deliverable_bytes(&scratch_root, chat_id, &read_filename)
-    })
-    .await
-    .map_err(|_| "Could not read that output".to_owned())??;
+    request: ExportDeliverableRequest,
+) -> Result<OutputExportResult, String> {
+    if request.operation_id.is_nil() || request.output_id.as_uuid().is_nil() {
+        return Err("Invalid output export request".to_owned());
+    }
+    let _export = host_access.output_exports.lock().await;
+    if let Some(mut receipt) = host_access
+        .receipts
+        .load_output_export(request.operation_id)
+        .map_err(private_receipt_error)?
+    {
+        if receipt.chat_id.as_uuid() != &request.chat_id || receipt.output_id != request.output_id {
+            return Err("That export operation belongs to a different output".to_owned());
+        }
+        return recover_output_export_receipt(&host_access.receipts, &mut receipt);
+    }
 
-    let Some(destination) = pick_export_path(&app, &filename).await? else {
-        return Ok(false);
-    };
-    // A picker may remain open while the selected conversation is deleted.
-    // Revalidate before the one user-authorized host write.
-    resolve_conversation_scope(&host_access, request.chat_id).await?;
-    tauri::async_runtime::spawn_blocking(move || {
-        write_exported_deliverable(&destination, &content)
+    let chat_id = resolve_conversation_scope(&host_access, request.chat_id).await?;
+    let (output, revision) =
+        require_live_output(host_access.store(), chat_id, request.output_id).await?;
+    let mut receipt = OutputExportReceipt::new(
+        request.operation_id,
+        chat_id,
+        output.id,
+        revision.id,
+        output.filename.clone(),
+        revision.byte_len,
+        revision.sha256,
+    );
+    host_access
+        .receipts
+        .save_output_export(&receipt)
+        .map_err(private_receipt_error)?;
+
+    let scratch_root = crate::data_dir(&app)?.join("scratch");
+    let read_output = output.clone();
+    let read_revision = revision.clone();
+    let content = match tauri::async_runtime::spawn_blocking(move || {
+        read_output_revision_bytes(&scratch_root, chat_id, &read_output, &read_revision)
     })
     .await
-    .map_err(|_| "Could not save that output".to_owned())??;
-    Ok(true)
+    {
+        Ok(Ok(content)) => content,
+        Ok(Err(_)) | Err(_) => {
+            return terminalize_output_export(
+                &host_access.receipts,
+                &mut receipt,
+                OutputExportTerminal::Failed {
+                    reason: OutputExportFailureReason::SourceUnavailable,
+                },
+            );
+        }
+    };
+
+    let picker = match host_access.picker.try_lock() {
+        Ok(picker) => picker,
+        Err(_) => {
+            return terminalize_output_export(
+                &host_access.receipts,
+                &mut receipt,
+                OutputExportTerminal::Failed {
+                    reason: OutputExportFailureReason::DestinationUnavailable,
+                },
+            );
+        }
+    };
+    let destination = match pick_export_path(&app, &output.filename).await {
+        Ok(Some(destination)) if destination.is_absolute() => destination,
+        Ok(None) => {
+            return terminalize_output_export(
+                &host_access.receipts,
+                &mut receipt,
+                OutputExportTerminal::Cancelled,
+            );
+        }
+        Ok(Some(_)) | Err(_) => {
+            return terminalize_output_export(
+                &host_access.receipts,
+                &mut receipt,
+                OutputExportTerminal::Failed {
+                    reason: OutputExportFailureReason::DestinationUnavailable,
+                },
+            );
+        }
+    };
+    drop(picker);
+
+    receipt.phase = OutputExportPhase::DestinationSelected;
+    receipt.destination = Some(destination.clone());
+    host_access
+        .receipts
+        .save_output_export(&receipt)
+        .map_err(private_receipt_error)?;
+
+    // A picker can remain open while the output or conversation is deleted.
+    // Revalidate the exact durable identities before the one authorized write.
+    if require_exact_revision(
+        host_access.store(),
+        chat_id,
+        output.id,
+        revision.id,
+        revision.byte_len,
+        revision.sha256,
+    )
+    .await
+    .is_err()
+    {
+        return terminalize_output_export(
+            &host_access.receipts,
+            &mut receipt,
+            OutputExportTerminal::Failed {
+                reason: OutputExportFailureReason::SourceUnavailable,
+            },
+        );
+    }
+
+    receipt.phase = OutputExportPhase::DispatchStarted;
+    host_access
+        .receipts
+        .save_output_export(&receipt)
+        .map_err(private_receipt_error)?;
+    let write_destination = destination.clone();
+    let write = tauri::async_runtime::spawn_blocking(move || {
+        write_exported_deliverable(&write_destination, &content)
+    })
+    .await;
+    let terminal = match write {
+        Ok(Ok(())) => OutputExportTerminal::Completed,
+        Ok(Err(_)) | Err(_) if destination_matches_revision(&destination, &revision) => {
+            OutputExportTerminal::Completed
+        }
+        Ok(Err(_)) | Err(_) => OutputExportTerminal::Failed {
+            reason: OutputExportFailureReason::AmbiguousNativeFailure,
+        },
+    };
+    terminalize_output_export(&host_access.receipts, &mut receipt, terminal)
 }
 
-fn list_deliverables_in_root(
+async fn require_live_output(
+    store: Option<&std::sync::Arc<dyn Store>>,
+    chat_id: ChatId,
+    output_id: OutputId,
+) -> Result<(OutputRecord, OutputRevision), String> {
+    let store = store.ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let output = store
+        .get_output(output_id)
+        .await
+        .map_err(|_| "Could not load that output".to_owned())?
+        .filter(|output| output.chat_id == chat_id && output.deleted_at.is_none())
+        .ok_or_else(|| "Output not found in this conversation".to_owned())?;
+    let revision = store
+        .get_output_revision(output.current_revision)
+        .await
+        .map_err(|_| "Could not load that output".to_owned())?
+        .filter(|revision| revision.output_id == output.id)
+        .ok_or_else(|| "Output not found in this conversation".to_owned())?;
+    Ok((output, revision))
+}
+
+async fn require_exact_revision(
+    store: Option<&std::sync::Arc<dyn Store>>,
+    chat_id: ChatId,
+    output_id: OutputId,
+    revision_id: OutputRevisionId,
+    byte_len: u64,
+    sha256: [u8; 32],
+) -> Result<(), String> {
+    let store = store.ok_or_else(|| "OpenWave is still starting".to_owned())?;
+    let output = store
+        .get_output(output_id)
+        .await
+        .map_err(|_| "Could not load that output".to_owned())?
+        .filter(|output| output.chat_id == chat_id && output.deleted_at.is_none())
+        .ok_or_else(|| "Output not found in this conversation".to_owned())?;
+    let revision = store
+        .get_output_revision(revision_id)
+        .await
+        .map_err(|_| "Could not load that output".to_owned())?
+        .filter(|revision| {
+            revision.output_id == output.id
+                && revision.byte_len == byte_len
+                && revision.sha256 == sha256
+        })
+        .ok_or_else(|| "Output not found in this conversation".to_owned())?;
+    if revision.id != revision_id {
+        return Err("Output not found in this conversation".to_owned());
+    }
+    Ok(())
+}
+
+fn summary_from_record(
+    output: &OutputRecord,
+    revision: &OutputRevision,
+) -> Result<DeliverableSummary, String> {
+    if output.deleted_at.is_some()
+        || output.current_revision != revision.id
+        || output.id != revision.output_id
+        || output.revision_count == 0
+        || revision.byte_len > MAX_DELIVERABLE_BYTES as u64
+        || deliverable_media_type(&output.filename) != Some(output.media_type.as_str())
+    {
+        return Err("Could not load this conversation's outputs".to_owned());
+    }
+    Ok(DeliverableSummary {
+        output_id: output.id,
+        filename: output.filename.clone(),
+        media_type: output.media_type.clone(),
+        size_bytes: revision.byte_len,
+        revision_count: output.revision_count,
+        updated_at: output.updated_at.to_rfc3339(),
+    })
+}
+
+fn read_output_revision_bytes(
     scratch_root: &Path,
     chat_id: ChatId,
-) -> Result<DeliverablesCatalog, String> {
-    let Some(directory) = open_deliverables_directory(scratch_root, chat_id)? else {
-        return Ok(DeliverablesCatalog {
-            deliverables: Vec::new(),
-            truncated: false,
-        });
-    };
-    let entries = directory
-        .read_dir(".")
-        .map_err(|_| "Could not load this conversation's outputs".to_owned())?;
-    let mut deliverables = Vec::new();
-    let mut inspected = 0usize;
-    for entry in entries {
-        inspected += 1;
-        if inspected > MAX_DELIVERABLE_DIRECTORY_ENTRIES {
-            return Err("This conversation has too many output files".to_owned());
-        }
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let Some(filename) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if validate_deliverable_name(&filename).is_err() {
-            continue;
-        }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_file() || file_type.is_symlink() {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        if metadata.len() > MAX_DELIVERABLE_BYTES as u64 {
-            continue;
-        }
-        let Some(media_type) = deliverable_media_type(&filename) else {
-            continue;
-        };
-        let updated_at = metadata
-            .modified()
-            .map(|time| DateTime::<Utc>::from(time.into_std()))
-            .unwrap_or_else(|_| DateTime::<Utc>::UNIX_EPOCH)
-            .to_rfc3339();
-        deliverables.push(DeliverableSummary {
-            filename,
-            media_type: media_type.to_owned(),
-            size_bytes: metadata.len(),
-            updated_at,
-        });
+    output: &OutputRecord,
+    revision: &OutputRevision,
+) -> Result<Vec<u8>, String> {
+    if output.chat_id != chat_id
+        || output.deleted_at.is_some()
+        || revision.output_id != output.id
+        || revision.byte_len > MAX_DELIVERABLE_BYTES as u64
+    {
+        return Err("Output not found in this conversation".to_owned());
     }
-    deliverables.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| left.filename.cmp(&right.filename))
-    });
-    let truncated = deliverables.len() > MAX_DELIVERABLES;
-    deliverables.truncate(MAX_DELIVERABLES);
-    Ok(DeliverablesCatalog {
-        deliverables,
+    let Some(root) = open_regular_directory(scratch_root)? else {
+        return Err("Output content is unavailable".to_owned());
+    };
+    let chat_name = chat_id.to_string();
+    let output_name = output.id.to_string();
+    if !is_regular_child_directory(&root, &chat_name)? {
+        return Err("Output content is unavailable".to_owned());
+    }
+    let chat = root
+        .open_dir_nofollow(&chat_name)
+        .map_err(|_| "Output content is unavailable".to_owned())?;
+    if !is_regular_child_directory(&chat, OUTPUTS_DIRECTORY)? {
+        return Err("Output content is unavailable".to_owned());
+    }
+    let outputs = chat
+        .open_dir_nofollow(OUTPUTS_DIRECTORY)
+        .map_err(|_| "Output content is unavailable".to_owned())?;
+    if !is_regular_child_directory(&outputs, &output_name)? {
+        return Err("Output content is unavailable".to_owned());
+    }
+    let revisions = outputs
+        .open_dir_nofollow(&output_name)
+        .map_err(|_| "Output content is unavailable".to_owned())?;
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = revisions
+        .open_with(revision.id.to_string(), &options)
+        .map_err(|_| "Output content is unavailable".to_owned())?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "Output content is unavailable".to_owned())?;
+    if !metadata.is_file() || metadata.len() != revision.byte_len {
+        return Err("Output content is unavailable".to_owned());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take((MAX_DELIVERABLE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Output content is unavailable".to_owned())?;
+    if bytes.len() as u64 != revision.byte_len
+        || bytes.len() > MAX_DELIVERABLE_BYTES
+        || <[u8; 32]>::from(Sha256::digest(&bytes)) != revision.sha256
+    {
+        return Err("Output content is unavailable".to_owned());
+    }
+    Ok(bytes)
+}
+
+fn preview_from_bytes(output: &OutputRecord, bytes: Vec<u8>) -> Result<DeliverablePreview, String> {
+    let text =
+        String::from_utf8(bytes).map_err(|_| "Output is not a supported text file".to_owned())?;
+    if text.contains('\0')
+        || deliverable_media_type(&output.filename) != Some(output.media_type.as_str())
+    {
+        return Err("Output is not a supported text file".to_owned());
+    }
+    let mut characters = text.chars();
+    let content: String = characters.by_ref().take(MAX_PREVIEW_CHARACTERS).collect();
+    let truncated = characters.next().is_some();
+    Ok(DeliverablePreview {
+        output_id: output.id,
+        filename: output.filename.clone(),
+        media_type: output.media_type.clone(),
+        content,
         truncated,
     })
 }
 
-fn open_deliverables_directory(
-    scratch_root: &Path,
-    chat_id: ChatId,
-) -> Result<Option<Dir>, String> {
-    let Some(root) = open_regular_directory(scratch_root)? else {
-        return Ok(None);
+fn recover_output_export_receipt(
+    store: &ReceiptStore,
+    receipt: &mut OutputExportReceipt,
+) -> Result<OutputExportResult, String> {
+    if receipt.terminal.is_none() {
+        let terminal = match receipt.phase {
+            // No selected destination means no host write could have happened.
+            OutputExportPhase::Prepared => OutputExportTerminal::Cancelled,
+            // A destination was durably selected, but dispatch was not. Recovery
+            // refuses to issue a delayed write after native state may have moved.
+            OutputExportPhase::DestinationSelected => OutputExportTerminal::Failed {
+                reason: OutputExportFailureReason::DestinationUnavailable,
+            },
+            // Once dispatch may have begun, recovery only verifies the exact
+            // digest. It never repeats the write.
+            OutputExportPhase::DispatchStarted => {
+                if receipt.destination.as_ref().is_some_and(|destination| {
+                    destination_matches(destination, receipt.byte_len, receipt.sha256)
+                }) {
+                    OutputExportTerminal::Completed
+                } else {
+                    OutputExportTerminal::Failed {
+                        reason: OutputExportFailureReason::AmbiguousNativeFailure,
+                    }
+                }
+            }
+        };
+        receipt.terminal = Some(terminal);
+        store
+            .save_output_export(receipt)
+            .map_err(private_receipt_error)?;
+    }
+    output_export_result(receipt)
+}
+
+fn terminalize_output_export(
+    store: &ReceiptStore,
+    receipt: &mut OutputExportReceipt,
+    terminal: OutputExportTerminal,
+) -> Result<OutputExportResult, String> {
+    receipt.terminal = Some(terminal);
+    store
+        .save_output_export(receipt)
+        .map_err(private_receipt_error)?;
+    output_export_result(receipt)
+}
+
+fn output_export_result(receipt: &OutputExportReceipt) -> Result<OutputExportResult, String> {
+    Ok(OutputExportResult {
+        operation_id: receipt.operation_id,
+        output_id: receipt.output_id,
+        revision_id: receipt.revision_id,
+        terminal: receipt
+            .terminal
+            .ok_or_else(|| "Output export has no terminal receipt".to_owned())?,
+    })
+}
+
+fn destination_matches_revision(destination: &Path, revision: &OutputRevision) -> bool {
+    destination_matches(destination, revision.byte_len, revision.sha256)
+}
+
+fn destination_matches(destination: &Path, byte_len: u64, sha256: [u8; 32]) -> bool {
+    if !destination.is_absolute() || byte_len > MAX_DELIVERABLE_BYTES as u64 {
+        return false;
+    }
+    let Some(parent) = destination.parent() else {
+        return false;
     };
-    let chat_name = chat_id.to_string();
-    if !is_regular_child_directory(&root, &chat_name)? {
-        return Ok(None);
+    let Some(filename) = destination.file_name() else {
+        return false;
+    };
+    let Ok(directory) = Dir::open_ambient_dir(parent, ambient_authority()) else {
+        return false;
+    };
+    let Ok(metadata) = directory.symlink_metadata(filename) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != byte_len {
+        return false;
     }
-    let chat = root
-        .open_dir_nofollow(&chat_name)
-        .map_err(|_| "Could not open this conversation's private outputs".to_owned())?;
-    if !is_regular_child_directory(&chat, DELIVERABLES_DIRECTORY)? {
-        return Ok(None);
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let Ok(file) = directory.open_with(filename, &options) else {
+        return false;
+    };
+    let mut bytes = Vec::with_capacity(byte_len as usize);
+    if file
+        .take((MAX_DELIVERABLE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return false;
     }
-    chat.open_dir_nofollow(DELIVERABLES_DIRECTORY)
-        .map(Some)
-        .map_err(|_| "Could not open this conversation's private outputs".to_owned())
+    bytes.len() as u64 == byte_len && <[u8; 32]>::from(Sha256::digest(&bytes)) == sha256
 }
 
 fn open_regular_directory(path: &Path) -> Result<Option<Dir>, String> {
@@ -259,57 +568,6 @@ fn is_regular_child_directory(parent: &Dir, name: &str) -> Result<bool, String> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err("Could not inspect private outputs".to_owned()),
     }
-}
-
-fn read_deliverable_bytes(
-    scratch_root: &Path,
-    chat_id: ChatId,
-    filename: &str,
-) -> Result<Vec<u8>, String> {
-    validate_deliverable_name(filename).map_err(|_| "Invalid output filename".to_owned())?;
-    let directory = open_deliverables_directory(scratch_root, chat_id)?
-        .ok_or_else(|| "Output not found".to_owned())?;
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    let file = directory
-        .open_with(filename, &options)
-        .map_err(|_| "Output not found".to_owned())?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| "Could not read that output".to_owned())?;
-    if !metadata.is_file() || metadata.len() > MAX_DELIVERABLE_BYTES as u64 {
-        return Err("Output is not a supported text file".to_owned());
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take((MAX_DELIVERABLE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Could not read that output".to_owned())?;
-    if bytes.len() > MAX_DELIVERABLE_BYTES
-        || bytes.contains(&0)
-        || std::str::from_utf8(&bytes).is_err()
-    {
-        return Err("Output is not a supported text file".to_owned());
-    }
-    Ok(bytes)
-}
-
-fn preview_from_bytes(filename: String, bytes: Vec<u8>) -> Result<DeliverablePreview, String> {
-    let text =
-        String::from_utf8(bytes).map_err(|_| "Output is not a supported text file".to_owned())?;
-    if text.contains('\0') {
-        return Err("Output is not a supported text file".to_owned());
-    }
-    let mut characters = text.chars();
-    let content: String = characters.by_ref().take(MAX_PREVIEW_CHARACTERS).collect();
-    let truncated = characters.next().is_some();
-    let media_type = deliverable_media_type(&filename)
-        .ok_or_else(|| "Output is not a supported text file".to_owned())?;
-    Ok(DeliverablePreview {
-        filename,
-        media_type: media_type.to_owned(),
-        content,
-        truncated,
-    })
 }
 
 async fn pick_export_path(app: &AppHandle, filename: &str) -> Result<Option<PathBuf>, String> {
@@ -382,65 +640,238 @@ fn write_exported_deliverable(destination: &Path, content: &[u8]) -> Result<(), 
     result.map_err(|_| "Could not save that output".to_owned())
 }
 
+fn private_receipt_error(_error: std::io::Error) -> String {
+    "Could not recover that output export".to_owned()
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone as _, Utc};
+
     use super::*;
 
-    fn artifact_path(root: &Path, chat_id: ChatId, filename: &str) -> PathBuf {
-        root.join(chat_id.to_string())
-            .join(DELIVERABLES_DIRECTORY)
-            .join(filename)
+    fn output_record(
+        chat_id: ChatId,
+        filename: &str,
+        content: &[u8],
+    ) -> (OutputRecord, OutputRevision) {
+        let output_id = OutputId::new();
+        let revision_id = OutputRevisionId::new();
+        let created_at = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        (
+            OutputRecord {
+                id: output_id,
+                chat_id,
+                filename: filename.to_owned(),
+                media_type: deliverable_media_type(filename).unwrap().to_owned(),
+                current_revision: revision_id,
+                revision_count: 1,
+                created_at,
+                updated_at: created_at,
+                deleted_at: None,
+            },
+            OutputRevision {
+                id: revision_id,
+                output_id,
+                ordinal: 1,
+                byte_len: content.len() as u64,
+                sha256: Sha256::digest(content).into(),
+                turn_id: None,
+                created_at,
+            },
+        )
+    }
+
+    fn revision_path(root: &Path, output: &OutputRecord, revision: &OutputRevision) -> PathBuf {
+        root.join(output.chat_id.to_string())
+            .join(OUTPUTS_DIRECTORY)
+            .join(output.id.to_string())
+            .join(revision.id.to_string())
     }
 
     #[test]
-    fn catalog_and_preview_are_exactly_conversation_scoped() {
-        let scratch = tempfile::tempdir().unwrap();
-        let first = ChatId::new();
-        let second = ChatId::new();
-        let first_path = artifact_path(scratch.path(), first, "brief.md");
-        let second_path = artifact_path(scratch.path(), second, "other.txt");
-        std::fs::create_dir_all(first_path.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(second_path.parent().unwrap()).unwrap();
-        std::fs::write(&first_path, "# Brief").unwrap();
-        std::fs::write(&second_path, "private").unwrap();
+    fn catalog_and_preview_project_durable_opaque_identity() {
+        let content = b"# Brief";
+        let (output, revision) = output_record(ChatId::new(), "brief.md", content);
+        let summary = summary_from_record(&output, &revision).unwrap();
+        assert_eq!(summary.output_id, output.id);
+        assert_eq!(summary.size_bytes, content.len() as u64);
+        assert_eq!(summary.revision_count, 1);
 
-        let catalog = list_deliverables_in_root(scratch.path(), first).unwrap();
-        assert_eq!(catalog.deliverables.len(), 1);
-        assert_eq!(catalog.deliverables[0].filename, "brief.md");
-        assert!(!catalog.truncated);
-        let preview = preview_from_bytes(
-            "brief.md".to_owned(),
-            read_deliverable_bytes(scratch.path(), first, "brief.md").unwrap(),
-        )
-        .unwrap();
+        let preview = preview_from_bytes(&output, content.to_vec()).unwrap();
+        assert_eq!(preview.output_id, output.id);
         assert_eq!(preview.content, "# Brief");
-        assert!(read_deliverable_bytes(scratch.path(), first, "other.txt").is_err());
+        let serialized = serde_json::to_value(preview).unwrap();
+        assert_eq!(
+            serialized
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["content", "filename", "mediaType", "outputId", "truncated"]
+        );
+        for forbidden in ["path", "scratch", "chatId", "token", "sha256"] {
+            assert!(!serialized.to_string().contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn immutable_revision_reads_are_exactly_scoped_and_content_addressed() {
+        let scratch = tempfile::tempdir().unwrap();
+        let content = b"private";
+        let (output, revision) = output_record(ChatId::new(), "brief.txt", content);
+        let path = revision_path(scratch.path(), &output, &revision);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        assert_eq!(
+            read_output_revision_bytes(scratch.path(), output.chat_id, &output, &revision).unwrap(),
+            content
+        );
+        assert!(
+            read_output_revision_bytes(scratch.path(), ChatId::new(), &output, &revision).is_err()
+        );
+        std::fs::write(path, b"tampered").unwrap();
+        assert!(
+            read_output_revision_bytes(scratch.path(), output.chat_id, &output, &revision).is_err()
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn private_catalog_and_export_reject_symlinks() {
+    fn private_revision_and_export_destinations_reject_symlinks() {
         use std::os::unix::fs::symlink;
 
         let scratch = tempfile::tempdir().unwrap();
-        let chat_id = ChatId::new();
         let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("secret.md"), "secret").unwrap();
-        let directory = artifact_path(scratch.path(), chat_id, "link.md");
-        std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
-        symlink(outside.path().join("secret.md"), &directory).unwrap();
-        assert!(read_deliverable_bytes(scratch.path(), chat_id, "link.md").is_err());
+        let content = b"private";
+        let (output, revision) = output_record(ChatId::new(), "brief.txt", content);
+        let path = revision_path(scratch.path(), &output, &revision);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let outside_source = outside.path().join("source.txt");
+        std::fs::write(&outside_source, content).unwrap();
+        symlink(&outside_source, &path).unwrap();
+        assert!(
+            read_output_revision_bytes(scratch.path(), output.chat_id, &output, &revision).is_err()
+        );
 
-        let linked_chat = ChatId::new();
-        symlink(outside.path(), scratch.path().join(linked_chat.to_string())).unwrap();
-        assert!(list_deliverables_in_root(scratch.path(), linked_chat).is_err());
-
-        let destination = outside.path().join("destination.md");
-        let target = outside.path().join("target.md");
+        let destination = outside.path().join("destination.txt");
+        let target = outside.path().join("target.txt");
         std::fs::write(&target, "keep").unwrap();
         symlink(&target, &destination).unwrap();
         assert!(write_exported_deliverable(&destination, b"replace").is_err());
+        assert!(!destination_matches_revision(&destination, &revision));
         assert_eq!(std::fs::read_to_string(target).unwrap(), "keep");
+    }
+
+    #[test]
+    fn exact_export_retries_recover_completed_cancelled_and_ambiguous_receipts() {
+        let private = tempfile::tempdir().unwrap();
+        let receipts = ReceiptStore::open(private.path()).unwrap();
+        let destination_root = tempfile::tempdir().unwrap();
+        let content = b"exact";
+        let (output, revision) = output_record(ChatId::new(), "brief.txt", content);
+
+        let mut cancelled = OutputExportReceipt::new(
+            Uuid::new_v4(),
+            output.chat_id,
+            output.id,
+            revision.id,
+            output.filename.clone(),
+            revision.byte_len,
+            revision.sha256,
+        );
+        receipts.save_output_export(&cancelled).unwrap();
+        let first_cancel = recover_output_export_receipt(&receipts, &mut cancelled).unwrap();
+        let mut cancelled_retry = receipts
+            .load_output_export(cancelled.operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recover_output_export_receipt(&receipts, &mut cancelled_retry).unwrap(),
+            first_cancel
+        );
+        assert!(matches!(
+            first_cancel.terminal,
+            OutputExportTerminal::Cancelled
+        ));
+
+        let interrupted_destination = destination_root.path().join("interrupted.txt");
+        let mut interrupted = OutputExportReceipt::new(
+            Uuid::new_v4(),
+            output.chat_id,
+            output.id,
+            revision.id,
+            output.filename.clone(),
+            revision.byte_len,
+            revision.sha256,
+        );
+        interrupted.phase = OutputExportPhase::DestinationSelected;
+        interrupted.destination = Some(interrupted_destination.clone());
+        receipts.save_output_export(&interrupted).unwrap();
+        let interrupted_result =
+            recover_output_export_receipt(&receipts, &mut interrupted).unwrap();
+        assert!(matches!(
+            interrupted_result.terminal,
+            OutputExportTerminal::Failed {
+                reason: OutputExportFailureReason::DestinationUnavailable
+            }
+        ));
+        assert!(
+            !interrupted_destination.exists(),
+            "recovery must not replay a write that was never dispatched"
+        );
+
+        let destination = destination_root.path().join("brief.txt");
+        std::fs::write(&destination, content).unwrap();
+        let mut completed = OutputExportReceipt::new(
+            Uuid::new_v4(),
+            output.chat_id,
+            output.id,
+            revision.id,
+            output.filename.clone(),
+            revision.byte_len,
+            revision.sha256,
+        );
+        completed.phase = OutputExportPhase::DispatchStarted;
+        completed.destination = Some(destination);
+        receipts.save_output_export(&completed).unwrap();
+        let completed_result = recover_output_export_receipt(&receipts, &mut completed).unwrap();
+        assert!(matches!(
+            completed_result.terminal,
+            OutputExportTerminal::Completed
+        ));
+
+        let ambiguous_destination = destination_root.path().join("ambiguous.txt");
+        std::fs::write(&ambiguous_destination, b"different").unwrap();
+        let mut ambiguous = OutputExportReceipt::new(
+            Uuid::new_v4(),
+            output.chat_id,
+            output.id,
+            revision.id,
+            output.filename,
+            revision.byte_len,
+            revision.sha256,
+        );
+        ambiguous.phase = OutputExportPhase::DispatchStarted;
+        ambiguous.destination = Some(ambiguous_destination);
+        receipts.save_output_export(&ambiguous).unwrap();
+        let first_ambiguous = recover_output_export_receipt(&receipts, &mut ambiguous).unwrap();
+        let mut ambiguous_retry = receipts
+            .load_output_export(ambiguous.operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recover_output_export_receipt(&receipts, &mut ambiguous_retry).unwrap(),
+            first_ambiguous
+        );
+        assert!(matches!(
+            first_ambiguous.terminal,
+            OutputExportTerminal::Failed {
+                reason: OutputExportFailureReason::AmbiguousNativeFailure
+            }
+        ));
     }
 
     #[test]
@@ -466,15 +897,25 @@ mod tests {
     }
 
     #[test]
-    fn renderer_projection_is_bounded_and_pathless() {
-        let preview = preview_from_bytes(
-            "brief.md".to_owned(),
-            "x".repeat(MAX_PREVIEW_CHARACTERS + 5).into_bytes(),
-        )
-        .unwrap();
-        assert_eq!(preview.content.chars().count(), MAX_PREVIEW_CHARACTERS);
-        assert!(preview.truncated);
-        let serialized = serde_json::to_value(preview).unwrap();
+    fn requests_and_export_results_are_renderer_safe() {
+        assert!(
+            serde_json::from_value::<ExportDeliverableRequest>(serde_json::json!({
+                "operationId": Uuid::new_v4(),
+                "chatId": Uuid::new_v4(),
+                "outputId": OutputId::new(),
+                "path": "/tmp/private"
+            }))
+            .is_err()
+        );
+        let result = OutputExportResult {
+            operation_id: Uuid::new_v4(),
+            output_id: OutputId::new(),
+            revision_id: OutputRevisionId::new(),
+            terminal: OutputExportTerminal::Failed {
+                reason: OutputExportFailureReason::AmbiguousNativeFailure,
+            },
+        };
+        let serialized = serde_json::to_value(result).unwrap();
         assert_eq!(
             serialized
                 .as_object()
@@ -482,35 +923,10 @@ mod tests {
                 .keys()
                 .cloned()
                 .collect::<Vec<_>>(),
-            ["content", "filename", "mediaType", "truncated"]
+            ["operationId", "outputId", "reason", "revisionId", "status"]
         );
-        for forbidden in ["path", "scratch", "chatId", "token"] {
+        for forbidden in ["path", "destination", "content", "sha256", "chatId"] {
             assert!(!serialized.to_string().contains(forbidden));
         }
-    }
-
-    #[test]
-    fn output_reads_reject_non_text_content() {
-        let scratch = tempfile::tempdir().unwrap();
-        let chat_id = ChatId::new();
-        let nul_path = artifact_path(scratch.path(), chat_id, "nul.txt");
-        std::fs::create_dir_all(nul_path.parent().unwrap()).unwrap();
-        std::fs::write(&nul_path, b"not\0text").unwrap();
-        std::fs::write(artifact_path(scratch.path(), chat_id, "binary.txt"), [0xff]).unwrap();
-
-        assert!(read_deliverable_bytes(scratch.path(), chat_id, "nul.txt").is_err());
-        assert!(read_deliverable_bytes(scratch.path(), chat_id, "binary.txt").is_err());
-    }
-
-    #[test]
-    fn requests_reject_scope_and_path_injection() {
-        assert!(
-            serde_json::from_value::<DeliverableRequest>(serde_json::json!({
-                "chatId": Uuid::new_v4(),
-                "filename": "brief.md",
-                "path": "/tmp/private"
-            }))
-            .is_err()
-        );
     }
 }

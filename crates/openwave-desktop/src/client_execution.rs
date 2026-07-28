@@ -39,6 +39,9 @@ use receipt_store::{
     FolderOperationPhase, FolderOperationReceipt, ManualFolderConnectReceipt,
     ProductRootAttachmentSync, RegistrationPhase, StoredResolution,
 };
+pub(crate) use receipt_store::{
+    OutputExportFailureReason, OutputExportPhase, OutputExportReceipt, OutputExportTerminal,
+};
 
 const RECOVERY_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const RECOVERY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);

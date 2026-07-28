@@ -7,7 +7,7 @@
 export type PanelContent =
   | { type: "chat" }
   | { type: "sources"; documentId?: string }
-  | { type: "outputs"; filename?: string }
+  | { type: "outputs"; outputId?: string }
   | { type: "folders" };
 
 export type PanelType = PanelContent["type"];

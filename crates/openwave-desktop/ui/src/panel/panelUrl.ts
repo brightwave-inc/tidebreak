@@ -16,12 +16,11 @@ import {
  *   sources
  *   sources.{documentId}
  *   outputs
- *   outputs.{filename}
+ *   outputs.{outputId}
  *   folders
  *
- * Only the first separator is significant. Output filenames carry their own
- * dots — `outputs.report.md` is one output named `report.md`, not a malformed
- * segment — so the identifier is the whole remainder of the string.
+ * Only the first separator is significant. Output navigation carries the
+ * durable opaque output identity rather than display filename.
  */
 export function parsePanelSegment(segment: string): PanelContent | null {
   const separator = segment.indexOf(".");
@@ -36,7 +35,7 @@ export function parsePanelSegment(segment: string): PanelContent | null {
     case "sources":
       return id ? { type: "sources", documentId: id } : { type: "sources" };
     case "outputs":
-      return id ? { type: "outputs", filename: id } : { type: "outputs" };
+      return id ? { type: "outputs", outputId: id } : { type: "outputs" };
     default:
       return null;
   }
@@ -51,7 +50,7 @@ export function encodePanelSegment(panel: PanelContent): string {
     case "sources":
       return panel.documentId ? `sources.${panel.documentId}` : "sources";
     case "outputs":
-      return panel.filename ? `outputs.${panel.filename}` : "outputs";
+      return panel.outputId ? `outputs.${panel.outputId}` : "outputs";
   }
 }
 

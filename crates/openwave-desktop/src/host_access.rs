@@ -20,6 +20,7 @@ use crate::client_execution::{ControlPlaneClient, ReceiptStore};
 pub(crate) struct HostAccess {
     pub(super) broker: BrokerClient,
     pub(super) picker: Mutex<()>,
+    pub(super) output_exports: Mutex<()>,
     pub(super) root_changes: Mutex<()>,
     store: OnceCell<std::sync::Arc<dyn Store>>,
     pub(super) control_plane: OnceCell<ControlPlaneClient>,
@@ -37,6 +38,7 @@ impl HostAccess {
         Ok(Self {
             broker: BrokerClient::new(app, data_dir, home_dir),
             picker: Mutex::const_new(()),
+            output_exports: Mutex::const_new(()),
             root_changes: Mutex::const_new(()),
             store: OnceCell::new(),
             control_plane: OnceCell::new(),

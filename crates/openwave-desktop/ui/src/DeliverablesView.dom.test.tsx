@@ -7,22 +7,34 @@ import { DeliverablesView } from "./DeliverablesView";
 
 afterEach(cleanup);
 
+const firstOutputId = "550062d4-2528-5cc6-90f8-a788e119bf36";
+const secondOutputId = "ce116263-15b5-5df2-b472-269378e9da58";
+const revisionId = "72cb0277-5a3c-45ee-bda8-43534f74feb2";
+
 describe("DeliverablesView", () => {
   it("previews and explicitly exports a conversation output", async () => {
-    const exportOutput = vi.fn().mockResolvedValue(true);
+    const exportOutput = vi.fn().mockResolvedValue({
+      operationId: "0e44560b-5d3b-4f80-b24c-647560f7ef19",
+      outputId: firstOutputId,
+      revisionId,
+      status: "completed" as const,
+    });
     const apis = {
       list: vi.fn().mockResolvedValue({
         deliverables: [
           {
+            outputId: firstOutputId,
             filename: "Research brief.md",
             mediaType: "text/markdown" as const,
             sizeBytes: 42,
+            revisionCount: 1,
             updatedAt: "2026-07-24T00:00:00Z",
           },
         ],
         truncated: false,
       }),
       read: vi.fn().mockResolvedValue({
+        outputId: firstOutputId,
         filename: "Research brief.md",
         mediaType: "text/markdown" as const,
         content: "# Findings\n\nGrounded.",
@@ -37,7 +49,7 @@ describe("DeliverablesView", () => {
     expect(await screen.findByRole("heading", { name: "Findings" })).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /Save As/ }));
     await waitFor(() =>
-      expect(exportOutput).toHaveBeenCalledWith("chat-1", "Research brief.md"),
+      expect(exportOutput).toHaveBeenCalledWith("chat-1", firstOutputId),
     );
     expect(await screen.findByText("Research brief.md was saved.")).toBeVisible();
   });
@@ -48,15 +60,15 @@ describe("DeliverablesView", () => {
     render(
       <DeliverablesView
         chatId="chat-1"
-        initialFilename="Second.md"
+        initialOutputId={secondOutputId}
         apis={apis}
       />,
     );
 
     await waitFor(() =>
-      expect(apis.read).toHaveBeenCalledWith("chat-1", "Second.md"),
+      expect(apis.read).toHaveBeenCalledWith("chat-1", secondOutputId),
     );
-    expect(apis.read).not.toHaveBeenCalledWith("chat-1", "First.md");
+    expect(apis.read).not.toHaveBeenCalledWith("chat-1", firstOutputId);
   });
 
   it("falls back to the list when it is pointed at an output this chat lacks", async () => {
@@ -65,15 +77,18 @@ describe("DeliverablesView", () => {
     render(
       <DeliverablesView
         chatId="chat-1"
-        initialFilename="Missing.md"
+        initialOutputId="550062d4-2528-5cc6-90f8-a788e119bf37"
         apis={apis}
       />,
     );
 
     await waitFor(() =>
-      expect(apis.read).toHaveBeenCalledWith("chat-1", "First.md"),
+      expect(apis.read).toHaveBeenCalledWith("chat-1", firstOutputId),
     );
-    expect(apis.read).not.toHaveBeenCalledWith("chat-1", "Missing.md");
+    expect(apis.read).not.toHaveBeenCalledWith(
+      "chat-1",
+      "550062d4-2528-5cc6-90f8-a788e119bf37",
+    );
   });
 
   it("stops steering once the reader chooses another output", async () => {
@@ -82,22 +97,22 @@ describe("DeliverablesView", () => {
     render(
       <DeliverablesView
         chatId="chat-1"
-        initialFilename="Second.md"
+        initialOutputId={secondOutputId}
         apis={apis}
       />,
     );
     await waitFor(() =>
-      expect(apis.read).toHaveBeenCalledWith("chat-1", "Second.md"),
+      expect(apis.read).toHaveBeenCalledWith("chat-1", secondOutputId),
     );
 
     await userEvent.click(screen.getByRole("button", { name: /First\.md/ }));
     await waitFor(() =>
-      expect(apis.read).toHaveBeenCalledWith("chat-1", "First.md"),
+      expect(apis.read).toHaveBeenCalledWith("chat-1", firstOutputId),
     );
 
     await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(apis.list).toHaveBeenCalledTimes(2));
-    expect(apis.read).toHaveBeenLastCalledWith("chat-1", "First.md");
+    expect(apis.read).toHaveBeenLastCalledWith("chat-1", firstOutputId);
   });
 
   it("explains how to create the first output", async () => {
@@ -125,21 +140,30 @@ describe("DeliverablesView", () => {
       list: vi.fn().mockResolvedValue({
         deliverables: [
           {
+            outputId: firstOutputId,
             filename: "brief.txt",
             mediaType: "text/plain" as const,
             sizeBytes: 5,
+            revisionCount: 1,
             updatedAt: "2026-07-24T00:00:00Z",
           },
         ],
         truncated: false,
       }),
       read: vi.fn().mockResolvedValue({
+        outputId: firstOutputId,
         filename: "brief.txt",
         mediaType: "text/plain" as const,
         content: "brief",
         truncated: false,
       }),
-      export: vi.fn().mockRejectedValue(new Error("Selected folder is unavailable")),
+      export: vi.fn().mockResolvedValue({
+        operationId: "0e44560b-5d3b-4f80-b24c-647560f7ef19",
+        outputId: firstOutputId,
+        revisionId,
+        status: "failed" as const,
+        reason: "ambiguous_native_failure" as const,
+      }),
     };
 
     render(
@@ -148,13 +172,14 @@ describe("DeliverablesView", () => {
     await screen.findByText("brief");
     await userEvent.click(screen.getByRole("button", { name: /Save As/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Selected folder is unavailable",
+      "could not confirm whether the output was saved",
     );
   });
 
   it("keeps the refreshed preview when an older read completes later", async () => {
     let resolveStalePreview:
       | ((preview: {
+          outputId: string;
           filename: string;
           mediaType: "text/plain";
           content: string;
@@ -162,6 +187,7 @@ describe("DeliverablesView", () => {
         }) => void)
       | undefined;
     const stalePreview = new Promise<{
+      outputId: string;
       filename: string;
       mediaType: "text/plain";
       content: string;
@@ -173,9 +199,11 @@ describe("DeliverablesView", () => {
       list: vi.fn().mockResolvedValue({
         deliverables: [
           {
+            outputId: firstOutputId,
             filename: "status.txt",
             mediaType: "text/plain" as const,
             sizeBytes: 7,
+            revisionCount: 1,
             updatedAt: "2026-07-24T00:00:00Z",
           },
         ],
@@ -186,6 +214,7 @@ describe("DeliverablesView", () => {
         .mockReturnValueOnce(stalePreview)
         .mockResolvedValueOnce({
           filename: "status.txt",
+          outputId: firstOutputId,
           mediaType: "text/plain" as const,
           content: "refreshed",
           truncated: false,
@@ -202,6 +231,7 @@ describe("DeliverablesView", () => {
 
     await act(async () => {
       resolveStalePreview?.({
+        outputId: firstOutputId,
         filename: "status.txt",
         mediaType: "text/plain",
         content: "stale",
@@ -214,25 +244,38 @@ describe("DeliverablesView", () => {
 });
 
 function twoOutputApis() {
-  const outputs = ["First.md", "Second.md"];
+  const outputs = [
+    { outputId: firstOutputId, filename: "First.md" },
+    { outputId: secondOutputId, filename: "Second.md" },
+  ];
   return {
     list: vi.fn().mockResolvedValue({
-      deliverables: outputs.map((filename) => ({
+      deliverables: outputs.map(({ outputId, filename }) => ({
+        outputId,
         filename,
         mediaType: "text/markdown" as const,
         sizeBytes: 12,
+        revisionCount: 1,
         updatedAt: "2026-07-24T00:00:00Z",
       })),
       truncated: false,
     }),
-    read: vi.fn().mockImplementation((_chatId: string, filename: string) =>
-      Promise.resolve({
+    read: vi.fn().mockImplementation((_chatId: string, outputId: string) => {
+      const filename =
+        outputs.find((output) => output.outputId === outputId)?.filename ?? "Missing";
+      return Promise.resolve({
+        outputId,
         filename,
         mediaType: "text/markdown" as const,
         content: `# ${filename}`,
         truncated: false,
-      }),
-    ),
-    export: vi.fn().mockResolvedValue(true),
+      });
+    }),
+    export: vi.fn().mockResolvedValue({
+      operationId: "0e44560b-5d3b-4f80-b24c-647560f7ef19",
+      outputId: firstOutputId,
+      revisionId,
+      status: "completed" as const,
+    }),
   };
 }

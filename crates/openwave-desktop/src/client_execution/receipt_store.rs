@@ -11,7 +11,10 @@ use std::{
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use chrono::{DateTime, Utc};
-use openwave_core::{CallId, ChatId, HostRootId, RootAttachmentChangeId, MAX_ATTACHMENT_REVISION};
+use openwave_core::{
+    validate_deliverable_name, CallId, ChatId, HostRootId, OutputId, OutputRevisionId,
+    RootAttachmentChangeId, MAX_ATTACHMENT_REVISION, MAX_DELIVERABLE_BYTES,
+};
 use openwave_host_broker::GrantSubject;
 use openwave_host_broker::OperationId;
 use serde::{Deserialize, Serialize};
@@ -26,7 +29,9 @@ const MAX_RECEIPTS: usize = 1_024;
 const FOLDER_OPERATION_PREFIX: &str = "folder-operation-";
 const DELEGATED_FILE_READ_PREFIX: &str = "delegated-file-read-";
 const MANUAL_FOLDER_CONNECT_PREFIX: &str = "manual-folder-connect-";
+const OUTPUT_EXPORT_PREFIX: &str = "output-export-";
 const MAX_SAFE_ROOT_DISPLAY_BYTES: usize = 1_024;
+const OUTPUT_EXPORT_RECEIPT_VERSION: u32 = 1;
 
 pub(crate) struct ReceiptStore {
     directory: PathBuf,
@@ -149,6 +154,54 @@ pub(super) struct ManualFolderConnectReceipt {
     pub(super) registration_phase: RegistrationPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) product_sync: Option<ProductRootAttachmentSync>,
+}
+
+/// App-private recovery state for one exact native output export.
+///
+/// The selected destination is required to recover an ambiguous native write,
+/// but it never crosses the native boundary and is redacted from debug output.
+/// The immutable revision identity and digest let recovery verify the effect
+/// without reading arbitrary scratch files or issuing the write again.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct OutputExportReceipt {
+    version: u32,
+    pub(crate) operation_id: Uuid,
+    pub(crate) chat_id: ChatId,
+    pub(crate) output_id: OutputId,
+    pub(crate) revision_id: OutputRevisionId,
+    pub(crate) filename: String,
+    pub(crate) byte_len: u64,
+    pub(crate) sha256: [u8; 32],
+    pub(crate) phase: OutputExportPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) destination: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) terminal: Option<OutputExportTerminal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OutputExportPhase {
+    Prepared,
+    DestinationSelected,
+    DispatchStarted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum OutputExportTerminal {
+    Completed,
+    Cancelled,
+    Failed { reason: OutputExportFailureReason },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OutputExportFailureReason {
+    SourceUnavailable,
+    DestinationUnavailable,
+    AmbiguousNativeFailure,
 }
 
 /// Whether a read-only broker request may have been dispatched already.
@@ -299,6 +352,28 @@ impl std::fmt::Debug for ManualFolderConnectReceipt {
     }
 }
 
+impl std::fmt::Debug for OutputExportReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OutputExportReceipt")
+            .field("version", &self.version)
+            .field("operation_id", &self.operation_id)
+            .field("chat_id", &self.chat_id)
+            .field("output_id", &self.output_id)
+            .field("revision_id", &self.revision_id)
+            .field("filename", &self.filename)
+            .field("byte_len", &self.byte_len)
+            .field("sha256", &"[redacted]")
+            .field("phase", &self.phase)
+            .field(
+                "destination",
+                &self.destination.as_ref().map(|_| "[redacted]"),
+            )
+            .field("terminal", &self.terminal)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for FolderAccessIntent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -431,6 +506,68 @@ impl ManualFolderConnectReceipt {
     }
 }
 
+impl OutputExportReceipt {
+    pub(crate) fn new(
+        operation_id: Uuid,
+        chat_id: ChatId,
+        output_id: OutputId,
+        revision_id: OutputRevisionId,
+        filename: String,
+        byte_len: u64,
+        sha256: [u8; 32],
+    ) -> Self {
+        Self {
+            version: OUTPUT_EXPORT_RECEIPT_VERSION,
+            operation_id,
+            chat_id,
+            output_id,
+            revision_id,
+            filename,
+            byte_len,
+            sha256,
+            phase: OutputExportPhase::Prepared,
+            destination: None,
+            terminal: None,
+        }
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if self.version != OUTPUT_EXPORT_RECEIPT_VERSION
+            || self.operation_id.is_nil()
+            || self.chat_id.as_uuid().is_nil()
+            || self.output_id.as_uuid().is_nil()
+            || self.revision_id.as_uuid().is_nil()
+            || validate_deliverable_name(&self.filename).is_err()
+            || self.byte_len > MAX_DELIVERABLE_BYTES as u64
+            || self
+                .destination
+                .as_ref()
+                .is_some_and(|destination| !destination.is_absolute())
+            || (matches!(self.phase, OutputExportPhase::Prepared) && self.destination.is_some())
+            || (!matches!(self.phase, OutputExportPhase::Prepared) && self.destination.is_none())
+            || matches!(
+                self.terminal,
+                Some(OutputExportTerminal::Cancelled)
+                    if self.phase != OutputExportPhase::Prepared
+            )
+            || matches!(
+                self.terminal,
+                Some(OutputExportTerminal::Completed)
+                    if self.phase != OutputExportPhase::DispatchStarted
+            )
+            || matches!(
+                self.terminal,
+                Some(OutputExportTerminal::Failed {
+                    reason: OutputExportFailureReason::AmbiguousNativeFailure
+                }) if self.phase != OutputExportPhase::DispatchStarted
+            )
+        {
+            return Err(invalid_data("invalid output-export receipt"));
+        }
+        Ok(())
+    }
+}
+
 impl FolderOperationReceipt {
     pub(super) fn new(
         chat_id: ChatId,
@@ -556,6 +693,7 @@ impl ReceiptStore {
         store.load_operations()?;
         store.load_delegated_file_reads()?;
         store.load_manual_connects()?;
+        store.load_output_exports()?;
         Ok(store)
     }
 
@@ -617,6 +755,26 @@ impl ReceiptStore {
         )
     }
 
+    pub(crate) fn save_output_export(&self, receipt: &OutputExportReceipt) -> io::Result<()> {
+        receipt.validate()?;
+        let bytes = serde_json::to_vec(receipt).map_err(invalid_data)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(invalid_data("output-export receipt is too large"));
+        }
+        let path = self.output_export_receipt_path(receipt.operation_id);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(invalid_data("output-export receipt is not a regular file")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if self.load_output_exports()?.len() >= MAX_RECEIPTS {
+                    return Err(invalid_data("too many durable output-export receipts"));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        write_atomically(&self.directory, &path, &bytes)
+    }
+
     pub(super) fn remove(&self, call_id: CallId) -> io::Result<()> {
         match fs::remove_file(self.receipt_path(call_id)) {
             Ok(()) => sync_directory(&self.directory),
@@ -670,6 +828,9 @@ impl ReceiptStore {
                 continue;
             }
             if file_name.starts_with(MANUAL_FOLDER_CONNECT_PREFIX) {
+                continue;
+            }
+            if file_name.starts_with(OUTPUT_EXPORT_PREFIX) {
                 continue;
             }
             if file_name.starts_with('.') && file_name.ends_with(".tmp") {
@@ -836,6 +997,65 @@ impl ReceiptStore {
         Ok(receipts)
     }
 
+    pub(crate) fn load_output_export(
+        &self,
+        operation_id: Uuid,
+    ) -> io::Result<Option<OutputExportReceipt>> {
+        if operation_id.is_nil() {
+            return Err(invalid_data("invalid output-export operation identity"));
+        }
+        let path = self.output_export_receipt_path(operation_id);
+        match validate_private_file(&path, MAX_RECEIPT_BYTES) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        let mut bytes = Vec::new();
+        File::open(path)?
+            .take((MAX_RECEIPT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(invalid_data("output-export receipt is too large"));
+        }
+        let receipt: OutputExportReceipt = serde_json::from_slice(&bytes).map_err(invalid_data)?;
+        receipt.validate()?;
+        if receipt.operation_id != operation_id {
+            return Err(invalid_data("output-export receipt identity mismatch"));
+        }
+        Ok(Some(receipt))
+    }
+
+    pub(crate) fn load_output_exports(&self) -> io::Result<Vec<OutputExportReceipt>> {
+        let mut receipts = Vec::new();
+        let mut operation_ids = HashSet::new();
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                return Err(invalid_data("invalid client-execution receipt name"));
+            };
+            let Some(operation_id) = file_name
+                .strip_prefix(OUTPUT_EXPORT_PREFIX)
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if receipts.len() >= MAX_RECEIPTS {
+                return Err(invalid_data("too many durable output-export receipts"));
+            }
+            let operation_id = Uuid::parse_str(operation_id).map_err(invalid_data)?;
+            let receipt = self
+                .load_output_export(operation_id)?
+                .ok_or_else(|| invalid_data("output-export receipt disappeared"))?;
+            if !operation_ids.insert(operation_id) {
+                return Err(invalid_data("duplicate output-export receipt identity"));
+            }
+            receipts.push(receipt);
+        }
+        receipts.sort_by_key(|receipt| receipt.operation_id);
+        Ok(receipts)
+    }
+
     fn receipt_path(&self, call_id: CallId) -> PathBuf {
         self.directory.join(format!("{call_id}.json"))
     }
@@ -853,6 +1073,11 @@ impl ReceiptStore {
     fn manual_connect_receipt_path(&self, change_id: RootAttachmentChangeId) -> PathBuf {
         self.directory
             .join(format!("{MANUAL_FOLDER_CONNECT_PREFIX}{change_id}.json"))
+    }
+
+    fn output_export_receipt_path(&self, operation_id: Uuid) -> PathBuf {
+        self.directory
+            .join(format!("{OUTPUT_EXPORT_PREFIX}{operation_id}.json"))
     }
 }
 
@@ -1163,6 +1388,44 @@ mod tests {
         assert_eq!(store.load_manual_connects().unwrap(), vec![receipt.clone()]);
         store.remove_manual_connect(receipt.change_id).unwrap();
         assert!(store.load_manual_connects().unwrap().is_empty());
+    }
+
+    #[test]
+    fn output_export_receipts_are_durable_exact_and_redact_native_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination_root = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(temp.path()).unwrap();
+        let mut receipt = OutputExportReceipt::new(
+            Uuid::new_v4(),
+            ChatId::new(),
+            OutputId::new(),
+            OutputRevisionId::new(),
+            "brief.md".to_owned(),
+            42,
+            [7; 32],
+        );
+        let destination = destination_root.path().join("brief.md");
+        receipt.phase = OutputExportPhase::DispatchStarted;
+        receipt.destination = Some(destination.clone());
+        receipt.terminal = Some(OutputExportTerminal::Failed {
+            reason: OutputExportFailureReason::AmbiguousNativeFailure,
+        });
+        store.save_output_export(&receipt).unwrap();
+        assert_eq!(
+            store.load_output_export(receipt.operation_id).unwrap(),
+            Some(receipt.clone())
+        );
+        assert_eq!(store.load_output_exports().unwrap(), vec![receipt.clone()]);
+        assert!(store.load_all().unwrap().is_empty());
+
+        let debug = format!("{receipt:?}");
+        assert!(!debug.contains(destination.to_str().unwrap()));
+        assert!(!debug.contains(&format!("{:?}", receipt.sha256)));
+
+        let mut conflicting = receipt;
+        conflicting.phase = OutputExportPhase::DestinationSelected;
+        conflicting.terminal = Some(OutputExportTerminal::Completed);
+        assert!(store.save_output_export(&conflicting).is_err());
     }
 
     #[test]
